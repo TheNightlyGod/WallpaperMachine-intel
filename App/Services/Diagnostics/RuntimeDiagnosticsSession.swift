@@ -130,6 +130,17 @@ final class RuntimeDiagnosticsSession {
         for surface in report.surfaces {
             let reasons = surface.effectivePauseReasons.isEmpty
                 ? "none" : surface.effectivePauseReasons.joined(separator: "+")
+            // What the display did with the presents, from each drawable's own
+            // report: shown, dropped, and refreshes between shown frames. Left
+            // out entirely when the renderer has no such reports.
+            let shown = report.presentationFeedbackAvailable
+                ? "presented_frames=\(surface.presentedFrames) "
+                    + "presents_dropped=\(surface.presentsDropped) "
+                    + "present_gaps_1_vsync=\(surface.presentGaps1Vsync) "
+                    + "present_gaps_2_vsync=\(surface.presentGaps2Vsync) "
+                    + "present_gaps_3plus_vsync=\(surface.presentGaps3plusVsync) "
+                    + "vsync_period_us=\(surface.vsyncPeriodMicros) "
+                : ""
             // Work this surface performs alone, including the colour
             // conversions and GPU imports its own texture cache does. All of it
             // has to stop when nobody can see the surface.
@@ -148,6 +159,7 @@ final class RuntimeDiagnosticsSession {
                     + "gpu_completions=\(surface.gpuCompletions) "
                     + "simulation_ticks=\(surface.simulationTicks) "
                     + "presents_skipped_unchanged=\(surface.presentsSkippedUnchanged) "
+                    + shown
                     + "tick_interval_us=\(surface.tickIntervalMicros) "
                     + "content_period_us=\(surface.contentPeriodMicros) "
                     + "frames_selected=\(surface.videoFramesSelected) "
@@ -179,8 +191,9 @@ final class RuntimeDiagnosticsSession {
             "process audio_analysis_deliveries=\(report.audioAnalysisDeliveries) "
                 + "audio_accepted_frames=\(report.audioAcceptedFrames) "
                 + "audio_active_consumers=\(report.audioActiveConsumers)")
-        // Present requests are requests. Whether the compositor displayed the
-        // frame is a different measurement, and this backend cannot make it.
+        // Present requests are requests. Whether the display showed the frame
+        // is a different measurement, carried per surface only when the
+        // renderer has the display's own reports of it.
         lines.append(
             "presented_frames="
                 + (report.presentationFeedbackAvailable ? "available" : "unavailable"))

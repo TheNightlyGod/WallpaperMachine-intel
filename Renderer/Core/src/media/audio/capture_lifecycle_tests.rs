@@ -87,6 +87,7 @@ fn populate(state: &mut CaptureState<FakeTeardown>, consumer: Arc<dyn AudioFrame
         channel_mode: AudioTapChannelMode::Stereo,
         sample_rate: 48_000,
         scratch: Mutex::new(vec![0.0; CALLBACK_CHUNK_FRAMES * 2]),
+        callbacks: AtomicU64::new(0),
     }));
 }
 

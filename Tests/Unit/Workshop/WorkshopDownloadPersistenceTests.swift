@@ -81,7 +81,7 @@ final class WorkshopDownloadPersistenceTests: DownloaderTestCase {
     let directory = root.appendingPathComponent("Downloads")
     func manager() -> WorkshopDownloadManager {
       let manager = WorkshopDownloadManager(sessionDirectory: root.appendingPathComponent("SteamSession"),
-        runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1)
+        runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1, downloadRegion: { .steamsChoice })
       manager.configurePersistence(at: directory)
       return manager
     }
@@ -125,7 +125,7 @@ final class WorkshopDownloadPersistenceTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let directory = root.appendingPathComponent("Downloads/Workshop")
     let manager = WorkshopDownloadManager(sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1)
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1, downloadRegion: { .steamsChoice })
     manager.configurePersistence(at: directory)
     manager.start(item: item, username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
       library: root.appendingPathComponent("Library"), rememberSession: false, onImported: {})
@@ -184,7 +184,7 @@ final class WorkshopDownloadPersistenceTests: DownloaderTestCase {
         monitorCount += 1
         if monitorCount == 2 { return cleanup }
         return FixtureNetworkMonitor()
-      })
+      }, downloadRegion: { .steamsChoice })
     let jobs = try ["1", "2"].map { id in
       manager.start(item: WorkshopItem(id: id, title: id, creator: "Fixture", summary: "", previewURL: nil,
         tags: ["Video"], size: 0, subscriptions: 0), username: "localtest",

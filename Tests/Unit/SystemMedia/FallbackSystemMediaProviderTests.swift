@@ -102,13 +102,143 @@ final class FallbackSystemMediaProviderTests: XCTestCase {
 
 @MainActor
 final class AppleScriptMediaProviderTests: XCTestCase {
+    func testNoPlayerSleepsUntilLaunchThenKeepsLivePollingCadence() async throws {
+        let runner = FakeAppleScriptRunner()
+        let scheduler = ManualMediaTimerScheduler()
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
+        var titles: [String] = []
+        provider.onPropertiesChanged = { titles.append($0.title) }
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+
+        let idleReads = runner.playerReads
+        for _ in 0..<60 { scheduler.fireRepeating() }
+        XCTAssertEqual(runner.playerReads, idleReads, "No running player needs no recurring app enumeration")
+        XCTAssertTrue(runner.queries.isEmpty)
+        XCTAssertTrue(scheduler.liveRepeating.isEmpty)
+        guard case .unavailable = provider.availability else { return XCTFail("No player is available") }
+
+        runner.answers[.music] = Self.track(.music, title: "Launched", durationSeconds: 100)
+        runner.running = [.music]
+        runner.notifyPlayersChanged()
+        try await poll { titles == ["Launched"] }
+        XCTAssertEqual(scheduler.liveRepeating.map(\.interval), [1])
+        try await poll(after: { scheduler.fireRepeating() }) { runner.queries[.music] == 2 }
+        let queryCount = runner.queries[.music]
+        runner.notifyPlayersChanged() // An unrelated application's lifecycle event.
+        XCTAssertEqual(runner.queries[.music], queryCount)
+
+        runner.running = []
+        runner.notifyPlayersChanged()
+        XCTAssertEqual(titles.last, "")
+        XCTAssertTrue(scheduler.liveRepeating.isEmpty)
+        let afterExitReads = runner.playerReads
+        for _ in 0..<60 { scheduler.fireRepeating() }
+        XCTAssertEqual(runner.playerReads, afterExitReads)
+
+        runner.answers[.spotify] = Self.track(.spotify, title: "Next player", durationSeconds: 200)
+        runner.running = [.spotify]
+        runner.notifyPlayersChanged()
+        try await poll { titles.last == "Next player" }
+    }
+
+    func testStoppedSubscriptionIgnoresLatePlayerAndTimerCallbacksAfterRestart() async throws {
+        let runner = FakeAppleScriptRunner()
+        runner.running = [.music]
+        runner.answers[.music] = Self.track(.music, title: "First", durationSeconds: 100)
+        let scheduler = ManualMediaTimerScheduler()
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
+        var titles: [String] = []
+        provider.onPropertiesChanged = { titles.append($0.title) }
+        provider.addConsumer()
+        try await poll { titles == ["First"] }
+        let oldObserver = try XCTUnwrap(runner.observations.first)
+        let oldTimer = try XCTUnwrap(scheduler.liveRepeating.first)
+        provider.removeConsumer()
+        let stoppedReads = runner.playerReads
+        runner.notifyPlayersChanged()
+        oldObserver()
+        oldTimer.handler()
+        XCTAssertEqual(runner.playerReads, stoppedReads)
+        XCTAssertTrue(scheduler.liveRepeating.isEmpty)
+
+        runner.answers[.music] = Self.track(.music, title: "Restarted", durationSeconds: 100)
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+        try await poll { titles.last == "Restarted" }
+        let restartedReads = runner.playerReads
+        oldObserver()
+        oldTimer.handler()
+        XCTAssertEqual(runner.playerReads, restartedReads, "Queued callbacks belong to their original subscription")
+        XCTAssertEqual(scheduler.liveRepeating.count, 1)
+    }
+
+    func testPlayerExitDiscardsPendingQueryAndLaunchRefreshesAfterItCompletes() async throws {
+        let runner = FakeAppleScriptRunner()
+        runner.running = [.music]
+        var pending: CheckedContinuation<AppleScriptNowPlaying?, Never>?
+        runner.queryOverride = { _ in await withCheckedContinuation { pending = $0 } }
+        let scheduler = ManualMediaTimerScheduler()
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
+        var titles: [String] = []
+        provider.onPropertiesChanged = { titles.append($0.title) }
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+        try await poll { pending != nil }
+        runner.running = []
+        runner.notifyPlayersChanged()
+        runner.running = [.spotify]
+        runner.answers[.spotify] = Self.track(.spotify, title: "Current", durationSeconds: 100)
+        runner.queryOverride = nil
+        runner.notifyPlayersChanged()
+        pending?.resume(returning: Self.track(.music, title: "Retired", durationSeconds: 100))
+        pending = nil
+        try await poll { titles == ["Current"] }
+        XCTAssertEqual(runner.queries[.spotify], 1, "The launch refresh waits for the in-flight query, not a timer")
+    }
+
+    func testLastPlayerExitClearsAndRejectsPendingArtwork() async throws {
+        let runner = FakeAppleScriptRunner()
+        runner.running = [.music]
+        runner.answers[.music] = Self.track(.music, title: "Leaving", durationSeconds: 100)
+        var pending: CheckedContinuation<Data?, Never>?
+        runner.artworkOverride = { await withCheckedContinuation { pending = $0 } }
+        let scheduler = ManualMediaTimerScheduler()
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
+        var titles: [String] = []
+        var covers: [SystemMediaThumbnail] = []
+        provider.onPropertiesChanged = { titles.append($0.title) }
+        provider.onThumbnailChanged = { covers.append($0) }
+        provider.addConsumer()
+        defer { provider.removeConsumer() }
+        try await poll { pending != nil }
+        runner.running = []
+        runner.notifyPlayersChanged()
+        XCTAssertEqual(titles, ["Leaving", ""])
+        XCTAssertTrue(scheduler.liveRepeating.isEmpty)
+        let cover = try makeSolidPNG(200, 40, 40)
+        pending?.resume(returning: cover)
+        pending = nil
+        runner.artworkOverride = nil
+        runner.answers[.spotify] = Self.track(.spotify, title: "New", durationSeconds: 200)
+        runner.running = [.spotify]
+        runner.notifyPlayersChanged()
+        try await poll { titles.last == "New" && runner.urlArtworkFetches + runner.appleEventArtworkFetches == 2 }
+        XCTAssertFalse(covers.contains { !$0.isEmpty }, "Artwork from the exited player never reaches the new subscription")
+    }
+
     func testUnavailableWithdrawsTrackCoverAndControlsThenRecovers() async throws {
         let runner = FakeAppleScriptRunner()
         runner.running = [.music]
         runner.answers[.music] = Self.track(.music, title: "Old track", durationSeconds: 100)
         runner.artwork = try makeSolidPNG(200, 40, 40)
         let scheduler = ManualMediaTimerScheduler()
-        let provider = AppleScriptMediaProvider(runner: runner, scheduler: scheduler)
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
         var titles: [String] = []
         var covers: [SystemMediaThumbnail] = []
         var states: [SystemMediaPlaybackState] = []
@@ -147,7 +277,8 @@ final class AppleScriptMediaProviderTests: XCTestCase {
         runner.answers[.music] = Self.track(.music, title: "Covered", durationSeconds: 100)
         runner.artwork = try makeSolidPNG(200, 40, 40)
         let scheduler = ManualMediaTimerScheduler()
-        let provider = AppleScriptMediaProvider(runner: runner, scheduler: scheduler)
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
         var covers: [SystemMediaThumbnail] = []
         provider.onThumbnailChanged = { covers.append($0) }
         provider.addConsumer()
@@ -168,7 +299,8 @@ final class AppleScriptMediaProviderTests: XCTestCase {
         runner.running = [.spotify]
         runner.answers[.spotify] = Self.track(.spotify, title: "Spotify track", durationSeconds: 200)
         let scheduler = ManualMediaTimerScheduler()
-        let provider = AppleScriptMediaProvider(runner: runner, scheduler: scheduler)
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
 
         provider.addConsumer()
         try await poll { runner.queries[.spotify] == 1 }
@@ -182,7 +314,8 @@ final class AppleScriptMediaProviderTests: XCTestCase {
         runner.answers[.spotify] = Self.track(.spotify, title: "Spotify track", durationSeconds: 200)
         var titles: [String] = []
         let scheduler = ManualMediaTimerScheduler()
-        let provider = AppleScriptMediaProvider(runner: runner, scheduler: scheduler)
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
         provider.onPropertiesChanged = { titles.append($0.title) }
 
         provider.addConsumer()
@@ -239,7 +372,7 @@ final class AppleScriptMediaProviderTests: XCTestCase {
         runner.artwork = try makeSolidPNG(200, 40, 40)
         var covers: [SystemMediaThumbnail] = []
         let provider = AppleScriptMediaProvider(
-            runner: runner, scheduler: ManualMediaTimerScheduler())
+            runner: runner, scheduler: ManualMediaTimerScheduler(), observePlayers: runner.observePlayers)
         provider.onThumbnailChanged = { covers.append($0) }
 
         provider.addConsumer()
@@ -267,7 +400,8 @@ final class AppleScriptMediaProviderTests: XCTestCase {
         runner.artwork = try makeSolidPNG(200, 40, 40)
         var covers: [SystemMediaThumbnail] = []
         let scheduler = ManualMediaTimerScheduler()
-        let provider = AppleScriptMediaProvider(runner: runner, scheduler: scheduler)
+        let provider = AppleScriptMediaProvider(
+            runner: runner, scheduler: scheduler, observePlayers: runner.observePlayers)
         provider.onThumbnailChanged = { covers.append($0) }
 
         provider.addConsumer()
@@ -282,6 +416,40 @@ final class AppleScriptMediaProviderTests: XCTestCase {
         runner.artwork = try makeSolidPNG(40, 200, 40)
         try await poll(after: { scheduler.fireRepeating() }) { runner.artworkFetches == 2 }
         XCTAssertEqual(covers.count, 2, "A new track publishes its own cover")
+    }
+
+    /// The fallback asks once a second; compiling its script (parsing it and loading the
+    /// player's scripting terminology) happens once per script, not once per question.
+    /// The compiler stands in a script that contacts no application.
+    func testEachScriptIsCompiledOnceHoweverOftenItRuns() async {
+        let compiled = CompiledSources()
+        let runner = NSAppleScriptNowPlayingRunner { source in
+            compiled.record(source)
+            return NSAppleScriptNowPlayingRunner.compile("return {}")
+        }
+        for _ in 0..<5 {
+            let answer = await runner.query(.music)
+            XCTAssertNil(answer, "an empty reply is not a track")
+        }
+        _ = await runner.query(.spotify)
+        _ = await runner.query(.music)
+        XCTAssertEqual(compiled.counts.count, 2, "one script per player")
+        XCTAssertEqual(Set(compiled.counts.values), [1], "each compiled once: \(compiled.counts)")
+    }
+
+    /// A script that does not compile is not kept: the next question compiles it again,
+    /// as every question did before scripts were kept.
+    func testAScriptThatDidNotCompileIsCompiledAgain() {
+        var attempts = 0
+        let cache = AppleScriptCache<Int> { _ in
+            attempts += 1
+            return attempts < 3 ? nil : attempts
+        }
+        XCTAssertNil(cache.script(for: "a"))
+        XCTAssertNil(cache.script(for: "a"))
+        XCTAssertEqual(cache.script(for: "a"), 3)
+        XCTAssertEqual(cache.script(for: "a"), 3)
+        XCTAssertEqual(attempts, 3)
     }
 
     private static func track(
@@ -360,12 +528,30 @@ final class FakeAppleScriptRunner: AppleScriptRunning {
     var running: [AppleScriptPlayer] = []
     var answers: [AppleScriptPlayer: AppleScriptNowPlaying] = [:]
     var artwork: Data?
+    var queryOverride: ((AppleScriptPlayer) async -> AppleScriptNowPlaying?)?
+    var artworkOverride: (() async -> Data?)?
+    private(set) var playerReads = 0
+    private(set) var observations: [@MainActor () -> Void] = []
+    private(set) var cancelledObservations: Set<Int> = []
+    func observePlayers(_ changed: @escaping @MainActor () -> Void) -> @MainActor () -> Void {
+        let index = observations.count
+        observations.append(changed)
+        return { [weak self] in self?.cancelledObservations.insert(index) }
+    }
+    func notifyPlayersChanged() {
+        for (index, changed) in observations.enumerated() where !cancelledObservations.contains(index) {
+            changed()
+        }
+    }
     private(set) var queries: [AppleScriptPlayer: Int] = [:]
     private(set) var appleEventArtworkFetches = 0
     private(set) var urlArtworkFetches = 0
     var artworkFetches: Int { appleEventArtworkFetches + urlArtworkFetches }
 
-    func runningPlayers() -> [AppleScriptPlayer] { running }
+    func runningPlayers() -> [AppleScriptPlayer] {
+        playerReads += 1
+        return running
+    }
 
     /// Players told to do something, and what.
     private(set) var controls: [(AppleScriptPlayer, SystemMediaCommand)] = []
@@ -377,11 +563,13 @@ final class FakeAppleScriptRunner: AppleScriptRunning {
 
     func query(_ player: AppleScriptPlayer) async -> AppleScriptNowPlaying? {
         queries[player, default: 0] += 1
+        if let queryOverride { return await queryOverride(player) }
         return answers[player]
     }
 
     func fetchArtwork(from player: AppleScriptPlayer) async -> Data? {
         appleEventArtworkFetches += 1
+        if let artworkOverride { return await artworkOverride() }
         return artwork
     }
 
@@ -389,4 +577,13 @@ final class FakeAppleScriptRunner: AppleScriptRunning {
         urlArtworkFetches += 1
         return artwork
     }
+}
+
+/// Sources a script runner compiled, counted on whatever queue it compiles on.
+final class CompiledSources: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String: Int] = [:]
+
+    func record(_ source: String) { lock.withLock { recorded[source, default: 0] += 1 } }
+    var counts: [String: Int] { lock.withLock { recorded } }
 }

@@ -20,14 +20,17 @@ Two things the naive `gh` sequence gets wrong, both covered by
   tags can still overlap. Manual invocations must use the same serialized publishing
   boundary rather than run alongside a workflow or another publisher.
 
-    python3 scripts/publish_release.py --tag v0.6.0 --notes notes.md app.dmg app.dmg.sha256 WallpaperMachine-update.json
-    python3 scripts/publish_release.py --tag v0.6.0 --notes notes.md --dry-run app.dmg
+    python3 scripts/publish_release.py --tag v0.6.0 --notes notes.md \\
+        WallpaperMachine-0.6.0-arm64.dmg WallpaperMachine-0.6.0-arm64.dmg.sha256 WallpaperMachine-update.json
+
+Add --dry-run to validate local artifacts and print the publish commands without mutation.
 
 Called by .github/workflows/build.yml; `gh` reads GH_TOKEN from the environment.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -115,8 +118,69 @@ def published_versions(run):
     return versions
 
 
+def validate_assets(tag, notes, assets):
+    """Fail closed before mutation: all three public assets describe exactly this image."""
+    version = tag.removeprefix("v")
+    image_name = f"WallpaperMachine-{version}-arm64.dmg"
+    paths = {Path(path).name: Path(path) for path in assets}
+    required = {image_name, image_name + ".sha256", "WallpaperMachine-update.json"}
+    if set(paths) != required or len(paths) != len(assets):
+        raise PublishError("A release requires exactly its DMG, SHA-256 sidecar and update manifest.")
+    try:
+        for path in [Path(notes), *paths.values()]:
+            if not path.is_file():
+                raise PublishError(f"Missing release file: {path}")
+        with paths[image_name].open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if paths[image_name + ".sha256"].read_text().strip() != f"{digest}  {image_name}":
+            raise PublishError("The checksum does not match the image.")
+        manifest = json.loads(paths["WallpaperMachine-update.json"].read_text(encoding="utf-8"))
+        entries = manifest.get("assets", [])
+        if (manifest.get("tag_name") != tag or manifest.get("prerelease") is not False
+                or manifest.get("bundle_identifier") != "app.wallpapermachine"
+                or not isinstance(manifest.get("architectures"), list)
+                or "arm64" not in manifest["architectures"]
+                or not re.fullmatch(r"\d+(?:\.\d+){0,2}", manifest.get("minimum_system_version", ""))
+                or manifest.get("body") != Path(notes).read_text(encoding="utf-8") or len(entries) != 1):
+            raise PublishError("The manifest identity, notes or compatibility metadata is invalid.")
+        entry = entries[0]
+        url = entry.get("browser_download_url", "")
+        if (entry.get("name") != image_name or entry.get("size") != paths[image_name].stat().st_size
+                or entry.get("digest") != "sha256:" + digest
+                or not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/download/"
+                                    + re.escape(tag + "/" + image_name), url)):
+            raise PublishError("The manifest asset does not match the image.")
+        return paths
+    except (OSError, ValueError, TypeError, AttributeError) as error:
+        raise PublishError(f"Cannot validate release assets: {error}") from error
+
+
+def verify_uploaded(tag, paths, run):
+    completed = run(["gh", "release", "view", tag, "--json", "assets,isDraft,tagName"])
+    try:
+        release = json.loads(completed.stdout)
+        entries = release["assets"]
+        uploaded = {entry["name"]: entry for entry in entries}
+        if release["isDraft"] is not True or release["tagName"] != tag:
+            raise PublishError("The uploaded release is not the expected draft.")
+        if set(uploaded) != set(paths) or len(uploaded) != len(entries):
+            raise PublishError("The draft does not contain exactly the required assets.")
+        for name, path in paths.items():
+            entry = uploaded[name]
+            if entry.get("size") != path.stat().st_size:
+                raise PublishError(f"Uploaded size mismatch: {name}")
+            if entry.get("digest"):
+                with path.open("rb") as handle:
+                    digest = "sha256:" + hashlib.file_digest(handle, "sha256").hexdigest()
+                if entry["digest"] != digest:
+                    raise PublishError(f"Uploaded digest mismatch: {name}")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        raise PublishError(f"Cannot verify uploaded assets: {error}") from error
+
+
 def publish(tag, notes, assets, run=runner, dry_run=False):
     promotes_to_latest(tag, [])  # Refuse malformed versions before any mutation.
+    paths = validate_assets(tag, notes, assets)
     action = plan(lookup(tag, run))
     if action == REFUSE:
         raise PublishError(
@@ -129,6 +193,8 @@ def publish(tag, notes, assets, run=runner, dry_run=False):
             print(f"{MARK.step} {' '.join(command)}")
             continue
         run(command)
+    if not dry_run:
+        verify_uploaded(tag, paths, run)
     # This check must be inside the workflow's repository-wide publish lock and
     # after the potentially slow upload. Never reuse a pre-upload decision.
     latest = promotes_to_latest(tag, published_versions(run))

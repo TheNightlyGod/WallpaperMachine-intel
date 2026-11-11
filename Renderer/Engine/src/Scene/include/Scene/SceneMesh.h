@@ -2,6 +2,7 @@
 #pragma once
 #include <vector>
 #include <memory>
+#include <optional>
 #include <cstddef>
 #include <cstdint>
 #include <climits>
@@ -72,6 +73,12 @@ public:
 
 		uint32_t material_slot {0};
 		std::string output_override;
+		/// Clear output_override to transparent right before this submesh draws.
+		bool clear_output {false};
+		/// Explicit policies for custom model streams. Other mesh producers inherit
+		/// their mesh's update policy.
+		std::optional<bool> dynamic_vertices;
+		std::optional<bool> dynamic_indices;
 
 	private:
 		std::vector<SceneVertexArray> m_vertices;
@@ -100,9 +107,13 @@ public:
 	/// Marks the geometry changed: the flag is raised and the generation moves on.
 	void SetDirty() {
 		m_generation.fetch_add(1, std::memory_order_acq_rel);
+		if (m_shared_generation) m_shared_generation->fetch_add(1, std::memory_order_acq_rel);
 		m_dirty.store(true, std::memory_order_release);
 	}
-	uint64_t DirtyGeneration() const { return m_generation.load(std::memory_order_acquire); }
+	uint64_t DirtyGeneration() const {
+		return m_shared_generation ? m_shared_generation->load(std::memory_order_acquire)
+		                           : m_generation.load(std::memory_order_acquire);
+	}
 
 	uint32_t ID() const { return m_id; }
 	void SetID(uint32_t v) { m_id = v; }
@@ -156,6 +167,15 @@ public:
 	/// Both meshes then read and write one store of submeshes; everything else a
 	/// mesh holds (materials, primitive, point size, id, driver, dirty state) stays its own.
 	void ChangeMeshDataFrom(const SceneMesh& o) { m_geometry = o.m_geometry; }
+	void EnableSharedGeometryUpdates() {
+		if (!m_shared_generation) m_shared_generation = std::make_shared<std::atomic<uint64_t>>(0);
+	}
+	void ShareGeometryFrom(const SceneMesh& other) {
+		m_geometry = other.m_geometry;
+		m_shared_generation = other.m_shared_generation;
+	}
+	bool SharesGeometryUpdates() const { return m_shared_generation != nullptr; }
+	std::shared_ptr<const void> GeometryStorage() const { return m_geometry; }
 
 private:
 	Submesh& First() {
@@ -171,6 +191,7 @@ private:
 	std::vector<std::shared_ptr<SceneMaterial>> m_materials;
 	std::atomic<bool> m_dirty {false};
 	std::atomic<uint64_t> m_generation {0};
+	std::shared_ptr<std::atomic<uint64_t>> m_shared_generation;
 };
 
 }

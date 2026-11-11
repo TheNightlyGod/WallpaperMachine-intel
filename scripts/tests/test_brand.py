@@ -119,7 +119,7 @@ print(String(data: try JSONSerialization.data(withJSONObject: [colors, joins, ed
                                            'Enlarged screen/frame joins must not expose a background seam')
 
     def test_dock_icons_are_the_asset_catalog_image_sets_the_app_loads(self):
-        for name in ('minimal', 'day', 'night'):
+        for name in ('minimal', 'day', 'night', 'halloween'):
             path = brand.dock_icon(name)
             with self.subTest(icon=name):
                 self.assertEqual(path.parent.name, f'AppIcon{name.capitalize()}.imageset')
@@ -186,6 +186,42 @@ for path in CommandLine.arguments.dropFirst() {
             # allow three source pixels (under 0.3 px at picker size).
             self.assertLessEqual(max(frame_widths) - min(frame_widths), 3,
                                  'Dock variants must have consistent rendered frame thickness')
+
+    def test_halloween_dock_icon_is_the_night_tile_with_its_night_and_a_pumpkin_for_the_gear(self):
+        if reason := ictool_skip_reason():
+            self.skipTest(reason)
+        with tempfile.TemporaryDirectory() as scratch:
+            work = Path(scratch)
+            with patch.object(brand, 'APP_ICON', work / 'AppIcon.icon'), \
+                    patch.object(brand, 'TRAY_ICON_SET', work / 'tray'), \
+                    patch.object(brand, 'DOCK_ICONS', work / 'dock'):
+                brand.write_app_icons(work)
+                [path] = brand.write_seasonal_dock_icons(work)
+            self.assertEqual(path.parent.name, 'AppIconHalloween.imageset')
+            result = subprocess.run(['swift', '-e', r'''
+import AppKit
+let image = NSBitmapImageRep(data: try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))!
+// Margin, tile, top frame, panel interior, gear centre (the pumpkin) and the clearance above it.
+let points = [(0, 0), (180, 512), (512, 256), (330, 330), (327, 698), (327, 560)]
+let colors = points.map { x, y -> [Double] in
+    let c = image.colorAt(x: x, y: y)!.usingColorSpace(.sRGB)!
+    return [c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent]
+}
+print(String(data: try JSONSerialization.data(withJSONObject: colors), encoding: .utf8)!)
+''', str(path)], check=True, capture_output=True, text=True)
+            margin, tile, frame, panel, pumpkin, clearance = json.loads(result.stdout)
+            self.assertEqual(margin[3], 0, 'Dock margin must stay transparent')
+            for color in (tile, clearance):
+                self.assertGreater(color[3], 0.99)
+                self.assertLess(max(color[:3]), 0.06, 'The Night tile, and its clean cutout above the pumpkin')
+            for channel in frame[:3]:
+                self.assertAlmostEqual(channel, 1, delta=0.04, msg='The frame stays white')
+            self.assertGreater(panel[2], panel[1], 'The panel shows the violet night, not the aurora')
+            self.assertGreater(panel[2], 0.08, 'The panel is painted, not the bare tile')
+            red, green, blue, _ = pumpkin
+            self.assertGreater(red, 0.8, 'A pumpkin stands where the gear was')
+            self.assertGreater(red - green, 0.2)
+            self.assertGreater(green - blue, 0.1)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'Requires macOS image tools')
     def test_website_icon_centers_the_display_frame(self):

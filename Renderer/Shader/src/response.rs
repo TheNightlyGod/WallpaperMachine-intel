@@ -83,10 +83,12 @@ pub struct ComboEntry {
     pub value: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AliasEntry {
     pub material: String,
     pub uniform: String,
+    /// The editor displays degrees while the shader stores radians.
+    pub rad2deg: bool,
 }
 
 /// A default uniform value from a shader annotation.
@@ -164,7 +166,9 @@ impl Metadata {
             json::object(&[("name", json::string(&c.name)), ("value", json::string(&c.value))])
         }));
         let aliases = json::array(self.aliases.iter().map(|a| {
-            json::object(&[("material", json::string(&a.material)), ("uniform", json::string(&a.uniform))])
+            let mut fields = vec![("material", json::string(&a.material)), ("uniform", json::string(&a.uniform))];
+            if a.rad2deg { fields.push(("rad2deg", "true".to_string())); }
+            json::object(&fields)
         }));
         let mut uniforms = Vec::with_capacity(self.default_uniforms.len());
         for u in &self.default_uniforms {
@@ -255,7 +259,7 @@ mod tests {
                 ComboEntry { name: "NORMALMAP".into(), value: "0".into() },
                 ComboEntry { name: "FOG".into(), value: "1".into() },
             ],
-            aliases: vec![AliasEntry { material: "speed".into(), uniform: "g_Speed".into() }],
+            aliases: vec![AliasEntry { material: "speed".into(), uniform: "g_Speed".into(), ..Default::default() }],
             default_uniforms: vec![
                 DefaultUniform { name: "g_A".into(), value: UniformValue::Number(0.5) },
                 DefaultUniform { name: "g_B".into(), value: UniformValue::Bool(true) },
@@ -334,8 +338,8 @@ mod tests {
                 ComboEntry { name: "A".into(), value: "2".into() },
             ],
             aliases: vec![
-                AliasEntry { material: "m".into(), uniform: "u".into() },
-                AliasEntry { material: "m".into(), uniform: "u".into() },
+                AliasEntry { material: "m".into(), uniform: "u".into(), ..Default::default() },
+                AliasEntry { material: "m".into(), uniform: "u".into(), ..Default::default() },
             ],
             ..Metadata::default()
         };
@@ -349,7 +353,7 @@ mod tests {
         // R94: a reader that looks at nothing but the keys the engine reads with a hard requirement.
         let m = Metadata {
             combos: vec![ComboEntry { name: "A".into(), value: "1".into() }],
-            aliases: vec![AliasEntry { material: "m".into(), uniform: "u".into() }],
+            aliases: vec![AliasEntry { material: "m".into(), uniform: "u".into(), ..Default::default() }],
             default_uniforms: vec![DefaultUniform { name: "g".into(), value: UniformValue::Number(1.0) }],
             default_textures: vec![DefaultTexture { slot: 0, path: "p".into() }],
             active_texture_slots: BTreeSet::new(),

@@ -74,6 +74,11 @@ WPSoundStream::WPSoundStream(std::vector<StreamFactory> factories, Config config
     m_volume.store(audio::ClampVolume(config.volume), std::memory_order_relaxed);
     m_muted.store(config.muted, std::memory_order_relaxed);
     m_playing.store(! config.startsilent, std::memory_order_relaxed);
+    m_mintime.store(config.mintime, std::memory_order_relaxed);
+    m_maxtime.store(config.maxtime, std::memory_order_relaxed);
+    m_mode.store(config.mode, std::memory_order_relaxed);
+    m_members = ScriptMembers { config.attenuation, config.mindistance, config.muteineditor,
+                                config.spatialization, config.startsilent, config.playbackmode_word };
     if (m_config.random_seed) m_random.seed(*m_config.random_seed);
 }
 
@@ -141,12 +146,13 @@ WPSoundStream::Piece WPSoundStream::NextPiece(float* out, std::size_t room,
 
     // The file delivered nothing: it is over (or empty, or failing).
     DropActiveFile();
-    if (m_config.mode == PlaybackMode::OneShot) {
+    const PlaybackMode mode = m_mode.load(std::memory_order_relaxed);
+    if (mode == PlaybackMode::OneShot) {
         m_finished.store(true, std::memory_order_relaxed);
         m_playing.store(false, std::memory_order_release);
         return { 0, true };
     }
-    if (m_config.mode == PlaybackMode::Random) m_delay_frames = DelayFrames();
+    if (mode == PlaybackMode::Random) m_delay_frames = DelayFrames();
     // When every file of the list has just ended without audio, stop instead of spinning.
     ++dead_files;
     return { 0, dead_files > m_stream_factories.size() };
@@ -166,8 +172,10 @@ void WPSoundStream::ApplyLayerGain(float* out, std::size_t samples) const {
 }
 
 uint64_t WPSoundStream::DelayFrames() {
-    const double minimum = std::isfinite(m_config.mintime) ? std::max(0.0f, m_config.mintime) : 0.0;
-    const double maximum = std::isfinite(m_config.maxtime) ? std::max(minimum, double(m_config.maxtime)) : minimum;
+    const float  mintime = m_mintime.load(std::memory_order_relaxed);
+    const float  maxtime = m_maxtime.load(std::memory_order_relaxed);
+    const double minimum = std::isfinite(mintime) ? std::max(0.0f, mintime) : 0.0;
+    const double maximum = std::isfinite(maxtime) ? std::max(minimum, double(maxtime)) : minimum;
     const double seconds = std::uniform_real_distribution<double>(minimum, maximum)(m_random);
     return static_cast<uint64_t>(std::min(std::ceil(seconds * m_desc.sampleRate),
                                          double(std::numeric_limits<int64_t>::max())));
@@ -219,6 +227,13 @@ bool WPSoundStream::Muted() const {
     return m_muted.load(std::memory_order_relaxed);
 }
 
+void WPSoundStream::SetMinTime(float seconds) { m_mintime.store(seconds, std::memory_order_relaxed); }
+float WPSoundStream::MinTime() const { return m_mintime.load(std::memory_order_relaxed); }
+void WPSoundStream::SetMaxTime(float seconds) { m_maxtime.store(seconds, std::memory_order_relaxed); }
+float WPSoundStream::MaxTime() const { return m_maxtime.load(std::memory_order_relaxed); }
+void WPSoundStream::SetPlaybackMode(PlaybackMode mode) { m_mode.store(mode, std::memory_order_relaxed); }
+PlaybackMode WPSoundStream::Mode() const { return m_mode.load(std::memory_order_relaxed); }
+
 void WPSoundStream::Switch() {
     m_cur_active.reset();
     const auto& factory = m_stream_factories[LoopIndex()];
@@ -230,7 +245,7 @@ void WPSoundStream::Switch() {
 std::size_t WPSoundStream::LoopIndex() {
     const std::size_t count = m_stream_factories.size();
     if (count == 0) return 0;
-    if (m_config.mode == PlaybackMode::Random) {
+    if (m_mode.load(std::memory_order_relaxed) == PlaybackMode::Random) {
         return std::uniform_int_distribution<std::size_t>(0, count - 1)(m_random);
     }
     const std::size_t index = m_cur_index % count;
@@ -257,6 +272,11 @@ void WPSoundParser::Parse(const wpscene::WPSoundObject& obj, fs::VFS& vfs, audio
     config.muted       = obj.muted;
     config.startsilent = obj.startsilent;
     config.mode        = ParseSoundPlaybackMode(obj.playbackmode);
+    config.playbackmode_word = obj.playbackmode;
+    config.attenuation       = obj.attenuation;
+    config.mindistance       = obj.mindistance;
+    config.muteineditor      = obj.muteineditor;
+    config.spatialization    = obj.spatialization;
 
     auto stream = std::make_shared<WPSoundStream>(obj.sound, vfs, config);
     if (runtime != nullptr) {

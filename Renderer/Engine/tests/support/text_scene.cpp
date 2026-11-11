@@ -1,4 +1,5 @@
 #include "support/text_scene.hpp"
+#include "support/font_assets.hpp"
 
 #include "Audio/SoundManager.h"
 #include "Fs/PhysicalFs.h"
@@ -7,6 +8,7 @@
 #include "Interface/IImageParser.h"
 #include "Runtime/VirtualAssetRegistry.hpp"
 #include "SpecTexs.hpp"
+#include "Text/TextGlyphMesh.hpp"
 #include "Utils/Random.hpp"
 #include "WPSceneParser.hpp"
 
@@ -31,6 +33,8 @@ TextWorld::TextWorld()
     if (::mkdtemp(pattern.data()) == nullptr) throw std::runtime_error("cannot create a scratch folder");
     root_ = pattern;
     for (const char* folder : { "assets", "provided", "cache" }) disk::create_directories(root_ / folder);
+    // The font materials and shaders text layers draw with (stand-ins; a test may overwrite them).
+    wallpaper::test::WriteFontAssets(root_ / "assets");
     sound_ = std::make_unique<audio::SoundManager>(audio::SoundManager::OutputBackend::Null);
 }
 
@@ -166,9 +170,18 @@ SceneNode* RootChild(Scene& scene, std::string_view name)
 std::string CardTexture(SceneNode& node)
 {
     if (node.Mesh() == nullptr) return {};
-    const auto* material = node.Mesh()->MaterialForSlot(0);
+    // The glyphs' material reads the layer's atlas (slot 1 of the text mesh).
+    const auto* material = node.Mesh()->MaterialForSlot(wallpaper::kTextGlyphSubmesh);
     if (material == nullptr || material->textures.empty()) return {};
     return material->textures.front();
+}
+
+std::size_t GlyphQuads(SceneNode& node)
+{
+    if (node.Mesh() == nullptr || node.Mesh()->Submeshes().size() <= kTextGlyphSubmesh) return 0;
+    const auto& glyphs = node.Mesh()->Submeshes()[kTextGlyphSubmesh];
+    if (glyphs.IndexCount() == 0) return 0;
+    return glyphs.GetIndexArray(0).DrawIndexCount() / 6;
 }
 
 bool PumpUntilClean(SceneRuntimeContext& runtime, const std::vector<std::string>& names)
@@ -194,9 +207,13 @@ std::size_t InkTexels(const Image& image)
     if (image.slots.empty() || image.slots.front().mipmaps.empty()) return 0;
     const auto& level = image.slots.front().mipmaps.front();
     if (level.data == nullptr) return 0;
-    std::size_t count = 0;
+    // A mono atlas is one coverage byte a texel (R8), the others RGBA8 with coverage in alpha.
+    const bool  r8     = image.header.format == TextureFormat::R8;
+    const i32   stride = r8 ? 1 : 4;
+    const i32   lane   = r8 ? 0 : 3;
+    std::size_t count  = 0;
     for (i32 at = 0; at < level.width * level.height; ++at) {
-        if (level.data.get()[at * 4 + 3] > 0) ++count;
+        if (level.data.get()[at * stride + lane] > 0) ++count;
     }
     return count;
 }

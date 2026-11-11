@@ -10,7 +10,7 @@
 
 use crate::json::{self, Number, Value};
 use crate::request::{
-    CachePolicy, Combo, Property, PropertyValue, RequestError, ShaderRequest, Stage, StageKind, Target,
+    CachePolicy, Combo, PointGeometry, Property, PropertyValue, RequestError, ShaderRequest, Stage, StageKind, Target,
     TextureComponents, TextureFormat, TextureRecord, ValidRequest, VideoPlanes,
 };
 use crate::text::quote;
@@ -58,6 +58,16 @@ impl ShaderRequest {
             for (i, item) in expect_array(v, "properties")?.iter().enumerate() {
                 request.properties.push(read_property(item, &format!("properties[{i}]"))?);
             }
+        }
+        if let Some(value) = root.get("point_geometry")? {
+            let geometry = Obj::new(value, "point_geometry")?;
+            let count = expect_number(geometry.required("max_vertices")?, "point_geometry.max_vertices")?
+                .as_str().parse::<u32>().map_err(|_| schema("point_geometry.max_vertices must be an unsigned integer".into()))?;
+            request.point_geometry = Some(PointGeometry {
+                source: geometry.required_str("source")?.into(),
+                max_vertices: count,
+                output_index_attribute: geometry.required_str("output_index_attribute")?.into(),
+            });
         }
         Ok(request)
     }
@@ -262,6 +272,12 @@ fn read_texture(value: &Value, path: &str) -> Result<TextureRecord, RequestError
             ))
         })?;
     }
+    if let Some(v) = obj.get("sample_count")? {
+        let path = obj.child("sample_count");
+        let number = expect_number(v, &path)?;
+        record.sample_count = Some(number.as_u64().and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| schema(format!("{path}: expected an unsigned 32-bit integer")))?);
+    }
     Ok(record)
 }
 
@@ -341,6 +357,19 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(omitted, explicit);
+    }
+
+    #[test]
+    fn physical_texture_samples_are_optional_and_have_supported_counts() {
+        for count in [1, 2, 4, 8] {
+            let request = parse_request(&doc(&format!(r#", "textures":[{{"slot":0,"enabled":true,"sample_count":{count}}}]"#))).unwrap();
+            assert_eq!(request.texture(0).unwrap().sample_count, Some(count));
+        }
+        for count in ["0", "3", "16", "-1", "1.5", "null", "\"1\""] {
+            assert!(parse_request(&doc(&format!(r#", "textures":[{{"slot":0,"enabled":true,"sample_count":{count}}}]"#))).is_err(), "{count}");
+        }
+        let request = parse_request(&doc(r#", "textures":[{"slot":0,"enabled":true}]"#)).unwrap();
+        assert_eq!(request.texture(0).unwrap().sample_count, None);
     }
 
     #[test]

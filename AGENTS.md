@@ -17,6 +17,8 @@ use `rg -u` only when those are the target.
 - Product / features: [README](README.md), [docs index](docs/README.md).
 - A wallpaper that looks wrong (issue reports): [wallpaper fixes](docs/testing/wallpaper-fixes.md),
   skill `wallpaper-issue`.
+- An emergency/urgent/hotfix patch release: [hotfix releases](docs/release.md#hotfix-releases),
+  skill `hotfix-release`; the request authorizes the `release:` line, not the push.
 
 ## Ownership and invariants
 
@@ -24,8 +26,9 @@ use `rg -u` only when those are the target.
   renderer facade and editor drafts; `App/Views/ControlPanel/`: the SwiftUI panel.
 - Panel: `Model/` holds `PanelController` and its typed `async throws` actions (views
   call them through `launch`, never by string), `Shell/`, `Library/`, `Inspector/`,
-  `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/` the area views and their
-  view models, `Components/`, `Theme/`, `Localization/`, `Images/` the shared pieces.
+  `Discover/`, `Downloads/`, `Pixiv/`, `Settings/`, `Welcome/`, `MenuBar/` (the menu bar
+  panel) the area views and their view models, `Components/`, `Theme/`, `Localization/`,
+  `Images/` the shared pieces.
   Untrusted text is `Text(verbatim:)`, links go through `ExternalLink`; views do no
   network, disk, per-frame or idle work ([conventions](docs/conventions.md#swiftui-control-panel)).
 - `Extension/`: sandboxed extension; `Shared/`: only code compiled by both targets,
@@ -54,10 +57,11 @@ use `rg -u` only when those are the target.
   without the Windows VM, say the fix was not compared. No frame-time, memory or
   energy cost to paper over a bug (extra passes, per-frame CPU work, unbounded
   caches); if a real trade-off is unavoidable, stop and ask.
-- Every new user-facing string goes into every shipped catalog in the same change
-  (`App/Resources/*.xcstrings`, `Extension/Localizable.xcstrings`); a panel literal
+- Every new user-facing string goes, in the same change, into the catalog of each target
+  that shows it, in every language that catalog ships (`App/Resources/*.xcstrings` for the
+  app, `Extension/Localizable.xcstrings` only for what the lock-screen extension shows); a panel literal
   (`Text("…")`, `L("…")`) must equal its catalog key or it renders English.
-  `README.md` and `README.zh-CN.md` change together ([localization](docs/localization.md)).
+  `README.md`, `README.zh-CN.md`, `README.pt-BR.md` and `README.ko.md` change together ([localization](docs/localization.md)).
 - Match surrounding conventions; reuse `ClientPaths`, `AppLog` and dependency injection.
   Unit tests run inside the real app, so `UserDefaults.standard` is the installed app's
   preferences: isolate with `WALLPAPER_MACHINE_HOME` and `TemporaryDefaults`, never a
@@ -85,8 +89,8 @@ use `rg -u` only when those are the target.
   `.omo/`, `.omp/`, `.pi/`) and `CLAUDE.local.md` are Git-ignored, machine-local state
   and personal rules: never `git add -f` them or link them from tracked docs. Ignore a
   new agent tool's dir in the same change; a shared file inside one follows the
-  `.gitignore` recipe and is listed here: the `wallpaper-issue` skill
-  (`.agents/skills/wallpaper-issue/`, linked from `.claude/skills/`). Check `git status`
+  `.gitignore` recipe and is listed here: the `wallpaper-issue` and `hotfix-release` skills
+  (`.agents/skills/<name>/`, linked from `.claude/skills/`). Check `git status`
   for agent paths before every commit.
 
 ## Permissions

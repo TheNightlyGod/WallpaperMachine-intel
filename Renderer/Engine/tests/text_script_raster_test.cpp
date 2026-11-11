@@ -10,6 +10,7 @@
 #include "RenderGraph/RenderGraph.hpp"
 #include "SpecTexs.hpp"
 #include "Text/SystemFontResolver.hpp"
+#include "Text/TextGlyphMesh.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -66,11 +67,11 @@ TextLayerState HelveticaState(const std::string& text, float point_size, float p
 /// Rasterises into a buffer sized by the layer's own estimate (rounded up).
 std::vector<uint8_t> RasterAtEstimate(const TextLayerState& state, int* width = nullptr, int* height = nullptr)
 {
-    const auto size = TextLayerRasterSize(state);
+    const auto size = MeasureTextLayerSize(state);
     const int  w    = static_cast<int>(std::ceil(size.x()));
     const int  h    = static_cast<int>(std::ceil(size.y()));
     std::vector<uint8_t> rgba(static_cast<std::size_t>(w) * h * 4, 0);
-    RasterizeTextLayer(state, w, h, rgba);
+    RasterizeTextGlyphsForTests(state, w, h, rgba);
     if (width != nullptr) *width = w;
     if (height != nullptr) *height = h;
     return rgba;
@@ -221,7 +222,7 @@ TEST_F(TextRaster, GlyphsAreSetAtTheFontsPixelSizeAndAntiAliased)
 #ifdef __APPLE__
     const int            w = 420, h = 220;
     std::vector<uint8_t> rgba(static_cast<std::size_t>(w) * h * 4, 0);
-    RasterizeTextLayer(state, w, h, rgba);
+    RasterizeTextGlyphsForTests(state, w, h, rgba);
     const InkBox ink = InkOf(rgba, w, h);
     ASSERT_TRUE(ink.found);
     EXPECT_GT(ink.Height(), 110) << "40 pt at 300 dpi is about 167 pixels per em";
@@ -236,7 +237,7 @@ TEST_F(TextRaster, TheEstimatedSizeContainsTallAndDescendingGlyphs)
     const TextLayerState state = HelveticaState("Hg", 40.0f, 4.0f);
     REQUIRE_HELVETICA(state);
 #ifdef __APPLE__
-    const auto size = TextLayerRasterSize(state);
+    const auto size = MeasureTextLayerSize(state);
     EXPECT_GT(size.x(), 130.0f);
     EXPECT_LT(size.x(), 280.0f);
     EXPECT_GT(size.y(), 120.0f);
@@ -254,7 +255,7 @@ TEST_F(TextRaster, CentredTextIsCentredInItsCard)
     state.vertical_align   = "center";
     REQUIRE_HELVETICA(state);
 #ifdef __APPLE__
-    const auto size = TextLayerRasterSize(state);
+    const auto size = MeasureTextLayerSize(state);
     EXPECT_TRUE(size.isApprox(MeasureTextLayerSize(state)));
     int w = 0, h = 0;
     const auto rgba = RasterAtEstimate(state, &w, &h);
@@ -271,7 +272,7 @@ TEST_F(TextRaster, AGlyphThePrimaryFaceLacksIsDrawnFromAFallbackFace)
 #ifdef __APPLE__
     const TextLayerState han = HelveticaState("\xE4\xB8\xAD", 40.0f, 4.0f);
     REQUIRE_HELVETICA(han);
-    const auto size = TextLayerRasterSize(han);
+    const auto size = MeasureTextLayerSize(han);
     EXPECT_GT(size.x(), 40.0f);
     EXPECT_GT(size.y(), 40.0f);
     int w = 0, h = 0;
@@ -401,16 +402,16 @@ TEST_F(TextClockScene, TheParentClockKeepsAVisibleRuntimeTexture)
     EXPECT_FALSE(state->resolved_font_path.empty());
 #endif
 
-    const auto* material = clock->Mesh()->MaterialForSlot(0);
+    const auto* material = clock->Mesh()->MaterialForSlot(kTextGlyphSubmesh);
     ASSERT_NE(material, nullptr);
     ASSERT_EQ(material->textures.size(), 1u);
     const auto image = scene->imageParser->Parse(material->textures.front());
     ASSERT_NE(image, nullptr);
-    const auto size = MeasureTextLayerSize(*state);
-    EXPECT_EQ(image->header.width, static_cast<int>(std::ceil(size.x())));
-    EXPECT_EQ(image->header.height, static_cast<int>(std::ceil(size.y())));
-    EXPECT_GT(image->header.width, 100);
+    // A persistent atlas, at least its first page of 512 (decompiles/G-F16.md), with ink in it,
+    // and a glyph quad for each inked character of the time.
+    EXPECT_GE(image->header.width, 512);
     EXPECT_GT(InkTexels(*image), 200u);
+    EXPECT_GE(GlyphQuads(*clock), 4u);
 
     Runtime().ClearNodeTextDirty("Clock");
     ResetTextLayerMeasurementCountForTests();
@@ -431,11 +432,11 @@ TEST_F(TextClockScene, TheRenderGraphDrawsTheClockWithItsRuntimeTexture)
     EXPECT_TRUE(clock->EffectiveVisible());
     EXPECT_NE(Runtime().NodeText("Clock"), kNulText);
     EXPECT_EQ(Runtime().scriptErrorCount(), 0u);
-    const auto* material = clock->Mesh()->MaterialForSlot(0);
+    const auto* material = clock->Mesh()->MaterialForSlot(kTextGlyphSubmesh);
     ASSERT_NE(material, nullptr);
     ASSERT_EQ(material->textures.size(), 1u);
-    EXPECT_EQ(material->textures.front(), TextTextureName("Clock"));
-    EXPECT_EQ(TextTextureName("Clock"), "runtime/text/Clock");
+    EXPECT_EQ(material->textures.front(), TextAtlasName("Clock"));
+    EXPECT_EQ(TextAtlasName("Clock"), "runtime/text/Clock/atlas");
     const auto image = scene->imageParser->Parse(material->textures.front());
     ASSERT_NE(image, nullptr);
     EXPECT_GT(InkTexels(*image), 200u);
@@ -445,11 +446,13 @@ TEST_F(TextClockScene, TheRenderGraphDrawsTheClockWithItsRuntimeTexture)
     const rg::DrawPass* draw = nullptr;
     for (const auto id : graph->topologicalOrder()) {
         const auto* pass = dynamic_cast<const rg::DrawPass*>(graph->getPass(id));
-        if (pass != nullptr && pass->desc().node == clock) draw = pass;
+        if (pass != nullptr && pass->desc().node == clock && pass->desc().material_slot == kTextGlyphSubmesh) {
+            draw = pass;
+        }
     }
     ASSERT_NE(draw, nullptr) << "the clock is not drawn by any pass";
     ASSERT_EQ(draw->desc().textures.size(), 1u);
-    EXPECT_EQ(draw->desc().textures.front(), TextTextureName("Clock"));
+    EXPECT_EQ(draw->desc().textures.front(), TextAtlasName("Clock"));
     EXPECT_EQ(draw->desc().visibility_node, clock);
     EXPECT_EQ(draw->desc().output, SpecTex_Default);
 

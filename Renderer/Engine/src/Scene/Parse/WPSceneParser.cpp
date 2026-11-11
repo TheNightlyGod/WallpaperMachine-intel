@@ -1,6 +1,6 @@
 // Clean-room implementation from the WallpaperMachine spec p1-scene-structure.md; written without access to the original source.
 #include "WPSceneParser.hpp"
-#include "LayerParallax.hpp"
+#include "Scene/CameraPlacement.hpp"
 #include "WPJson.hpp"
 #include "Scene/SceneIndexArray.h"
 
@@ -15,7 +15,11 @@
 
 #include "WPShaderParser.hpp"
 #include "WPTexImageParser.hpp"
+#include "WPTextureFormats.hpp"
+#include "TexelSample.hpp"
+#include "ParticleLayerImage.hpp"
 #include "WPParticleParser.hpp"
+#include "WPParticleRemap.hpp"
 #include "WPSoundParser.hpp"
 #include "WPMdlParser.hpp"
 
@@ -27,10 +31,12 @@
 #include "Shader/TextureFormatCombos.hpp"
 #include "Runtime/RuntimeImageSource.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
+#include "Runtime/SceneModelData.hpp"
 #include "Runtime/SceneSettingResolver.hpp"
 #include "Scripting/ScriptModuleSyntax.hpp"
 #include "Text/SystemFontResolver.hpp"
 #include "Text/TextLayer.hpp"
+#include "Text/TextGlyphMesh.hpp"
 #include "wpscene/WPImageObject.h"
 #include "wpscene/WPParticleObject.h"
 #include "wpscene/WPSoundObject.h"
@@ -43,9 +49,11 @@
 #include "MetalRender/MetalVideoSupport.hpp"
 #include "MetalRender/SceneMetalProgram.hpp"
 #include "Scene/SceneBackendSelection.hpp"
+#include "Shader/FallbackProgram.hpp"
 #include "Shader/RustShaderBridge.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -125,33 +133,67 @@ struct PendingMetalTranslation {
 thread_local std::vector<PendingMetalTranslation> g_pending_metal_translations;
 thread_local const LayerObjectIndex* g_parse_layer_index { nullptr };
 /// The shaders of this parse that could not be compiled, one sentence each, in
-/// the order the parse met them. The layer or effect that wanted one is left out
-/// of the scene (its material did not load), so the parse ends by handing these
-/// to the scene, whose capability gate refuses it with the first as the reason:
-/// a scene is never drawn with a part of it missing.
+/// the order the parse met them, each once. The pass that wanted one is drawn
+/// with Wallpaper Engine's fallback stage in place of the one that failed, so
+/// these only travel to the scene as a diagnostic (`Scene::shader_fallbacks`).
 thread_local std::vector<std::string> g_shader_failures;
 
-/// Records that `shader_name` could not be compiled, with the compiler's own
-/// explanation when it has one (its first line, so a long diagnostic does not
-/// become the panel's reason).
+/// The object `BuildLayers` is building, so a file it asks for and does not find is put down to
+/// it: id -1 and no name between objects.
+thread_local int32_t     g_parse_object_id { -1 };
+thread_local std::string g_parse_object_name;
+/// The files this parse asked for that the scene does not have (`Scene::missing_files`).
+thread_local std::vector<SceneMissingFile> g_missing_files;
+constexpr std::size_t kMissingFileLimit = 64;
+
+/// Records a file asked for and not found. Only the scene's own space counts: a shader cache
+/// entry that is not there yet is not something the scene lacks. A file asked for again by a
+/// layer is put down to that layer if it was first asked for between objects.
+void RecordMissingFile(std::string_view path) {
+    constexpr std::string_view kSceneSpace = "/assets/";
+    if (path.substr(0, kSceneSpace.size()) != kSceneSpace) return;
+    std::string relative(path.substr(kSceneSpace.size()));
+    if (relative.empty()) return;
+    const auto known = std::find_if(g_missing_files.begin(), g_missing_files.end(),
+                                    [&](const SceneMissingFile& file) { return file.path == relative; });
+    if (known != g_missing_files.end()) {
+        if (known->object_id < 0 && g_parse_object_id >= 0) {
+            known->object_id = g_parse_object_id;
+            known->layer     = g_parse_object_name;
+        }
+        return;
+    }
+    if (g_missing_files.size() >= kMissingFileLimit) return;
+    g_missing_files.push_back(SceneMissingFile {
+        .layer = g_parse_object_name, .object_id = g_parse_object_id, .path = std::move(relative) });
+}
+
+/// Puts the files asked for while it lives down to one object of the scene file.
+struct ParseObjectScope {
+    ParseObjectScope(int32_t id, std::string name) {
+        g_parse_object_id   = id;
+        g_parse_object_name = std::move(name);
+    }
+    ~ParseObjectScope() {
+        g_parse_object_id = -1;
+        g_parse_object_name.clear();
+    }
+    ParseObjectScope(const ParseObjectScope&)            = delete;
+    ParseObjectScope& operator=(const ParseObjectScope&) = delete;
+};
+
+/// Records and logs, once per shader and reason, that `shader_name` could not be
+/// compiled, with the compiler's own explanation when it has one (its first line,
+/// so a long diagnostic does not become the panel's reason).
 void NoteShaderFailure(std::string_view shader_name, std::string detail) {
     constexpr std::size_t kMaxDetail = 240;
     if (const auto line = detail.find('\n'); line != std::string::npos) detail.resize(line);
     if (detail.size() > kMaxDetail) detail.resize(kMaxDetail);
     std::string reason = "the shader '" + std::string(shader_name) + "' could not be translated to Metal";
     if (! detail.empty() && detail != "no shader error") reason += " (" + detail + ")";
+    if (std::find(g_shader_failures.begin(), g_shader_failures.end(), reason) != g_shader_failures.end()) return;
+    LOG_ERROR("%s; it is drawn with the fallback shader", reason.c_str());
     g_shader_failures.push_back(std::move(reason));
-}
-
-/// What the scene reports when the parse met shaders that did not compile.
-std::string ShaderFailureReason() {
-    if (g_shader_failures.empty()) return {};
-    std::string reason = g_shader_failures.front();
-    if (g_shader_failures.size() > 1) {
-        reason += "; " + std::to_string(g_shader_failures.size() - 1) + " more shader" +
-                  (g_shader_failures.size() == 2 ? "" : "s") + " failed too";
-    }
-    return reason;
 }
 
 /// Compiles one iteration of a material's shader to Metal, merging what the
@@ -159,8 +201,16 @@ std::string ShaderFailureReason() {
 /// made (or, for a later iteration of the same shader, replaces the earlier
 /// one). The inputs are copied before the compile consumes them, so the record
 /// holds exactly what the compile saw rather than the state it left behind; the
-/// last iteration to run is the one that settled. A failed compile leaves
-/// nothing queued for the shader.
+/// last iteration to run is the one that settled.
+///
+/// A stage that does not compile is replaced, in `units` too, by Wallpaper
+/// Engine's fallback stage (`sub_1400D5070` compiles `dx11fallback.vert` or
+/// `.frag` in place of the stage that failed and keeps the rest of the pass;
+/// probe T9). Which stage failed is found by replacing the fragment first, then
+/// the vertex, then both. Only when even that does not compile is nothing queued.
+/// A program with a geometry stage keeps it when only the fragment is replaced;
+/// failing that it tries its own stages without it (`GS_ENABLED` 0, the author's
+/// vertex-only path) before the fallback stages, and `shader_info` then says so.
 bool CompileAndQueueMetalProgram(const std::shared_ptr<SceneShader>& shader,
                                  std::string_view scene_id, std::string_view shader_name,
                                  std::span<WPShaderUnit> units, fs::VFS& vfs,
@@ -172,26 +222,68 @@ bool CompileAndQueueMetalProgram(const std::shared_ptr<SceneShader>& shader,
     pending.shader       = shader;
     pending.shader_name  = std::string(shader_name);
     pending.scene_id     = std::string(scene_id);
-    pending.units.assign(units.begin(), units.end());
-    pending.shader_info  = *shader_info;
     pending.texinfos.assign(texinfos.begin(), texinfos.end());
     pending.texture_keys = std::move(texture_keys);
+    const auto compile = [&] {
+        pending.units.assign(units.begin(), units.end());
+        pending.shader_info = *shader_info;
+        pending.stages.clear();
+        pending.reflection_json.clear();
+        pending.includes.clear();
+        return WPShaderParser::CompileToMslRust(scene_id, shader_name, units, pending.stages, vfs,
+                                                shader_info, texinfos, &pending.reflection_json,
+                                                std::nullopt, &pending.includes);
+    };
 
     const bool replaces = ! g_pending_metal_translations.empty() &&
                           g_pending_metal_translations.back().shader == shader;
-    if (! WPShaderParser::CompileToMslRust(scene_id,
-                                           shader_name,
-                                           units,
-                                           pending.stages,
-                                           vfs,
-                                           shader_info,
-                                           texinfos,
-                                           &pending.reflection_json,
-                                           std::nullopt,
-                                           &pending.includes)) {
-        if (replaces) g_pending_metal_translations.pop_back();
-        NoteShaderFailure(shader_name, shader::LastRustShaderError());
-        return false;
+    if (! compile()) {
+        const std::string               error = shader::LastRustShaderError();
+        const std::vector<WPShaderUnit> authored(units.begin(), units.end());
+        const auto authored_geometry = shader_info->point_geometry;
+        const auto authored_combos   = shader_info->combos;
+        // Which stage failed: the fragment first, keeping a geometry stage, as WE replaces
+        // only the stage that fails; then the program without its geometry stage
+        // (`GS_ENABLED` 0, the author's vertex-only path); then the fallback stages without it.
+        struct Attempt { bool vertex, fragment, geometry; };
+        constexpr std::array<Attempt, 5> kAttempts { {
+            { false, true, true }, { false, false, false }, { false, true, false },
+            { true, false, false }, { true, true, false } } };
+        bool compiled = false, stage_replaced = false;
+        for (const auto& attempt : kAttempts) {
+            // Without a geometry stage the first three attempts are the ordinary two and
+            // the unchanged program, which has already failed.
+            if (! authored_geometry && (attempt.geometry || (! attempt.vertex && ! attempt.fragment))) continue;
+            shader_info->point_geometry = attempt.geometry ? authored_geometry : nullptr;
+            shader_info->combos         = authored_combos;
+            if (authored_geometry && ! attempt.geometry) shader_info->combos["GS_ENABLED"] = "0";
+            for (std::size_t i = 0; i < units.size(); ++i) {
+                units[i] = authored[i];
+                if (units[i].stage == ShaderType::VERTEX && attempt.vertex) {
+                    units[i].src = std::string(shader::kFallbackVertexSource);
+                } else if (units[i].stage == ShaderType::FRAGMENT && attempt.fragment) {
+                    units[i].src = std::string(shader::kFallbackFragmentSource);
+                }
+            }
+            if ((compiled = compile())) {
+                stage_replaced = attempt.vertex || attempt.fragment;
+                if (authored_geometry && ! attempt.geometry) {
+                    LOG_ERROR("the geometry stage of '%s' could not be translated; it is drawn without it: %s",
+                              std::string(shader_name).c_str(), error.c_str());
+                }
+                break;
+            }
+        }
+        if (! compiled) {
+            std::copy(authored.begin(), authored.end(), units.begin());
+            shader_info->point_geometry = authored_geometry;
+            shader_info->combos         = authored_combos;
+            if (replaces) g_pending_metal_translations.pop_back();
+            LOG_ERROR("the shader '%s' could not be translated and neither could the fallback shader: %s",
+                      std::string(shader_name).c_str(), error.c_str());
+            return false;
+        }
+        if (stage_replaced) NoteShaderFailure(shader_name, error);
     }
     if (reflection_json != nullptr) *reflection_json = pending.reflection_json;
     if (replaces) {
@@ -223,15 +315,6 @@ std::optional<uint32_t> ResolveVideoPlaneCandidate(const Scene& scene,
         candidate = static_cast<uint32_t>(slot);
     }
     return candidate;
-}
-
-SceneMetalSlotKind ToSceneMetalSlotKind(shader::RustShaderMetalSlotKind kind) {
-    switch (kind) {
-    case shader::RustShaderMetalSlotKind::Texture: return SceneMetalSlotKind::Texture;
-    case shader::RustShaderMetalSlotKind::Sampler: return SceneMetalSlotKind::Sampler;
-    case shader::RustShaderMetalSlotKind::Buffer: break;
-    }
-    return SceneMetalSlotKind::Buffer;
 }
 
 /// Records what the direct plane-sampling variant of one already-translated
@@ -278,26 +361,7 @@ void FlushPendingMetalTranslations(Scene& scene) {
         auto program = std::make_shared<SceneMetalProgram>();
 
         program->reflection_json = std::move(request.reflection_json);
-        for (const auto& stage : request.stages) {
-            SceneMetalStage out;
-            out.kind             = stage.kind == ShaderType::FRAGMENT
-                                       ? SceneMetalStageKind::Fragment
-                                       : SceneMetalStageKind::Vertex;
-            out.source           = stage.source;
-            out.entry_point      = stage.entry_point;
-            out.language_version = stage.language_version;
-            out.bindings.reserve(stage.bindings.size());
-            for (const auto& binding : stage.bindings) {
-                out.bindings.push_back(SceneMetalBinding {
-                    .name      = binding.name,
-                    .set       = binding.set,
-                    .binding   = binding.binding,
-                    .slot_kind = ToSceneMetalSlotKind(binding.slot_kind),
-                    .slot      = binding.slot,
-                });
-            }
-            program->stages.push_back(std::move(out));
-        }
+        for (const auto& stage : request.stages) program->stages.push_back(shader::ToSceneMetalStage(stage));
         if (program->stages.empty() || program->reflection_json.empty()) {
             program->error = "metal translation produced no usable shader";
             LOG_ERROR("metal translation of '%s' failed: %s",
@@ -330,8 +394,13 @@ struct PassthroughCardShape {
     float canvas_width { 1.0f };
     float canvas_height { 1.0f };
     bool  clip_space { false };
+    /// The card's shader finds the screen position it samples through the projection
+    /// (`composelayer`, see `SamplesScreenBackground`) rather than at its texture coordinates,
+    /// which then only place the card in its own buffer.
+    bool  screen_through_projection { false };
 };
 
+namespace { struct LazyParseInputs; }
 struct ParseContext {
     std::shared_ptr<Scene>                                  scene;
     WPShaderValueUpdater*                                   shader_updater;
@@ -353,6 +422,26 @@ struct ParseContext {
     /// Work that waits for the layers to sit in their tree (a child system's place under a
     /// world-space parent depends on the scale it is drawn under).
     std::vector<std::function<void()>>                      after_attach;
+    /// What a particle file's layer links (`dependencies[]` entries with a type)
+    /// may read of each layer, by object id; filled by the model and image loaders.
+    struct ParticleLinkTarget {
+        std::weak_ptr<SceneNode> node;
+        /// collisionmodel: each bone record of 76 bytes (half extents and a matrix)
+        /// in the bone's space, or one box around the mesh (bone -1) when the
+        /// model has none.
+        struct Box {
+            linalg::Vector3d extents { 0.0, 0.0, 0.0 };
+            linalg::Matrix4d record { linalg::Matrix4d::Identity() };
+            int              bone { -1 };
+        };
+        std::vector<Box> boxes;
+        WPPuppetLayer    puppet_layer;
+        bool             has_puppet { false };
+        std::shared_ptr<ParticleLayerImageSource> image;
+    };
+    std::unordered_map<int32_t, ParticleLinkTarget>         particle_link_targets;
+    std::unordered_set<int32_t>                             particle_image_targets;
+    std::unordered_set<int32_t>                             particle_link_targets_required;
     /// The scene file's objects, for questions about a layer's ancestors.
     const nlohmann::json*                                   objects { nullptr };
     /// The cards of pass-through layers, laid out once every layer sits under its parent.
@@ -378,8 +467,18 @@ struct ParseContext {
     /// The card each text layer shows, for a composite registered only once
     /// a later consumer turns out to sample the layer.
     std::unordered_map<int32_t, TextLayerRenderFrame>       text_cards;
+    SharedFontData                                          twemoji_font;
+    bool                                                    twemoji_read { false };
 
     bool                       uses_models { false };
+    bool                       scripts_use_effects { false };
+    /// Shadows are drawn (Appendix C item 6): the shadows quality is on, the light config
+    /// has a shadow subset, a light that is not statically hidden casts and a model casts.
+    /// Lit materials then sample `_rt_shadowAtlas` (LIGHTS_SHADOW_MAPPING).
+    bool                       shadow_mapping { false };
+    bool                       shadow_capable { false };
+    bool                       shadow_variant_build { false };
+    std::shared_ptr<LazyParseInputs> shadow_inputs;
     // `orthogonalprojection` present and not null. The scene is then projected
     // by that canvas, which is the space every 2D layer's geometry, origin and
     // alignment is authored in.
@@ -452,20 +551,16 @@ int32_t ResolveRenderTargetDimension(float base_dimension, uint32_t scale) {
     return static_cast<int32_t>(std::clamp(std::round(value), 4.0, 2147483647.0));
 }
 
-// The format Wallpaper Engine gives an effect buffer. Float buffers hold signed
-// values, such as a fluid simulation's velocity and pressure, which an 8-bit
-// target would clamp at zero; the back-buffer formats follow the scene. A
-// single- or two-channel float buffer takes the four-channel float target, the
-// narrowest float format the renderer allocates.
+// The format Wallpaper Engine gives an effect buffer (sub_1401E7170): `rgba_backbuffer` and
+// `rgb_backbuffer` follow the scene (codes 14/15 under HDR, 0/1 without), any other name is the
+// render-target format of its row of the texture format table (`sub_1401E53A0`), and a name the
+// table does not have reads as code 0, rgba8888 -- `r32f` included, HDR or not.
 TextureFormat EffectFboFormat(std::string_view format, bool hdr) {
-    if (format == "r16f" || format == "rg1616f" || format == "rgba16161616f" ||
-        format == "r32f" || format == "rg3232f" || format == "rgba32323232f") {
-        return TextureFormat::RGBA16F;
+    if (format == "rgba_backbuffer" || format == "rgb_backbuffer") {
+        return hdr ? TextureFormat::RGBA16F : TextureFormat::RGBA8;
     }
-    if (format == "rgba8888" || format == "rgb888" || format == "rg88" || format == "r8") {
-        return TextureFormat::RGBA8;
-    }
-    return hdr ? TextureFormat::RGBA16F : TextureFormat::RGBA8;
+    const auto* row = WeFormatOfName(format);
+    return row != nullptr ? row->target : TextureFormat::RGBA8;
 }
 
 // An effect buffer with a `width`, `height` or `fit` of its own has a fixed
@@ -565,6 +660,10 @@ void LowerEffectCommands(const wpscene::WPImageEffect& effect,
 
 /// A quad of four vertices in the order left-bottom, left-top, right-bottom,
 /// right-top, drawn as the triangles (0, 1, 2) and (2, 1, 3).
+/// The camera WE gives a layer with the `perspective` flag in a 3D scene, and its distance.
+constexpr std::string_view kPerspectiveLayerCamera { "global_perspective_layer" };
+constexpr double           kPerspectiveLayerDistance = 2000.0;
+
 std::shared_ptr<SceneMesh> MakeQuadMesh(const std::array<float, 12>& positions,
                                         const std::array<float, 8>&  uvs,
                                         MeshUpdate update = MeshUpdate::Fixed) {
@@ -580,8 +679,10 @@ std::shared_ptr<SceneMesh> MakeQuadMesh(const std::array<float, 12>& positions,
         vertex[5] = uvs[corner * 2 + 1];
     }
     vertices.SetVertexs(0, packed);
-    // Sixteen-bit indices, two to a slot of the index array.
-    const std::array<uint16_t, 6> indices { 0, 1, 2, 2, 1, 3 };
+    // Sixteen-bit indices, two to a slot of the index array. The corners are given
+    // bottom-left, top-left, bottom-right, top-right; both triangles run counter-clockwise
+    // with y up, so a culled card faces the camera as authored (WE probe ordinary-cull-v1).
+    const std::array<uint16_t, 6> indices { 0, 2, 1, 1, 2, 3 };
     SceneIndexArray index_array(1);
     index_array.AssignHalf(0, indices);
     auto mesh = std::make_shared<SceneMesh>(update);
@@ -647,11 +748,22 @@ std::shared_ptr<SceneMesh> MakePassthroughMesh(const PassthroughCardShape& shape
 }
 
 /// Lays the card out again where `world` puts its layer.
-void LayOutPassthroughCard(SceneMesh& mesh, const PassthroughCardShape& shape, const Matrix4d& world) {
+void LayOutPassthroughCard(SceneMesh& mesh, const PassthroughCardShape& shape, const Matrix4d& world,
+                           const Scene& scene) {
     if (mesh.VertexCount() < 1 || mesh.GetVertexArray(0).VertexCount() < 4) return;
     std::array<float, 12> positions {};
     std::array<float, 8>  uvs {};
     PassthroughCardVertices(shape, world, positions, uvs);
+    // A card that samples the screen at its texture coordinates samples the framed raster, so
+    // they follow the framing. One that finds its screen position through the projection
+    // already gets the framed projection; its coordinates place it in its own buffer.
+    if (scene.display_framed && ! shape.screen_through_projection) {
+        const auto& clip = scene.display_clip;
+        for (std::size_t corner = 0; corner < 4; ++corner) {
+            uvs[corner*2] = clip[0]*uvs[corner*2] + (1.0-clip[0]+clip[2])*0.5;
+            uvs[corner*2+1] = clip[1]*uvs[corner*2+1] + (1.0-clip[1]-clip[3])*0.5;
+        }
+    }
     auto& quad = mesh.GetVertexArray(0);
     quad.SetVertex(WE_IN_POSITION, positions);
     quad.SetVertex(WE_IN_TEXCOORD, uvs);
@@ -671,10 +783,14 @@ ParticleParseContext MakeParticleParseContext(
     ctx.tint_after_retint = tint_after_retint;
     ctx.over  = over;
     ctx.spawn = pSys.SpawnContext();
+    ctx.writable_controlpoints = pSys.Controlpoints();
     ctx.color = WPParticleParser::analyzeColorSources(wp.initializers, wp.operators);
     ctx.ortho = pixel_canvas;
     ctx.speed_override = wp.AppliesSpeedOverride();
     ctx.size_override  = wp.AppliesSizeOverride();
+    ctx.colour_override   = wp.AppliesColourOverride();
+    ctx.count_override    = wp.AppliesCountOverride();
+    ctx.lifetime_override = wp.AppliesLifetimeOverride();
     if (scene != nullptr) {
         ctx.spectrum = [scene]() {
             return scene->runtime != nullptr ? scene->runtime->CurrentAudioSpectrumSnapshot()
@@ -684,8 +800,10 @@ ParticleParseContext MakeParticleParseContext(
     }
     return ctx;
 }
-/// The blend mode a material's `blending` word names. `disabled` writes the
-/// fragment as it is, like `normal`; a word outside the list reads as `normal`.
+/// The blend mode a material's `blending` word names. Wallpaper Engine compares the word
+/// case-sensitively with its table (normal, translucent, additive, alphatocoverage) and takes
+/// the first entry, normal, for anything else (`sub_1401587D0`, table in `sub_1401577E0`), so
+/// `Additive` or `disabled` writes the fragment as it is.
 BlendMode ParseSceneBlendMode(std::string_view word) {
     if (word == "translucent") return BlendMode::Translucent;
     if (word == "additive") return BlendMode::Additive;
@@ -721,10 +839,21 @@ CullMode ParseSceneCullMode(std::string_view value) {
     return value == "nocull" ? CullMode::None : CullMode::Back;
 }
 
+// Wallpaper Engine's `alphawriting` words (sub_1401577E0): exact and case-sensitive;
+// any other word is the default.
+AlphaWriting ParseAlphaWriting(std::string_view value) {
+    if (value == "enabled") return AlphaWriting::Enabled;
+    if (value == "disabled") return AlphaWriting::Disabled;
+    return AlphaWriting::Default;
+}
+
 // `general.lightconfig` names how many lights of each kind lit shaders are
-// compiled for. Wallpaper Engine packs each count into four bits; its shadow
-// and cookie subsets are not drawn here, so those lights count as plain ones.
-SceneLightConfig ParseSceneLightConfig(const nlohmann::json& config) {
+// compiled for, and how many of them fall in each shadow and cookie subset.
+// Wallpaper Engine (0x140186C90) packs each kind count into four bits and each
+// subset into two (`& 3`, never checked against its kind's count); with shadows
+// off it drops the shadow subsets and ORs spotshadowcookie into spotcookie.
+// Each subset keeps its own array slots for the shadow/cookie projection helpers.
+SceneLightConfig ParseSceneLightConfig(const nlohmann::json& config, bool shadows) {
     SceneLightConfig lights;
     if (! config.is_object()) return lights;
     const auto count = [&config](const char* key) -> uint32_t {
@@ -732,10 +861,26 @@ SceneLightConfig ParseSceneLightConfig(const nlohmann::json& config) {
         if (found == config.end() || ! found->is_number()) return 0;
         return static_cast<uint32_t>(std::clamp(found->get<double>(), 0.0, 15.0));
     };
+    const auto subset = [&config](const char* key) -> uint32_t {
+        const auto found = config.find(key);
+        if (found == config.end() || ! found->is_number()) return 0;
+        const double value = found->get<double>();
+        if (! std::isfinite(value) || std::abs(value) > 1e9) return 0;
+        return static_cast<uint32_t>(static_cast<int64_t>(value) & 3);
+    };
     lights.point       = count("point");
     lights.spot        = count("spot");
     lights.tube        = count("tube");
     lights.directional = count("directional");
+    lights.spot_cookie = subset("spotcookie");
+    if (shadows) {
+        lights.spot_shadow_cookie = subset("spotshadowcookie");
+        lights.spot_shadow        = subset("spotshadow");
+        lights.directional_shadow = subset("directionalshadow");
+        lights.point_shadow       = subset("pointshadow");
+    } else {
+        lights.spot_cookie |= subset("spotshadowcookie");
+    }
     return lights;
 }
 
@@ -850,7 +995,9 @@ std::optional<wpscene::WPImageEffect> MakeFogCompositeEffect(fs::VFS& vfs) {
     wpscene::WPImageEffect effect;
     wpscene::WPMaterial    material;
     nlohmann::json         json;
-    if (! PARSE_JSON(fs::GetFileContent(vfs, "/assets/materials/util/effectpassthrough_4.json"), json))
+    // Looked for, not required: asking `Contains` first keeps its absence off the missing files.
+    constexpr const char* kMaterial = "/assets/materials/util/effectpassthrough_4.json";
+    if (! vfs.Contains(kMaterial) || ! PARSE_JSON(fs::GetFileContent(vfs, kMaterial), json))
         return std::nullopt;
     material.FromJson(json);
     material.combos["BONECOUNT"] = 1;
@@ -858,11 +1005,33 @@ std::optional<wpscene::WPImageEffect> MakeFogCompositeEffect(fs::VFS& vfs) {
     return effect;
 }
 
+/// Wallpaper Engine's material light flags (material+508, `sub_1401515B0`): 0x10 when
+/// the program reads lights, 0x08 when it reflects. Read here from the effective
+/// combos (`LIGHTING`, `REFLECTION`) that make the program do so; a missing key is 0.
+uint32_t LitMaterialFlags(const Combos& effective) {
+    const auto on = [&](const char* name) {
+        const auto it = effective.find(name);
+        return it != effective.end() && ! it->second.empty() && it->second != "0";
+    };
+    return (on("LIGHTING") ? 0x10u : 0u) | (on("REFLECTION") ? 0x08u : 0u);
+}
+
+/// The combos of the pass that lights a layer drawn through effects
+/// (`we_BuildImagePrelightingPass` 0x140209540): lighting and reflection as the
+/// layer's flags say, `PRELIGHTING`, and no face culling.
+void ApplyPrelightingCombos(wpscene::WPMaterial& material, uint32_t flags) {
+    material.combos["LIGHTING"]    = (flags & 0x10u) != 0 ? 1 : 0;
+    material.combos["REFLECTION"]  = (flags & 0x08u) != 0 ? 1 : 0;
+    material.combos["PRELIGHTING"] = 1;
+    material.cullmode              = "nocull";
+}
+
 // Whether an effect is part of the chain a layer is built with: one that is
 // visible, or one a script may switch on later. Wallpaper Engine keeps every
 // effect of a layer and runs the ones its effect object says are visible.
-bool EffectIsBuilt(const wpscene::WPImageEffect& effect) {
-    return effect.visible || effect.scripted_visible;
+bool EffectIsBuilt(const wpscene::WPImageEffect& effect, bool scripts_use_effects = false) {
+    if (effect.visible || effect.scripted_visible) return true;
+    return scripts_use_effects && effect.visible_setting.is_null();
 }
 
 /// The padding a text object's file gives, on each axis: capped at 512 pixels from above and not
@@ -931,16 +1100,21 @@ void ResolveUserEffectVisibility(ParseContext& context,
 }
 
 // Hands a built effect its visibility: fixed, or followed from the script that
-// decides it.
-void RegisterScriptedEffectVisibility(ParseContext& context,
-                                      const wpscene::WPImageEffect& source,
-                                      const std::shared_ptr<SceneImageEffect>& effect,
-                                      std::string_view runtime_name) {
+// decides it, and lists authored effects on the layer for `thisLayer.getEffect`.
+void RegisterScriptedEffectVisibility(
+    ParseContext& context, const wpscene::WPImageEffect& source,
+    const std::shared_ptr<SceneImageEffect>& effect, std::string_view runtime_name,
+    std::vector<SceneRuntimeContext::EffectMaterialPass> passes = {},
+    bool is_authored_effect = false) {
     effect->visible = source.visible;
-    if (! source.scripted_visible || context.scene->runtime == nullptr) return;
-    auto& runtime = *context.scene->runtime;
+    if (context.scene->runtime == nullptr) return;
+    if (! source.scripted_visible && ! is_authored_effect) return;
+    auto& runtime   = *context.scene->runtime;
+    const auto& effect_name = source.instance_name;
+    auto  reference = runtime.RegisterEffectObject(
+        runtime_name, effect, effect_name, std::move(passes), is_authored_effect);
+    if (! source.scripted_visible) return;
     // The script that decides the effect's visibility has the effect as its `thisObject`.
-    auto reference = runtime.RegisterEffectObject(runtime_name, effect);
     runtime.RegisterEffectVisibility(
         effect, ResolveBoolSetting(runtime, source.visible_setting, runtime_name, -1,
                                    std::move(reference)));
@@ -975,55 +1149,14 @@ void ResolveLoadTimeTextStyle(ParseContext& context, wpscene::WPTextObject& obj,
             *field = ResolveBoolSetting(runtime, *setting, runtime_name)->getBool();
         }
     }
-    for (const auto& [key, field] :
-         { std::pair<const char*, float*> { "outlinethickness", &obj.outlinethickness },
-           { "blursize", &obj.blursize },
-           { "dropshadowsize", &obj.dropshadowsize },
-           { "dropshadowopacity", &obj.dropshadowopacity } }) {
-        if (const auto* setting = bound(key)) {
-            *field = ResolveFloatSetting(runtime, *setting, runtime_name)->getFloat();
-        }
-    }
+    // The sizes, opacity and colours are uniforms of the font shader and follow live
+    // (`LoadTextEntry`, `SceneRuntimeContext::EditTextStyleUniforms`).
 }
 
-/// Gives `node` the local translation, scale and angles that make its local matrix
-/// `transform` (translation, then z, y and x rotations, then scale: the order
-/// `SceneNode::LocalTransOf` composes). A mirrored matrix carries its mirror on x.
+/// Gives `node` the local transform that makes its local matrix `transform`
+/// (`SceneNode::SetTransformFromMatrix`).
 void SetNodeTransformFromMatrix(SceneNode& node, const Matrix4d& transform) {
-    const auto at = [&transform](int row, int column) { return transform(row, column); };
-    std::array<double, 3> scale {};
-    for (int column = 0; column < 3; ++column) {
-        scale[column] = std::sqrt(at(0, column) * at(0, column) + at(1, column) * at(1, column) +
-                                  at(2, column) * at(2, column));
-    }
-    // The sign of the 3x3 part's determinant tells a mirror from a turn.
-    const double det = at(0, 0) * (at(1, 1) * at(2, 2) - at(1, 2) * at(2, 1)) -
-                       at(0, 1) * (at(1, 0) * at(2, 2) - at(1, 2) * at(2, 0)) +
-                       at(0, 2) * (at(1, 0) * at(2, 1) - at(1, 1) * at(2, 0));
-    if (det < 0.0) scale[0] = -scale[0];
-    double rotation[3][3];
-    for (int column = 0; column < 3; ++column) {
-        for (int row = 0; row < 3; ++row) {
-            rotation[row][column] = std::abs(scale[column]) > 1e-12 ? at(row, column) / scale[column]
-                                                                    : (row == column ? 1.0 : 0.0);
-        }
-    }
-    // R = Rz * Ry * Rx.
-    const double sin_y = std::clamp(-rotation[2][0], -1.0, 1.0);
-    double       x     = 0.0;
-    double       y     = std::asin(sin_y);
-    double       z     = 0.0;
-    if (std::abs(sin_y) < 1.0 - 1e-9) {
-        x = std::atan2(rotation[2][1], rotation[2][2]);
-        z = std::atan2(rotation[1][0], rotation[0][0]);
-    } else {
-        x = std::atan2(-rotation[1][2], rotation[1][1]);
-    }
-    node.SetTranslate(Vector3f(static_cast<float>(at(0, 3)), static_cast<float>(at(1, 3)),
-                               static_cast<float>(at(2, 3))));
-    node.SetScale(Vector3f(static_cast<float>(scale[0]), static_cast<float>(scale[1]),
-                           static_cast<float>(scale[2])));
-    node.SetRotation(Vector3f(static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)));
+    node.SetTransformFromMatrix(transform);
 }
 
 // ---------------------------------------------------------------------------
@@ -1160,7 +1293,11 @@ void LoadStaticMaterialConstants(SceneMaterial& material, const wpscene::WPMater
                                  MaterialConstantWrite write = MaterialConstantWrite::Replace) {
     std::vector<std::string> unmatched;
     const auto resolved = ResolveConstantUniforms(wpmat, info, report_unmatched ? &unmatched : nullptr);
-    for (const auto& key : unmatched) LOG_ERROR("ShaderValue: %s not found in glsl", key.c_str());
+    // A scene parse gathers these and says them once (`UnmatchedConstantTally`); one
+    // loaded on its own is reported here.
+    for (const auto& key : unmatched) {
+        if (! UnmatchedConstantTally::Note(key)) LOG_ERROR("ShaderValue: %s not found in glsl", key.c_str());
+    }
     for (const auto& entry : resolved) {
         if (entry.constant->value.empty()) continue;
         auto& value = material.customShader.constValues[entry.uniform];
@@ -1306,8 +1443,17 @@ void RegisterDrivenMaterialConstants(ParseContext& context, const std::shared_pt
                                                                  std::move(own_clock));
             runtime->RegisterMaterialConstant(material, entry.uniform, std::move(value));
         } else if (const auto timeline = timelines.find(entry.key); timeline != timelines.end()) {
-            runtime->RegisterMaterialConstant(material, entry.uniform,
-                                              std::make_unique<DynamicValue>(0.0f), timeline->second);
+            // A script that exports no `update` leaves the timeline the value, and its
+            // `thisObject.getAnimation()` is the clock that timeline plays on: a handler that
+            // calls `play()` (a cover cross-fade a new track starts) plays the constant.
+            std::unique_ptr<DynamicValue> value;
+            if (setting.contains("script")) {
+                value = ResolveVectorSetting(*runtime, setting, entry.constant->value.size(), layer_name,
+                                             timeline->second->playback);
+            } else {
+                value = std::make_unique<DynamicValue>(0.0f);
+            }
+            runtime->RegisterMaterialConstant(material, entry.uniform, std::move(value), timeline->second);
         }
     }
 }
@@ -1424,7 +1570,15 @@ ClassifiedTexture ClassifyTexture(ParseContext& context, const std::string& auth
         result.is_target = true;
         return result;
     }
+    if (authored == kLightCookieAlias && scene.shadows.cookie_features) {
+        result.name = authored;
+        result.is_target = true;
+        return result;
+    }
+    if (authored == kReflectionTarget)
+        EnsureSceneReflectionTarget(scene,context.ortho_w,context.ortho_h);
     if (! scene.HasRenderTarget(authored)) {
+        if (authored == kShadowAtlas) return result; // optional while no light/caster is active
         LOG_ERROR("render target '%s' is not registered, leaving the texture slot unbound",
                   authored.c_str());
         return result;
@@ -1443,6 +1597,10 @@ std::vector<WPShaderTexInfo> SlotInfos(ParseContext& context, const std::vector<
         info.present = slot < author_supplied.size() && author_supplied[slot];
         const auto& name = slots[slot];
         if (name.empty()) continue;
+        // Current material readers bind resolved render targets or file images.
+        // WE exposes the resolved framebuffer as a one-sample Texture2DMS under
+        // BACKBUFFER_MS; the compiler keeps its integer read on Metal's 2D image.
+        info.sample_count = 1;
         if (IsSpecTex(name)) {
             // Render targets are always known to carry every component.
             info.enabled      = true;
@@ -1475,6 +1633,11 @@ struct MaterialLoadOptions {
     /// Settle particle sheet/layout combos from the same final slot list as the
     /// compiler (including user replacements and sampler-default textures).
     bool particle_material { false };
+    /// Utility passes that read scene depth can use a different convention
+    /// from the shadow atlas. An explicit pass convention wins over globals.
+    std::optional<bool> reverse_depth;
+    /// A geometry stage the program is compiled with while it lowers (`GS_ENABLED` 1).
+    std::shared_ptr<const WPPointGeometryShader> point_geometry;
     /// The two stages of a program made in code; with both empty the shader's
     /// files are read from the asset namespace.
     std::string vertex_source;
@@ -1485,6 +1648,8 @@ struct LoadedMaterial {
     WPShaderInfo                               info;
     std::vector<std::pair<usize, std::string>> render_targets;
 };
+void RememberShadowMaterial(ParseContext&, const wpscene::WPMaterial&, const MaterialLoadOptions&,
+                            SceneMaterial&, const LoadedMaterial&);
 
 constexpr std::size_t kMaxTextureSlots   = 13;
 constexpr int         kMaxCompileRounds  = 8;
@@ -1579,14 +1744,41 @@ bool LoadMaterial(ParseContext& context, const wpscene::WPMaterial& wpmat, Scene
     for (const auto& [name, value] : wpmat.combos) base_combos[name] = std::to_string(value);
     base_combos["HDR"]         = scene.hdr ? "1" : "0";
     base_combos["SCENE_ORTHO"] = context.is_ortho ? "1" : "0";
+    if (const auto* frame = scene.FindRenderTarget(SpecTex_Default); frame && frame->sample_count > 1)
+        base_combos["BACKBUFFER_MS"] = "1";
     if (! scene.light_config.empty()) {
         base_combos["LIGHTS_POINT"]       = std::to_string(scene.light_config.point);
         base_combos["LIGHTS_SPOT"]        = std::to_string(scene.light_config.spot);
         base_combos["LIGHTS_TUBE"]        = std::to_string(scene.light_config.tube);
         base_combos["LIGHTS_DIRECTIONAL"] = std::to_string(scene.light_config.directional);
+        // The subsets (0x1401A5C40): Wallpaper Engine writes all five, a 0 included; a 0
+        // reads like a missing macro, so only the others are written here.
+        // `LIGHTS_SHADOW_MAPPING` (with the shadows level as its quality) is set only while
+        // shadows are drawn: the generated `PerformLighting_V1` then samples the atlas.
+        // `REVERSEDEPTH` (0x1401a67ca, device flag 0x1000) goes with it: the atlas is drawn
+        // with reversed depth (C-6.md). `LIGHTS_COOKIE` declares the shared cookie sampler.
+        const auto& lights = scene.light_config;
+        const auto  subset = [&](const char* name, uint32_t count) {
+            if (count != 0) base_combos[name] = std::to_string(count);
+        };
+        subset("LIGHTS_SPOT_SHADOW_COOKIE", lights.spot_shadow_cookie);
+        subset("LIGHTS_SPOT_SHADOW", lights.spot_shadow);
+        subset("LIGHTS_SPOT_COOKIE", lights.spot_cookie);
+        subset("LIGHTS_DIRECTIONAL_SHADOW", lights.directional_shadow);
+        subset("LIGHTS_POINT_SHADOW", lights.point_shadow);
+        if (context.shadow_mapping) {
+            base_combos["LIGHTS_SHADOW_MAPPING"]         = "1";
+            base_combos["LIGHTS_SHADOW_MAPPING_QUALITY"] = std::to_string(scene.quality.shadows);
+            base_combos["REVERSEDEPTH"]                  = "1";
+        }
+        if (lights.spot_cookie + lights.spot_shadow_cookie != 0) base_combos["LIGHTS_COOKIE"] = "1";
     }
+    if (options.reverse_depth.has_value())
+        base_combos["REVERSEDEPTH"] = *options.reverse_depth ? "1" : "0";
     const BlendMode blend = ParseSceneBlendMode(wpmat.blending);
     if (blend == BlendMode::AlphaToCoverage) base_combos["ALPHATOCOVERAGE"] = "1";
+    // From the authored blending only, never a layer's colour blend mode (sub_140154480).
+    if (blend == BlendMode::Additive) base_combos["ADDITIVE"] = "1";
 
     const bool has_blend_combo = wpmat.combos.contains("BLENDMODE");
     std::vector<ClassifiedTexture> classified(slots.size());
@@ -1615,9 +1807,16 @@ bool LoadMaterial(ParseContext& context, const wpscene::WPMaterial& wpmat, Scene
                 sheet_material && ParticleSheetUsesWholeCells(*sheet) ? "1" : "0";
         }
         info.combos = std::move(combos);
-        for (std::size_t slot = 0; slot < slots.size(); ++slot) {
+        info.point_geometry = options.point_geometry;
+        if (info.point_geometry) info.combos["GS_ENABLED"] = "1";
+        for (std::size_t slot = 0; slot < std::min<std::size_t>(slots.size(), 10); ++slot) {
             if (slots[slot].empty() || IsSpecTex(slots[slot])) continue;
-            shader::ApplyTextureFormatCombo(info.combos, slot, TextureHeaderOf(context, slots[slot]).format);
+            const auto& header = TextureHeaderOf(context, slots[slot]);
+            // A runtime image states only its pixel format; a file texture states its code.
+            i32 code = header.formatCode;
+            if (code == 0 && header.format == TextureFormat::R8) code = 9;
+            if (code == 0 && header.format == TextureFormat::RG8) code = 8;
+            shader::ApplyTextureFormatCombo(info.combos, slot, code);
         }
         const auto texinfos = SlotInfos(context, slots, author_supplied);
         return CompileAndQueueMetalProgram(shader, scene.scene_id, wpmat.shader, units, *context.vfs,
@@ -1681,12 +1880,49 @@ bool LoadMaterial(ParseContext& context, const wpscene::WPMaterial& wpmat, Scene
         }
     }
 
-    // Slots the shader never samples hold nothing (R27).
+    // The scene's own constants first, then what each slot knows about its texture (R23),
+    // before unsampled slots are cleared: a pass may size its cells from `g_Texture0Resolution`
+    // without sampling `g_Texture0` in the active combo branch.
     std::unordered_set<uint> sampled;
     for (const auto& unit : units) {
         sampled.insert(unit.preprocess_info.active_tex_slots.begin(),
                        unit.preprocess_info.active_tex_slots.end());
     }
+    auto& constants = material.customShader.constValues;
+    for (const auto& [name, value] : context.global_base_uniforms) constants[name] = value;
+    for (std::size_t slot = 0; slot < slots.size(); ++slot) {
+        const auto& name = slots[slot];
+        if (name.empty()) continue;
+        const bool is_sampled = sampled.contains(static_cast<uint>(slot));
+        if (IsSpecLinkTex(name)) {
+            // Another layer's composite: its size is the value updater's to supply.
+            loaded.render_targets.emplace_back(slot, name);
+            continue;
+        }
+        std::array<float, 4> resolution {};
+        if (classified[slot].is_target) {
+            const auto* target = scene.FindRenderTarget(name);
+            if (target == nullptr) continue;
+            const float w = static_cast<float>(target->width);
+            const float h = static_cast<float>(target->height);
+            resolution    = { w, h, w, h };
+            loaded.render_targets.emplace_back(slot, scene.ResolveRenderTargetName(name));
+        } else {
+            if (! is_sampled) continue;
+            const auto& header = TextureHeaderOf(context, name);
+            resolution = TextureGeometryOf(header).resolution;
+            RegisterFileTexture(context, name, header);
+            if (header.isSprite && header.spriteAnim.numFrames() > 0) material.hasSprite = true;
+        }
+        constants[std::string(WE_GLTEX_RESOLUTION_NAMES[slot])] = ShaderValue(resolution.data(), 4);
+        if (resolution[2] != 0.0f && resolution[3] != 0.0f) {
+            const std::array<float, 4> texel { 1.0f / resolution[2], 1.0f / resolution[3],
+                                               resolution[2], resolution[3] };
+            constants[std::string(WE_GLTEX_TEXEL_NAMES[slot])] = ShaderValue(texel.data(), 4);
+        }
+    }
+
+    // Slots the shader never samples hold nothing (R27).
     for (std::size_t slot = 0; slot < slots.size(); ++slot) {
         if (! slots[slot].empty() && ! sampled.contains(static_cast<uint>(slot))) {
             slots[slot].clear();
@@ -1711,39 +1947,13 @@ bool LoadMaterial(ParseContext& context, const wpscene::WPMaterial& wpmat, Scene
         slots[slot]           = kUnboundTextureName;
         classified[slot].name = kUnboundTextureName;
         classified[slot].is_file = true;
-    }
-
-    // The scene's own constants first, then what each slot knows about its texture (R23).
-    auto& constants = material.customShader.constValues;
-    for (const auto& [name, value] : context.global_base_uniforms) constants[name] = value;
-    for (std::size_t slot = 0; slot < slots.size(); ++slot) {
-        const auto& name = slots[slot];
-        if (name.empty()) continue;
-        if (IsSpecLinkTex(name)) {
-            // Another layer's composite: its size is the value updater's to supply.
-            loaded.render_targets.emplace_back(slot, name);
-            continue;
-        }
-        std::array<float, 4> resolution {};
-        if (classified[slot].is_target) {
-            const auto* target = scene.FindRenderTarget(name);
-            if (target == nullptr) continue;
-            const float w = static_cast<float>(target->width);
-            const float h = static_cast<float>(target->height);
-            resolution    = { w, h, w, h };
-            loaded.render_targets.emplace_back(slot, scene.ResolveRenderTargetName(name));
-        } else {
-            const auto& header = TextureHeaderOf(context, name);
-            resolution = TextureGeometryOf(header).resolution;
-            RegisterFileTexture(context, name, header);
-            if (header.isSprite && header.spriteAnim.numFrames() > 0) material.hasSprite = true;
-        }
-        constants[std::string(WE_GLTEX_RESOLUTION_NAMES[slot])] = ShaderValue(resolution.data(), 4);
-        if (resolution[2] != 0.0f && resolution[3] != 0.0f) {
-            const std::array<float, 4> texel { 1.0f / resolution[2], 1.0f / resolution[3],
-                                               resolution[2], resolution[3] };
-            constants[std::string(WE_GLTEX_TEXEL_NAMES[slot])] = ShaderValue(texel.data(), 4);
-        }
+        RegisterFileTexture(context, kUnboundTextureName, TextureHeaderOf(context, kUnboundTextureName));
+        // What Wallpaper Engine's built-in uniforms say of a slot with no texture
+        // (`sub_1400D8300` cases 0x3E-0x51): two texels square, not our 1x1 stand-in.
+        constexpr std::array<float, 4> kNoTextureResolution { 2.0f, 2.0f, 2.0f, 2.0f };
+        constexpr std::array<float, 4> kNoTextureTexel { 0.5f, 0.5f, 2.0f, 2.0f };
+        constants[std::string(WE_GLTEX_RESOLUTION_NAMES[slot])] = ShaderValue(kNoTextureResolution.data(), 4);
+        constants[std::string(WE_GLTEX_TEXEL_NAMES[slot])]      = ShaderValue(kNoTextureTexel.data(), 4);
     }
 
     shader->default_uniforms = info.svs;
@@ -1759,6 +1969,7 @@ bool LoadMaterial(ParseContext& context, const wpscene::WPMaterial& wpmat, Scene
     material.customShader.shader   = shader;
     material.blenmode              = blend;
     material.cull_mode             = ParseSceneCullMode(wpmat.cullmode);
+    material.alpha_writing         = ParseAlphaWriting(wpmat.alphawriting);
     ApplyMaterialDepth(material, wpmat);
     material.defines.clear();
     for (const auto& [name, value] : info.combos) {
@@ -1791,6 +2002,8 @@ bool LoadMaterial(ParseContext& context, const wpscene::WPMaterial& wpmat, Scene
         }
     }
     loaded.info = std::move(info);
+    if (context.shadow_capable && !context.shadow_variant_build)
+        RememberShadowMaterial(context, wpmat, options, material, loaded);
     return true;
 }
 
@@ -1850,45 +2063,8 @@ bool ImageObjectHandlesCursorEvents(const wpscene::WPImageObject& wpimgobj) {
 
 // Alpha of one texel from the mip-0 payload, or 255 for formats without alpha.
 uint8_t TexelAlpha(const ImageData& mip, TextureFormat format, i32 x, i32 y) {
-    const auto* data = mip.data.get();
-    switch (format) {
-    case TextureFormat::RGBA8: {
-        const isize offset = (static_cast<isize>(y) * mip.width + x) * 4 + 3;
-        return offset < mip.size ? data[offset] : 0;
-    }
-    case TextureFormat::BC2: {
-        // 16-byte blocks; the first 8 bytes hold sixteen 4-bit alphas.
-        const isize blocks_per_row = (mip.width + 3) / 4;
-        const isize block          = (static_cast<isize>(y) / 4) * blocks_per_row + x / 4;
-        const isize offset         = block * 16 + ((y % 4) * 4 + (x % 4)) / 2;
-        if (offset >= mip.size) return 0;
-        const uint8_t pair = data[offset];
-        const uint8_t nib  = (x % 2) == 0 ? (pair & 0x0F) : (pair >> 4);
-        return static_cast<uint8_t>(nib * 17);
-    }
-    case TextureFormat::BC3: {
-        // 16-byte blocks; the first 8 bytes are a DXT5 interpolated alpha block.
-        const isize blocks_per_row = (mip.width + 3) / 4;
-        const isize block          = (static_cast<isize>(y) / 4) * blocks_per_row + x / 4;
-        const isize offset         = block * 16;
-        if (offset + 8 > mip.size) return 0;
-        const uint8_t a0 = data[offset];
-        const uint8_t a1 = data[offset + 1];
-        uint64_t      bits = 0;
-        for (int i = 0; i < 6; ++i) bits |= static_cast<uint64_t>(data[offset + 2 + i]) << (8 * i);
-        const unsigned index = static_cast<unsigned>((bits >> (3 * ((y % 4) * 4 + (x % 4)))) & 0x7);
-        if (index == 0) return a0;
-        if (index == 1) return a1;
-        if (a0 > a1) {
-            return static_cast<uint8_t>(((8 - index) * a0 + (index - 1) * a1) / 7);
-        }
-        if (index == 6) return 0;
-        if (index == 7) return 255;
-        return static_cast<uint8_t>(((6 - index) * a0 + (index - 1) * a1) / 5);
-    }
-    default:
-        return 255;
-    }
+    if (format != TextureFormat::RGBA8 && format != TextureFormat::BC2 && format != TextureFormat::BC3) return 255;
+    return TexelRgba(mip, format, x, y)[3];
 }
 
 // Builds a coverage mask for an image object's albedo texture. Returns nullopt
@@ -2004,25 +2180,9 @@ float ResolveCanvasPerspectiveFov(const wpscene::WPSceneGeneral& general) {
 }
 
 void PlacePerspectiveCameraNode(SceneNode& node, const wpscene::WPSceneCamera& camera) {
-    const Vector3d eye(camera.eye[0], camera.eye[1], camera.eye[2]);
-    const Vector3d center(camera.center[0], camera.center[1], camera.center[2]);
-    Vector3d       up(camera.up[0], camera.up[1], camera.up[2]);
-    if (up.squaredNorm() < 1e-12) up = Vector3d::UnitY();
-
-    Vector3d camDir = center - eye;
-    if (camDir.squaredNorm() < 1e-12) camDir = -Vector3d::UnitZ();
-    const Vector3d zAxis = -camDir.normalized();
-    Vector3d       xAxis = up.cross(zAxis);
-    if (xAxis.squaredNorm() < 1e-12) xAxis = Vector3d::UnitX();
-    xAxis.normalize();
-    const Vector3d yAxis = zAxis.cross(xAxis).normalized();
-
-    Affine3d world = Affine3d::Identity();
-    world.linear().col(0) = xAxis;
-    world.linear().col(1) = yAxis;
-    world.linear().col(2) = zAxis;
-    world.translation()   = eye;
-    SetNodeTransformFromMatrix(node, world.matrix());
+    PlaceCameraNode(node, Vector3d(camera.eye[0], camera.eye[1], camera.eye[2]),
+                    Vector3d(camera.center[0], camera.center[1], camera.center[2]),
+                    Vector3d(camera.up[0], camera.up[1], camera.up[2]));
 }
 
 std::array<float, 4> HDRBloomBlend(float threshold, float feather) {
@@ -2045,6 +2205,16 @@ int HDRBloomLevels(int iterations, int width, int height) {
         if ((shorter >> (k + 1)) >= 1) ++available;
     }
     return std::max(1, std::min(available, iterations));
+}
+
+// The chain is initially built before a surface exists. Once raster sizing has
+// resolved the default target, its physical extent controls both the level
+// count and extraction strength; the authored canvas remains unchanged.
+int HDRBloomLevels(int iterations, const Scene& scene) {
+    const auto* frame = scene.FindRenderTarget(SpecTex_Default);
+    const int width = frame && frame->width > 0 ? frame->width : scene.ortho[0];
+    const int height = frame && frame->height > 0 ? frame->height : scene.ortho[1];
+    return HDRBloomLevels(iterations, width, height);
 }
 
 /// The filter Wallpaper Engine gives the render targets of an image layer: points
@@ -2101,20 +2271,6 @@ void ResolveLoadOnlySceneSetting(SceneRuntimeContext& runtime, const nlohmann::j
     }
     runtime.NoteLoadOnlyProperty(UserPropertyName(setting));
 }
-
-/// `ResolveLoadOnlySceneSetting` for a colour.
-void ResolveLoadOnlySceneVec3(SceneRuntimeContext& runtime, const nlohmann::json& setting,
-                              std::array<float, 3>& value) {
-    if (! HasDynamicSetting(setting)) return;
-    const linalg::Vector3f resolved = ResolveVec3Setting(runtime, setting)->getVec3();
-    value                = { resolved.x(), resolved.y(), resolved.z() };
-    runtime.NoteLoadOnlyProperty(UserPropertyName(setting));
-}
-
-// The scene's wind and gravity (`windenabled`, `winddirection`, `windstrength`,
-// `gravitydirection`, `gravitystrength`) are read into the scene description and
-// reach no one: the particle simulation takes only the gravity of its own `movement`
-// operator and has no entry for a scene-wide force (P4 asks for none).
 
 /// Wallpaper Engine composes a layer from the flags and shader of its model, not
 /// from the model's path. These are the editor's two models of that kind: the
@@ -2258,26 +2414,63 @@ std::string EffectBufferName(const std::string& fbo_name, int32_t layer_id, std:
     return std::string(WE_SPEC_PREFIX) + fbo_name + owner + "_named";
 }
 
-/// Registers the render target of one effect buffer (R55).
+/// The size of the buffer `fbo` declares for a layer drawn at `extent` (R55).
+std::array<int32_t, 2> EffectBufferExtent(const wpscene::WPEffectFbo& fbo, std::array<int32_t, 2> extent,
+                                          bool follows_screen) {
+    const auto fixed = follows_screen ? std::nullopt
+                                      : FixedEffectFboExtent(fbo, static_cast<float>(extent[0]),
+                                                             static_cast<float>(extent[1]));
+    return fixed.has_value() ? *fixed
+                             : std::array<int32_t, 2> { ResolveRenderTargetDimension(extent[0], fbo.scale),
+                                                        ResolveRenderTargetDimension(extent[1], fbo.scale) };
+}
+
+/// The render target an effect buffer is drawn in, as Wallpaper Engine shares them
+/// (`sub_1401EA500`): a `unique` buffer is its effect instance's own; any other is one target for
+/// every effect of the scene that declares the name at the same size and scale, and in a
+/// passthrough layer one for every effect that declares the name. `per_layer` keeps every buffer
+/// the instance's own (a text layer's buffers follow its card as the text changes).
+std::string EffectBufferKey(const wpscene::WPEffectFbo& fbo, int32_t layer_id, std::size_t position,
+                            std::array<int32_t, 2> size, bool passthrough_layer, bool per_layer) {
+    if (fbo.unique || per_layer) return EffectBufferName(fbo.name, layer_id, position);
+    // WE keys the texture by the name as written: `plain` and `_rt_plain` are two buffers.
+    std::string key = StartsWithText(fbo.name, WE_SPEC_PREFIX) ? fbo.name
+                                                               : std::string(WE_SPEC_PREFIX) + fbo.name + "_named";
+    if (! passthrough_layer) {
+        key += "_" + std::to_string(size[0]) + "_" + std::to_string(size[1]) + "_" + std::to_string(fbo.scale);
+    }
+    return key + "_shared";
+}
+
+/// Registers the render target of one effect buffer (R55). A buffer shared with an effect
+/// registered before keeps that registration (Wallpaper Engine finds the target by name), and
+/// carries the previous frame when either effect reads it before writing.
 void RegisterEffectBuffer(ParseContext& context, const std::string& name,
                           const wpscene::WPEffectFbo& fbo, std::array<int32_t, 2> extent,
-                          bool follows_screen, bool carries_previous_frame) {
-    auto&      scene  = *context.scene;
-    const auto fixed  = follows_screen ? std::nullopt
-                                       : FixedEffectFboExtent(fbo, static_cast<float>(extent[0]),
-                                                              static_cast<float>(extent[1]));
-    const std::array<int32_t, 2> size =
-        fixed.has_value() ? *fixed
-                          : std::array<int32_t, 2> { ResolveRenderTargetDimension(extent[0], fbo.scale),
-                                                     ResolveRenderTargetDimension(extent[1], fbo.scale) };
+                          bool follows_screen, bool carries_previous_frame, bool shared) {
+    auto& scene = *context.scene;
+    if (const auto existing = scene.renderTargets.find(name); shared && existing != scene.renderTargets.end()) {
+        // sub_1401EA500 applies each declaration's explicit clear even when the
+        // target already exists. The last clear before drawing determines its contents.
+        if (fbo.clear) existing->second.initial_clear = fbo.clear_color;
+        if (carries_previous_frame) {
+            existing->second.carriesPreviousFrame = true;
+            existing->second.allowReuse           = false;
+        }
+        return;
+    }
+    const auto size = EffectBufferExtent(fbo, extent, follows_screen);
     SceneRenderTarget target;
     target.width                = size[0];
     target.height               = size[1];
     target.allowReuse           = ! carries_previous_frame;
     target.carriesPreviousFrame = carries_previous_frame;
-    target.sample               = { TextureWrap::CLAMP_TO_EDGE, TextureWrap::CLAMP_TO_EDGE,
-                                    TextureFilter::LINEAR, TextureFilter::LINEAR };
+    // `uvs: "repeat"` wraps (sub_1401EA500 passes wrap 0 instead of 2).
+    const auto wrap             = fbo.repeat ? TextureWrap::REPEAT : TextureWrap::CLAMP_TO_EDGE;
+    target.sample               = { wrap, wrap, TextureFilter::LINEAR, TextureFilter::LINEAR };
     target.format               = EffectFboFormat(fbo.format, scene.hdr);
+    // A `clear` buffer is cleared to its colour whenever it is made (sub_1401EA500).
+    if (fbo.clear) target.initial_clear = fbo.clear_color;
     if (follows_screen) {
         target.bind.enable = true;
         target.bind.screen = true;
@@ -2308,6 +2501,7 @@ std::shared_ptr<SceneNode> MakeEffectPassNode(SceneMaterial&& material) {
 struct EffectPassPlan {
     wpscene::WPMaterial material;
     std::string         output;
+    std::string         material_name;
 };
 
 /// Settles every pass of `source` before any of them is compiled (R42, R55, R79):
@@ -2329,6 +2523,7 @@ std::vector<EffectPassPlan> PlanEffectPasses(const wpscene::WPImageEffect& sourc
         auto&                          plan     = plans[pass];
         const wpscene::WPMaterialPass* instance = pass < source.passes.size() ? &source.passes[pass] : nullptr;
         plan.material = source.materials[pass];
+        if (pass < source.material_paths.size()) plan.material_name = source.material_paths[pass];
         plan.output   = chain_output;
         if (instance != nullptr) {
             plan.material.MergePass(*instance);
@@ -2370,27 +2565,50 @@ bool BuildEffect(ParseContext& context, const wpscene::WPImageObject& image,
                  std::vector<std::shared_ptr<SceneMaterial>>& all_materials,
                  std::shared_ptr<SceneImageEffect>*           built_out,
                  const WPPuppetLayer*                         puppet = nullptr,
-                 bool mandatory_previous_slot0 = false) {
+                 bool mandatory_previous_slot0 = false,
+                 bool is_authored_effect = false,
+                 std::array<float, 2> alt_model_scale = { 1.0f, 1.0f },
+                 bool per_layer_buffers = false) {
     auto&      scene = *context.scene;
     const auto previous_name = PingPongName(WE_EFFECT_PPONG_PREFIX_A, camera_name);
     const auto output_name   = PingPongName(WE_EFFECT_PPONG_PREFIX_B, camera_name);
 
     std::unordered_map<std::string, std::string> fbo_map;
     fbo_map["previous"] = previous_name;
+    std::vector<std::string> buffer_keys;
+    buffer_keys.reserve(source.fbos.size());
     for (const auto& fbo : source.fbos) {
-        const auto name = EffectBufferName(fbo.name, image.id, index);
-        fbo_map[fbo.name] = name;
+        const auto size = EffectBufferExtent(fbo, extent, fullscreen);
+        const bool shared = ! fbo.unique && ! per_layer_buffers;
+        const auto name =
+            EffectBufferKey(fbo, image.id, index, size, image.config.passthrough, per_layer_buffers);
+        // A pass names a buffer by the first entry of that name (sub_1401E7170).
+        fbo_map.try_emplace(fbo.name, name);
+        buffer_keys.push_back(name);
         RegisterEffectBuffer(context, name, fbo, extent, fullscreen,
-                             EffectReadsBeforeWriting(source, fbo.name, 0));
+                             EffectReadsBeforeWriting(source, fbo.name, 0), shared);
     }
 
     auto effect = std::make_shared<SceneImageEffect>();
+    // `executeMaterialFunction(name)` clears (sub_1401EE3A0): Wallpaper Engine walks the function's
+    // resolved buffers with a counter and clears the effect's buffer AT that counter -- its first N
+    // buffers, N the number listed -- each to its own `clear` colour.
+    for (const auto& function : source.functions) {
+        EffectFunction lowered { .name = function.name, .actions = {} };
+        for (std::size_t k = 0; k < function.fbos.size() && k < source.fbos.size(); ++k) {
+            lowered.actions.push_back(EffectFunctionAction {
+                .kind = EffectFunctionAction::Kind::Clear, .target = buffer_keys[k],
+                .color = source.fbos[k].clear_color });
+        }
+        effect->functions.push_back(std::move(lowered));
+    }
     struct Built {
         std::shared_ptr<SceneNode> node;
         std::string                output;
         std::shared_ptr<SceneMaterial> material;
         WPShaderInfo                   info;
         wpscene::WPMaterial            authored;
+        std::string                   material_name;
     };
     std::vector<Built> built;
     auto plans = PlanEffectPasses(source, image.id, fbo_map, previous_name, output_name);
@@ -2419,6 +2637,7 @@ bool BuildEffect(ParseContext& context, const wpscene::WPImageObject& image,
         entry.material = entry.node->Mesh()->MaterialSlotPtr(0);
         entry.info     = std::move(loaded.info);
         entry.authored = std::move(material);
+        entry.material_name = std::move(plan.material_name);
         if (context.shader_updater != nullptr) {
             WPShaderValueData data;
             data.effect_owner   = layer_node.get();
@@ -2428,12 +2647,15 @@ bool BuildEffect(ParseContext& context, const wpscene::WPImageObject& image,
             data.parallax_layer = layer_node.get();
             data.renderTargets  = std::move(loaded.render_targets);
             if (puppet != nullptr) data.puppet_layer = *puppet;
+            data.alt_model_scale = alt_model_scale;
             context.shader_updater->SetNodeData(entry.node.get(), 0, data);
         }
         built.push_back(std::move(entry));
     }
     if (built.empty()) return false;
 
+    std::vector<SceneRuntimeContext::EffectMaterialPass> effect_passes;
+    effect_passes.reserve(built.size());
     for (auto& entry : built) {
         effect->nodes.push_back(SceneImageEffectNode { .output = entry.output, .sceneNode = entry.node });
         RegisterDrivenMaterialConstants(context, entry.material, entry.authored, entry.info, key);
@@ -2443,9 +2665,17 @@ bool BuildEffect(ParseContext& context, const wpscene::WPImageObject& image,
             all_materials.push_back(entry.material);
             tinted.push_back(entry.material);
         }
+        effect_passes.push_back(SceneRuntimeContext::EffectMaterialPass {
+            .node     = entry.node,
+            .material = entry.material,
+            .aliases  = { entry.info.alias.begin(), entry.info.alias.end() },
+            .material_name = std::move(entry.material_name),
+            .rad2deg = { entry.info.alias_rad2deg.begin(), entry.info.alias_rad2deg.end() },
+        });
     }
     LowerEffectCommands(source, fbo_map, scene, effect->commands);
-    RegisterScriptedEffectVisibility(context, source, effect, key);
+    RegisterScriptedEffectVisibility(
+        context, source, effect, key, std::move(effect_passes), is_authored_effect);
     chain.AddEffect(effect);
     if (built_out != nullptr) *built_out = effect;
     return true;
@@ -2460,6 +2690,7 @@ void ApplyParticleOverrideControlpoints(const wpscene::ParticleInstanceoverride&
     if (! over.enabled) return;
     for (std::size_t i = 0; i < points.size() && i < 8; ++i) {
         auto& point = points[i];
+        if (point.copy_from_parent || point.written_by_remap) continue;
         if (over.controlpointSet[i] && ! point.link_mouse) {
             point.base_offset = linalg::Vector3d(over.controlpoint[i][0],
                                                 over.controlpoint[i][1],
@@ -2535,7 +2766,24 @@ void ApplyDefaultDepthTarget(ParseContext& context) {
     if (context.uses_models ||
         (context.scene->activeCamera != nullptr && context.scene->activeCamera->IsPerspective())) {
         target->withDepth = true;
+        // A runtime-created model can turn an empty depth sentinel into a
+        // real scene-depth reader on the same graph rebuild.
+        if (auto* volume = context.scene->FindRenderTarget("_rt_volumetricsBack")) {
+            volume->width = target->width; volume->height = target->height;
+            volume->authored_width = target->authored_width;
+            volume->authored_height = target->authored_height;
+            volume->bind = target->bind; volume->unscaled = false;
+        }
     }
+}
+
+void ApplySceneMultisampling(ParseContext& context, const SceneParseRequest& request) {
+    auto* target = context.scene->FindRenderTarget(SpecTex_Default.data());
+    if (target == nullptr || !context.uses_models || context.scene->quality.msaa <= 1) return;
+    const auto requested = static_cast<uint32_t>(context.scene->quality.msaa);
+    const uint32_t selected = request.select_msaa_samples ? request.select_msaa_samples(requested) : requested;
+    target->sample_count = selected <= requested && (selected == 2 || selected == 4 || selected == 8)
+        ? selected : 1;
 }
 
 std::string LightRuntimeName(const ParseContext& context, const wpscene::WPLightObject& obj) {
@@ -2587,6 +2835,28 @@ void CollectScriptStringLiterals(std::string_view source, std::unordered_set<std
             literal.push_back(source[j]);
         }
         if (j < source.size() && source[j] == quote) out.insert(std::move(literal));
+        i = j;
+    }
+}
+
+// The whole decimal numbers of a script that fit a layer id: digits standing alone, not part
+// of a name or a fraction (inside strings and comments too, which only ever adds ids).
+void CollectScriptIntegerLiterals(std::string_view source, std::unordered_set<int32_t>& out) {
+    const auto word = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' || c == '$';
+    };
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        if (std::isdigit(static_cast<unsigned char>(source[i])) == 0) continue;
+        std::size_t j = i;
+        while (j < source.size() && std::isdigit(static_cast<unsigned char>(source[j])) != 0) ++j;
+        const bool alone = (i == 0 || (! word(source[i - 1]) && source[i - 1] != '.')) &&
+                           (j == source.size() || (! word(source[j]) && source[j] != '.'));
+        if (alone && j - i <= 10) {
+            const long long value = std::stoll(std::string(source.substr(i, j - i)));
+            if (value > 0 && value <= std::numeric_limits<int32_t>::max()) {
+                out.insert(static_cast<int32_t>(value));
+            }
+        }
         i = j;
     }
 }
@@ -2666,6 +2936,46 @@ void wallpaper::LoadMaterialConstantShaderValues(SceneMaterial& material,
 
 namespace
 {
+// The innermost tally of the thread that is loading materials, if it has one.
+thread_local UnmatchedConstantTally* t_unmatched_constants = nullptr;
+} // namespace
+
+wallpaper::UnmatchedConstantTally::UnmatchedConstantTally(): m_outer(t_unmatched_constants) {
+    t_unmatched_constants = this;
+}
+
+wallpaper::UnmatchedConstantTally::~UnmatchedConstantTally() {
+    t_unmatched_constants = m_outer;
+    const auto summary = Summary();
+    if (summary.empty()) return;
+    LOG_INFO("material constants that name no uniform of their shader, ignored as authored leftovers: %s",
+             summary.c_str());
+}
+
+bool wallpaper::UnmatchedConstantTally::Note(const std::string& key) {
+    auto* const tally = t_unmatched_constants;
+    if (tally == nullptr) return false;
+    auto&      counts = tally->m_counts;
+    const auto found  = std::lower_bound(counts.begin(), counts.end(), key,
+                                         [](const auto& entry, const std::string& name) { return entry.first < name; });
+    if (found != counts.end() && found->first == key) ++found->second;
+    else counts.emplace(found, key, std::size_t { 1 });
+    return true;
+}
+
+std::string wallpaper::UnmatchedConstantTally::Summary() const {
+    std::string summary;
+    std::size_t named = 0;
+    for (; named < m_counts.size() && named < kNamed; ++named) {
+        if (named > 0) summary += ", ";
+        summary += m_counts[named].first + " x" + std::to_string(m_counts[named].second);
+    }
+    if (named < m_counts.size()) summary += ", and " + std::to_string(m_counts.size() - named) + " more";
+    return summary;
+}
+
+namespace
+{
 // What a layer made while the scene runs needs of the parse that built the scene.
 struct LazyParseInputs {
     ShaderValueMap   globals;
@@ -2687,6 +2997,8 @@ ParseContext MakeLazyParseContext(const std::shared_ptr<Scene>& scene, fs::VFS& 
     lazy.global_base_uniforms     = inputs.globals;
     lazy.is_ortho                 = inputs.is_ortho;
     lazy.uses_models              = inputs.uses_models;
+    lazy.shadow_capable           = scene->shadows.enabled;
+    lazy.shadow_mapping           = scene->shadows.active();
     lazy.effect_camera_node       = scene->cameras.at("effect")->GetAttachedNode();
     lazy.global_camera_node       = scene->cameras.at("global")->GetAttachedNode();
     lazy.global_perspective_camera_node =
@@ -2704,13 +3016,72 @@ struct LazyShaderParseScope {
     }
     ~LazyShaderParseScope() {
         g_pending_metal_translations.clear();
-        // A layer a script creates after the scene is drawing: its failure is the
-        // script's (the layer is not made), never a reason to refuse the scene.
+        // A layer a script creates after the scene is drawing: a stage of it that does
+        // not compile is drawn with the fallback too, and only logged.
         g_shader_failures.clear();
         g_parse_layer_index = previous;
         WPShaderParser::EndShaderSession();
     }
 };
+
+
+std::shared_ptr<LazyParseInputs> ShadowParseInputs(ParseContext& context) {
+    if (!context.shadow_inputs) {
+        auto inputs = std::make_shared<LazyParseInputs>();
+        inputs->globals = context.global_base_uniforms;
+        if (g_parse_layer_index != nullptr) inputs->index = *g_parse_layer_index;
+        inputs->is_ortho = context.is_ortho;
+        inputs->uses_models = context.uses_models;
+        context.shadow_inputs = std::move(inputs);
+    }
+    return context.shadow_inputs;
+}
+
+void RememberShadowMaterial(ParseContext& context, const wpscene::WPMaterial& authored,
+                            const MaterialLoadOptions& options, SceneMaterial& material,
+                            const LoadedMaterial& loaded) {
+    std::vector<std::size_t> slots;
+    for (const auto& [slot, name] : loaded.info.defTexs) {
+        if (slot < 0 || name != kShadowAtlas) continue;
+        const auto index = static_cast<std::size_t>(slot);
+        // A sampler's default does not own an explicitly bound depth texture.
+        // Utility chains may keep a far-depth sentinel until an atlas exists.
+        if (index >= material.textures.size() || material.textures[index].empty() ||
+            material.textures[index] == kShadowAtlas)
+            slots.push_back(index);
+    }
+    if (slots.empty()) return;
+    auto variants = std::make_shared<ShadowMaterialVariants>();
+    auto& initial = variants->versions[context.shadow_mapping ? 1 : 0];
+    initial.material = std::make_shared<SceneMaterial>(material);
+    initial.targets = loaded.render_targets;
+    initial.key = SceneShadowVariantKey(*context.scene);
+    variants->atlas_slots = std::move(slots);
+    const std::weak_ptr<Scene> weak = context.scene;
+    fs::VFS* const vfs = context.vfs;
+    const auto inputs = ShadowParseInputs(context);
+    const std::string required(options.required_texture0);
+    variants->build = [weak, vfs, inputs, authored, options, required](bool enabled) {
+        ShadowMaterialVersion result;
+        const auto scene = weak.lock();
+        if (!scene) return result;
+        LazyShaderParseScope scope(inputs->index);
+        auto lazy = MakeLazyParseContext(scene, *vfs, *inputs);
+        lazy.shadow_mapping = enabled;
+        lazy.shadow_capable = true;
+        lazy.shadow_variant_build = true;
+        auto settings = options;
+        settings.required_texture0 = required;
+        auto material = std::make_shared<SceneMaterial>();
+        LoadedMaterial loaded;
+        if (!LoadMaterial(lazy, authored, *material, loaded, settings)) return result;
+        FlushPendingMetalTranslations(*scene);
+        result.material = std::move(material);
+        result.targets = std::move(loaded.render_targets);
+        return result;
+    };
+    material.shadow_variants = std::move(variants);
+}
 } // namespace
 
 namespace
@@ -2747,9 +3118,13 @@ struct EntryPlan {
     EntryKind   kind { EntryKind::Ignored };
     Admission   admission { Admission::Skip };
     int32_t     id { 0 };
-    bool        has_children { false }; // another entry names this one as its parent
+    bool        has_children { false }; // another entry, or a script (`ScriptMayParentTo`), parents to it
     bool        placeholder { false }; // a node standing in for a typed object that has children
     std::string key;
+    // A light's place among every light object in the file, hidden ones and
+    // LightingV1 ones included: Wallpaper Engine numbers legacy slots by it
+    // (`sub_14018FF60`).
+    uint32_t    light_ordinal { 0 };
 };
 
 /// A script that only registers scene events: it exports no `update` and calls
@@ -2855,30 +3230,78 @@ nlohmann::json WithExternalMaterials(const nlohmann::json& objects, fs::VFS& vfs
 }
 
 /// What the scripts of the object list could reach: the quoted strings of every
-/// script anywhere in it.
-std::unordered_set<std::string> ScriptLiterals(const nlohmann::json& objects) {
-    std::unordered_set<std::string> literals;
+/// script anywhere in it, and, when some script looks layers up by id
+/// (`getLayerByID`), the whole numbers they write.
+struct ScriptLiteralSet {
+    std::unordered_set<std::string> strings;
+    std::unordered_set<int32_t>     ids;
+    bool                            creates_layers { false }; // some script calls `createLayer`
+};
+
+ScriptLiteralSet ScriptLiterals(const nlohmann::json& objects) {
+    ScriptLiteralSet                literals;
     std::vector<const std::string*> sources;
     CollectScriptSources(objects, sources);
-    for (const auto* source : sources) CollectScriptStringLiterals(*source, literals);
+    for (const auto* source : sources) CollectScriptStringLiterals(*source, literals.strings);
+    const bool by_id = std::any_of(sources.begin(), sources.end(), [](const std::string* source) {
+        return source->find("getLayerByID") != std::string::npos;
+    });
+    if (by_id) {
+        for (const auto* source : sources) CollectScriptIntegerLiterals(*source, literals.ids);
+    }
+    literals.creates_layers = std::any_of(sources.begin(), sources.end(), [](const std::string* source) {
+        return source->find("createLayer") != std::string::npos;
+    });
     return literals;
 }
 
 /// Whether a statically hidden entry is built anyway: a script sits inside it, a
-/// script names it by a quoted literal, or (for an image) another built image
-/// reads its picture.
+/// script names it by a quoted literal or by its id, or (for an image) another
+/// built image reads its picture.
 bool RetainedWhileHidden(EntryKind kind, const nlohmann::json& entry, int32_t id,
-                         const std::unordered_set<int32_t>&     reachable,
-                         const std::unordered_set<std::string>& literals) {
+                         const std::unordered_set<int32_t>& reachable,
+                         const ScriptLiteralSet&            literals) {
     if (kind == EntryKind::Image && id != 0 && reachable.contains(id)) return true;
     std::vector<const std::string*> sources;
     CollectScriptSources(entry, sources);
     if (! sources.empty()) return true;
+    if (id != 0 && literals.ids.contains(id)) return true;
     if (const auto name = entry.find("name");
         name != entry.end() && name->is_string() && ! name->get_ref<const std::string&>().empty()) {
-        return literals.contains(name->get<std::string>());
+        return literals.strings.contains(name->get<std::string>());
     }
     return false;
+}
+
+// A sampled reflection can be enabled by a hidden model's material. Retain
+// hidden models only when the already-scanned scene declares this picture;
+// ordinary scenes keep their existing hidden-object loading policy. This
+// admission is conservative: LoadMaterial still removes inactive sampler slots.
+bool DeclaresReflectionTexture(const nlohmann::json& value) {
+    if (value.is_object()) {
+        const auto textures=value.find("textures");
+        if(textures!=value.end() && textures->is_array())
+            for(const auto& name:*textures)
+                if(name.is_string() && name.get_ref<const std::string&>()==kReflectionTarget) return true;
+    }
+    if (value.is_array() || value.is_object())
+        for (const auto& child:value) if(DeclaresReflectionTexture(child)) return true;
+    return false;
+}
+
+/// Whether a compose layer takes children from scripts: some script creates layers and names
+/// this one by a quoted literal or its id. It is then built as a composition, as one with
+/// children in the scene file is, so what a script parents to it is drawn through its effects.
+bool ScriptMayParentTo(const nlohmann::json& entry, int32_t id, const ScriptLiteralSet& literals) {
+    if (! literals.creates_layers) return false;
+    const auto image = entry.find("image");
+    if (image == entry.end() || ! image->is_string() || ! IsComposeLayerModel(image->get<std::string>())) {
+        return false;
+    }
+    if (id != 0 && literals.ids.contains(id)) return true;
+    const auto name = entry.find("name");
+    return name != entry.end() && name->is_string() && ! name->get_ref<const std::string&>().empty() &&
+           literals.strings.contains(name->get<std::string>());
 }
 
 /// Decides, for every entry, what is built and what is called.
@@ -2897,7 +3320,9 @@ std::vector<EntryPlan> PlanEntries(ParseContext& context, const nlohmann::json& 
     }
     const auto reachable = CollectReachableLayerIds(scanned, index, context.vfs);
     const auto literals  = ScriptLiterals(objects);
+    const bool reflection_reader = DeclaresReflectionTexture(scanned);
 
+    uint32_t lights_seen = 0;
     for (std::size_t at = 0; at < objects.size(); ++at) {
         const auto& entry = objects[at];
         auto&       plan  = plans[at];
@@ -2906,13 +3331,14 @@ std::vector<EntryPlan> PlanEntries(ParseContext& context, const nlohmann::json& 
         plan.id            = EntryId(entry);
         const bool has_id  = plan.id != 0;
         const bool has_kids = has_id && parent_ids.contains(plan.id);
-        plan.has_children   = has_kids;
+        plan.has_children   = has_kids || ScriptMayParentTo(entry, plan.id, literals);
         const bool hidden  = StaticallyHidden(entry);
         switch (plan.kind) {
         case EntryKind::Group:
         case EntryKind::Shape: plan.admission = has_id ? Admission::Node : Admission::Skip; break;
         case EntryKind::Sound: plan.admission = hidden ? Admission::Skip : Admission::Object; break;
         case EntryKind::Light:
+            plan.light_ordinal = lights_seen++;
             // A light that is statically hidden is dropped whatever binds its
             // visibility; its children still keep their parent.
             if (hidden) plan.admission = has_kids ? Admission::Node : Admission::Skip;
@@ -2922,7 +3348,9 @@ std::vector<EntryPlan> PlanEntries(ParseContext& context, const nlohmann::json& 
         default:
             if (! has_id) {
                 plan.admission = Admission::Skip;
-            } else if (! hidden || RetainedWhileHidden(plan.kind, entry, plan.id, reachable, literals)) {
+            } else if (! hidden || context.particle_link_targets_required.contains(plan.id) ||
+                       (plan.kind == EntryKind::Model && reflection_reader) ||
+                       RetainedWhileHidden(plan.kind, entry, plan.id, reachable, literals)) {
                 plan.admission = Admission::Object;
             } else {
                 plan.admission = has_kids ? Admission::Node : Admission::Skip;
@@ -3011,6 +3439,19 @@ std::shared_ptr<SceneNode> MakePlainLayerNode(ParseContext& context, const nlohm
                                             Vector3f(base.scale.data()),
                                             Vector3f(base.angles.data()), plan.key);
     node->ID() = plan.id;
+    SceneNode::ReflectionKind reflection_kind=SceneNode::ReflectionKind::None;
+    switch(plan.kind) {
+    case EntryKind::Image: reflection_kind=SceneNode::ReflectionKind::Image;break;
+    case EntryKind::Model: reflection_kind=SceneNode::ReflectionKind::Model;break;
+    case EntryKind::Particle: reflection_kind=SceneNode::ReflectionKind::Particle;break;
+    case EntryKind::Text: reflection_kind=SceneNode::ReflectionKind::Text;break;
+    default:break;
+    }
+    const auto reflected=entry.find("reflected");
+    node->SetReflection(reflection_kind,reflected==entry.end() || !reflected->is_boolean() || reflected->get<bool>());
+    node->SetParallaxDepth(base.parallaxDepth[0], base.parallaxDepth[1]);
+    if (context.scene->transparent_sorting && !context.scene->runtime)
+        context.scene->sorting_origins.emplace(node.get(), Vector3f(base.origin.data()));
     // A parse with no property table has no runtime: nothing is bound, and every
     // value keeps what the file says.
     bool visible = base.visible;
@@ -3115,6 +3556,8 @@ void SetUnhittable(ParseContext& context, const std::string& key, bool solid = f
 
 /// The render target the clipping masks are drawn into: the screen scaled by one half (R25).
 constexpr std::string_view kPuppetMaskTarget = "_rt_puppet_mask";
+/// Where a nested mask's further masks are drawn before they are multiplied into it.
+constexpr std::string_view kPuppetMaskIntermediateTarget = "_rt_puppet_mask_intermediate";
 
 struct PuppetSlot {
     wpscene::WPMaterial authored;
@@ -3136,6 +3579,19 @@ std::optional<wpscene::WPMaterial> ReadPuppetMaterial(fs::VFS& vfs, const std::s
     return material;
 }
 
+/// A texture channel: a mesh drawn with `puppettexturechannels` paints frames into the
+/// puppet's own picture, where its animation weighs them in. Its positions are pixels of that
+/// picture, not points of the model, so it is never drawn as part of the model on the screen.
+bool IsTextureChannelMesh(fs::VFS& vfs, const WPMdl::Mesh& mesh) {
+    nlohmann::json json;
+    if (mesh.mat_json_file.empty() ||
+        ! wpscene::ParseBoundedJson(fs::GetFileContent(vfs, "/assets/" + mesh.mat_json_file), json)) {
+        return false;
+    }
+    wpscene::WPMaterial material;
+    return material.FromJson(json) && material.shader == "puppettexturechannels";
+}
+
 /// The clipping-mask material of one mask (R69): the shipped `clippingmaskimage4`
 /// shader, translucent, never depth tested, written or culled, drawing the piece's
 /// picture with the mask's picture. Skinning combos apply to it as to any slot.
@@ -3153,6 +3609,33 @@ wpscene::WPMaterial MakeClippingMaskMaterial(const std::string& piece_texture,
     };
     if (has_bones) WPMdlParser::AddPuppetMatInfo(material, mdl);
     return material;
+}
+
+/// The pass that multiplies the intermediate mask into the mask: Wallpaper Engine draws
+/// `materials/util/flattexture.json` (`minimalalpha`, translucent, g_Alpha 1) over the whole
+/// target with device flag 0x100, DEST_COLOR / INV_SRC_ALPHA (`sub_14020D6A0`). Its masks
+/// are R8 (`sub_1401AADB0` format 9), so the sample reads (r, 0, 0, 1) and the blend is
+/// mask.r * intermediate.r; our masks keep four channels, so the pass reads only red and
+/// writes alpha 1 the way the R8 sample does. Drawn as a quad already in clip space.
+bool LoadMaskMultiplyMaterial(ParseContext& context, SceneMaterial& material, LoadedMaterial& loaded) {
+    wpscene::WPMaterial authored;
+    authored.shader     = "puppet_mask_multiply";
+    authored.blending   = "translucent";
+    authored.cullmode   = "nocull";
+    authored.depthtest  = "disabled";
+    authored.depthwrite = "disabled";
+    authored.textures   = { std::string(kPuppetMaskIntermediateTarget) };
+    MaterialLoadOptions options;
+    options.vertex_source =
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+        "void main() {\n  gl_Position = vec4(a_Position.xy, 0.0, 1.0);\n  v_TexCoord = a_TexCoord;\n}\n";
+    options.fragment_source =
+        "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+        "void main() {\n  gl_FragColor = vec4(texSample2D(g_Texture0, v_TexCoord).r, 0.0, 0.0, 1.0);\n}\n";
+    if (! LoadMaterial(context, authored, material, loaded, options)) return false;
+    material.name     = "puppet mask multiply";
+    material.blenmode = BlendMode::Multiply;
+    return true;
 }
 
 /// The mesh's own material drawn through a mask (R69, R25): both clipping combos on and
@@ -3181,6 +3664,17 @@ bool LoadPuppetSlots(ParseContext& context, const wpscene::WPImageObject& image,
         return true;
     };
     bool mask_target_added = false;
+    bool intermediate_added = false;
+    const auto add_mask_target = [&](std::string_view key) {
+        const auto* frame = context.scene->FindRenderTarget(std::string(SpecTex_Default));
+        SceneRenderTarget target;
+        target.width      = std::max(1, (frame != nullptr ? frame->width : context.ortho_w) / 2);
+        target.height     = std::max(1, (frame != nullptr ? frame->height : context.ortho_h) / 2);
+        target.allowReuse = true;
+        target.format     = context.scene->hdr ? TextureFormat::RGBA16F : TextureFormat::RGBA8;
+        target.bind       = { .enable = true, .screen = true, .scale = 0.5 };
+        context.scene->renderTargets[std::string(key)] = target;
+    };
     for (const auto& source : mdl.meshes) {
         if (source.positions.empty()) continue;
         auto base = ReadPuppetMaterial(*context.vfs, source.mat_json_file, mdl, has_bones);
@@ -3189,14 +3683,7 @@ bool LoadPuppetSlots(ParseContext& context, const wpscene::WPImageObject& image,
             return false;
         }
         if (! source.masks.empty() && ! mask_target_added) {
-            const auto* frame = context.scene->FindRenderTarget(std::string(SpecTex_Default));
-            SceneRenderTarget target;
-            target.width      = std::max(1, (frame != nullptr ? frame->width : context.ortho_w) / 2);
-            target.height     = std::max(1, (frame != nullptr ? frame->height : context.ortho_h) / 2);
-            target.allowReuse = true;
-            target.format     = context.scene->hdr ? TextureFormat::RGBA16F : TextureFormat::RGBA8;
-            target.bind       = { .enable = true, .screen = true, .scale = 0.5 };
-            context.scene->renderTargets[std::string(kPuppetMaskTarget)] = target;
+            add_mask_target(kPuppetMaskTarget);
             mask_target_added = true;
         }
         const std::string first_texture =
@@ -3204,14 +3691,126 @@ bool LoadPuppetSlots(ParseContext& context, const wpscene::WPImageObject& image,
                 ? base->textures[0]
                 : (! image.material.textures.empty() ? image.material.textures[0] : std::string());
         if (! load(*base, true)) return false;
-        for (const auto& mask : source.masks) {
-            if (! load(MakeClippingMaskMaterial(first_texture, mask.mat_json_file, mdl, has_bones), true)) {
-                return false;
+        // In the order WPMdlParser::GenPuppetMesh lays the submeshes out.
+        for (std::size_t m = 0; m < source.masks.size(); ++m) {
+            std::vector<uint32_t> draws = WPMdlParser::MaskChain(source, m);
+            draws.push_back(static_cast<uint32_t>(m));
+            for (std::size_t d = 0; d < draws.size(); ++d) {
+                const auto& drawn = source.masks[draws[d]];
+                if (! load(MakeClippingMaskMaterial(first_texture, drawn.mat_json_file, mdl, has_bones), true)) {
+                    return false;
+                }
+                // sub_14020D6A0 sets clippingmaskimage4's g_RenderVar0.x (ctx+168) to 1 before
+                // drawing a mask whose record flags (+68) have bit 1, else 0: an inverted mask.
+                const float inverted = (drawn.flags & WPMdl::Mesh::MaskBlock::kMaskFlagInverted) != 0 ? 1.0f : 0.0f;
+                mesh.MaterialSlots().back()->customShader.constValues["g_RenderVar0"] =
+                    ShaderValue(std::array<float, 4> { inverted, 0.0f, 0.0f, 0.0f });
+                if (d == 0) continue;
+                if (! intermediate_added) {
+                    add_mask_target(kPuppetMaskIntermediateTarget);
+                    intermediate_added = true;
+                }
+                SceneMaterial multiply;
+                PuppetSlot    slot;
+                if (! LoadMaskMultiplyMaterial(context, multiply, slot.loaded)) return false;
+                mesh.AddMaterial(std::move(multiply));
+                slots.push_back(std::move(slot));
             }
             if (! load(MakeClippedCopy(*base), true)) return false;
         }
     }
     return ! slots.empty();
+}
+
+/// How many texture channels a puppet's animations weigh in at some frame; 0 when none ever
+/// does, and the channel meshes then never paint anything.
+std::size_t PaintedTextureChannels(const WPMdl& mdl) {
+    if (mdl.puppet == nullptr) return 0;
+    std::size_t count = 0;
+    for (const auto& anim : mdl.puppet->anims) {
+        for (std::size_t channel = 0; channel < anim.texture_channels.size(); ++channel) {
+            const auto& weights = anim.texture_channels[channel];
+            if (std::any_of(weights.begin(), weights.end(), [](float w) { return w > 0.001f; })) {
+                count = std::max(count, channel + 1);
+            }
+        }
+    }
+    return count;
+}
+
+/// A puppet's texture channels: each channel mesh paints its frames
+/// into the layer's picture where the card draws it into the chain's first target, before any
+/// effect. Its positions, pixels of the picture, are moved onto the card, and it takes the
+/// card's colour and alpha, as the card would have drawn the painted picture. The pass draws
+/// only while its animation weighs a channel in (`RegisterPuppetTextureChannels`).
+void AddTextureChannelPainters(ParseContext& context, const wpscene::WPImageObject& image,
+                               const std::vector<WPMdl::Mesh>& meshes, std::size_t channels,
+                               const std::string& picture, std::array<float, 2> card,
+                               const std::shared_ptr<SceneNode>& owner, SceneImageEffectLayer& chain,
+                               const std::string& camera_name, const WPPuppetLayer& puppet_layer,
+                               std::vector<std::shared_ptr<SceneMaterial>>& tinted,
+                               std::vector<std::shared_ptr<SceneMaterial>>& all_materials) {
+    if (picture.empty() || IsSpecTex(picture)) return;
+    const auto& header = TextureHeaderOf(context, picture);
+    const std::array<float, 2> pixels { static_cast<float>(header.mapWidth),
+                                        static_cast<float>(header.mapHeight) };
+    if (! (pixels[0] > 0.0f) || ! (pixels[1] > 0.0f)) return;
+    // The card is cut down to whole units (`MakeCardMesh`); the frames land on it as drawn.
+    for (float& side : card) side = std::isfinite(side) ? std::clamp(std::trunc(side), 0.0f, 65535.0f) : 0.0f;
+    // Far more channels than any picture paints: a number past it is not a channel.
+    constexpr uint32_t kMaxTextureChannels = 256;
+    for (const auto& source : meshes) {
+        // The shader reads a vertex's weight at `g_BlendMap[n / 4][n % 4]`, `n` its first blend
+        // index: the rows cover every channel the mesh names, and those no animation weighs
+        // in read 0 and are discarded.
+        uint32_t highest = 0;
+        for (const auto& indices : source.blend_indices) highest = std::max(highest, indices[0]);
+        if (highest >= kMaxTextureChannels) {
+            LOG_ERROR("texture channel mesh '%s' names channel %u; it is not painted",
+                      source.mat_json_file.c_str(), highest);
+            continue;
+        }
+        const auto rows = static_cast<int32_t>(
+            (std::max<std::size_t>(channels, std::size_t { highest } + 1) + 3) / 4);
+        nlohmann::json json;
+        wpscene::WPMaterial authored;
+        if (! wpscene::ParseBoundedJson(fs::GetFileContent(*context.vfs, "/assets/" + source.mat_json_file),
+                                        json) ||
+            ! authored.FromJson(json)) {
+            continue;
+        }
+        // The weights are uploaded four to a row, exactly as many rows as the shader declares.
+        auto& declared = authored.combos["BLENDROWCOUNT"];
+        declared       = std::max(declared, rows);
+        const auto uploaded = static_cast<std::size_t>(declared) * 4;
+        SceneMaterial  material;
+        LoadedMaterial loaded;
+        if (! LoadMaterial(context, authored, material, loaded)) {
+            LOG_ERROR("texture channel material '%s' cannot be loaded", source.mat_json_file.c_str());
+            continue;
+        }
+        SetLayerTint(context, material, image, false);
+        auto mesh = std::make_shared<SceneMesh>();
+        mesh->Submeshes().emplace_back();
+        WPMdlParser::GenTextureChannelMesh(mesh->Submeshes().back(), source, pixels, card);
+        mesh->AddMaterial(std::move(material));
+        tinted.push_back(mesh->MaterialSlotPtr(0));
+        all_materials.push_back(mesh->MaterialSlotPtr(0));
+        auto painter = std::make_shared<SceneNode>();
+        painter->SetName(owner->Name() + " texture channels");
+        painter->AddMesh(mesh);
+        painter->SetCamera(camera_name);
+        painter->SetRenderTransformOverride(Matrix4d::Identity());
+        painter->SetVisible(false);
+        if (context.shader_updater != nullptr) {
+            WPShaderValueData data;
+            data.renderTargets = std::move(loaded.render_targets);
+            context.shader_updater->SetNodeData(painter.get(), 0, data);
+            context.shader_updater->RegisterPuppetTextureChannels(puppet_layer, owner.get(), painter.get(),
+                                                                  uploaded);
+        }
+        chain.AddCardOverlay(std::move(painter));
+    }
 }
 
 /// Whether something the scene file says can move an object while the scene runs: an origin,
@@ -3249,6 +3848,120 @@ struct ImageKind {
     bool compose_model { false };
     bool children { false };
 };
+
+std::vector<ParseContext::ParticleLinkTarget::Box> ModelCollisionBoxes(const WPMdl& mdl);
+
+/// A linked image's CPU emission source. Images without an emitterimage consumer
+/// never create this object, decode another image or inspect their geometry.
+std::shared_ptr<ParticleLayerImageSource> MakeParticleImageSource(
+    ParseContext& context, const std::shared_ptr<SceneNode>& node, const std::string& key,
+    linalg::Vector2d extent, const WPMdl* mdl = nullptr,
+    WPPuppetLayer puppet = {}, bool instanced = false) {
+    auto source = std::make_shared<ParticleLayerImageSource>();
+    source->extent = instanced ? linalg::Vector2d::Ones() : extent;
+    struct TextureNames { std::string albedo, opacity; bool dynamic_albedo, dynamic_opacity; };
+    std::vector<TextureNames> textures;
+    auto* images = dynamic_cast<RuntimeImageSource*>(context.scene->imageParser.get());
+    const auto& materials = node->Mesh()->MaterialSlots();
+    const std::size_t count = mdl != nullptr && !mdl->meshes.empty() ? mdl->meshes.size() : 1;
+    for (std::size_t part = 0; part < count; ++part) {
+        const auto material = node->Mesh()->MaterialSlotPtr(part < materials.size() ? part : 0);
+        if (!material || material->textures.empty()) continue;
+        ParticleImageSurface surface;
+        TextureNames names { material->textures[0], {}, false, false };
+        if (std::find(material->defines.begin(), material->defines.end(), "OPACITYMASK") != material->defines.end() &&
+            material->textures.size() > 1) names.opacity = material->textures[1];
+        names.dynamic_albedo = images != nullptr && images->IsRuntimeImage(names.albedo);
+        names.dynamic_opacity = images != nullptr && !names.opacity.empty() && images->IsRuntimeImage(names.opacity);
+        if (!TextureHeaderOf(context, names.albedo).isVideo)
+            surface.image = context.scene->imageParser->Parse(names.albedo);
+        if (!names.opacity.empty() && !TextureHeaderOf(context, names.opacity).isVideo)
+            surface.opacity = context.scene->imageParser->Parse(names.opacity);
+        if (mdl != nullptr) {
+            const auto& mesh = mdl->meshes[part];
+            const auto* uv = mesh.FindStream(0x8);
+            if (uv != nullptr && uv->width >= 2) {
+                for (const auto& indices : mesh.indices) {
+                    ParticleImageTriangle triangle;
+                    bool valid = true;
+                    for (int corner = 0; corner < 3; ++corner) {
+                        const auto vertex = indices[corner];
+                        if (vertex >= mesh.positions.size() || vertex * uv->width + 1 >= uv->values.size()) {
+                            valid = false; break;
+                        }
+                        auto& v = triangle[corner];
+                        v.position = linalg::Vector3f(mesh.positions[vertex].data());
+                        v.uv = { uv->values[vertex * uv->width], uv->values[vertex * uv->width + 1] };
+                        if (vertex < mesh.blend_indices.size()) v.bones = mesh.blend_indices[vertex];
+                        if (vertex < mesh.blend_weights.size()) v.weights = mesh.blend_weights[vertex];
+                    }
+                    if (valid) surface.triangles.push_back(std::move(triangle));
+                }
+            }
+        }
+        source->surfaces.push_back(std::move(surface));
+        textures.push_back(std::move(names));
+    }
+    if (mdl != nullptr && mdl->puppet != nullptr)
+        source->palette = [puppet]() { return puppet.lastFrame(); };
+    source->refresh = [weak = std::weak_ptr<SceneNode>(node), scene = context.scene.get(),
+                       key, extent, instanced, textures = std::move(textures)](ParticleLayerImageSource& out) {
+        const auto node = weak.lock();
+        out.available = node != nullptr;
+        if (!node) return;
+        node->UpdateTrans();
+        out.world = node->ModelTrans();
+        out.extent = instanced ? linalg::Vector2d::Ones() : extent;
+        if (scene->runtime != nullptr) {
+            const auto size = scene->runtime->NodeSize(key).cast<double>().eval();
+            if (size.x() > 0 && size.y() > 0) {
+                out.extent = instanced ? linalg::Vector2d::Ones() : size;
+                out.centre = scene->runtime->NodeBoxCentre(key).cast<double>();
+                if (instanced) out.centre = { out.centre.x() / size.x(), out.centre.y() / size.y() };
+            }
+        }
+        for (std::size_t part = 0; part < textures.size(); ++part) {
+            const auto& names = textures[part];
+            if (names.dynamic_albedo) out.surfaces[part].image = scene->imageParser->Parse(names.albedo);
+            if (names.dynamic_opacity) out.surfaces[part].opacity = scene->imageParser->Parse(names.opacity);
+        }
+    };
+    return source;
+}
+
+/// An on-demand text donor. Metadata is cheap to read on an emission step; its
+/// temporary quarter image is requested only when the emission map needs pixels.
+std::shared_ptr<ParticleLayerImageSource> MakeParticleTextImageSource(
+    const std::shared_ptr<SceneNode>& node,
+    std::function<std::optional<TextLayerRenderFrame>()> describe,
+    std::function<std::shared_ptr<Image>(uint32_t, uint32_t)> build) {
+    auto source = std::make_shared<ParticleLayerImageSource>();
+    source->surfaces.resize(1);
+    source->surfaces[0].downsampled = true;
+    source->refresh = [weak = std::weak_ptr<SceneNode>(node), describe = std::move(describe)]
+        (ParticleLayerImageSource& out) {
+        const auto node = weak.lock();
+        const auto frame = node && describe ? describe() : std::nullopt;
+        out.available = frame.has_value() && frame->size.allFinite() &&
+                        frame->size.x() >= 1.0f && frame->size.y() >= 1.0f &&
+                        static_cast<double>(frame->size.x()) <= std::numeric_limits<int>::max() &&
+                        static_cast<double>(frame->size.y()) <= std::numeric_limits<int>::max();
+        if (!out.available) return;
+        node->UpdateTrans();
+        out.world = node->ModelTrans();
+        out.extent = { frame->bounds.right - frame->bounds.left, frame->bounds.top - frame->bounds.bottom };
+        out.centre = frame->center.cast<double>();
+        out.surfaces[0].pixel_extent = { static_cast<int>(frame->size.x()), static_cast<int>(frame->size.y()) };
+    };
+    source->prepare_pixels = [build = std::move(build)](ParticleLayerImageSource& out) {
+        auto& surface = out.surfaces[0];
+        const auto size = particle_image_detail::QuarterExtent(surface.pixel_extent[0], surface.pixel_extent[1]);
+        surface.image = build ? build(static_cast<uint32_t>(size[0]), static_cast<uint32_t>(size[1])) : nullptr;
+    };
+    source->release_pixels = [](ParticleLayerImageSource& out) { out.surfaces[0].image.reset(); };
+    return source;
+}
+
 
 /// Loads one image layer (R1 to R22, R38 to R92).
 bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json& entry,
@@ -3288,7 +4001,7 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
     std::vector<wpscene::WPImageEffect>        extras;
     extras.reserve(2);
     for (const auto& effect : image.effects) {
-        if (! EffectIsBuilt(effect) || effect.materials.empty()) continue;
+        if (! EffectIsBuilt(effect, context.scripts_use_effects) || effect.materials.empty()) continue;
         chain_sources.push_back(&effect);
     }
     // The colour blend (R52): mode 31 is additive blending, any other mode one more pass.
@@ -3302,41 +4015,71 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         blend_pass = true;
     }
     const std::size_t built_effects = chain_sources.size();
+    // A passthrough layer with effects draws its children into its own buffer, whatever
+    // its model's path (sub_1401E8AA0: with +772 & 2 the children go through
+    // sub_1401ECB20 into the layer's buffer instead of its own picture).
     const bool composition =
         (kind.compose_model && kind.children && (! image.copybackground || built_effects > 0)) ||
-        (kind.fullscreen && kind.passthrough && kind.children && built_effects > 0);
+        (kind.passthrough && kind.children && built_effects > 0);
     // A sampled layer whose effects all failed to load still renders into its own base buffer.
     const bool failed_effects = built_effects == 0 && referenced && entry.contains("effects") &&
                                 entry.at("effects").is_array() && ! entry.at("effects").empty();
     bool has_effects = built_effects > 0 || composition || failed_effects ||
                        (kind.compose_model && ! image.copybackground);
+    // Whether the layer's picture goes through a chain of its own before a puppet adds one.
+    const bool draws_through_chain = has_effects;
     // A puppet (R66, R75): one that cannot be read leaves the layer an ordinary card.
     WPMdl mdl;
     bool  puppet_ok = false;
+    // A texture channel paints into the picture and is never part of the model.
+    std::vector<WPMdl::Mesh> channel_meshes;
     if (! image.puppet.empty()) {
-        puppet_ok = WPMdlParser::Parse(image.puppet, *context.vfs, mdl) &&
+        const bool parsed = WPMdlParser::Parse(image.puppet, *context.vfs, mdl);
+        if (parsed) {
+            for (auto mesh = mdl.meshes.begin(); mesh != mdl.meshes.end();) {
+                if (! IsTextureChannelMesh(*context.vfs, *mesh)) {
+                    ++mesh;
+                    continue;
+                }
+                channel_meshes.push_back(std::move(*mesh));
+                mesh = mdl.meshes.erase(mesh);
+            }
+        }
+        puppet_ok = parsed && ! mdl.meshes.empty() &&
                     ((mdl.puppet != nullptr && ! mdl.puppet->bones.empty()) ||
                      std::any_of(mdl.meshes.begin(), mdl.meshes.end(),
                                  [](const WPMdl::Mesh& mesh) { return ! mesh.positions.empty(); }));
         if (! puppet_ok) LOG_ERROR("layer %d: the puppet '%s' cannot be used", image.id, image.puppet.c_str());
     }
     const bool puppet_bones  = puppet_ok && mdl.puppet != nullptr && ! mdl.puppet->bones.empty();
+    if (puppet_bones) {
+        if (auto* images = dynamic_cast<RuntimeImageSource*>(scene.imageParser.get()))
+            RegisterPuppetMorphImages(mdl, *images, image.puppet, true);
+    }
+    // Painted texture channels need the flat picture in a target of the layer's own, which only
+    // the chain has: such a puppet is drawn through it, with or without effects.
+    const std::size_t painted_channels =
+        puppet_ok && ! channel_meshes.empty() ? PaintedTextureChannels(mdl) : 0;
     const bool puppet_direct = puppet_ok && built_effects == 0 && ! composition &&
-                               (image.colorBlendMode == 0 || additive_blend);
+                               (image.colorBlendMode == 0 || additive_blend) && painted_channels == 0;
     // Under effects the chain works on the flat sheet and closes with one pass that draws
     // the assembled model (R72); a model with bones takes the colour blend into that pass.
     const bool puppet_closing = puppet_ok && ! puppet_direct;
     const bool blend_closing  = puppet_closing && puppet_bones && blend_pass;
-    const bool blend_separate = blend_pass && ! blend_closing;
+    bool       blend_separate = blend_pass && ! blend_closing;
     if (blend_closing) chain_sources.pop_back();
     if (puppet_closing) has_effects = true;
 
     // A card with the `perspective` flag in a 2D scene is seen through the scene's perspective
     // camera, as a particle system or a model with the flag is: bare, or by the pass that puts
-    // its effects' result onto the scene. A fullscreen layer fills the canvas whatever it says
-    // and a composition copies the screen behind it where the flat view puts it.
-    const bool perspective_card =
-        image.perspective && context.is_ortho && ! kind.fullscreen && ! kind.compose_model && ! composition;
+    // its effects' result onto the scene. A composition's closing card uses the same lens:
+    // its local effect buffer must not flatten a cover attached to a rotated model.
+    // A fullscreen layer still fills the canvas whatever the flag says.
+    const bool perspective_card = image.perspective && context.is_ortho && ! kind.fullscreen;
+    // In a 3D scene the flag gives the card WE's far view of the scene camera.
+    const bool perspective_card_3d = image.perspective && ! context.is_ortho && ! kind.fullscreen &&
+                                     ! kind.compose_model && ! composition &&
+                                     context.scene->cameras.contains(std::string(kPerspectiveLayerCamera));
 
     // A card with no area, saved with a size of 0 on one axis, shows nothing. When it draws
     // into targets of its own (it has effects, or another layer reads it) the card takes the
@@ -3357,9 +4100,10 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         if (puppet_bones) {
             WPMdlParser::AddPuppetMatInfo(closing_material, mdl);
             if (blend_closing) closing_material.combos["BLENDMODE"] = image.colorBlendMode;
-            // Nothing before the closing pass lights anything.
-            image.material.combos["LIGHTING"] = 0;
         }
+        // Nothing before the closing pass lights or reflects anything.
+        image.material.combos["LIGHTING"]   = 0;
+        image.material.combos["REFLECTION"] = 0;
     }
     if (puppet_direct && puppet_bones) WPMdlParser::AddPuppetMatInfo(image.material, mdl);
 
@@ -3384,6 +4128,40 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         return false;
     }
     if (fog_pass.has_value() && ! own_loaded.info.fog_deferred) fog_pass.reset();
+
+    // A lit or reflective card under effects (Wallpaper Engine 0x140206AE0 and
+    // `we_BuildImagePrelightingPass` 0x140209540): its own pass is drawn unlit into
+    // its card, and one closing pass with `PRELIGHTING` lights the chain's result
+    // where the layer sits, through the Alt matrices. That pass also takes the
+    // scene's fog in place of the fog pass, and the colour blend (WE writes no
+    // `BLENDMODE` into its prelighting pass; here the two passes are one).
+    wpscene::WPMaterial lit_closing_material;
+    bool                lit_closing = false;
+    if (draws_through_chain && ! puppet_closing) {
+        Combos effective = own_loaded.info.combos;
+        for (const auto& [name, value] : image.material.combos) effective[name] = std::to_string(value);
+        const uint32_t lit_flags = LitMaterialFlags(effective);
+        if (lit_flags != 0) {
+            lit_closing          = true;
+            lit_closing_material = image.material;
+            ApplyPrelightingCombos(lit_closing_material, lit_flags);
+            image.material.combos["LIGHTING"]   = 0;
+            image.material.combos["REFLECTION"] = 0;
+            fog_pass.reset();
+            own_options.defer_fog = scene_fog;
+            if (blend_separate) {
+                lit_closing_material.combos["BLENDMODE"] = image.colorBlendMode;
+                chain_sources.pop_back();
+                blend_separate = false;
+            }
+            own        = SceneMaterial {};
+            own_loaded = LoadedMaterial {};
+            if (! LoadMaterial(context, image.material, own, own_loaded, own_options)) {
+                LOG_ERROR("layer %d: the material cannot be loaded", image.id);
+                return false;
+            }
+        }
+    }
     const BlendMode authored_blend = own.blenmode;
 
     // The mesh of the own pass: a card, with the padding of the picture left out (R21, R22).
@@ -3396,6 +4174,10 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
 
     auto& layer = AddLayer(context, at, entry, plan, true, false);
     const auto node = layer.node;
+    node->SetParentingPassthrough(image.config.model_passthrough);
+    if (authored_blend == BlendMode::Translucent || authored_blend == BlendMode::Additive)
+        node->SetTransparentSort(kind.fullscreen || image.projectlayer
+            ? SceneNode::TransparentSort::Last : SceneNode::TransparentSort::Depth);
     auto* runtime   = scene.runtime.get();
 
     // Placement: a fullscreen layer sits on the canvas centre and keeps its authored
@@ -3427,6 +4209,8 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         runtime->SetNodeCursorTarget(plan.key, true, image.solid, image.disablepropagation);
     }
     node->SetSkipRenderPass(false);
+    // Children of a layer without copybackground blend alpha as MAX (sub_1401ECB20).
+    node->SetChildrenAlphaMax(! image.copybackground);
 
     std::vector<std::shared_ptr<SceneMaterial>> tinted;
     std::vector<std::shared_ptr<SceneMaterial>> all_materials;
@@ -3458,6 +4242,7 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         shape.canvas_width  = static_cast<float>(std::max(1, context.ortho_w));
         shape.canvas_height = static_cast<float>(std::max(1, context.ortho_h));
         shape.clip_space    = image.material.shader == "passthrough";
+        shape.screen_through_projection = image.material.shader == "composelayer";
         // A card that something in the scene can move is rewritten in place by an event; any
         // other is fixed, and rewritten (with the graph built again) only if it moves anyway.
         mesh = MakePassthroughMesh(shape, local,
@@ -3485,6 +4270,20 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         if (runtime != nullptr) {
             runtime->RegisterPuppetLayer(plan.key, puppet_layer);
             BindPuppetAnimationLayerSettings(context, plan.key, image, puppet_layer);
+        }
+    }
+    if (plan.id != 0) {
+        auto& target = context.particle_link_targets[plan.id];
+        target.node  = node;
+        if (context.particle_image_targets.contains(plan.id)) {
+            target.image = MakeParticleImageSource(context, node, plan.key,
+                linalg::Vector2d(geometry.size[0], geometry.size[1]),
+                puppet_ok ? &mdl : nullptr, puppet_layer, image.instanced);
+        }
+        if (puppet_ok && mdl.puppet != nullptr) {
+            target.boxes        = ModelCollisionBoxes(mdl);
+            target.puppet_layer = puppet_layer;
+            target.has_puppet   = true;
         }
     }
     if (puppet_slots.empty()) {
@@ -3572,6 +4371,7 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         chain->SetFinalDepth(own_material->depth_test, own_material->depth_write && ! sorted);
         if (kind.fullscreen) chain->SetFinalCamera(std::string(FullscreenLayerCamera));
         else if (perspective_card) chain->SetFinalCamera("global_perspective");
+        else if (perspective_card_3d) chain->SetFinalCamera(std::string(kPerspectiveLayerCamera));
 
         const bool defer = fog_pass.has_value();
         std::size_t index = 0;
@@ -3579,8 +4379,16 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         for (const auto* source : chain_sources) {
             const bool is_blend_pass = blend_separate && source == chain_sources.back();
             if (BuildEffect(context, image, *source, index, node, *chain, geometry.extent, kind.fullscreen,
-                            is_blend_pass, defer, false, plan.key, camera_name, tinted, all_materials, nullptr)) {
-                if (! source->scripted_visible) any_fixed = true;
+                            is_blend_pass, defer, false, plan.key, camera_name, tinted, all_materials,
+                            nullptr, nullptr, false, ! is_blend_pass)) {
+                if (! source->scripted_visible && (! context.scripts_use_effects || is_blend_pass)) {
+                    any_fixed = true;
+                }
+            } else if (! is_blend_pass && context.scripts_use_effects && runtime != nullptr) {
+                const auto& effect_name =
+                    ! source->instance_name.empty() ? source->instance_name : source->name;
+                runtime->RegisterEffectObject(
+                    plan.key, std::make_shared<SceneImageEffect>(), effect_name, {}, true);
             }
             ++index;
         }
@@ -3604,6 +4412,35 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
             }
         }
 
+        if (lit_closing) {
+            // The last pass lights what the chain made, drawn white where the layer sits.
+            wpscene::WPImageEffect closing;
+            closing.materials.push_back(lit_closing_material);
+            // Wallpaper Engine places this pass's fragments in the picture's pixels, not the
+            // card's (its image mesh spans the texture; 0x140207B50): lights are measured
+            // against the card squeezed to its texture's size around the layer's origin.
+            std::array<float, 2> alt_scale { 1.0f, 1.0f };
+            const auto& own_textures = own_material->textures;
+            // An `instanced` layer's matrix carries its size (layer flag 0x800), so it is lit as laid out.
+            if (! image.instanced && ! own_textures.empty() && ! own_textures[0].empty() &&
+                ! IsSpecTex(own_textures[0])) {
+                const auto& header = TextureHeaderOf(context, own_textures[0]);
+                for (std::size_t axis = 0; axis < 2; ++axis) {
+                    const int32_t pixels = axis == 0 ? header.mapWidth : header.mapHeight;
+                    if (pixels > 0 && card_size[axis] > 0.0f) {
+                        alt_scale[axis] = static_cast<float>(pixels) / card_size[axis];
+                    }
+                }
+            }
+            if (! BuildEffect(context, image, closing, index++, node, *chain, geometry.extent,
+                              kind.fullscreen, true, false, true, plan.key, camera_name, tinted,
+                              all_materials, nullptr, nullptr, true, false, alt_scale)) {
+                // The same shader compiled for the own pass: a failure is a real compile error.
+                return false;
+            }
+            any_fixed = true;
+        }
+
         if (puppet_closing) {
             // The last pass: the layer's own material over what the chain made, skinned.
             wpscene::WPImageEffect closing;
@@ -3613,6 +4450,11 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
                             mdl.puppet != nullptr ? &puppet_layer : nullptr, true)) {
                 any_fixed = true;
             }
+        }
+        if (painted_channels > 0 && ! own_material->textures.empty()) {
+            AddTextureChannelPainters(context, image, channel_meshes, painted_channels,
+                                      own_material->textures[0], card_size, node, *chain, camera_name,
+                                      puppet_layer, tinted, all_materials);
         }
 
         auto camera = std::make_shared<SceneCamera>(geometry.extent[0], geometry.extent[1], -1.0f, 1.0f);
@@ -3634,6 +4476,8 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         node->SetCamera(std::string(FullscreenLayerCamera));
     } else if (perspective_card) {
         node->SetCamera("global_perspective");
+    } else if (perspective_card_3d) {
+        node->SetCamera(std::string(kPerspectiveLayerCamera));
     }
     if (referenced) RegisterImageComposite(context, image, *node);
 
@@ -3645,6 +4489,19 @@ bool LoadImageEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         RegisterLayerTint(context, plan.key, without_color, image.color, tinted);
     } else {
         RegisterLayerTint(context, plan.key, entry, image.color, tinted);
+    }
+    if (runtime != nullptr) {
+        runtime->RegisterImageLayerFlags(
+            plan.key, node.get(),
+            SceneRuntimeContext::ImageLayerFlags { .brightness      = image.brightness,
+                                                   .colorBlendMode  = image.colorBlendMode,
+                                                   .perspective     = image.perspective,
+                                                   .copybackground  = image.copybackground,
+                                                   .nointerpolation = image.nointerpolation,
+                                                   .clampuvs        = image.clampuvs,
+                                                   .ledsource       = image.ledsource,
+                                                   .castshadow      = image.castshadow },
+            context.scene->hdr ? tinted : std::vector<std::shared_ptr<SceneMaterial>> {});
     }
     if (runtime != nullptr && ImageObjectHandlesCursorEvents(image)) {
         if (auto mask = BuildImageHitMask(context, image); mask.has_value()) {
@@ -3672,12 +4529,12 @@ void LayOutPassthroughCards(ParseContext& context) {
     for (auto& card : context.passthrough_cards) {
         card.node->UpdateTrans();
         const Matrix4d world = card.node->ModelTrans();
-        LayOutPassthroughCard(*card.mesh, card.shape, world);
+        LayOutPassthroughCard(*card.mesh, card.shape, world, *context.scene);
         if (runtime == nullptr) continue;
         runtime->RegisterPassthroughCard(
             card.node, card.mesh,
-            [shape = card.shape](SceneMesh& mesh, const Matrix4d& moved) {
-                LayOutPassthroughCard(mesh, shape, moved);
+            [shape = card.shape, scene = context.scene.get()](SceneMesh& mesh, const Matrix4d& moved) {
+                LayOutPassthroughCard(mesh, shape, moved, *scene);
             },
             world);
     }
@@ -3717,11 +4574,97 @@ std::optional<wpscene::WPMaterial> ReadModelMaterial(fs::VFS& vfs, const std::st
         pass = &passes->front();
     }
     const auto says = [pass](const char* key) { return pass != nullptr && pass->is_object() && pass->contains(key); };
-    if (! says("blending")) material.blending = "normal";
     if (! says("cullmode")) material.cullmode = "normal";
     if (! says("depthtest")) material.depthtest = "enabled";
     if (! says("depthwrite")) material.depthwrite = "enabled";
     return material;
+}
+
+/// The boxes a `collisionmodel` builds its capsules from (sub_1401D4580,
+/// artifacts/we-parity/decompiles/F-D13.md): every 76-byte bone record (half
+/// extents and a matrix) whose extents are long enough (|e|² >= 0.01), each in
+/// its bone's model-space frame; a model without bone records gets one box
+/// around all its vertices.
+std::vector<ParseContext::ParticleLinkTarget::Box> ModelCollisionBoxes(const WPMdl& mdl) {
+    using Box = ParseContext::ParticleLinkTarget::Box;
+    std::vector<Box> boxes;
+    if (mdl.puppet != nullptr) {
+        for (std::size_t i = 0; i < mdl.puppet->bones.size(); ++i) {
+            const auto& bone = mdl.puppet->bones[i];
+            if (! bone.has_file_skin_pivot) continue;
+            const linalg::Vector3d e = bone.file_skin_pivot.cast<double>();
+            if (e.squaredNorm() < 0.01) continue;
+            boxes.push_back(Box { e, bone.file_skin_mat.cast<double>(), static_cast<int>(i) });
+        }
+    }
+    if (! boxes.empty()) return boxes;
+    linalg::Vector3d low = linalg::Vector3d::Constant(std::numeric_limits<double>::max());
+    linalg::Vector3d high = -low;
+    for (const auto& mesh : mdl.meshes) {
+        for (const auto& p : mesh.positions) {
+            const linalg::Vector3d v(p[0], p[1], p[2]);
+            low  = low.cwiseMin(v);
+            high = high.cwiseMax(v);
+        }
+    }
+    if (! (low.x() <= high.x())) return boxes;
+    Box box;
+    box.extents                      = (high - low) * 0.5;
+    box.record.topRightCorner<3, 1>() = (high + low) * 0.5;
+    boxes.push_back(box);
+    return boxes;
+}
+
+/// The shader a material's shadow pass draws with (`sub_140155FC0`): the fragment shader's
+/// `// [PASS] shadow <name>` annotation, else `shadowcaster`.
+std::string ShadowPassShader(fs::VFS& vfs, const std::string& shader) {
+    const std::string source = fs::GetFileContent(vfs, "/assets/shaders/" + shader + ".frag");
+    constexpr std::string_view kMarker = "[PASS] shadow ";
+    std::size_t at = 0;
+    while (at < source.size()) {
+        const std::size_t end  = std::min(source.find('\n', at), source.size());
+        std::string_view  line = std::string_view(source).substr(at, end - at);
+        at = end + 1;
+        const std::size_t comment = line.find("//");
+        if (comment == std::string_view::npos) continue;
+        const std::size_t marker = line.find(kMarker, comment);
+        if (marker == std::string_view::npos) continue;
+        std::string_view name = line.substr(marker + kMarker.size());
+        while (! name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.remove_suffix(1);
+        while (! name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.remove_prefix(1);
+        if (! name.empty()) return std::string(name);
+    }
+    return "shadowcaster";
+}
+
+/// The caster material of one model material (`sub_140155FC0`): `materials/util/shadowcaster.json`
+/// with the material's shadow-pass shader and its combos (SKINNING, BONECOUNT, ...), alpha to
+/// coverage (and the albedo) only when the material blends that way.
+std::optional<wpscene::WPMaterial> ShadowCasterMaterial(fs::VFS& vfs, const wpscene::WPMaterial& authored) {
+    auto caster = ReadModelMaterial(vfs, "materials/util/shadowcaster.json");
+    if (! caster.has_value()) return std::nullopt;
+    caster->shader = ShadowPassShader(vfs, authored.shader);
+    // WE's caster is double-sided even when the model's visible pass culls a face
+    // (opposite-winding model probes, WE 2.8.0.42). Keep the visible material's cull mode.
+    caster->cullmode = "nocull";
+    for (const auto& [name, value] : authored.combos) caster->combos[name] = value;
+    caster->combos.erase("ALPHATOCOVERAGE");
+    if (ParseSceneBlendMode(authored.blending) == BlendMode::AlphaToCoverage) {
+        caster->blending = authored.blending;
+        caster->textures = authored.textures;
+        if (caster->textures.size() > 1) caster->textures.resize(1);
+    } else {
+        caster->blending = "normal";
+        caster->textures.clear();
+    }
+    if (authored.combos.contains("MORPHING") && authored.combos.at("MORPHING") != 0 &&
+        authored.textures.size() > 5 && !authored.textures[5].empty()) {
+        // The model's visible pass samples slot 5; shadowcaster's material:morph
+        // sampler is slot 1 (including the foliage shadow variant).
+        caster->textures.resize(2);
+        caster->textures[1] = authored.textures[5];
+    }
+    return caster;
 }
 
 /// Loads one 3D model object (P5 R74 to R78).
@@ -3740,7 +4683,8 @@ bool LoadModelEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         LOG_ERROR("model '%s' cannot be read or has no vertices", model.model.c_str());
         return false;
     }
-    const bool has_bones = mdl.puppet != nullptr && ! mdl.puppet->bones.empty();
+    if (auto* images = dynamic_cast<RuntimeImageSource*>(scene.imageParser.get()))
+        RegisterPuppetMorphImages(mdl, *images, model.model, false);
 
     auto mesh = std::make_shared<SceneMesh>();
     WPMdlParser::GenPuppetMesh(*mesh, mdl, false);
@@ -3749,14 +4693,16 @@ bool LoadModelEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         WPShaderInfo        info;
         LoadedMaterial      loaded;
         bool                ok { false };
+        uint32_t            source_mesh { 0 };
     };
     std::vector<Slot> slots;
     for (const auto& source : mdl.meshes) {
         if (source.positions.empty()) continue;
         Slot slot;
+        slot.source_mesh = static_cast<uint32_t>(&source - mdl.meshes.data());
         if (auto material = ReadModelMaterial(*context.vfs, source.mat_json_file); material.has_value()) {
             slot.authored = std::move(*material);
-            if (has_bones) WPMdlParser::AddPuppetMatInfo(slot.authored, mdl);
+            WPMdlParser::AddPuppetMatInfo(slot.authored, mdl, slot.source_mesh);
             SceneMaterial scene_material;
             if (LoadMaterial(context, slot.authored, scene_material, slot.loaded)) {
                 slot.ok = true;
@@ -3775,11 +4721,35 @@ bool LoadModelEntry(ParseContext& context, std::size_t at, const nlohmann::json&
         }
         slots.push_back(std::move(slot));
     }
+    // Shadow casters (Appendix C item 6): one extra material slot per drawn submesh, which no
+    // submesh draws in the scene; the graph draws them depth-only into the shadow atlas.
+    std::vector<uint32_t> caster_slots;
+    if (context.shadow_mapping && model.castshadow) {
+        caster_slots.assign(slots.size(), kNoShadowCasterSlot);
+        uint32_t next = static_cast<uint32_t>(slots.size());
+        for (std::size_t index = 0; index < slots.size(); ++index) {
+            if (! slots[index].ok) continue;
+            auto caster = ShadowCasterMaterial(*context.vfs, slots[index].authored);
+            SceneMaterial  caster_material;
+            LoadedMaterial caster_loaded;
+            if (! caster.has_value() || ! LoadMaterial(context, *caster, caster_material, caster_loaded)) {
+                LOG_ERROR("model '%s': its shadow caster cannot be loaded", model.model.c_str());
+                continue;
+            }
+            mesh->AddMaterial(std::move(caster_material));
+            caster_slots[index] = next++;
+        }
+        if (std::all_of(caster_slots.begin(), caster_slots.end(),
+                        [](uint32_t slot) { return slot == kNoShadowCasterSlot; }))
+            caster_slots.clear();
+    }
     context.uses_models = true;
 
     auto& layer = TypedLayer(context, at, entry, plan);
     const auto node = layer.node;
     node->AddMesh(mesh);
+    node->SetShadowCasterSlots(std::move(caster_slots));
+    node->SetCastsShadow(model.castshadow);
     if (model.perspective || (scene.activeCamera != nullptr && scene.activeCamera->IsPerspective())) {
         node->SetCamera("global_perspective");
     }
@@ -3787,8 +4757,9 @@ bool LoadModelEntry(ParseContext& context, std::size_t at, const nlohmann::json&
     WPPuppetLayer puppet_layer;
     auto*         runtime = scene.runtime.get();
     if (mdl.puppet != nullptr) {
-        puppet_layer = WPPuppetLayer(mdl.puppet);
+        puppet_layer = WPPuppetLayer(mdl.puppet, WPPuppetLayer::CompositionKind::Model);
         puppet_layer.prepared(model.puppet_layers);
+        puppet_layer.setRootMotion(model.rootmotion);
         layer.puppet       = mdl.puppet;
         layer.puppet_layer = puppet_layer;
         if (runtime != nullptr) {
@@ -3802,7 +4773,16 @@ bool LoadModelEntry(ParseContext& context, std::size_t at, const nlohmann::json&
             data.parallaxDepth = model.parallaxDepth;
             data.renderTargets = slots[slot].loaded.render_targets;
             data.puppet_layer  = puppet_layer;
+            data.morph_mesh = slots[slot].source_mesh;
             context.shader_updater->SetNodeData(node.get(), static_cast<uint32_t>(slot), data);
+            const auto& casters = node->ShadowCasterSlots();
+            if (slot < casters.size() && casters[slot] != kNoShadowCasterSlot) {
+                WPShaderValueData caster;
+                caster.parallaxDepth = model.parallaxDepth;
+                caster.puppet_layer  = puppet_layer;
+                caster.morph_mesh = slots[slot].source_mesh;
+                context.shader_updater->SetNodeData(node.get(), casters[slot], caster);
+            }
         }
         if (slots[slot].ok) {
             RegisterDrivenMaterialConstants(context, mesh->MaterialSlotPtr(slot), slots[slot].authored,
@@ -3811,8 +4791,180 @@ bool LoadModelEntry(ParseContext& context, std::size_t at, const nlohmann::json&
     }
     if (runtime != nullptr) {
         runtime->SetNodeCursorTarget(plan.key, true, model.solid, model.disablepropagation);
+        runtime->RegisterModelFlags(plan.key, model.rootmotion, model.castshadow);
+    }
+    if (plan.id != 0) {
+        auto& target        = context.particle_link_targets[plan.id];
+        target.node         = node;
+        target.boxes        = ModelCollisionBoxes(mdl);
+        target.puppet_layer = puppet_layer;
+        target.has_puppet   = mdl.puppet != nullptr;
+}
+
+    if (context.shadow_capable) {
+        const std::weak_ptr<Scene> weak_scene = context.scene;
+        const std::weak_ptr<SceneNode> weak_node = node;
+        fs::VFS* const vfs = context.vfs;
+        const auto inputs = ShadowParseInputs(context);
+        std::vector<wpscene::WPMaterial> authored;
+        std::vector<bool> valid;
+        std::vector<uint32_t> morph_meshes;
+        for (const auto& slot : slots) { authored.push_back(slot.authored); valid.push_back(slot.ok); }
+        for (const auto& slot : slots) morph_meshes.push_back(slot.source_mesh);
+        ShadowCasterPreparation preparation;
+        preparation.node = node;
+        preparation.attempted = context.shadow_mapping && model.castshadow;
+        preparation.key = SceneShadowVariantKey(scene);
+        preparation.prepare = [weak_scene, weak_node, vfs, inputs, authored, valid, morph_meshes, puppet_layer,
+                                parallax = model.parallaxDepth] {
+            const auto scene = weak_scene.lock();
+            const auto node = weak_node.lock();
+            if (!scene || !node || node->Mesh() == nullptr) return;
+            LazyShaderParseScope scope(inputs->index);
+            auto lazy = MakeLazyParseContext(scene, *vfs, *inputs);
+            lazy.shadow_mapping = true;
+            lazy.shadow_variant_build = true;
+            auto* mesh = node->Mesh();
+            auto slots = node->ShadowCasterSlots();
+            slots.resize(authored.size(), kNoShadowCasterSlot);
+            for (std::size_t index = 0; index < authored.size(); ++index) {
+                if (!valid[index]) continue;
+                auto source = ShadowCasterMaterial(*vfs, authored[index]);
+                SceneMaterial material;
+                LoadedMaterial loaded;
+                if (!source || !LoadMaterial(lazy, *source, material, loaded)) continue;
+                if (slots[index] == kNoShadowCasterSlot || mesh->MaterialForSlot(slots[index]) == nullptr) {
+                    slots[index] = static_cast<uint32_t>(mesh->MaterialSlots().size());
+                    mesh->AddMaterial(std::move(material));
+                } else {
+                    *mesh->MaterialForSlot(slots[index]) = std::move(material);
+                }
+                WPShaderValueData data;
+                data.parallaxDepth = parallax;
+                data.puppet_layer = puppet_layer;
+                data.morph_mesh = morph_meshes[index];
+                lazy.shader_updater->SetNodeData(node.get(), slots[index], data);
+            }
+            if (std::all_of(slots.begin(), slots.end(), [](auto slot) { return slot == kNoShadowCasterSlot; })) slots.clear();
+            node->SetShadowCasterSlots(std::move(slots));
+            FlushPendingMetalTranslations(*scene);
+        };
+        scene.shadows.casters.push_back(std::move(preparation));
     }
     return true;
+}
+
+std::shared_ptr<ModelDataMaterial> MakeModelDataMaterial(
+    const std::weak_ptr<Scene>& weak, fs::VFS* vfs,
+    const std::shared_ptr<LazyParseInputs>& inputs, std::string path,
+    uint32_t format, std::string& error, bool caster = false) {
+    const auto scene = weak.lock();
+    if (!scene || !vfs) { error = "Invalid material"; return {}; }
+    auto authored = ReadModelMaterial(*vfs, path);
+    if (!authored) { error = "Invalid material"; return {}; }
+    if (caster) authored = ShadowCasterMaterial(*vfs, *authored);
+    if (!authored) return {};
+    LazyShaderParseScope scope(inputs->index);
+    auto context = MakeLazyParseContext(scene, *vfs, *inputs);
+    context.uses_models = true;
+    if (caster) {
+        context.shadow_mapping = true;
+        context.shadow_variant_build = true;
+    }
+    auto material = std::make_shared<SceneMaterial>();
+    LoadedMaterial loaded;
+    if (!LoadMaterial(context, *authored, *material, loaded)) {
+        error = "Invalid material"; return {};
+    }
+    auto result = std::make_shared<ModelDataMaterial>();
+    result->material = std::move(material);
+    if (result->material->customShader.shader) {
+        for (const auto& attribute : result->material->customShader.shader->attrs) {
+            const auto& name = attribute.name;
+            const uint32_t bit = name == "a_Position" ? 1u : name == "a_Normal" ? 2u :
+                name == "a_Tangent4" ? 4u : name == "a_TexCoord" ? 8u :
+                name == "a_Color" ? 0x8000u : 0x80000000u;
+            result->required_format |= bit;
+        }
+    }
+    if ((result->required_format & format) != result->required_format) {
+        error = "Shader expecting more vertex data"; return {};
+    }
+    WPShaderValueData data;
+    data.renderTargets = std::move(loaded.render_targets);
+    result->attach = [weak, data](const std::shared_ptr<SceneNode>& node, uint32_t slot) {
+        const auto scene = weak.lock();
+        if (!scene || !scene->shaderValueUpdater) return;
+        static_cast<WPShaderValueUpdater*>(scene->shaderValueUpdater.get())->SetNodeData(node.get(), slot, data);
+    };
+    if (!caster && scene->shadows.enabled) {
+        result->shadow = [weak, vfs, inputs, path = std::move(path), format] {
+            std::string error;
+            return MakeModelDataMaterial(weak, vfs, inputs, path, format, error, true);
+        };
+    }
+    FlushPendingMetalTranslations(*scene);
+    return result;
+}
+
+void SetUpModelDataLayer(
+    const std::weak_ptr<Scene>& weak, fs::VFS* vfs,
+    const std::shared_ptr<LazyParseInputs>& inputs,
+    const std::function<uint32_t(uint32_t)>& select_samples,
+    const std::shared_ptr<SceneNode>& node,
+    const std::vector<std::shared_ptr<ModelDataMaterial>>& materials,
+    const ModelDataLayerOptions&) {
+    const auto scene = weak.lock();
+    if (!scene || !node || !node->Mesh()) return;
+    auto context = MakeLazyParseContext(scene, *vfs, *inputs);
+    context.uses_models = true;
+    ApplyDefaultDepthTarget(context);
+    SceneParseRequest request;
+    request.select_msaa_samples = select_samples;
+    ApplySceneMultisampling(context, request);
+    if (!scene->shadows.enabled) return;
+    std::erase_if(scene->shadows.casters, [&](const ShadowCasterPreparation& existing) {
+        const auto owner = existing.node.lock();
+        return !owner || owner == node;
+    });
+    node->SetShadowCasterSlots({});
+    ShadowCasterPreparation preparation;
+    preparation.node = node;
+    preparation.key = SceneShadowVariantKey(*scene);
+    std::vector<std::weak_ptr<ModelDataMaterial>> definitions(materials.begin(), materials.end());
+    const std::weak_ptr<SceneNode> weak_node = node;
+    preparation.prepare = [weak, weak_node, definitions = std::move(definitions)] {
+        const auto scene = weak.lock();
+        const auto node = weak_node.lock();
+        if (!scene || !node || !node->Mesh() ||
+            (scene->runtime && !scene->runtime->HasNodeNamed(node->Name()))) return;
+        auto* mesh = node->Mesh();
+        auto slots = node->ShadowCasterSlots();
+        slots.resize(definitions.size(), kNoShadowCasterSlot);
+        for (std::size_t at = 0; at < definitions.size(); ++at) {
+            if (at >= mesh->Submeshes().size() ||
+                mesh->Submeshes()[at].GetVertexArray(0).CapacitySizeOf() == 0) continue;
+            const auto definition = definitions[at].lock();
+            const auto caster = definition && definition->shadow ? definition->shadow() : nullptr;
+            if (!caster || !caster->material) continue;
+            if (slots[at] == kNoShadowCasterSlot || !mesh->MaterialForSlot(slots[at])) {
+                slots[at] = static_cast<uint32_t>(mesh->MaterialSlots().size());
+                mesh->AddMaterial(SceneMaterial(*caster->material));
+            } else *mesh->MaterialForSlot(slots[at]) = SceneMaterial(*caster->material);
+            if (caster->attach) caster->attach(node, slots[at]);
+            if (scene->runtime) scene->runtime->AddSceneUniformMaterial(mesh->MaterialSlotPtr(slots[at]));
+        }
+        if (std::all_of(slots.begin(), slots.end(), [](auto slot) { return slot == kNoShadowCasterSlot; }))
+            slots.clear();
+        node->SetShadowCasterSlots(std::move(slots));
+        if (scene->runtime) {
+            const auto alpha = scene->runtime->NodeAlpha(node->Name()).value_or(1);
+            scene->runtime->RegisterNodeAlpha(node->Name(), mesh->MaterialSlots(), alpha);
+            scene->runtime->SetNodeColor(node->Name(), scene->runtime->NodeColor(node->Name()));
+        }
+    };
+    scene->shadows.casters.push_back(std::move(preparation));
+    scene->shadows.dirty = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3868,166 +5020,74 @@ void ResolveTextFont(fs::VFS& vfs, TextLayerState& state, const std::string& key
     state.resolved_font_fit      = face.fit;
 }
 
-/// How a text card is drawn; each combination is one generated program (P3 R85).
-struct TextCardKind {
-    bool composite { false }; // seeds its picture from the scene behind it
-    bool styled { false };    // the picture holds three coverage masks
-    bool outline { false };
-    bool filled { false };    // an opaque background lies under the glyphs
-    int  neutral { 0 };       // 1: over white, 2: over black (colour blend modes 5 and 10)
-};
-
-std::string TextProgramName(const TextCardKind& kind) {
-    std::string name = kind.composite ? "text_composite" : "text";
-    if (kind.styled) name += kind.outline ? "_styled_outline" : "_styled";
-    if (kind.filled) name += "_filled";
-    if (kind.neutral == 1) name += "_over_white";
-    if (kind.neutral == 2) name += "_over_black";
-    return name;
-}
-
-std::string TextVertexSource(const TextCardKind& kind) {
-    std::string source = "uniform mat4 g_ModelViewProjectionMatrix;\n";
-    if (kind.composite) source += "uniform mat4 g_EffectModelViewProjectionMatrix;\n";
-    source += "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n";
-    if (kind.composite) source += "varying vec3 v_ScreenPos;\n";
-    source += "void main() {\n"
-              "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
-              "  v_TexCoord = a_TexCoord;\n";
-    if (kind.composite) {
-        // Where the vertex lies on the screen, for the picture behind it: the layer's own
-        // matrix, since the pass itself draws into the chain's buffer.
-        source += "  vec4 s = g_EffectModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
-                  "  v_ScreenPos = vec3(s.x * 0.5 + s.w * 0.5, s.w * 0.5 - s.y * 0.5, s.w);\n";
+/// One of Wallpaper Engine's font materials, `materials/fonts/<name>.json` (`basefont`,
+/// `basefontrgba`, `fontbackground`, each with `_msdf` and `_depth` forms, decompiles/G-F9.md,
+/// G-F10.md), with the style combos the text object adds in code (`sub_1401B3B60`).
+bool LoadFontMaterial(ParseContext& context, const std::string& name, const TextStyleUniforms* style,
+                      std::vector<std::string> textures, SceneMaterial& material, LoadedMaterial& loaded) {
+    nlohmann::json json;
+    if (! PARSE_JSON(fs::GetFileContent(*context.vfs, "/assets/materials/fonts/" + name + ".json"), json)) {
+        return false;
     }
-    source += "}\n";
-    return source;
-}
-
-std::string TextFragmentSource(const TextCardKind& kind) {
-    std::string source = "uniform sampler2D g_Texture0;\n";
-    if (kind.composite) source += "uniform sampler2D g_Texture1;\nuniform float g_Composite;\n";
-    source += "uniform vec3 g_Color;\nuniform float g_Alpha;\nuniform float g_Brightness;\n";
-    if (kind.outline) source += "uniform vec3 g_OutlineColor;\n";
-    if (kind.styled) source += "uniform vec3 g_ShadowColor;\n";
-    if (kind.filled) {
-        source += "uniform vec3 g_Background;\nuniform float g_BackgroundBrightness;\n"
-                  "uniform vec2 g_CardInset;\n";
-    }
-    source += "varying vec2 v_TexCoord;\n";
-    if (kind.composite) source += "varying vec3 v_ScreenPos;\n";
-    source += "void main() {\n"
-              "  vec4 texel = texture(g_Texture0, v_TexCoord);\n"
-              "  vec3 tint = g_Color * g_Brightness;\n"
-              "  vec3 color;\n"
-              "  float cover;\n";
-    if (kind.styled) {
-        source += "  float glyph_a = texel.g * g_Alpha;\n"
-                  "  float shadow_a = texel.b * g_Alpha;\n";
-        source += kind.outline ? "  vec3 glyph = mix(g_OutlineColor, tint, texel.r);\n"
-                               : "  vec3 glyph = tint;\n";
-        source += "  cover = glyph_a + shadow_a * (1.0 - glyph_a);\n"
-                  "  color = cover > 0.0 ? (glyph * glyph_a + g_ShadowColor * shadow_a * "
-                  "(1.0 - glyph_a)) / cover : glyph;\n";
-    } else {
-        source += "  color = texel.rgb * tint;\n"
-                  "  cover = texel.a * g_Alpha;\n";
-    }
-    if (kind.filled) {
-        source += "  vec3 fill_color = g_Background * g_BackgroundBrightness;\n"
-                  "  bool inside = v_TexCoord.x >= g_CardInset.x && v_TexCoord.x <= 1.0 - g_CardInset.x "
-                  "&& v_TexCoord.y >= g_CardInset.y && v_TexCoord.y <= 1.0 - g_CardInset.y;\n"
-                  "  float fill = inside ? g_Alpha : 0.0;\n";
-    } else {
-        source += "  vec3 fill_color = vec3(0.0);\n  float fill = 0.0;\n";
-    }
-    if (kind.composite) {
-        source += "  if (g_Composite > 0.5) {\n"
-                  "    vec2 screen = v_ScreenPos.xy / v_ScreenPos.z;\n"
-                  "    vec3 behind = texture(g_Texture1, screen).rgb;\n"
-                  "    vec3 base = fill > 0.0 ? fill_color : behind;\n"
-                  "    float held = pow(cover, " + std::to_string(kTextCompositeAlphaExponent) + ") + fill * (1.0 - cover);\n"
-                  "    gl_FragColor = vec4(mix(base, color, cover), clamp(held, 0.0, 1.0));\n"
-                  "    return;\n"
-                  "  }\n";
-    }
-    if (kind.neutral != 0) {
-        source += kind.neutral == 1 ? "  vec3 neutral = vec3(1.0);\n" : "  vec3 neutral = vec3(0.0);\n";
-        source += "  vec3 base = fill > 0.0 ? fill_color : neutral;\n"
-                  "  gl_FragColor = vec4(mix(base, color, cover), 1.0);\n";
-    } else {
-        source += "  float total = cover + fill * (1.0 - cover);\n"
-                  "  vec3 mixed = total > 0.0 ? (color * cover + fill_color * fill * (1.0 - cover)) / total : color;\n"
-                  "  gl_FragColor = vec4(mixed, total);\n";
-    }
-    source += "}\n";
-    return source;
-}
-
-/// The card's material: the generated program of `kind`, over the layer's own raster
-/// (slot 0) and, for a composite, the scene colour buffer (slot 1).
-bool LoadTextMaterial(ParseContext& context, const TextCardKind& kind, const std::string& raster,
-                      SceneMaterial& material, LoadedMaterial& loaded) {
     wpscene::WPMaterial authored;
-    authored.shader     = TextProgramName(kind);
-    authored.blending   = "translucent";
+    authored.FromJson(json);
+    if (style != nullptr) {
+        if (style->outline) authored.combos["OUTLINE_ENABLED"] = 1;
+        if (style->blur) authored.combos["BLUR_ENABLED"] = 1;
+        if (style->shadow) authored.combos["DROP_SHADOW_ENABLED"] = 1;
+    }
+    authored.textures = std::move(textures);
+    if (! LoadMaterial(context, authored, material, loaded, {})) return false;
+    material.name = "text";
+    if (style != nullptr) {
+        auto& values = material.customShader.constValues;
+        values["g_RenderVar0"] = ShaderValue(style->rv0);
+        values["g_RenderVar1"] = ShaderValue(style->rv1);
+        values["g_RenderVar2"] = ShaderValue(style->rv2);
+        values["g_RenderVar3"] = ShaderValue(style->rv3);
+    }
+    return true;
+}
+
+/// What a composite text layer's chain buffer starts from before its glyphs are drawn into it:
+/// the scene behind the card with no alpha, or the opaque background at the layer's alpha
+/// (`sub_140258900`, `sub_140257C30`). The glyphs then blend over it with the translucent
+/// blend's alpha rule, which is what the composite's alpha comes from (T.7.4).
+bool LoadTextSeedMaterial(ParseContext& context, SceneMaterial& material, LoadedMaterial& loaded) {
+    wpscene::WPMaterial authored;
+    authored.shader     = "text_seed";
+    authored.blending   = "disabled";
     authored.cullmode   = "nocull";
     authored.depthtest  = "disabled";
     authored.depthwrite = "disabled";
-    authored.textures   = { raster };
-    if (kind.composite) authored.textures.push_back("_rt_FullFrameBuffer");
+    authored.textures   = { "_rt_FullFrameBuffer" };
     MaterialLoadOptions options;
-    options.vertex_source   = TextVertexSource(kind);
-    options.fragment_source = TextFragmentSource(kind);
+    options.vertex_source =
+        "uniform mat4 g_ModelViewProjectionMatrix;\nuniform mat4 g_EffectModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec3 v_ScreenPos;\n"
+        "void main() {\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+        // Where the vertex lies on the screen: the layer's own matrix, since the pass itself
+        // draws into the chain's buffer.
+        "  vec4 s = mul(vec4(a_Position, 1.0), g_EffectModelViewProjectionMatrix);\n"
+        "  v_ScreenPos = vec3(s.x * 0.5 + s.w * 0.5, s.w * 0.5 - s.y * 0.5, s.w);\n"
+        "}\n";
+    options.fragment_source =
+        "uniform sampler2D g_Texture0;\nuniform vec3 g_Background;\nuniform float g_BackgroundBrightness;\n"
+        "uniform float g_Alpha;\nuniform float g_Fill;\nvarying vec3 v_ScreenPos;\n"
+        "void main() {\n"
+        "  vec3 behind = texSample2D(g_Texture0, v_ScreenPos.xy / v_ScreenPos.z).rgb;\n"
+        "  gl_FragColor = g_Fill > 0.5 ? vec4(g_Background * g_BackgroundBrightness, g_Alpha)\n"
+        "                              : vec4(behind, 0.0);\n"
+        "}\n";
     if (! LoadMaterial(context, authored, material, loaded, options)) return false;
     material.name = "text";
     return true;
 }
 
-/// A raster side in whole texels, 1 to 4096.
-uint32_t TextRasterSide(float extent) {
-    if (! (extent > 1.0f)) return 1;
-    if (extent >= 4096.0f) return 4096;
-    return static_cast<uint32_t>(std::ceil(extent));
-}
-
-/// Draws the text once and hands the picture to the scene's image source, under the
-/// name the card's material reads it by.
-void PublishInitialTextRaster(Scene& scene, const TextLayerState& state, const TextLayerLayout& layout) {
-    auto* images = dynamic_cast<RuntimeImageSource*>(scene.imageParser.get());
-    if (images == nullptr) return;
-    const auto     wanted = TextLayerRasterSizeForLayout(state, layout);
-    const uint32_t width  = TextRasterSide(wanted.x());
-    const uint32_t height = TextRasterSide(wanted.y());
-    std::vector<uint8_t> rgba(static_cast<std::size_t>(width) * height * 4u, 0u);
-    RasterizeTextLayer(state, width, height, rgba);
-    images->SetRgbaImage(TextTextureName(state.layer_key), width, height, rgba.data(), rgba.size());
-}
-
 /// The brightness a text value takes: only an HDR scene applies it.
 float EffectiveTextBrightness(const Scene& scene, float authored) {
     return scene.hdr && std::isfinite(authored) ? authored : 1.0f;
-}
-
-/// Hands a text layer's live constant to its material: `convert` turns the value into the
-/// uniform's lanes.
-void FollowTextConstant(ParseContext& context, const std::shared_ptr<SceneMaterial>& material,
-                        const nlohmann::json& entry, const char* key, const char* uniform,
-                        const std::string& layer_key,
-                        std::function<ShaderValue(const DynamicValue&)> convert,
-                        bool vec3) {
-    auto* runtime = context.scene->runtime.get();
-    if (runtime == nullptr) return;
-    const auto setting = entry.find(key);
-    if (setting == entry.end() || ! HasDynamicSetting(*setting)) return;
-    auto value = vec3 ? ResolveVec3Setting(*runtime, *setting, layer_key)
-                      : ResolveFloatSetting(*runtime, *setting, layer_key);
-    std::weak_ptr<SceneMaterial> weak = material;
-    const std::string            name = uniform;
-    runtime->RegisterDynamicValueListener(
-        std::move(value), [weak, name, convert = std::move(convert)](const DynamicValue& now) {
-            if (const auto held = weak.lock()) held->customShader.constValues[name] = convert(now);
-        });
 }
 
 /// Loads one text object (P3 R2 to R11, R17 to R26, R29 to R33, R39 to R55).
@@ -4053,15 +5113,16 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
     }
 
     // The effect chain: the effects that are built (visible, or switchable by a script)
-    // and have a pass, then the colour blend's passthrough. A buffer of an effect is the
-    // card's size whatever its declared scale.
+    // and have a pass, then the colour blend's passthrough, then in a fogged scene the
+    // passthrough that fogs the composite where the layer sits (the WE probe probetext-fog
+    // shows text fogged; its glyph passes themselves never are, decompiles/G-F11.md).
+    // Effect buffers keep their authored scale and explicit extent rules.
     ResolveUserEffectVisibility(context, obj.effects, plan.key);
     std::vector<wpscene::WPImageEffect> chain_sources;
-    chain_sources.reserve(obj.effects.size() + 1);
+    chain_sources.reserve(obj.effects.size() + 2);
     for (const auto& effect : obj.effects) {
-        if (! EffectIsBuilt(effect) || effect.materials.empty()) continue;
+        if (! EffectIsBuilt(effect, context.scripts_use_effects) || effect.materials.empty()) continue;
         chain_sources.push_back(effect);
-        for (auto& fbo : chain_sources.back().fbos) fbo.scale = 1;
     }
     const std::size_t real_effects = chain_sources.size();
     const bool        additive     = obj.colorBlendMode == kAdditiveColorBlendMode;
@@ -4071,7 +5132,16 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
         if (! effect.has_value()) return false;
         chain_sources.push_back(std::move(*effect));
     }
+    bool fog_pass = false;
+    if (scene_fog && ! blend_pass) {
+        if (auto fog = MakeFogCompositeEffect(*context.vfs); fog.has_value()) {
+            chain_sources.push_back(std::move(*fog));
+            fog_pass = true;
+        }
+    }
     const bool has_chain = ! chain_sources.empty();
+    // Composited whatever the effects do: a colour blend, an LED source, fog (T.7.1).
+    const bool composites_regardless = blend_pass || obj.ledsource || fog_pass;
 
     // What the layer says.
     std::unique_ptr<DynamicValue> text_value;
@@ -4122,66 +5192,110 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
     state.style.shadow_opacity    = obj.dropshadowopacity;
     state.style.shadow_offset     = linalg::Vector2f(obj.dropshadowoffset[0], obj.dropshadowoffset[1]);
     state.style.shadow_color      = Vector3f(obj.dropshadowcolor.data());
+    state.msdf                    = obj.msdf;
+    state.depth_test              = obj.depthtest != "disabled";
+    state.opaque_background       = obj.opaquebackground;
+    state.background_color        = Vector3f(obj.backgroundcolor.data());
+    state.background_brightness   = obj.backgroundbrightness;
+    state.anchor                  = ParseTextScreenAnchor(obj.anchor) == TextScreenAnchor::None ? "none" : obj.anchor;
+    if (! context.twemoji_read) {
+        // The assets' Twemoji, a face of Wallpaper Engine's glyph fallback list; read once.
+        context.twemoji_read = true;
+        constexpr std::string_view kTwemoji = "/assets/fonts/TwemojiMozilla.ttf";
+        const std::string bytes =
+            context.vfs->Contains(kTwemoji) ? fs::GetFileContent(*context.vfs, std::string(kTwemoji)) : std::string();
+        if (! bytes.empty()) context.twemoji_font = std::vector<uint8_t>(bytes.begin(), bytes.end());
+    }
+    state.asset_emoji_font        = context.twemoji_font;
     ResolveTextFont(*context.vfs, state, SettingText(obj.font).empty() ? std::string(kDefaultSceneFontKey)
                                                                        : SettingText(obj.font));
 
-    // Laid out and drawn once, here.
-    const TextLayerLayout layout = MeasureTextLayerLayout(state);
+    // Laid out and its glyphs placed once, here.
+    const TextGlyphBuild  build  = BuildTextGlyphs(state);
+    const TextLayerLayout layout = build.layout;
     const auto            frame  = TextLayerRenderFrameForLayout(state, layout);
-    PublishInitialTextRaster(scene, state, layout);
+    if (auto* images = dynamic_cast<RuntimeImageSource*>(scene.imageParser.get())) {
+        PublishTextAtlases(*images, plan.key, build);
+    }
 
-    // The card's material.
-    TextCardKind kind;
-    kind.composite = real_effects > 0 && ! blend_pass;
-    kind.styled    = TextStyleActive(state.style);
-    kind.outline   = kind.styled && state.style.outline;
-    kind.filled    = obj.opaquebackground;
-    if (blend_pass && obj.colorBlendMode == 5) kind.neutral = 1;
-    if (blend_pass && obj.colorBlendMode == 10) kind.neutral = 2;
-    SceneMaterial  card;
-    LoadedMaterial card_loaded;
-    if (! LoadTextMaterial(context, kind, TextTextureName(plan.key), card, card_loaded)) {
-        LOG_ERROR("text object %d: the card's program cannot be loaded", plan.id);
+    // The materials: Wallpaper Engine's font materials, the `_depth` ones in a perspective
+    // scene unless the layer says `depthtest disabled` (sub_140256F20, G-F10).
+    const bool  depth   = ! context.is_ortho && obj.depthtest != "disabled";
+    const bool  df      = build.distance_field;
+    const auto  style   = TextStyleRenderVars(state.style, state.point_size);
+    const std::string suffix = std::string(df ? "_msdf" : "") + (depth ? "_depth" : "");
+    SceneMaterial  glyph_material, color_material, background_material, seed_material;
+    LoadedMaterial glyph_loaded, color_loaded, background_loaded, seed_loaded;
+    std::vector<std::string> color_textures = df ? std::vector<std::string> { TextAtlasName(plan.key), TextColorAtlasName(plan.key) }
+                                                 : std::vector<std::string> { TextColorAtlasName(plan.key) };
+    if (! LoadFontMaterial(context, "basefont" + suffix, &style, { TextAtlasName(plan.key) }, glyph_material,
+                           glyph_loaded) ||
+        ! LoadFontMaterial(context, "basefontrgba" + suffix, &style, std::move(color_textures), color_material,
+                           color_loaded)) {
+        LOG_ERROR("text object %d: the font materials cannot be loaded", plan.id);
         return false;
     }
-    card.blenmode    = has_chain ? BlendMode::Normal : (additive ? BlendMode::Additive : BlendMode::Translucent);
-    card.depth_test  = false;
-    card.depth_write = false;
-    {
-        auto& values = card.customShader.constValues;
-        card.tint.color      = obj.color;
-        card.tint.brightness = 1.0f;
-        values["g_Color"]      = ShaderValue(obj.color.data(), 3);
-        values["g_Brightness"] = ShaderValue(brightness);
-        SetMaterialAlpha(card, obj.alpha);
-        if (kind.outline) values["g_OutlineColor"] = ShaderValue(obj.outlinecolor.data(), 3);
-        if (kind.styled) values["g_ShadowColor"] = ShaderValue(obj.dropshadowcolor.data(), 3);
-        if (kind.filled) {
-            values["g_Background"] = ShaderValue(obj.backgroundcolor.data(), 3);
-            values["g_BackgroundBrightness"] =
-                ShaderValue(EffectiveTextBrightness(scene, obj.backgroundbrightness));
-        }
+    if (obj.opaquebackground &&
+        ! LoadFontMaterial(context, std::string("fontbackground") + (depth ? "_depth" : ""), nullptr, {},
+                           background_material, background_loaded)) {
+        LOG_ERROR("text object %d: the background material cannot be loaded", plan.id);
+        return false;
+    }
+    if (has_chain && ! LoadTextSeedMaterial(context, seed_material, seed_loaded)) {
+        LOG_ERROR("text object %d: the composite's seed cannot be loaded", plan.id);
+        return false;
+    }
+    SetTextAtlasResolutions(&glyph_material, &color_material, build);
+    for (SceneMaterial* glyphs : { &glyph_material, &color_material }) {
+        glyphs->blenmode        = BlendMode::Translucent;
+        glyphs->tint.color      = obj.color;
+        glyphs->tint.brightness = brightness;
+        glyphs->customShader.constValues["g_Color4"] = ShaderValue(std::array<float, 4> {
+            obj.color[0] * brightness, obj.color[1] * brightness, obj.color[2] * brightness, obj.alpha });
+        SetMaterialAlpha(*glyphs, obj.alpha);
+    }
+    const float background_brightness = EffectiveTextBrightness(scene, obj.backgroundbrightness);
+    if (obj.opaquebackground) {
+        auto& values = background_material.customShader.constValues;
+        values["g_Color"] = ShaderValue(std::array<float, 3> { obj.backgroundcolor[0] * background_brightness,
+                                                               obj.backgroundcolor[1] * background_brightness,
+                                                               obj.backgroundcolor[2] * background_brightness });
+        SetMaterialAlpha(background_material, obj.alpha);
+    }
+    if (has_chain) {
+        auto& values = seed_material.customShader.constValues;
+        values["g_Background"]           = ShaderValue(obj.backgroundcolor.data(), 3);
+        values["g_BackgroundBrightness"] = ShaderValue(background_brightness);
+        values["g_Fill"]                 = ShaderValue(obj.opaquebackground ? 1.0f : 0.0f);
+        SetMaterialAlpha(seed_material, obj.alpha);
     }
 
-    // The node, the card and what the runtime keeps of the layer.
+    // The node, its mesh and what the runtime keeps of the layer.
     auto& layer = TypedLayer(context, at, entry, plan);
     const auto node = layer.node;
-    auto mesh = MakeTextCardMesh(frame.bounds.left, frame.bounds.bottom, frame.bounds.right,
-                                 frame.bounds.top);
-    mesh->AddMaterial(std::move(card));
+    node->SetTransparentSort(SceneNode::TransparentSort::Depth);
+    auto mesh = MakeTextLayerMesh(frame.bounds, build);
+    mesh->MaterialSlots().push_back(nullptr); // slot 0, set by the draw mode below
+    mesh->AddMaterial(std::move(glyph_material));
+    mesh->AddMaterial(std::move(color_material));
     node->AddMesh(mesh);
     node->SetSkipRenderPass(false);
-    const auto card_material = mesh->MaterialSlotPtr(0);
+    const auto glyph_ptr = mesh->MaterialSlotPtr(kTextGlyphSubmesh);
+    const auto color_ptr = mesh->MaterialSlotPtr(kTextColorGlyphSubmesh);
+    const auto background_ptr =
+        obj.opaquebackground ? std::make_shared<SceneMaterial>(std::move(background_material)) : nullptr;
+    const auto seed_ptr = has_chain ? std::make_shared<SceneMaterial>(std::move(seed_material)) : nullptr;
     context.text_cards[plan.id] = frame;
     if (context.shader_updater != nullptr) {
         WPShaderValueData data;
         data.parallaxDepth = obj.parallaxDepth;
-        data.renderTargets = card_loaded.render_targets;
-        context.shader_updater->SetNodeData(node.get(), 0, data);
+        for (uint32_t slot = 0; slot <= kTextColorGlyphSubmesh; ++slot) {
+            data.renderTargets = slot == 0 ? (seed_ptr != nullptr ? seed_loaded.render_targets : background_loaded.render_targets)
+                                           : slot == 1 ? glyph_loaded.render_targets : color_loaded.render_targets;
+            context.shader_updater->SetNodeData(node.get(), slot, data);
+        }
     }
 
-    DynamicValue* composite_value = nullptr;
-    DynamicValue* inset_value     = nullptr;
     if (runtime != nullptr) {
         runtime->RegisterTextLayer(plan.key, state, layout);
         if (text_value != nullptr) runtime->RegisterTextValue(plan.key, std::move(text_value), false);
@@ -4189,19 +5303,19 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
         if (const auto anchor = ParseTextScreenAnchor(obj.anchor); anchor != TextScreenAnchor::None) {
             runtime->SetNodeScreenAnchor(plan.key, anchor);
         }
-        if (kind.filled) {
-            auto inset = std::make_unique<DynamicValue>(TextCardInsetInRaster(state, layout));
-            inset_value = inset.get();
-            runtime->RegisterMaterialConstant(card_material, "g_CardInset", std::move(inset));
-        }
-    } else if (kind.filled) {
-        const auto inset = TextCardInsetInRaster(state, layout);
-        card_material->customShader.constValues["g_CardInset"] =
-            ShaderValue(std::array<float, 2> { inset.x(), inset.y() });
     }
+    // Text a perspective flag puts in an ortho scene is drawn through the perspective camera
+    // (T.9), as an image layer's card is.
+    const bool perspective_text = obj.perspective && context.is_ortho;
+    const std::string own_camera = perspective_text ? "global_perspective" : "";
+    if (! has_chain) node->SetCamera(own_camera);
 
     // The effect chain, drawn in the card's own plane.
-    std::vector<std::shared_ptr<SceneMaterial>> all_materials { card_material };
+    std::vector<std::shared_ptr<SceneMaterial>> all_materials { glyph_ptr, color_ptr };
+    if (background_ptr != nullptr) all_materials.push_back(background_ptr);
+    if (seed_ptr != nullptr) all_materials.push_back(seed_ptr);
+    SceneImageEffectLayer* text_chain = nullptr;
+    std::string            chain_camera;
     std::vector<std::shared_ptr<SceneImageEffect>> counted_effects;
     TextLayerRenderFrame effect_frame = TextLayerEffectFrame(frame);
     const bool referenced = plan.id != 0 && context.referenced_layer_ids.contains(plan.id);
@@ -4236,22 +5350,31 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
                                                  effect_frame.bounds.right, effect_frame.bounds.top);
         chain->SetFinalMeshDynamic(MeshUpdate::OnEvent);
         chain->FinalMesh().ChangeMeshDataFrom(*final_card);
-        // The last pass is drawn translucent by the alpha it holds, whatever the blend.
+        // The last pass is drawn translucent by the alpha it holds, whatever the blend, with
+        // the depth test of the layer's materials (G-F10); its depth write stays the pass's.
         chain->SetFinalBlend(BlendMode::Translucent);
-        // With every effect off the layer is plain text again, added when it says so.
-        if (additive) chain->SetIdleFinalBlend(BlendMode::Additive);
-        chain->SetFinalDepth(false, false);
+        chain->SetFinalDepthTest(depth);
+        if (perspective_text) chain->SetFinalCamera("global_perspective");
 
         std::vector<std::shared_ptr<SceneMaterial>> unused_tint;
         std::size_t index     = 0;
         bool        any_fixed = false;
         for (const auto& source : chain_sources) {
-            const bool is_blend_pass = blend_pass && index + 1 == chain_sources.size();
+            // The colour blend's and the fog's passthroughs follow the authored effects.
+            const bool is_fixed_pass = index >= real_effects;
             std::shared_ptr<SceneImageEffect> built;
-            if (BuildEffect(context, proxy, source, index, node, *chain, extent, false, is_blend_pass,
-                            false, false, plan.key, camera_name, unused_tint, all_materials, &built)) {
-                if (! source.scripted_visible) any_fixed = true;
+            if (BuildEffect(context, proxy, source, index, node, *chain, extent, false, is_fixed_pass,
+                            false, false, plan.key, camera_name, unused_tint, all_materials, &built,
+                            nullptr, false, ! is_fixed_pass, { 1.0f, 1.0f }, /*per_layer_buffers*/ true)) {
+                if (! source.scripted_visible && (! context.scripts_use_effects || is_fixed_pass)) {
+                    any_fixed = true;
+                }
                 if (index < real_effects && built != nullptr) counted_effects.push_back(built);
+            } else if (! is_fixed_pass && context.scripts_use_effects && runtime != nullptr) {
+                const auto& effect_name =
+                    ! source.instance_name.empty() ? source.instance_name : source.name;
+                runtime->RegisterEffectObject(
+                    plan.key, std::make_shared<SceneImageEffect>(), effect_name, {}, true);
             }
             ++index;
         }
@@ -4281,7 +5404,7 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
                     found->second.bind.enable = true;
                     found->second.bind.screen = false;
                     found->second.bind.name   = first;
-                    found->second.bind.scale  = 1.0;
+                    found->second.bind.scale  = 1.0 / std::max<double>(1.0, fbo.scale);
                 }
                 ++position;
             }
@@ -4296,10 +5419,11 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
         camera->AttatchImgEffect(chain);
         camera->Update();
         scene.cameras[camera_name] = camera;
-        node->SetCamera(camera_name);
-        // The own pass fills its buffer untransformed; the final card carries the placement.
-        node->SetRenderTransformOverride(Matrix4d::Identity());
+        // The node's camera and transform follow the draw mode (`ApplyTextDrawMode`): the chain's
+        // camera and no transform while it is a composite, the layer's own otherwise.
         layer.effects = chain;
+        text_chain    = chain.get();
+        chain_camera  = camera_name;
         if (runtime != nullptr) {
             runtime->RegisterNodeEffectFinal(plan.key, node.get(), chain.get(), effect_frame);
         }
@@ -4327,34 +5451,54 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
     }
 
     // What follows the layer's effects as they are switched (P3 R26, R44).
-    const bool any_counted_visible = std::any_of(counted_effects.begin(), counted_effects.end(),
-                                                 [](const auto& effect) { return effect->visible; });
-    if (kind.composite) {
-        auto composite = std::make_unique<DynamicValue>(any_counted_visible ? 1.0f : 0.0f);
-        composite_value = composite.get();
-        if (runtime != nullptr) {
-            runtime->RegisterMaterialConstant(card_material, "g_Composite", std::move(composite));
-        } else {
-            card_material->customShader.constValues["g_Composite"] =
-                ShaderValue(any_counted_visible ? 1.0f : 0.0f);
-            composite_value = nullptr;
-        }
-    }
-    if (runtime != nullptr && (! counted_effects.empty() || kind.filled || kind.composite)) {
-        SceneRuntimeContext::TextEffectGate gate;
-        gate.padded_regardless = TextCardIsPaddedRegardless(obj, scene_fog);
-        gate.effects           = counted_effects;
-        gate.composite         = composite_value;
-        gate.card_inset        = inset_value;
+    SceneRuntimeContext::TextEffectGate gate;
+    gate.padded_regardless     = TextCardIsPaddedRegardless(obj, scene_fog);
+    gate.composites_regardless = composites_regardless;
+    gate.particle_image_source = context.particle_image_targets.contains(plan.id);
+    gate.padding_without_background = blend_pass || obj.ledsource || scene_fog;
+    gate.depth_available       = !context.is_ortho;
+    gate.material_key = { .distance_field = df, .outline = style.outline, .blur = style.blur,
+                          .shadow = style.shadow, .depth = depth, .background = obj.opaquebackground };
+    gate.effects               = counted_effects;
+    gate.chain                 = text_chain;
+    gate.node                  = node.get();
+    gate.chain_camera          = chain_camera;
+    gate.own_camera            = own_camera;
+    gate.seed                  = seed_ptr;
+    gate.background            = background_ptr;
+    gate.glyphs                = { glyph_ptr, color_ptr };
+    gate.additive              = additive;
+    if (runtime != nullptr) {
         runtime->RegisterTextEffectGate(plan.key, std::move(gate));
+    } else {
+        const bool any_visible = std::any_of(counted_effects.begin(), counted_effects.end(),
+                                             [](const auto& effect) { return effect->visible; });
+        SceneRuntimeContext::ApplyTextDrawMode(gate, has_chain && (composites_regardless || any_visible));
     }
 
-    // Alpha, colour and brightness: live, and never part of the picture (P3 R39 to R41).
-    RegisterAlphaSetting(context, plan.key,
-                         entry.contains("alpha") ? entry.at("alpha") : nlohmann::json(), obj.alpha,
-                         all_materials);
+    // Alpha, colour and brightness: live uniforms of the glyph materials (P3 R39 to R41).
+    const auto alpha_setting = entry.contains("alpha") ? entry.at("alpha") : nlohmann::json();
+    if (runtime != nullptr && HasDynamicSetting(alpha_setting)) {
+        auto live_materials = std::make_shared<std::vector<std::shared_ptr<SceneMaterial>>>(all_materials);
+        runtime->RegisterDynamicValueListener(ResolveFloatSetting(*runtime, alpha_setting, plan.key),
+            [live_materials](const DynamicValue& now) {
+                for (const auto& material : *live_materials) SetMaterialAlpha(*material, now.getFloat());
+            });
+        runtime->SetTextBackgroundAlphaBinding(plan.key,
+            [live_materials](const std::shared_ptr<SceneMaterial>& material, bool enabled) {
+                if (enabled) live_materials->push_back(material);
+                else std::erase(*live_materials, material);
+            });
+    } else if (auto animation = ResolveScalarAnimation(alpha_setting); runtime != nullptr && animation) {
+        const auto playback = runtime->RegisterScalarAnimation(plan.key, std::move(*animation));
+        for (const auto& material : all_materials) runtime->RegisterMaterialAlphaAnimation(material, playback);
+        runtime->SetTextBackgroundAlphaBinding(plan.key,
+            [runtime, playback](const std::shared_ptr<SceneMaterial>& material, bool enabled) {
+                if (enabled) runtime->RegisterMaterialAlphaAnimation(material, playback);
+            });
+    } else RegisterAlphaSetting(context, plan.key, alpha_setting, obj.alpha, all_materials);
     if (runtime != nullptr) {
-        const std::vector<std::shared_ptr<SceneMaterial>> tinted { card_material };
+        const std::vector<std::shared_ptr<SceneMaterial>> tinted { glyph_ptr, color_ptr };
         if (const auto color = entry.find("color"); color != entry.end() && color->is_object()) {
             nlohmann::json only_color = nlohmann::json::object();
             only_color["color"]       = *color;
@@ -4363,36 +5507,131 @@ bool LoadTextEntry(ParseContext& context, std::size_t at, const nlohmann::json& 
             runtime->BindMaterialColor(plan.key, tinted,
                                        std::make_unique<DynamicValue>(Vector3f(obj.color.data())));
         }
+        const bool hdr = scene.hdr;
+        if (const auto setting = entry.find("brightness"); setting != entry.end() && HasDynamicSetting(*setting)) {
+            std::vector<std::weak_ptr<SceneMaterial>> weak { glyph_ptr, color_ptr };
+            runtime->RegisterDynamicValueListener(
+                ResolveFloatSetting(*runtime, *setting, plan.key), [weak, hdr](const DynamicValue& now) {
+                    const float value = now.getFloat();
+                    for (const auto& held : weak) {
+                        const auto material = held.lock();
+                        if (material == nullptr) continue;
+                        material->tint.brightness = hdr && std::isfinite(value) ? value : 1.0f;
+                        auto& values = material->customShader.constValues;
+                        float alpha = 1.0f;
+                        if (const auto found = values.find("g_Color4"); found != values.end() && found->second.size() >= 4) {
+                            alpha = found->second[3];
+                        }
+                        values["g_Color4"] = ShaderValue(std::array<float, 4> {
+                            material->tint.color[0] * material->tint.brightness,
+                            material->tint.color[1] * material->tint.brightness,
+                            material->tint.color[2] * material->tint.brightness, alpha });
+                    }
+                });
+        }
     }
-    const bool hdr = scene.hdr;
-    FollowTextConstant(context, card_material, entry, "brightness", "g_Brightness", plan.key,
-                       [hdr](const DynamicValue& now) {
-                           const float value = now.getFloat();
-                           return ShaderValue(hdr && std::isfinite(value) ? value : 1.0f);
-                       }, false);
-    const auto vec3_of = [](const DynamicValue& now) {
-        const auto lanes = now.getVec3();
-        return ShaderValue(std::array<float, 3> { lanes.x(), lanes.y(), lanes.z() });
-    };
-    if (kind.filled) {
-        FollowTextConstant(context, card_material, entry, "backgroundcolor", "g_Background", plan.key,
-                           vec3_of, true);
-        FollowTextConstant(context, card_material, entry, "backgroundbrightness",
-                           "g_BackgroundBrightness", plan.key,
-                           [hdr](const DynamicValue& now) {
-                               const float value = now.getFloat();
-                               return ShaderValue(hdr && std::isfinite(value) ? value : 1.0f);
-                           }, false);
+    // One driver owns each background property, whether or not its quad exists yet.
+    // A later script toggle reads these held values instead of registering another script.
+    if (runtime != nullptr) {
+        const std::string key = plan.key;
+        if (const auto setting = entry.find("backgroundcolor"); setting != entry.end() && HasDynamicSetting(*setting)) {
+            runtime->RegisterDynamicValueListener(ResolveVec3Setting(*runtime, *setting, key),
+                [runtime, key](const DynamicValue& now) { runtime->SetTextBackgroundColor(key, now.getVec3()); });
+        }
+        if (const auto setting = entry.find("backgroundbrightness"); setting != entry.end() && HasDynamicSetting(*setting)) {
+            runtime->RegisterDynamicValueListener(ResolveFloatSetting(*runtime, *setting, key),
+                [runtime, key](const DynamicValue& now) { runtime->SetTextBackgroundBrightness(key, now.getFloat()); });
+        }
     }
-    if (kind.outline) {
-        FollowTextConstant(context, card_material, entry, "outlinecolor", "g_OutlineColor", plan.key,
-                           vec3_of, true);
+    // The style's sizes, opacity and colours are uniforms of the font shader (`g_RenderVar0..3`,
+    // `TextStyleRenderVars`): one a property or script drives follows it every time it changes,
+    // with no layout and no rebuild (T.8). The switches stay load-time: they pick the combos.
+    if (runtime != nullptr) {
+        const std::string layer_key = plan.key;
+        const auto follow = [&](const char* key, auto apply, bool vector) {
+            const auto setting = entry.find(key);
+            if (setting == entry.end() || ! HasDynamicSetting(*setting)) return;
+            auto value = vector ? ResolveVec3Setting(*runtime, *setting, plan.key)
+                                : ResolveFloatSetting(*runtime, *setting, plan.key);
+            runtime->RegisterDynamicValueListener(
+                std::move(value), [runtime, layer_key, apply](const DynamicValue& now) {
+                    runtime->EditTextStyleUniforms(layer_key, [&](TextStyle& style) { apply(style, now); });
+                });
+        };
+        follow("outlinethickness", [](TextStyle& style, const DynamicValue& now) {
+            style.outline_thickness = now.getFloat(); }, false);
+        follow("blursize", [](TextStyle& style, const DynamicValue& now) { style.blur_size = now.getFloat(); },
+               false);
+        follow("dropshadowsize", [](TextStyle& style, const DynamicValue& now) {
+            style.shadow_size = now.getFloat(); }, false);
+        follow("dropshadowopacity", [](TextStyle& style, const DynamicValue& now) {
+            style.shadow_opacity = now.getFloat(); }, false);
+        follow("outlinecolor", [](TextStyle& style, const DynamicValue& now) {
+            style.outline_color = now.getVec3(); }, true);
+        follow("dropshadowcolor", [](TextStyle& style, const DynamicValue& now) {
+            style.shadow_color = now.getVec3(); }, true);
     }
-    if (kind.styled) {
-        FollowTextConstant(context, card_material, entry, "dropshadowcolor", "g_ShadowColor", plan.key,
-                           vec3_of, true);
+    if (context.particle_image_targets.contains(plan.id)) {
+        auto& target = context.particle_link_targets[plan.id];
+        target.node = node;
+        if (runtime != nullptr) {
+            target.image = MakeParticleTextImageSource(node,
+                [runtime, key = plan.key]() { return runtime->TextEmissionFrame(key); },
+                [runtime, key = plan.key](uint32_t width, uint32_t height) {
+                    return runtime->BuildTextEmissionImage(key, width, height);
+                });
+        } else {
+            const auto emission_frame = TextLayerEffectFrame(frame);
+            target.image = MakeParticleTextImageSource(node,
+                [emission_frame]() -> std::optional<TextLayerRenderFrame> { return emission_frame; },
+                [weak = std::weak_ptr<SceneNode>(node), scene_ptr = &scene, emission_frame, df, style,
+                 background = background_ptr](uint32_t width, uint32_t height) -> std::shared_ptr<Image> {
+                    const auto node = weak.lock();
+                    auto* images = dynamic_cast<RuntimeImageSource*>(scene_ptr->imageParser.get());
+                    if (!node || node->Mesh() == nullptr || images == nullptr) return nullptr;
+                    return RenderTextEmissionImage(*node->Mesh(), *images, emission_frame, df, style,
+                                                    width, height, background.get());
+                });
+        }
     }
     return true;
+}
+
+void AddLiveSceneUniformMaterials(Scene& scene, SceneNode* root);
+
+// Builds only the event-selected font programs. The runtime installs them into the
+// existing material objects once their matching atlas is ready, preserving live bindings.
+std::optional<SceneRuntimeContext::TextMaterialSet> MakeScriptTextMaterials(
+    const std::shared_ptr<Scene>& scene, fs::VFS* vfs, const LazyParseInputs& inputs,
+    const std::string& name, const SceneRuntimeContext::TextMaterialKey& key,
+    const TextStyleUniforms& style) {
+    if (!scene || !vfs) return std::nullopt;
+    auto lazy = MakeLazyParseContext(scene, *vfs, inputs);
+    LazyShaderParseScope scope(inputs.index);
+    // Compile format-dependent shader branches for the atlas that will be published,
+    // while the current graph continues drawing the old representation.
+    auto atlas_header = scene->imageParser->ParseHeader(TextAtlasName(name));
+    atlas_header.format = key.distance_field ? TextureFormat::RGBA8 : TextureFormat::R8;
+    atlas_header.formatCode = key.distance_field ? 0 : 9;
+    lazy.texture_headers.emplace(TextAtlasName(name), std::move(atlas_header));
+    const std::string suffix = std::string(key.distance_field ? "_msdf" : "") + (key.depth ? "_depth" : "");
+    SceneRuntimeContext::TextMaterialSet result;
+    result.glyphs = std::make_shared<SceneMaterial>();
+    result.color = std::make_shared<SceneMaterial>();
+    LoadedMaterial glyph_loaded, color_loaded, background_loaded;
+    const auto color_textures = key.distance_field
+        ? std::vector<std::string> { TextAtlasName(name), TextColorAtlasName(name) }
+        : std::vector<std::string> { TextColorAtlasName(name) };
+    if (!LoadFontMaterial(lazy, "basefont" + suffix, &style, { TextAtlasName(name) }, *result.glyphs, glyph_loaded) ||
+        !LoadFontMaterial(lazy, "basefontrgba" + suffix, &style, color_textures, *result.color, color_loaded))
+        return std::nullopt;
+    if (key.background) {
+        result.background = std::make_shared<SceneMaterial>();
+        if (!LoadFontMaterial(lazy, std::string("fontbackground") + (key.depth ? "_depth" : ""),
+                              nullptr, {}, *result.background, background_loaded)) return std::nullopt;
+    }
+    FlushPendingMetalTranslations(*scene);
+    return result;
 }
 
 /// The layer a script's `createLayer({ text, ... })` makes (P3 R55, R73): the keys go
@@ -4405,7 +5644,7 @@ std::shared_ptr<SceneNode> MakeScriptTextLayer(const std::shared_ptr<Scene>& sce
     auto entry = nlohmann::json::parse(config, nullptr, false);
     if (! entry.is_object()) return nullptr;
     entry["id"] = object_id;
-    // The name is the script's to give (`NameLayer`); the key is always generated.
+    // The name is the script's to give (`RenameLayer`); the key is always generated.
     entry.erase("name");
     entry.erase("parent");
     if (! entry.contains("text") || entry["text"].is_null()) entry["text"] = "";
@@ -4422,6 +5661,7 @@ std::shared_ptr<SceneNode> MakeScriptTextLayer(const std::shared_ptr<Scene>& sce
         return nullptr;
     }
     FlushPendingMetalTranslations(*scene);
+    AddLiveSceneUniformMaterials(*scene, lazy.layers.back().node.get());
     for (auto& [source, key] : lazy.scene_scripts) {
         scene->runtime->RegisterSceneScript(std::move(source), std::move(key));
     }
@@ -4493,6 +5733,7 @@ bool LoadLayerTemplate(const std::shared_ptr<Scene>& scene, fs::VFS* vfs,
     }
     FlushPendingMetalTranslations(*scene);
     auto node = lazy.layers.back().node;
+    AddLiveSceneUniformMaterials(*scene, node.get());
     scene->runtime->RegisterLayerTemplate(path, node, scene->runtime->NodeSize(plan.key));
     return true;
 }
@@ -4525,20 +5766,50 @@ bool IsRopeKind(ParticleRendererKind kind) {
     return kind == ParticleRendererKind::Rope || kind == ParticleRendererKind::RopeTrail;
 }
 
+/// What a scrolling rope measures its texture against, as WE's writer reads it
+/// (0x1402308A0, probe rope-uv-v4): the rate of the file's first emitter, and the
+/// average of the `lifetimerandom` bounds times the lifetime override the record takes.
+float RopeEmissionRate(const wpscene::Particle& file) {
+    return file.emitters.empty() ? 0.0f : file.emitters.front().rate;
+}
+
+float RopeAverageLifetime(const wpscene::Particle& file, const wpscene::ParticleInstanceoverride* over) {
+    float lifetime = 0.0f;
+    for (const auto& initializer : file.initializers) {
+        if (! initializer.is_object() || initializer.value("name", "") != "lifetimerandom") continue;
+        const auto bound = [&](const char* key, float fallback) {
+            const auto found = initializer.find(key);
+            return found != initializer.end() && found->is_number() ? found->get<float>() : fallback;
+        };
+        lifetime = 0.5f * (bound("min", 0.0f) + bound("max", 1.0f));
+        if (over != nullptr && over->enabled && file.AppliesLifetimeOverride()) lifetime *= over->lifetime;
+    }
+    return lifetime;
+}
+
 /// The mesh a renderer fills every frame, with room for `quads` quads: the billboard layout
 /// of a sprite (position, the corner and size record, colour, the thick record for sheets and
-/// trails, the two other angles) or the seven four-float groups of a rope piece.
-std::shared_ptr<SceneMesh> MakeParticleMesh(ParticleRendererKind kind, bool thick, uint32_t quads) {
+/// trails, the two other angles) or the thin/thick groups of a rope piece. A rope drawn
+/// through its geometry stage has the strip vertex where the quad corner would be.
+std::shared_ptr<SceneMesh> MakeParticleMesh(ParticleRendererKind kind, bool thick, uint32_t quads,
+                                            bool geometry_stage = false) {
     using Attribute = SceneVertexArray::SceneVertexAttribute;
     std::vector<Attribute> attributes;
     if (IsRopeKind(kind)) {
         attributes = { { std::string(WE_IN_POSITIONVEC4), VertexType::FLOAT4 },
                        { std::string(WE_IN_TEXCOORDVEC4), VertexType::FLOAT4 },
-                       { std::string(WE_IN_TEXCOORDVEC4C1), VertexType::FLOAT4 },
-                       { std::string(WE_IN_TEXCOORDVEC4C2), VertexType::FLOAT4 },
-                       { std::string(WE_IN_TEXCOORDVEC4C3), VertexType::FLOAT4 },
-                       { std::string(WE_IN_TEXCOORDC4), VertexType::FLOAT4 },
-                       { std::string(WE_IN_COLOR), VertexType::FLOAT4 } };
+                       { std::string(WE_IN_TEXCOORDVEC4C1), VertexType::FLOAT4 } };
+        if (thick) {
+            attributes.push_back({std::string(WE_IN_TEXCOORDVEC4C2), VertexType::FLOAT4});
+            attributes.push_back({std::string(WE_IN_TEXCOORDVEC4C3), VertexType::FLOAT4});
+        } else {
+            attributes.push_back({std::string(WE_IN_TEXCOORDVEC3C2), VertexType::FLOAT4});
+        }
+        const std::string_view corner = geometry_stage ? WE_IN_GEOMETRYVERTEX
+                                        : thick         ? WE_IN_TEXCOORDC4
+                                                        : WE_IN_TEXCOORDC3;
+        attributes.push_back({std::string(corner), VertexType::FLOAT4});
+        attributes.push_back({std::string(WE_IN_COLOR), VertexType::FLOAT4});
     } else {
         attributes = { { std::string(WE_IN_POSITION), VertexType::FLOAT3 },
                        { std::string(WE_IN_TEXCOORDVEC4), VertexType::FLOAT4 },
@@ -4557,6 +5828,7 @@ std::shared_ptr<SceneMesh> MakeParticleMesh(ParticleRendererKind kind, bool thic
         vertices.SetOption(WE_PRENDER_TRAIL, true);
     }
     if (kind == ParticleRendererKind::RopeTrail) vertices.SetOption(WE_PRENDER_ROPETRAIL, true);
+    if (geometry_stage) vertices.SetOption(WE_PRENDER_GEOMETRY, true);
     return mesh;
 }
 
@@ -4599,6 +5871,8 @@ bool PrepareParticleSystem(ParseContext& context, const wpscene::Particle& file,
         skipped = true;
         return false;
     }
+    const bool shared_thick = std::any_of(file.renderers.begin(), file.renderers.end(),
+        [](const auto& render) { return ClassifyParticleRenderer(render.name) == ParticleRendererKind::SpriteTrail; });
     for (const auto& render : file.renderers) {
         ParticleRendererBuild item;
         item.render = render;
@@ -4606,15 +5880,37 @@ bool PrepareParticleSystem(ParseContext& context, const wpscene::Particle& file,
         item.authored = file.material;
         if (IsRopeKind(item.kind)) {
             item.authored.shader = "genericropeparticle";
+            item.authored.combos["ORIENTATION"] = static_cast<int>(render.orientation) - 1;
             build.has_plain_rope = build.has_plain_rope || item.kind == ParticleRendererKind::Rope;
         }
         const bool trail = item.kind == ParticleRendererKind::SpriteTrail ||
                            item.kind == ParticleRendererKind::RopeTrail;
-        item.authored.combos["THICKFORMAT"]      = trail || IsRopeKind(item.kind) ? 1 : 0;
+        item.authored.combos["THICKFORMAT"] = shared_thick || item.kind == ParticleRendererKind::Rope ? 1 : 0;
         item.authored.combos["SPRITESHEETBLEND"] = file.BlendsSpriteFrames() ? 1 : 0;
         item.authored.combos["TRAILRENDERER"]    = trail ? 1 : 0;
+        if (item.kind == ParticleRendererKind::RopeTrail && render.uvscrolling) {
+            // A scrolling trail is drawn by the shader's TRAILSCROLLALPHA branch, with the
+            // fade bits only there (0x1401D2340).
+            item.authored.combos["TRAILSCROLLALPHA"] = 1;
+            if (render.fadealpha) item.authored.combos["TRAILFADEALPHA"] = 1;
+            if (render.fadesize) item.authored.combos["TRAILFADESIZE"] = 1;
+        }
         MaterialLoadOptions options;
         options.particle_material = true;
+        // How many points subdivide two particles (rope), or two recorded points (trail).
+        const uint32_t added = static_cast<uint32_t>(std::clamp(render.subdivision, 0.0f, 32.0f));
+        if (IsRopeKind(item.kind)) {
+            // WE draws ropes through the shader's geometry stage (`GS_ENABLED`): one record per
+            // pair, subdivided by the stage into a strip of 4 + 2 * `TRAILSUBDIVISION` vertices
+            // (0x1401D2340, 0x1402308A0).
+            const std::string path = "/assets/shaders/" + item.authored.shader + ".geom";
+            auto geometry = context.vfs->Contains(path) ? fs::GetFileContent(*context.vfs, path) : std::string();
+            if (! geometry.empty()) {
+                options.point_geometry = std::make_shared<const WPPointGeometryShader>(WPPointGeometryShader {
+                    std::move(geometry), 4 + 2 * added, std::string(WE_IN_GEOMETRYVERTEX) });
+                item.authored.combos["TRAILSUBDIVISION"] = static_cast<int>(added);
+            }
+        }
         if (! LoadMaterial(context, item.authored, item.material, item.loaded, options)) {
             LOG_ERROR("particle material '%s' cannot be loaded", item.authored.shader.c_str());
             return false;
@@ -4633,8 +5929,21 @@ bool PrepareParticleSystem(ParseContext& context, const wpscene::Particle& file,
             constants["g_ViewUp"]             = ShaderValue(std::array<float, 3> { 0.0f, 1.0f, 0.0f });
             constants["g_ViewRight"]          = ShaderValue(std::array<float, 3> { 1.0f, 0.0f, 0.0f });
         }
-        // How many straight pieces join two particles (rope), or two recorded points (trail).
-        const uint32_t added = static_cast<uint32_t>(std::clamp(render.subdivision, 0.0f, 32.0f));
+        if (render.orientation == ParticleOrientation::Upright) {
+            constants["g_OrientationUp"] = ShaderValue(render.axis);
+        } else if (render.orientation == ParticleOrientation::Fixed) {
+            const Vector3f forward(render.axis.data());
+            Vector3f up(0,0,-1);
+            if (forward.x() != 0.0f || forward.z() != 0.0f) {
+                const Vector3f right(forward.z(),0,-forward.x());
+                up = forward.cross(right);
+                up /= std::sqrt(up.squaredNorm());
+            }
+            constants["g_OrientationForward"] = ShaderValue(render.axis);
+            constants["g_OrientationUp"] = ShaderValue(std::array<float,3>{up.x(),up.y(),up.z()});
+        }
+        // How many straight pieces join two particles (rope), or two recorded points (trail):
+        // the mesh room either for those pieces or for the one strip the geometry stage draws.
         item.pieces_per_pair = added + 1;
         uint64_t quads = static_cast<uint64_t>(build.capacity) * instances;
         if (item.kind == ParticleRendererKind::Rope) quads *= item.pieces_per_pair;
@@ -4642,23 +5951,26 @@ bool PrepareParticleSystem(ParseContext& context, const wpscene::Particle& file,
             item.segments = static_cast<uint32_t>(std::clamp(render.segments, 2.0f, 32.0f));
             quads *= static_cast<uint64_t>(item.segments) * item.pieces_per_pair;
         }
-        const uint64_t floats_per_vertex = IsRopeKind(item.kind) ? 28 : (thick ? 20 : 16);
+        const uint64_t floats_per_vertex = IsRopeKind(item.kind) ? (thick ? 28 : 24) : (thick ? 20 : 16);
         const uint64_t bytes             = quads * 4 * floats_per_vertex * 4 + quads * 6 * 4;
         if (quads > std::numeric_limits<uint32_t>::max() || bytes > kMaxParticleMeshBytes) {
             LOG_ERROR("particle mesh of %llu quads is too large", static_cast<unsigned long long>(quads));
             return false;
         }
-        item.mesh = MakeParticleMesh(item.kind, thick, static_cast<uint32_t>(std::max<uint64_t>(quads, 1)));
+        item.mesh = MakeParticleMesh(item.kind, thick, static_cast<uint32_t>(std::max<uint64_t>(quads, 1)),
+                                     item.loaded.info.point_geometry != nullptr);
         if (item.kind == ParticleRendererKind::SpriteTrail) {
             constants["g_RenderVar0"] = ShaderValue(std::array<float, 4> {
                 render.length, render.maxlength, render.minlength,
                 static_cast<float>(build.capacity) - 1.0f });
         }
         if (item.kind == ParticleRendererKind::RopeTrail) {
-            const float length = static_cast<float>(item.segments * item.pieces_per_pair);
+            const uint32_t pieces = item.loaded.info.point_geometry != nullptr ? 1 : item.pieces_per_pair;
+            const float length = static_cast<float>(item.segments * pieces);
+            // 0x1402366F0: .x the history less one while scrolling, .w the maximum count.
             constants["g_RenderVar0"] = ShaderValue(std::array<float, 4> {
-                static_cast<float>(item.segments), 0.0f, 0.0f,
-                EncodeRopeTrailLength(length, render.uvscale) });
+                render.uvscrolling ? length - 1.0f : static_cast<float>(item.segments), 0.0f, 0.0f,
+                RopeTrailMaxCount(length, render.uvscale, render.uvscrolling) });
         }
         build.renderers.push_back(std::move(item));
     }
@@ -4677,21 +5989,38 @@ bool PrepareParticleSystem(ParseContext& context, const wpscene::Particle& file,
 
 /// Follows the scene object's bound override fields (R57): each value that a property, a
 /// script or a timeline drives is written into the shared override record as it changes.
-void FollowParticleOverride(ParseContext& context, const nlohmann::json& entry,
-                            const std::shared_ptr<wpscene::ParticleInstanceoverride>& over,
-                            const std::string& key) {
+/// A field keyed with an authored timeline (`animation`) plays on its own clock: the
+/// returned sampler writes its current value into the record, and the layer's control
+/// point source calls it at the start of every step (the vortex orb preset turns its
+/// control point 1 a full turn every 3 s this way). Null when nothing is keyed.
+std::function<void()> FollowParticleOverride(ParseContext& context, const nlohmann::json& entry,
+                                             const std::shared_ptr<wpscene::ParticleInstanceoverride>& over,
+                                             const std::string& key) {
     auto* runtime = context.scene->runtime.get();
-    if (runtime == nullptr || ! over->enabled) return;
+    if (runtime == nullptr || ! over->enabled) return {};
     const auto block = entry.find("instanceoverride");
-    if (block == entry.end() || ! block->is_object()) return;
+    if (block == entry.end() || ! block->is_object()) return {};
     using Override = wpscene::ParticleInstanceoverride;
+    struct Keyed {
+        std::vector<std::pair<std::shared_ptr<ScalarAnimationPlayback>, float Override::*>> numbers;
+        std::vector<std::tuple<std::shared_ptr<const NodeVec3Animation>, std::array<float, 3>*, bool*>> vectors;
+    };
+    auto keyed = std::make_shared<Keyed>();
     static constexpr std::array<std::pair<const char*, float Override::*>, 7> kNumbers { {
         { "alpha", &Override::alpha }, { "size", &Override::size }, { "lifetime", &Override::lifetime },
         { "speed", &Override::speed }, { "count", &Override::count }, { "rate", &Override::rate },
         { "brightness", &Override::brightness } } };
     for (const auto& [name, field] : kNumbers) {
         const auto setting = block->find(name);
-        if (setting == block->end() || ! HasDynamicSetting(*setting)) continue;
+        if (setting == block->end()) continue;
+        if (! HasDynamicSetting(*setting)) {
+            if (setting->is_object() && ! setting->contains("script")) {
+                if (auto curve = ResolveScalarAnimation(*setting)) {
+                    keyed->numbers.emplace_back(runtime->RegisterScalarAnimation(key, std::move(*curve)), field);
+                }
+            }
+            continue;
+        }
         auto value = ResolveFloatSetting(*runtime, *setting, key);
         runtime->RegisterDynamicValueListener(std::move(value), [over, field = field](const DynamicValue& now) {
             const float next = now.getFloat();
@@ -4702,36 +6031,45 @@ void FollowParticleOverride(ParseContext& context, const nlohmann::json& entry,
         const auto lanes = now.getVec3();
         if (lanes.allFinite()) out = { lanes.x(), lanes.y(), lanes.z() };
     };
-    if (const auto setting = block->find("color"); setting != block->end() && HasDynamicSetting(*setting)) {
-        runtime->RegisterDynamicValueListener(
-            ResolveVec3Setting(*runtime, *setting, key),
-            [over, lanes_into](const DynamicValue& now) { lanes_into(over->color, now); });
-    }
-    if (const auto setting = block->find("colorn"); setting != block->end() && HasDynamicSetting(*setting)) {
-        runtime->RegisterDynamicValueListener(
-            ResolveVec3Setting(*runtime, *setting, key),
-            [over, lanes_into](const DynamicValue& now) { lanes_into(over->colorn, now); });
-    }
+    // A vec3 field: followed when a property or script drives it, played from its
+    // timeline when only that is keyed.
+    const auto follow_vec3 = [&](const char* name, std::array<float, 3>* lanes, bool* set) {
+        const auto setting = block->find(name);
+        if (setting == block->end()) return;
+        if (HasDynamicSetting(*setting)) {
+            runtime->RegisterDynamicValueListener(ResolveVec3Setting(*runtime, *setting, key),
+                                                  [over, lanes_into, lanes, set](const DynamicValue& now) {
+                                                      lanes_into(*lanes, now);
+                                                      if (set != nullptr) *set = true;
+                                                  });
+        } else if (setting->is_object() && ! setting->contains("script")) {
+            if (auto animation = ResolveVec3Animation(*runtime, key, *setting)) {
+                keyed->vectors.emplace_back(std::move(animation), lanes, set);
+            }
+        }
+    };
+    follow_vec3("color", &over->color, nullptr);
+    follow_vec3("colorn", &over->colorn, nullptr);
     for (std::size_t index = 0; index < 8; ++index) {
-        if (const auto setting = block->find("controlpoint" + std::to_string(index));
-            setting != block->end() && HasDynamicSetting(*setting)) {
-            runtime->RegisterDynamicValueListener(
-                ResolveVec3Setting(*runtime, *setting, key),
-                [over, lanes_into, index](const DynamicValue& now) {
-                    lanes_into(over->controlpoint[index], now);
-                    over->controlpointSet[index] = true;
-                });
-        }
-        if (const auto setting = block->find("controlpointangle" + std::to_string(index));
-            setting != block->end() && HasDynamicSetting(*setting)) {
-            runtime->RegisterDynamicValueListener(
-                ResolveVec3Setting(*runtime, *setting, key),
-                [over, lanes_into, index](const DynamicValue& now) {
-                    lanes_into(over->controlpointangle[index], now);
-                    over->controlpointangleSet[index] = true;
-                });
-        }
+        follow_vec3(("controlpoint" + std::to_string(index)).c_str(), &over->controlpoint[index],
+                    &over->controlpointSet[index]);
+        follow_vec3(("controlpointangle" + std::to_string(index)).c_str(), &over->controlpointangle[index],
+                    &over->controlpointangleSet[index]);
     }
+    if (keyed->numbers.empty() && keyed->vectors.empty()) return {};
+    // `over` owns the lanes the pointers name; the sampler keeps it alive.
+    return [over, keyed]() {
+        for (const auto& [playback, field] : keyed->numbers) {
+            const float next = playback->Value();
+            if (std::isfinite(next)) (*over).*field = next;
+        }
+        for (const auto& [animation, lanes, set] : keyed->vectors) {
+            const auto value = animation->Value();
+            if (! (std::isfinite(value[0]) && std::isfinite(value[1]) && std::isfinite(value[2]))) continue;
+            *lanes = value;
+            if (set != nullptr) *set = true;
+        }
+    };
 }
 
 /// What the commit of every system of one layer shares.
@@ -4741,6 +6079,9 @@ struct ParticleCommit {
     std::shared_ptr<wpscene::ParticleInstanceoverride> over;
     std::shared_ptr<SceneNode>                        layer_node;
     std::array<float, 2>                              parallax_depth { 1.0f, 1.0f };
+    /// Writes the override fields keyed with a timeline into `over` (see
+    /// `FollowParticleOverride`); null when none is.
+    std::function<void()>                             sample_override;
     nlohmann::json                                    entry;
     std::unordered_set<int>                           logged_audio_modes;
 };
@@ -4759,6 +6100,8 @@ void AttachParticleMesh(ParticleCommit& commit, const std::shared_ptr<SceneNode>
     if (context.shader_updater != nullptr) {
         WPShaderValueData data;
         data.parallaxDepth  = commit.parallax_depth;
+        data.particle_orientation = static_cast<uint8_t>(static_cast<uint8_t>(renderer.render.orientation) |
+            ((renderer.render.flags & 1u) != 0 ? kParticleOrientationWorldspace : 0u));
         data.renderTargets  = renderer.loaded.render_targets;
         if (! is_layer_node) data.parallax_layer = commit.layer_node.get();
         context.shader_updater->SetNodeData(node.get(), 0, data);
@@ -4776,10 +6119,313 @@ ParticleRawGenSpecOp MakeParticleSpecOp(const wpscene::Particle& file) {
     };
 }
 
+/// A capsule from one collision box (sub_1401D5880, F-D13.md): along the axis of
+/// the box's largest half extent L, with the second largest m as its radius and
+/// |L| - |m| as its half length, through `to_scene`.
+ParticleCapsule CapsuleOfBox(const linalg::Vector3d& extents, const linalg::Matrix4d& to_scene) {
+    std::array<int, 3> order { 0, 1, 2 };
+    std::sort(order.begin(), order.end(),
+              [&](int a, int b) { return std::abs(extents[a]) > std::abs(extents[b]); });
+    const double long_half = std::abs(extents[order[0]]);
+    const double radius    = std::abs(extents[order[1]]);
+    linalg::Vector3d dir = linalg::Vector3d::Zero();
+    dir[order[0]]        = 1.0;
+    linalg::Vector3d across = linalg::Vector3d::Zero();
+    across[order[1]]        = radius;
+    const double     c      = long_half - radius;
+    const linalg::Matrix3d linear = to_scene.topLeftCorner<3, 3>();
+    const linalg::Vector3d shift  = to_scene.topRightCorner<3, 1>();
+    ParticleCapsule capsule;
+    capsule.a      = linear * (dir * -c) + shift;
+    capsule.b      = linear * (dir * c) + shift;
+    capsule.radius = (linear * across).norm();
+    return capsule;
+}
+
+/// Connects a particle file's layer links to the layers the scene object's
+/// `dependencies[]` objects name: the entry whose `index` is the link's place
+/// in the file and whose `type` matches (sub_14022AF30). Runs once every layer
+/// exists.
+void ResolveParticleLinks(ParseContext& context, const nlohmann::json& entry,
+                          const std::shared_ptr<ParticleLayerLinks>& links) {
+    if (links->slots.empty()) return;
+    const auto deps = entry.find("dependencies");
+    if (deps == entry.end() || ! deps->is_array()) return;
+    for (const auto& dep : *deps) {
+        if (! dep.is_object()) continue;
+        int32_t     id = 0, index = 0;
+        std::string type;
+        if (! wpscene::ReadInt32(dep.value("id", nlohmann::json()), id) ||
+            ! wpscene::ReadInt32(dep.value("index", nlohmann::json()), index) ||
+            ! dep.contains("type") || ! dep["type"].is_string())
+            continue;
+        type = dep["type"].get<std::string>();
+        if (index < 0 || static_cast<std::size_t>(index) >= links->slots.size()) continue;
+        auto& slot = links->slots[static_cast<std::size_t>(index)];
+        const auto target = context.particle_link_targets.find(id);
+        if (target == context.particle_link_targets.end()) {
+            LOG_INFO("particle link %d (%s) names object %d, which is no linkable layer", index,
+                     type.c_str(), id);
+            continue;
+        }
+        if (slot.kind == ParticleLayerLinks::Kind::EmitterImage && type == "emitterimage" && slot.image) {
+            slot.image->source = target->second.image;
+            if (slot.image->source) slot.image->source->Prepare(context.scene->elapsingTime, false);
+        }
+        if (slot.kind == ParticleLayerLinks::Kind::CollisionModel && type == "collisionmodel" && slot.model) {
+            slot.model->capsules.reserve(target->second.boxes.size());
+            slot.model->fill = [node = target->second.node, boxes = target->second.boxes,
+                                puppet = target->second.puppet_layer,
+                                has_puppet = target->second.has_puppet](std::vector<ParticleCapsule>& out) {
+                const auto layer = node.lock();
+                if (! layer) return;
+                layer->UpdateTrans();
+                const linalg::Matrix4d world = layer->ModelTrans();
+                const auto bones = has_puppet ? puppet.modelBones() : std::span<const linalg::Affine3f> {};
+                for (const auto& box : boxes) {
+                    linalg::Matrix4d bone = linalg::Matrix4d::Identity();
+                    if (box.bone >= 0 && static_cast<std::size_t>(box.bone) < bones.size())
+                        bone = bones[static_cast<std::size_t>(box.bone)].matrix().cast<double>();
+                    out.push_back(CapsuleOfBox(box.extents, world * bone * box.record));
+                }
+            };
+        }
+    }
+}
+
+/// The native loader registers through the highest point referenced by a
+/// consumer. Merely authoring a point (or naming it as a parent) does not register it.
+uint8_t ParticleControlpointCount(const wpscene::Particle& file, bool feeds_points) {
+    if (feeds_points) return 8;
+    int count = 0;
+    const auto use = [&count](int index) { count = std::max(count, std::clamp(index, 0, 7) + 1); };
+    const auto number = [](const nlohmann::json& record, const char* key, int fallback) {
+        const auto it = record.find(key);
+        if (it == record.end() || ! it->is_number()) return fallback;
+        const double value = it->get<double>();
+        return value < 0.0 || value > 7.0 ? 7 : static_cast<int>(value);
+    };
+    for (const auto& emitter : file.emitters)
+        if (emitter.name == "sphererandom" || emitter.name == "boxrandom") use(emitter.controlpoint);
+    const auto record = [&](const nlohmann::json& op) {
+        if (! op.is_object()) return;
+        const auto found = op.find("name");
+        if (found == op.end() || ! found->is_string()) return;
+        const auto& name = found->get_ref<const std::string&>();
+        if (name == "inheritcontrolpointvelocity" || name == "mapsequencearoundcontrolpoint" ||
+            name == "controlpointattract" || name == "maintaindistancetocontrolpoint" ||
+            name == "reducemovementnearcontrolpoint" || name == "vortex" ||
+            name == "collisionplane" || name == "collisionsphere" || name == "collisionquad") {
+            use(number(op, "controlpoint", 0));
+        } else if (name == "mapsequencebetweencontrolpoints" || name == "maintaindistancebetweencontrolpoints") {
+            use(number(op, "controlpointstart", 0));
+            use(number(op, "controlpointend", 1));
+        } else if (name == "remapvalue" || name == "remapinitialvalue") {
+            const auto c = ParticleRemap::Read(op);
+            const auto reads_point = [](ParticleRemap::Quantity q) {
+                const auto value = static_cast<unsigned int>(q);
+                return (value >= 7 && value <= 8) || (value >= 16 && value <= 18);
+            };
+            // Native registers both sides when either quantity needs the point.
+            if (reads_point(c.input) || reads_point(c.output)) {
+                use(c.input_point0); use(c.output_point0);
+            }
+            if (c.input == ParticleRemap::Quantity::PositionBetweenTwoControlPoints ||
+                c.output == ParticleRemap::Quantity::PositionBetweenTwoControlPoints) {
+                use(c.input_point1); use(c.output_point1);
+            }
+        }
+    };
+    for (const auto& op : file.initializers) record(op);
+    for (const auto& op : file.operators) record(op);
+    return static_cast<uint8_t>(count);
+}
+
+uint8_t ParticleControlpointWrittenMask(const wpscene::Particle& file, bool operators_only = false) {
+    uint8_t mask = 0;
+    const auto note = [&mask, operators_only](const nlohmann::json& op) {
+        if (! op.is_object()) return;
+        const auto name = op.find("name");
+        if (name == op.end() || ! name->is_string() ||
+            (*name != "remapvalue" && *name != "remapinitialvalue")) return;
+        if (operators_only && *name != "remapvalue") return;
+        const auto config = ParticleRemap::Read(op);
+        if (config.output == ParticleRemap::Quantity::ControlPoint)
+            mask |= static_cast<uint8_t>(1u << config.output_point0);
+    };
+    if (!operators_only) for (const auto& op : file.initializers) note(op);
+    for (const auto& op : file.operators) note(op);
+    return mask;
+}
+
+struct ParticleCopiedPointHistory {
+    // Eight indices need four bits each, including the missing-column sentinel.
+    // Packing them leaves the metadata the same size as the previous xyz cache.
+    uint32_t columns { 0xffffffffu };
+    uint32_t active_index { std::numeric_limits<uint32_t>::max() };
+    uint8_t count { 0 };
+    uint8_t stride { 3 };
+    uint32_t limit { 0 };
+    std::vector<uint32_t> generations;
+    // Only operator-written origins and their copy descendants need a fourth
+    // coordinate. Ordinary copied points keep their existing 24-byte records.
+    std::vector<double> positions;
+
+    uint32_t Column(std::size_t point) const { return (columns >> (4 * point)) & 15u; }
+    void Add(std::size_t point, bool homogeneous) {
+        columns = (columns & ~(15u << (4 * point))) | (static_cast<uint32_t>(count++) << (4 * point));
+        if (homogeneous) stride = 4;
+    }
+    bool Prepare(const ParticleInstance& instance) {
+        const auto needed = static_cast<std::size_t>(instance.Index()) + 1;
+        if (generations.size() < needed) {
+            const auto capacity = std::min<std::size_t>(limit,
+                std::max(needed, generations.capacity() * 2));
+            generations.reserve(capacity);
+            positions.reserve(capacity * count * stride);
+            generations.resize(needed, std::numeric_limits<uint32_t>::max());
+            positions.resize(needed * count * stride);
+        }
+        const bool primed = generations[instance.Index()] == instance.Generation();
+        generations[instance.Index()] = instance.Generation();
+        active_index = instance.Index();
+        return primed;
+    }
+    bool IsActive(const ParticleInstance& instance) const {
+        return active_index == instance.Index() && active_index < generations.size() &&
+               generations[active_index] == instance.Generation();
+    }
+    double* Find(const ParticleInstance& instance, std::size_t point) {
+        const auto column = Column(point);
+        if (column == 15 || instance.Index() >= generations.size() ||
+            generations[instance.Index()] != instance.Generation()) return nullptr;
+        return &positions[(static_cast<std::size_t>(instance.Index()) * count + column) * stride];
+    }
+    static Vector3d Position(const double* value) { return { value[0], value[1], value[2] }; }
+    float Homogeneous(const double* value) const { return stride == 4 ? static_cast<float>(value[3]) : 1.0f; }
+    void Store(double* value, const Vector3d& position, float homogeneous) const {
+        value[0] = position.x(); value[1] = position.y(); value[2] = position.z();
+        if (stride == 4) value[3] = homogeneous;
+    }
+};
+
+/// Optional per-instance state for copied, written, or fed point origins.
+/// A native write changes the full homogeneous origin, not only its xyz.
+std::shared_ptr<ParticleCopiedPointHistory> BindParentControlpointSource(
+    ParticleSubSystem& child, ParticleSubSystem& parent,
+    ParticleSubSystem::ControlpointSource overrides,
+    const std::shared_ptr<ParticleCopiedPointHistory>& parent_history) {
+    const bool event = child.Type() != ParticleSubSystem::SpawnType::STATIC;
+    const auto feed_start = child.ParentPointFeedStart();
+    const auto supplied = [&](const ParticleControlpoint& point, std::size_t i) {
+        return point.written_by_remap ||
+            (i >= feed_start && !point.link_mouse && !point.copy_from_parent);
+    };
+    const auto points = child.Controlpoints();
+    const bool commit = event && std::any_of(points.begin(), points.begin()+child.ControlpointCount(),
+        [&](const ParticleControlpoint& point) { return supplied(point, static_cast<std::size_t>(&point-points.data())); });
+    auto history = event ? std::make_shared<ParticleCopiedPointHistory>() : nullptr;
+    if (history != nullptr) {
+        history->limit = child.MaxInstanceCount();
+        for (std::size_t i = 0; i < child.ControlpointCount(); ++i) {
+            const auto& point = points[i];
+            if (supplied(point,i) || (point.copy_from_parent && !point.link_mouse &&
+                point.parent_point < parent.ControlpointCount()))
+                history->Add(i, point.homogeneous_may_vary);
+        }
+    }
+    child.SetControlpointSource(
+        [&child, &parent, overrides = std::move(overrides), history, parent_history]
+        (std::span<ParticleControlpoint> points, ParticleInstance* instance,
+         const Matrix4d& child_model, const Matrix4d& model_inverse, ParticleSubSystem::ControlpointStage stage) {
+            const auto feed_start = child.ParentPointFeedStart();
+            const Vector3d origin = child.WorldSpace() ? Vector3d(child_model.topRightCorner<3,1>()) : Vector3d::Zero();
+            if (stage == ParticleSubSystem::ControlpointStage::Commit) {
+                if (history != nullptr && instance != nullptr)
+                    for (std::size_t i=0;i<child.ControlpointCount();++i)
+                        if (auto* saved=history->Find(*instance,i)) {
+                            history->Store(saved, points[i].offset + origin, points[i].homogeneous);
+                        }
+                return;
+            }
+            overrides(points, instance, child_model, model_inverse, stage);
+            const bool primed = history != nullptr && instance != nullptr && history->Prepare(*instance);
+            // A born/recycled instance starts from its own authored point. Other
+            // instances resume the origin their last operator left behind.
+            if (history != nullptr && instance != nullptr && child.HasOwnedControlpoints())
+                for (std::size_t i=0;i<child.ControlpointCount();++i) {
+                    auto& point=points[i];
+                    if (!point.written_by_remap && !(i>=feed_start && !point.link_mouse && !point.copy_from_parent)) continue;
+                    const auto* saved=history->Find(*instance,i);
+                    point.offset=(primed ? history->Position(saved) : point.base_offset)-origin;
+                    point.prev_offset=point.offset;
+                    point.homogeneous=primed ? history->Homogeneous(saved) : 1.0f;
+                    point.owned_world_relative=child.WorldSpace();
+                }
+            Matrix4d parent_model = parent.SimulationTransform();
+            Matrix4d child_inverse = model_inverse;
+            ParticleInstance* parent_instance = nullptr;
+            if (instance != nullptr) {
+                Matrix4d translation = Matrix4d::Identity();
+                translation.topRightCorner<3,1>() = -instance->GetBoundedData().pos.cast<double>();
+                child_inverse = translation * child_inverse;
+                parent_instance = instance->GetBoundedData().parent;
+                if (parent_instance != nullptr && !parent.WorldSpace()) {
+                    translation.topRightCorner<3,1>() = parent_instance->GetBoundedData().pos.cast<double>();
+                    parent_model = parent_model * translation;
+                }
+            }
+            Matrix4d mapping = parent.WorldSpace() ? Matrix4d::Identity() : parent_model;
+            if (!child.WorldSpace()) mapping = child_inverse * mapping;
+            const auto parent_points = parent.Controlpoints();
+            for (std::size_t i=0;i<child.ControlpointCount();++i) {
+                auto& point=points[i];
+                point.parent_resolved=false;
+                if (!point.copy_from_parent || point.link_mouse || point.written_by_remap ||
+                    point.parent_point>=parent.ControlpointCount()) continue;
+                const auto& source=parent_points[point.parent_point];
+                Matrix3d axes=source.has_world_linear ? Matrix3d(source.world_linear*source.rotation) : source.rotation;
+                Vector3d position=source.offset;
+                float homogeneous=source.homogeneous;
+                if (parent.WorldSpace() && parent_instance!=nullptr && !source.parent_resolved &&
+                    !source.written_by_remap && !source.link_mouse && !(source.worldspace && point.parent_point!=0))
+                    position=parent_model.topLeftCorner<3,3>()*source.base_offset+parent_instance->GetBoundedData().pos.cast<double>();
+                if (parent.WorldSpace() && parent.ControlpointsPrimed()) position+=parent_model.topRightCorner<3,1>();
+                // Before a parent's operators finish, its child can already be
+                // prewarmed. Read that active frame directly; other siblings use
+                // their completed snapshot instead of the shared working array.
+                if (parent_history!=nullptr && parent_instance!=nullptr && !parent_history->IsActive(*parent_instance))
+                    if (const auto* saved=parent_history->Find(*parent_instance,point.parent_point)) {
+                        position=parent_history->Position(saved);
+                        homogeneous=parent_history->Homogeneous(saved);
+                    }
+                if (!point.copy_raw && !(parent.WorldSpace() && child.WorldSpace())) {
+                    axes=mapping.topLeftCorner<3,3>()*axes;
+                    position=mapping.topLeftCorner<3,3>()*position+mapping.topRightCorner<3,1>()*homogeneous;
+                }
+                point.offset=position-origin;
+                point.homogeneous=homogeneous;
+                point.rotation=axes;
+                point.has_rotation=true;
+                point.has_world_linear=false;
+                point.world_linear=Matrix3d::Identity();
+                point.parent_resolved=true;
+                if (history!=nullptr && instance!=nullptr) {
+                    auto* previous=history->Find(*instance,i);
+                    point.prev_offset=primed ? history->Position(previous)-origin : point.offset;
+                    history->Store(previous, position, homogeneous);
+                }
+            }
+        }, event, commit);
+    return history;
+}
+
 /// Builds the subsystem of one prepared system, its mirrors and its children, hung from `node`.
 std::unique_ptr<ParticleSubSystem> CommitParticleSystem(
     ParticleCommit& commit, ParticleSystemBuild& build, const std::shared_ptr<SceneNode>& node,
-    bool world_space, ParticleSubSystem::SpawnType type, std::vector<ParticleSubSystem*>& statics) {
+    bool world_space, ParticleSubSystem::SpawnType type, std::vector<ParticleSubSystem*>& statics,
+    ParticleSubSystem* parent_sub = nullptr,
+    const std::shared_ptr<ParticleCopiedPointHistory>& parent_history = nullptr) {
     auto&       context = *commit.context;
     auto&       scene   = *context.scene;
     const auto& file    = *build.file;
@@ -4793,39 +6439,80 @@ std::unique_ptr<ParticleSubSystem> CommitParticleSystem(
                                                    MakeParticleSpecOp(file));
     sub->SetOwnerNode(node);
     sub->SetWorldSpace(world_space);
+    if (build.entry != nullptr && (build.entry->flags & 1u) != 0)
+        sub->SetParentPointFeed(build.entry->controlpointstartindex);
     sub->SetDrawn(! build.renderers.empty());
     sub->SetStartTime(file.starttime);
     const auto over = commit.over;
     sub->SetRateMultiplier([over]() { return over->enabled ? static_cast<double>(over->rate) : 1.0; });
-    sub->SetControlpointSource([over](std::span<ParticleControlpoint> points) {
-        ApplyParticleOverrideControlpoints(*over, points);
-    });
+    ParticleSubSystem::ControlpointSource point_source =
+        [over, sample = commit.sample_override](std::span<ParticleControlpoint> points, ParticleInstance*, const Matrix4d&, const Matrix4d&, ParticleSubSystem::ControlpointStage) {
+            if (sample) sample();
+            ApplyParticleOverrideControlpoints(*over, points);
+        };
+    sub->SetControlpointCount(ParticleControlpointCount(file, build.entry != nullptr &&
+        (build.entry->flags & 1u) != 0));
 
-    // Control points: the file's entries by id (or by position), zero for the rest (R75).
+    // Control points: entry j of the file's list is slot j (the loader 0x1401C5490
+    // reads no `id`), zero for the rest (R75).
     auto points = sub->Controlpoints();
-    for (std::size_t at = 0; at < file.controlpoints.size() && at < 8; ++at) {
-        const auto& entry = file.controlpoints[at];
-        const std::size_t index = entry.id >= 0 && entry.id < 8 ? static_cast<std::size_t>(entry.id) : at;
+    const auto written_points = ParticleControlpointWrittenMask(file);
+    for (std::size_t index = 0; index < file.controlpoints.size() && index < 8; ++index) {
+        const auto& entry = file.controlpoints[index];
         auto& point = points[index];
         point.link_mouse  = entry.flags[wpscene::ParticleControlpoint::FlagEnum::link_mouse];
         point.worldspace  = entry.flags[wpscene::ParticleControlpoint::FlagEnum::worldspace];
+        point.copy_from_parent = entry.flags[wpscene::ParticleControlpoint::FlagEnum::copyfromparent];
+        point.copy_raw = entry.flags[wpscene::ParticleControlpoint::FlagEnum::rawvalue];
+        point.parent_point = entry.parentcontrolpoint;
+        point.written_by_remap = entry.flags[uint32_t { 16 }];
         point.base_offset = linalg::Vector3d(entry.offset[0], entry.offset[1], entry.offset[2]);
         point.offset      = point.base_offset;
         point.prev_offset = point.base_offset;
+        if (entry.has_angles) {
+            const auto& a = entry.angles;
+            point.rotation = (linalg::AngleAxisd(a[2], linalg::Vector3d::UnitZ()) *
+                              linalg::AngleAxisd(a[1], linalg::Vector3d::UnitY()) *
+                              linalg::AngleAxisd(a[0], linalg::Vector3d::UnitX()))
+                                 .toRotationMatrix();
+            point.has_rotation = true;
+        }
     }
+    for (std::size_t i = 0; i < points.size(); ++i)
+        points[i].written_by_remap = points[i].written_by_remap || (written_points & (1u << i)) != 0;
     ApplyParticleOverrideControlpoints(*over, points);
+    const auto homogeneous_points = ParticleControlpointWrittenMask(file, true);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        auto& point = points[i];
+        point.homogeneous_may_vary = (homogeneous_points & (1u << i)) != 0 ||
+            (parent_sub != nullptr && point.copy_from_parent && !point.link_mouse && !point.written_by_remap &&
+             point.parent_point < parent_sub->ControlpointCount() &&
+             parent_sub->Controlpoints()[point.parent_point].homogeneous_may_vary);
+    }
+    uint8_t owned_points=0;
+    for (std::size_t i=0;i<sub->ControlpointCount();++i)
+        if (points[i].written_by_remap || (i>=sub->ParentPointFeedStart() && !points[i].link_mouse && !points[i].copy_from_parent))
+            owned_points |= static_cast<uint8_t>(1u<<i);
+    sub->SetOwnedControlpoints(owned_points);
+    const bool copies_parent = parent_sub != nullptr && std::any_of(points.begin(), points.begin() + sub->ControlpointCount(),
+        [parent_sub](const ParticleControlpoint& point) {
+            return point.copy_from_parent && ! point.link_mouse && ! point.written_by_remap &&
+                   point.parent_point < parent_sub->ControlpointCount();
+        });
+    std::shared_ptr<ParticleCopiedPointHistory> point_history;
+    if (parent_sub != nullptr && (copies_parent || owned_points != 0)) point_history = BindParentControlpointSource(*sub, *parent_sub, std::move(point_source), parent_history);
+    else sub->SetControlpointSource(std::move(point_source));
+
+    // Records that link to another layer take their place in this list (WE's load
+    // order: emitters, then operators).
+    const auto links = std::make_shared<ParticleLayerLinks>();
 
     // Emitters, initializers and operators (R3, R31, R32, R50).
     const std::function<audio::AudioSpectrumSnapshot()> spectrum = [scene_pointer = &scene]() {
         return scene_pointer->runtime != nullptr ? scene_pointer->runtime->CurrentAudioSpectrumSnapshot()
                                                  : audio::AudioSpectrumSnapshot {};
     };
-    const int start = build.entry != nullptr ? build.entry->controlpointstartindex : 0;
-    for (auto emitter : file.emitters) {
-        if (build.entry != nullptr) {
-            const int shifted = emitter.controlpoint + start;
-            emitter.controlpoint = shifted > 7 ? -1 : shifted;
-        }
+    for (const auto& emitter : file.emitters) {
         if (emitter.audioprocessingmode >= 1 && emitter.audioprocessingmode <= 3) {
             MarkSceneRequiresAudioResponse(&scene);
         } else if (emitter.audioprocessingmode != 0 &&
@@ -4833,31 +6520,53 @@ std::unique_ptr<ParticleSubSystem> CommitParticleSystem(
             LOG_INFO("emitter audio processing mode %u is not supported and is ignored",
                      emitter.audioprocessingmode);
         }
-        sub->AddEmitter(WPParticleParser::genParticleEmittOp(emitter, build.has_plain_rope, over, spectrum,
-                                                             sub->SpawnContext()));
+        // File flag 32 keeps the override count away from the emitter rate.
+        sub->AddEmitter(WPParticleParser::genParticleEmittOp(emitter, build.has_plain_rope,
+                                                             file.AppliesCountOverride() ? over : nullptr, spectrum,
+                                                             sub->SpawnContext(), links));
+        if (emitter.name == "layerimage") sub->SetNeedsSceneFrame(true);
     }
-    const auto parse_context =
+    auto parse_context =
         MakeParticleParseContext(*sub, file, over, &scene, context.pixel_canvas, context.tint_after_retint);
+    parse_context.links = links;
+    // A remap that reads the layer origin or the time of day has the subsystem fill them.
+    const auto note_remap_inputs = [&sub](const nlohmann::json& record) {
+        if (ParticleRemap::ReadsLayerOrigin(record)) sub->SetNeedsLayerOrigin(true);
+        if (ParticleRemap::ReadsTimeOfDay(record)) sub->SetNeedsTimeOfDay(true);
+    };
     for (const auto& initializer : file.initializers) {
-        if (initializer.is_object()) sub->AddInitializer(WPParticleParser::genParticleInitOp(initializer, parse_context));
+        if (! initializer.is_object()) continue;
+        sub->AddInitializer(WPParticleParser::genParticleInitOp(initializer, parse_context));
+        const auto init_name = initializer.find("name");
+        if (init_name != initializer.end() && init_name->is_string() &&
+            init_name->get_ref<const std::string&>() == "remapinitialvalue")
+            note_remap_inputs(initializer);
     }
     sub->AddInitializer(WPParticleParser::genOverrideInitOp(over, parse_context.color,
                                                             parse_context.speed_override,
                                                             parse_context.size_override,
-                                                            parse_context.tint_after_retint));
+                                                            parse_context.tint_after_retint,
+                                                            parse_context.colour_override));
     for (const auto& op : file.operators) {
         if (! op.is_object()) continue;
         sub->AddOperator(WPParticleParser::genParticleOperatorOp(op, parse_context));
         const auto name = op.find("name");
         if (name != op.end() && name->is_string()) {
-            if (name->get_ref<const std::string&>() == "movement") sub->SetNeedsWorldAxes(true);
-            if (name->get_ref<const std::string&>() == "controlpointattract") {
+            const auto& op_name = name->get_ref<const std::string&>();
+            if (op_name == "movement") sub->SetNeedsWorldAxes(true);
+            if (op_name == "controlpointattract" || op_name == "collisionquad") {
                 sub->SetTracksPreviousPosition(true);
             }
+            if (op_name == "collisionbounds" || op_name == "collisionmodel") sub->SetNeedsSceneFrame(true);
+            if (op_name == "remapvalue") note_remap_inputs(op);
         }
     }
+    context.after_attach.push_back([&context, entry = commit.entry, links]() {
+        ResolveParticleLinks(context, entry, links);
+    });
 
     // Renderers: the first draws the simulated system, the others mirror it (R112).
+    bool trail_recording = false;
     for (std::size_t index = 0; index < build.renderers.size(); ++index) {
         auto& renderer = build.renderers[index];
         const auto& render = renderer.render;
@@ -4876,13 +6585,17 @@ std::unique_ptr<ParticleSubSystem> CommitParticleSystem(
         }
         if (IsRopeKind(renderer.kind)) {
             target->SetRopeSubdivision(renderer.pieces_per_pair);
+            target->SetRopeSteady(RopeEmissionRate(file), RopeAverageLifetime(file, over.get()));
             target->SetRopeUv(render.uvscale, render.uvscrolling, render.uvsmoothing && ! render.uvscrolling);
         }
-        if (index == 0 && renderer.kind == ParticleRendererKind::RopeTrail && render.length > 0.0f) {
+        if (renderer.kind == ParticleRendererKind::RopeTrail)
+            target->SetTrailFades(render.fadealpha, render.fadesize);
+        if (!trail_recording && renderer.kind == ParticleRendererKind::RopeTrail && render.length > 0.0f) {
             ParticleTrailConfig trail;
             trail.samples = renderer.segments;
             trail.period  = std::max(0.001, static_cast<double>(render.length)) / renderer.segments;
             sub->SetTrail(trail);
+            trail_recording = true;
         }
         // A bound `uvscale`, `uvscrolling` or `uvsmoothing` follows its value (R57).
         if (auto* runtime = scene.runtime.get(); runtime != nullptr && IsRopeKind(renderer.kind)) {
@@ -4917,8 +6630,8 @@ std::unique_ptr<ParticleSubSystem> CommitParticleSystem(
                                                               : ParticleSubSystem::SpawnType::STATIC;
         const bool is_static = child_type == ParticleSubSystem::SpawnType::STATIC;
         const bool own_world = child.file->flags[wpscene::Particle::FlagEnum::wordspace];
-        const bool child_world = is_static ? own_world : world_space;
-        const bool keeps_units = world_space || (is_static && own_world);
+        const bool child_world = own_world;
+        const bool keeps_units = is_static && (world_space || own_world);
         auto child_node = std::make_shared<SceneNode>(Vector3f(entry.origin.data()), Vector3f(entry.scale.data()),
                                                       Vector3f(entry.angles.data()));
         node->AppendChild(child_node);
@@ -4942,7 +6655,7 @@ std::unique_ptr<ParticleSubSystem> CommitParticleSystem(
                 child->SetTranslate(translate);
             });
         }
-        auto child_sub = CommitParticleSystem(commit, child, child_node, child_world, child_type, statics);
+        auto child_sub = CommitParticleSystem(commit, child, child_node, child_world, child_type, statics, sub.get(), point_history);
         if (is_static) statics.push_back(child_sub.get());
         sub->AddChild(std::move(child_sub));
     }
@@ -4966,6 +6679,7 @@ bool LoadParticleEntry(ParseContext& context, std::size_t at, const nlohmann::js
     auto over = std::make_shared<wpscene::ParticleInstanceoverride>(object.instanceoverride);
     over->hdr = scene.hdr;
     auto& layer = TypedLayer(context, at, entry, plan);
+    layer.node->SetTransparentSort(SceneNode::TransparentSort::Depth);
     SetUnhittable(context, plan.key);
     ParticleCommit commit;
     commit.context        = &context;
@@ -4973,7 +6687,8 @@ bool LoadParticleEntry(ParseContext& context, std::size_t at, const nlohmann::js
     commit.over           = over;
     commit.layer_node     = layer.node;
     commit.parallax_depth = object.parallaxDepth;
-    FollowParticleOverride(context, entry, over, plan.key);
+    commit.entry          = entry;
+    commit.sample_override = FollowParticleOverride(context, entry, over, plan.key);
 
     std::vector<ParticleSubSystem*> statics;
     const bool world = object.particleObj.flags[wpscene::Particle::FlagEnum::wordspace];
@@ -4982,6 +6697,7 @@ bool LoadParticleEntry(ParseContext& context, std::size_t at, const nlohmann::js
     // Pre-simulation waits for the finished tree, children before their parent (R91).
     for (auto* child : statics) context.pending_prewarms.push_back(child);
     context.pending_prewarms.push_back(sub.get());
+    scene.paritileSys->RegisterLayer(plan.key, sub.get(), over);
     scene.paritileSys->subsystems.push_back(std::move(sub));
     return true;
 }
@@ -5043,6 +6759,7 @@ void LoadShapeEntry(ParseContext& context, ParsedLayer& layer, const nlohmann::j
 
 /// Steps that take back what a build has done so far; run newest first.
 using UndoList = std::vector<std::function<void()>>;
+using TargetBackups = std::map<std::string, std::optional<SceneRenderTarget>>;
 
 void RunUndo(UndoList& undo) {
     while (! undo.empty()) {
@@ -5055,27 +6772,37 @@ void RunUndo(UndoList& undo) {
 /// Adds (or replaces) a scene render target and notes in `undo` how to give it back:
 /// the target that held the name before returns, or the name goes away (R105).
 void PutSceneRenderTarget(Scene& scene, UndoList& undo, const std::string& name,
-                          SceneRenderTarget target) {
+                          SceneRenderTarget target, TargetBackups* touched = nullptr) {
     auto& table = scene.renderTargets;
     if (const auto held = table.find(name); held != table.end()) {
+        if (touched) touched->try_emplace(name, held->second);
         undo.push_back([&table, name, previous = held->second]() { table[name] = previous; });
     } else {
+        if (touched) touched->try_emplace(name, std::nullopt);
         undo.push_back([&table, name]() { table.erase(name); });
     }
     table[name] = std::move(target);
 }
 
+void RestoreSceneRenderTarget(Scene& scene, const std::string& name,
+                              const std::optional<SceneRenderTarget>& previous) {
+    if (previous) scene.renderTargets[name] = *previous;
+    else scene.renderTargets.erase(name);
+}
+
 /// A screen-following bloom target of `fraction` of the colour buffer.
-SceneRenderTarget BloomTarget(const Scene& scene, double fraction) {
+SceneRenderTarget BloomTarget(const Scene& scene, double fraction,
+    SceneRenderTarget::Bind::SizePolicy policy = SceneRenderTarget::Bind::SizePolicy::Effect) {
     const auto* frame = scene.FindRenderTarget(std::string(SpecTex_Default));
     const i32   w     = frame != nullptr ? frame->width : 1;
     const i32   h     = frame != nullptr ? frame->height : 1;
     SceneRenderTarget target;
-    target.width      = std::max(1, static_cast<i32>(std::floor(w * fraction)));
-    target.height     = std::max(1, static_cast<i32>(std::floor(h * fraction)));
+    const i32 minimum = policy == SceneRenderTarget::Bind::SizePolicy::NativeFramebuffer ? 2 : 1;
+    target.width      = std::max(minimum, static_cast<i32>(std::floor(w * fraction)));
+    target.height     = std::max(minimum, static_cast<i32>(std::floor(h * fraction)));
     target.allowReuse = true;
     target.format     = scene.hdr ? TextureFormat::RGBA16F : TextureFormat::RGBA8;
-    target.bind       = { .enable = true, .screen = true, .scale = fraction };
+    target.bind       = { .enable = true, .screen = true, .scale = fraction, .size_policy = policy };
     return target;
 }
 
@@ -5085,7 +6812,9 @@ std::optional<ScenePostProcessPass> BuildBloomPass(
     ParseContext& context, const std::string& material_name, std::vector<std::string> textures,
     std::string output, float source_texel_radius,
     const std::vector<std::pair<std::string, ShaderValue>>& constants,
-    std::shared_ptr<SceneMaterial>*                          out_material = nullptr) {
+    std::shared_ptr<SceneMaterial>*                          out_material = nullptr,
+    const std::unordered_map<std::string, int32_t>&          combos = {},
+    UndoList*                                               undo = nullptr) {
     nlohmann::json json;
     wpscene::WPMaterial material;
     if (! PARSE_JSON(fs::GetFileContent(*context.vfs, "/assets/materials/util/" + material_name + ".json"),
@@ -5095,6 +6824,7 @@ std::optional<ScenePostProcessPass> BuildBloomPass(
         return std::nullopt;
     }
     material.textures = std::move(textures);
+    for (const auto& [name, value] : combos) material.combos[name] = value;
     SceneMaterial  scene_material;
     LoadedMaterial loaded;
     if (! LoadMaterial(context, material, scene_material, loaded)) {
@@ -5113,22 +6843,344 @@ std::optional<ScenePostProcessPass> BuildBloomPass(
         WPShaderValueData data;
         data.renderTargets = loaded.render_targets;
         context.shader_updater->SetNodeData(node.get(), 0, data);
+        if (undo != nullptr) undo->push_back([updater = context.shader_updater, node] {
+            updater->ForgetNode(node.get());
+        });
     }
     if (out_material != nullptr) *out_material = mesh->MaterialSlotPtr(0);
     return ScenePostProcessPass { .node = node, .output = std::move(output),
                                   .source_texel_radius = source_texel_radius };
 }
 
+/// Native 0x140196CE0: sphere for point lights, 32-sided clip cylinder for
+/// plain spots and the clip box for cookie spots. Built once, never per frame.
+std::shared_ptr<SceneMesh> MakeVolumeMesh(const SceneLight& light) {
+    std::vector<std::array<float,4>> vertices;
+    std::vector<uint16_t> indices;
+    const bool point = light.type() == SceneLightType::Point;
+    const bool box = (light.flags() & SceneLight::kUseCookie) != 0;
+    const auto add = [&](float x,float y,float z){vertices.push_back({x,y,z,0});};
+    const auto tri = [&](uint16_t a,uint16_t b,uint16_t c){indices.insert(indices.end(),{a,b,c});};
+    const double pi=std::acos(-1.0);
+    if (point) {
+        for (int latitude=0;latitude<=24;++latitude) {
+            const double phi=pi*latitude/24.0;
+            for (int longitude=0;longitude<=24;++longitude) {
+                const double theta=2*pi*longitude/24.0;
+                add(std::sin(phi)*std::cos(theta),std::cos(phi),std::sin(phi)*std::sin(theta));
+            }
+        }
+        for(uint16_t y=0;y<24;++y)for(uint16_t x=0;x<24;++x) {
+            const auto a=static_cast<uint16_t>(y*25+x),b=static_cast<uint16_t>(a+25);
+            tri(a,a+1,b);tri(a+1,b+1,b);
+        }
+    } else if (box) {
+        for(float z:{0.0f,1.0f})for(float y:{-1.0f,1.0f})for(float x:{-1.0f,1.0f})add(x,y,z);
+        for(const auto& t:std::array<std::array<uint16_t,3>,12>{{
+            {0,2,1},{1,2,3},{4,5,6},{5,7,6},{0,1,4},{1,5,4},
+            {2,6,3},{3,6,7},{0,4,2},{2,4,6},{1,3,5},{3,7,5}}})tri(t[0],t[1],t[2]);
+    } else {
+        add(0,0,0);add(0,0,1);
+        for(int i=0;i<32;++i) {
+            const double angle=2*pi*i/32;
+            add(std::cos(angle),std::sin(angle),0);add(std::cos(angle),std::sin(angle),1);
+        }
+        for(uint16_t i=0;i<32;++i) {
+            const uint16_t a=2+i*2,b=2+((i+1)%32)*2;
+            tri(0,b,a);tri(1,a+1,b+1);tri(a,b,a+1);tri(b,b+1,a+1);
+        }
+    }
+    // Inverse projection reverses the clip cylinder/box orientation. Keep the
+    // world-space winding outward so back-face depth still exists inside a spot.
+    if (!point) for (std::size_t i=0;i<indices.size();i+=3) std::swap(indices[i+1],indices[i+2]);
+    SceneVertexArray array({{std::string(WE_IN_POSITION),VertexType::FLOAT3}},vertices.size());
+    array.SetVertexs(0,std::span(vertices[0].data(),vertices.size()*4));
+    auto mesh=std::make_shared<SceneMesh>();mesh->AddVertexArray(std::move(array));
+    mesh->AddIndexArray(SceneIndexArray(std::span<const uint16_t>(indices)));
+    return mesh;
+}
+
+void ForgetVolumetricNodes(Scene& scene) {
+    auto* updater = scene.shaderValueUpdater.get();
+    if (!updater) return;
+    for (const auto& volume : scene.volumetric_lights)
+        for (const auto& node : {volume.back,volume.front,volume.fullscreen})
+            if (node) updater->ForgetNode(node.get());
+    if (scene.volumetric_combine) for (const auto& step : scene.volumetric_combine->steps)
+        if (const auto* pass=std::get_if<ScenePostProcessPass>(&step); pass && pass->node)
+            updater->ForgetNode(pass->node.get());
+}
+
+bool BuildVolumetrics(ParseContext& context) {
+    auto& scene = *context.scene;
+    std::vector<const SceneLight*> lights;
+    scene.volumetric_cast_count = 0;
+    for (const auto& light : scene.lights)
+        if (light && light->castsVolumetrics() &&
+            (light->type()==SceneLightType::Point || light->type()==SceneLightType::Spot))
+            ++scene.volumetric_cast_count;
+    if (scene.quality.volumetrics != 0) for (const auto& light : scene.lights) {
+        if (light && light->castsVolumetrics() && light->node() && light->visible() &&
+            (light->type()==SceneLightType::Point || light->type()==SceneLightType::Spot))
+            lights.push_back(light.get());
+    }
+    if (lights.empty()) {
+        ForgetVolumetricNodes(scene);
+        scene.volumetric_lights.clear();
+        scene.volumetric_combine.reset();
+        for (const char* key : {"_rt_volumetricsBack","_rt_volumetricsSingle",
+             "_rt_volumetricsLightBuffer","_rt_volumetricsLightBufferB","_rt_volumetricsShadowFar"}) scene.renderTargets.erase(key);
+        scene.volumetric_dirty = false;
+        return true;
+    }
+    UndoList undo;
+    std::vector<SceneVolumetricLight> volumes;
+    volumes.reserve(lights.size()); // updater pointers remain stable through commit
+    auto post = std::make_shared<ScenePostProcess>();
+    const double fraction = scene.quality.volumetrics < 3 ? 0.125 : 0.25;
+    auto light_target = BloomTarget(scene,fraction);
+    auto back = BloomTarget(scene,1.0);
+    back.format = TextureFormat::Depth32F;
+    back.initial_clear = {1,1,1,1};
+    back.allowReuse = false;
+    auto single = back;
+    single.width = light_target.width;
+    single.height = light_target.height;
+    single.bind.scale = fraction;
+    if (const auto* frame=scene.FindRenderTarget(SpecTex_Default); frame && !frame->withDepth) {
+        back.width=back.height=1; back.bind={}; back.unscaled=true;
+    }
+    PutSceneRenderTarget(scene,undo,"_rt_volumetricsBack",back);
+    PutSceneRenderTarget(scene,undo,"_rt_volumetricsSingle",single);
+    PutSceneRenderTarget(scene,undo,"_rt_volumetricsLightBuffer",light_target);
+    if (scene.quality.volumetrics < 3)
+        PutSceneRenderTarget(scene,undo,"_rt_volumetricsLightBufferB",light_target);
+    const auto fail = [&] { RunUndo(undo); return false; };
+    try {
+        for (const auto* light : lights) {
+            volumes.emplace_back();
+            auto& volume = volumes.back();
+            volume.light = light;
+            volume.shadow = scene.quality.shadows!=0 && (light->flags() & SceneLight::kCastShadow)!=0;
+            const bool atlas = std::any_of(scene.shadows.views.begin(),scene.shadows.views.end(),
+                [light](const auto& view){ return view.light==light; });
+            std::string shadow_texture;
+            if (volume.shadow) {
+                shadow_texture=atlas ? std::string(kShadowAtlas) : "_rt_volumetricsShadowFar";
+                if (!atlas && !scene.HasRenderTarget(shadow_texture)) {
+                    SceneRenderTarget far;
+                    far.width=far.height=1;far.format=TextureFormat::Depth32F;far.unscaled=true;
+                    PutSceneRenderTarget(scene,undo,shadow_texture,far);
+                }
+            }
+            const auto geometry = MakeVolumeMesh(*light);
+            for (int kind=0;kind<3;++kind) {
+                const bool exit = kind==0, fullscreen=kind==2;
+                const std::string file = exit ? "volumetrics_back" : fullscreen
+                    ? "volumetrics_fullscreen" : "volumetrics_front";
+                nlohmann::json json;
+                wpscene::WPMaterial authored;
+                if (!PARSE_JSON(fs::GetFileContent(*context.vfs,
+                    "/assets/materials/util/"+file+".json"),json) || !authored.FromJson(json)) return fail();
+                authored.combos["QUALITY"] = scene.quality.volumetrics;
+                authored.combos["POINTLIGHT"] = light->type()==SceneLightType::Point;
+                authored.combos["REVERSEDEPTH"] = 0;
+                authored.combos["LIGHTS_SHADOW_MAPPING_QUALITY"] = scene.quality.shadows;
+                if (fullscreen) authored.combos["FULLSCREEN"] = 1;
+                if (!exit && (light->flags() & SceneLight::kUseCookie)!=0) authored.combos["COOKIE"]=1;
+                if (!exit && volume.shadow) authored.combos["SHADOW"]=1;
+                if (!exit) authored.textures={shadow_texture,
+                    "_rt_volumetricsBack",light->cookie(),"_rt_volumetricsSingle"};
+                SceneMaterial material;
+                LoadedMaterial loaded;
+                MaterialLoadOptions options;
+                options.reverse_depth = false;
+                if (!LoadMaterial(context,authored,material,loaded,options)) return fail();
+                material.cull_mode = exit ? CullMode::Front : fullscreen ? CullMode::None : CullMode::Back;
+                auto mesh = fullscreen ? MakeCardMesh(2,2) : std::make_shared<SceneMesh>();
+                if (!fullscreen) mesh->ShareGeometryFrom(*geometry);
+                mesh->AddMaterial(std::move(material));
+                auto node = std::make_shared<SceneNode>();
+                node->SetName("__"+file);node->SetCamera("");node->AddMesh(mesh);
+                WPShaderValueData data;
+                data.volumetric_light=&volume;
+                data.renderTargets=loaded.render_targets;
+                context.shader_updater->SetNodeData(node.get(),0,data);
+                undo.push_back([updater=context.shader_updater,node]{updater->ForgetNode(node.get());});
+                (exit ? volume.back : fullscreen ? volume.fullscreen : volume.front)=node;
+            }
+        }
+        if (scene.quality.volumetrics < 3) for (bool vertical : {false,true}) {
+            auto step = BuildBloomPass(context,vertical ? "volumetrics_blur_v" : "volumetrics_blur_h",
+                {vertical ? "_rt_volumetricsLightBufferB" : "_rt_volumetricsLightBuffer"},
+                vertical ? "_rt_volumetricsLightBuffer" : "_rt_volumetricsLightBufferB",0,{},nullptr,{},&undo);
+            if (!step) return fail();
+            post->steps.push_back(std::move(*step));
+        }
+        auto combine = BuildBloomPass(context,"volumetrics_combine",{"_rt_volumetricsLightBuffer"},
+            std::string(SpecTex_Default),0,{},nullptr,{},&undo);
+        if (!combine) return fail();
+        post->steps.push_back(std::move(*combine));
+    } catch (...) {
+        RunUndo(undo);
+        throw;
+    }
+    ForgetVolumetricNodes(scene);
+    scene.volumetric_lights = std::move(volumes);
+    scene.volumetric_combine = std::move(post);
+    scene.volumetric_dirty = false;
+    UpdateSceneVolumetrics(scene);
+    if (scene.runtime && scene.runtime->HasSceneUniforms()) {
+        for (const auto& volume : scene.volumetric_lights)
+            for (const auto& node : {volume.back,volume.front,volume.fullscreen})
+                for (const auto& material : node->Mesh()->MaterialSlots())
+                    scene.runtime->AddSceneUniformMaterial(material);
+    }
+    return true;
+}
+
+void InstallVolumetrics(ParseContext& context) {
+    if (context.scene->quality.volumetrics==0 || context.scene->lights.empty()) return;
+    if (!BuildVolumetrics(context)) throw std::runtime_error("Volumetrics needs its utility materials");
+    const std::weak_ptr<Scene> weak=context.scene;
+    fs::VFS* const vfs=context.vfs;
+    const auto inputs=ShadowParseInputs(context);
+    context.scene->prepare_volumetrics=[weak,vfs,inputs] {
+        const auto scene=weak.lock();
+        if (!scene) return false;
+        LazyShaderParseScope scope(inputs->index);
+        auto lazy=MakeLazyParseContext(scene,*vfs,*inputs);
+        const bool built=BuildVolumetrics(lazy);
+        FlushPendingMetalTranslations(*scene);
+        return built;
+    };
+}
+
 ShaderValue Vec4Value(const std::array<float, 4>& lanes) { return ShaderValue(lanes.data(), 4); }
+
+// One set of parameter drivers survives post-process changes. Its recipients are weak:
+// turning bloom off releases the chain, and turning it on does not register scripts again.
+struct BloomBindings {
+    float strength {2}, threshold {0.65f};
+    float hdr_strength {2}, scatter {1.619f}, hdr_threshold {1}, feather {0.1f};
+    std::array<float, 3> tint {1, 1, 1};
+    bool hdr {false};
+    int levels {1};
+    std::weak_ptr<SceneMaterial> extract;
+    std::vector<std::weak_ptr<SceneMaterial>> upsample;
+    TargetBackups targets;
+
+    void Write(const char* uniform, const ShaderValue& value) const {
+        if (const auto material = extract.lock()) material->customShader.constValues[uniform] = value;
+    }
+    void Strength() const {
+        Write("g_BloomStrength", ShaderValue(hdr
+            ? HDRBloomExtractionStrength(hdr_strength, scatter, levels) : strength));
+    }
+    void Blend() const {
+        if (hdr) Write("g_BloomBlendParams", Vec4Value(HDRBloomBlend(hdr_threshold, feather)));
+        else Write("g_BloomThreshold", ShaderValue(threshold));
+    }
+    void Scatter() const {
+        if (!hdr) return;
+        for (const auto& weak : upsample) if (const auto material = weak.lock())
+            material->customShader.constValues["g_BloomScatter"] = ShaderValue(scatter);
+        Strength();
+    }
+    void CopySettings(wpscene::WPSceneGeneral& general) const {
+        general.bloomstrength = strength;
+        general.bloomthreshold = threshold;
+        general.bloomtint = tint;
+        general.bloomhdrstrength = hdr_strength;
+        general.bloomhdrscatter = scatter;
+        general.bloomhdrthreshold = hdr_threshold;
+        general.bloomhdrfeather = feather;
+    }
+    void ClearRecipients() {
+        extract.reset();
+        upsample.clear();
+    }
+};
+
+std::shared_ptr<BloomBindings> BindBloomSettings(ParseContext& context,
+                                                const wpscene::WPSceneGeneral& general) {
+    auto* runtime = context.scene->runtime.get();
+    if (!runtime) return {};
+    auto state = std::make_shared<BloomBindings>();
+    state->strength = general.bloomstrength;
+    state->threshold = general.bloomthreshold;
+    state->tint = general.bloomtint;
+    state->hdr_strength = general.bloomhdrstrength;
+    state->scatter = general.bloomhdrscatter;
+    state->hdr_threshold = general.bloomhdrthreshold;
+    state->feather = general.bloomhdrfeather;
+    const auto follow = [&](const nlohmann::json& setting, float BloomBindings::* field,
+                            const char* alias, auto apply) {
+        if (!HasDynamicSetting(setting)) return;
+        auto input = ResolveFloatSetting(*runtime, setting);
+        if (alias) runtime->AliasSceneGeneralDriver(alias, input.get());
+        runtime->RegisterDynamicValueListener(std::move(input), [state, field, apply](const DynamicValue& now) {
+            state.get()->*field = now.getFloat();
+            apply(*state);
+        });
+    };
+    follow(general.bloomstrength_setting, &BloomBindings::strength, "bloomstrength",
+           [](const BloomBindings& state) { if (!state.hdr) state.Strength(); });
+    follow(general.bloomthreshold_setting, &BloomBindings::threshold, "bloomthreshold",
+           [](const BloomBindings& state) { if (!state.hdr) state.Blend(); });
+    follow(general.bloomhdrstrength_setting, &BloomBindings::hdr_strength, "bloomhdrstrength",
+           [](const BloomBindings& state) { if (state.hdr) state.Strength(); });
+    follow(general.bloomhdrscatter_setting, &BloomBindings::scatter, "bloomhdrscatter",
+           [](const BloomBindings& state) { state.Scatter(); });
+    follow(general.bloomhdrthreshold_setting, &BloomBindings::hdr_threshold, "bloomhdrthreshold",
+           [](const BloomBindings& state) { if (state.hdr) state.Blend(); });
+    follow(general.bloomhdrfeather_setting, &BloomBindings::feather, "bloomhdrfeather",
+           [](const BloomBindings& state) { if (state.hdr) state.Blend(); });
+    if (general.dynamic_bloomtint) {
+        auto input = ResolveVec3Setting(*runtime, general.bloomtint_setting);
+        runtime->AliasSceneGeneralDriver("bloomtint", input.get());
+        runtime->RegisterDynamicValueListener(std::move(input), [state](const DynamicValue& now) {
+            const auto value = now.getVec3();
+            state->tint = {value.x(), value.y(), value.z()};
+            state->Write("g_BloomTint", ShaderValue(state->tint));
+        });
+    }
+    runtime->SetSceneGeneralBloomWriter([state](std::string_view name, const ShaderValue& value) {
+        if (name == "bloomtint") {
+            std::copy_n(value.data(), 3, state->tint.begin());
+            state->Write("g_BloomTint", value);
+        } else if (name == "bloomstrength") {
+            state->strength = value[0];
+            if (!state->hdr) state->Strength();
+        } else if (name == "bloomthreshold") {
+            state->threshold = value[0];
+            if (!state->hdr) state->Blend();
+        } else if (name == "bloomhdrstrength") {
+            state->hdr_strength = value[0];
+            if (state->hdr) state->Strength();
+        } else if (name == "bloomhdrscatter") {
+            state->scatter = value[0];
+            state->Scatter();
+        } else if (name == "bloomhdrthreshold") {
+            state->hdr_threshold = value[0];
+            if (state->hdr) state->Blend();
+        } else if (name == "bloomhdrfeather") {
+            state->feather = value[0];
+            if (state->hdr) state->Blend();
+        }
+    });
+    return state;
+}
 
 /// The LDR chain (R107): extract, vertical down-sample, horizontal blur, combine.
 bool BuildLdrBloom(ParseContext& context, const wpscene::WPSceneGeneral& general,
-                   ScenePostProcess& post, UndoList& undo) {
+                   ScenePostProcess& post, UndoList& undo,
+                   const std::shared_ptr<BloomBindings>& bindings, TargetBackups& touched) {
     auto& scene = *context.scene;
-    PutSceneRenderTarget(scene, undo, "_rt_bloom_mip1", BloomTarget(scene, 0.25));
-    PutSceneRenderTarget(scene, undo, "_rt_bloom_mip2", BloomTarget(scene, 0.125));
-    PutSceneRenderTarget(scene, undo, "_rt_bloom_blur", BloomTarget(scene, 0.125));
-    PutSceneRenderTarget(scene, undo, "_rt_bloom_combine", BloomTarget(scene, 1.0));
+    PutSceneRenderTarget(scene, undo, "_rt_bloom_mip1", BloomTarget(scene, 0.25), &touched);
+    PutSceneRenderTarget(scene, undo, "_rt_bloom_mip2", BloomTarget(scene, 0.125), &touched);
+    PutSceneRenderTarget(scene, undo, "_rt_bloom_blur", BloomTarget(scene, 0.125), &touched);
+    PutSceneRenderTarget(scene, undo, "_rt_bloom_combine", BloomTarget(scene, 1.0), &touched);
     const std::string frame(SpecTex_Default);
 
     float strength = general.bloomstrength;
@@ -5139,12 +7191,13 @@ bool BuildLdrBloom(ParseContext& context, const wpscene::WPSceneGeneral& general
         context, "downsample_quarter_bloom", { frame }, "_rt_bloom_mip1", 0.0f,
         { { "g_BloomStrength", ShaderValue(strength) }, { "g_BloomThreshold", ShaderValue(threshold) },
           { "g_BloomTint", ShaderValue(tint.data(), 3) } },
-        &extract_material);
+        &extract_material, {}, &undo);
     auto down = BuildBloomPass(context, "downsample_eighth_blur_v", { "_rt_bloom_mip1" },
-                               "_rt_bloom_mip2", 0.0f, {});
-    auto blur = BuildBloomPass(context, "blur_h_bloom", { "_rt_bloom_mip2" }, "_rt_bloom_blur", 0.0f, {});
+                               "_rt_bloom_mip2", 0.0f, {}, nullptr, {}, &undo);
+    auto blur = BuildBloomPass(context, "blur_h_bloom", { "_rt_bloom_mip2" }, "_rt_bloom_blur", 0.0f, {},
+                               nullptr, {}, &undo);
     auto combine = BuildBloomPass(context, "combine_ldr", { frame, "_rt_bloom_blur" },
-                                  "_rt_bloom_combine", 0.0f, {});
+                                  "_rt_bloom_combine", 0.0f, {}, nullptr, {}, &undo);
     if (! extract || ! down || ! blur || ! combine) return false;
     post.name = "__bloom";
     post.steps.push_back(std::move(*extract));
@@ -5153,27 +7206,13 @@ bool BuildLdrBloom(ParseContext& context, const wpscene::WPSceneGeneral& general
     post.steps.push_back(std::move(*combine));
     post.steps.push_back(ScenePostProcessCopy { .src = "_rt_bloom_combine", .dst = frame });
 
-    if (auto* runtime = scene.runtime.get(); runtime != nullptr && extract_material != nullptr) {
-        // Followed through listeners, so a changed property reaches the pass at once.
-        const auto follow_float = [&](const nlohmann::json& setting, const char* uniform) {
-            if (! HasDynamicSetting(setting)) return;
-            runtime->RegisterDynamicValueListener(
-                ResolveFloatSetting(*runtime, setting),
-                [extract_material, uniform](const DynamicValue& now) {
-                    extract_material->customShader.constValues[uniform] = ShaderValue(now.getFloat());
-                });
-        };
-        follow_float(general.bloomstrength_setting, "g_BloomStrength");
-        follow_float(general.bloomthreshold_setting, "g_BloomThreshold");
-        if (general.dynamic_bloomtint) {
-            runtime->RegisterDynamicValueListener(
-                ResolveVec3Setting(*runtime, general.bloomtint_setting),
-                [extract_material](const DynamicValue& now) {
-                    const auto tint = now.getVec3();
-                    extract_material->customShader.constValues["g_BloomTint"] =
-                        ShaderValue(std::array<float, 3> { tint.x(), tint.y(), tint.z() });
-                });
-        }
+    if (bindings) {
+        bindings->hdr = false;
+        bindings->strength = general.bloomstrength;
+        bindings->threshold = general.bloomthreshold;
+        bindings->tint = general.bloomtint;
+        bindings->extract = extract_material;
+        bindings->upsample.clear();
     }
     return true;
 }
@@ -5189,13 +7228,17 @@ struct HdrBloomState {
 
 /// The HDR chain (R108). A missing required material is a failure of the whole scene.
 bool BuildHdrBloom(ParseContext& context, const wpscene::WPSceneGeneral& general,
-                   ScenePostProcess& post, UndoList& undo) {
+                   ScenePostProcess& post, UndoList& undo,
+                   const std::shared_ptr<BloomBindings>& bindings, TargetBackups& touched) {
     auto&       scene = *context.scene;
+    // A lookup, so a material that is not there (the optional cubic upsample) is not reported as
+    // a file the scene lacks; a required one that is absent fails the scene below.
     const auto  exists = [&](const char* name) {
-        return ! fs::GetFileContent(*context.vfs, std::string("/assets/materials/util/") + name + ".json").empty();
+        const std::string path = std::string("/assets/materials/util/") + name + ".json";
+        return context.vfs->Contains(path) && ! fs::GetFileContent(*context.vfs, path).empty();
     };
-    for (const char* required : { "hdr_downsample_bloom", "hdr_downsample", "hdr_upsample",
-                                  "combine_hdr_upsample_linear" }) {
+    const char* combine_name = scene.display_hdr ? "combine_dhdr_upsample" : "combine_hdr_upsample";
+    for (const char* required : { "hdr_downsample_bloom", "hdr_downsample", "hdr_upsample", combine_name }) {
         if (! exists(required)) {
             throw std::runtime_error(std::string("HDR bloom needs the material ") + required);
         }
@@ -5207,14 +7250,15 @@ bool BuildHdrBloom(ParseContext& context, const wpscene::WPSceneGeneral& general
     state->scatter   = general.bloomhdrscatter;
     state->threshold = general.bloomhdrthreshold;
     state->feather   = general.bloomhdrfeather;
-    state->levels    = HDRBloomLevels(general.bloomhdriterations, context.ortho_w, context.ortho_h);
+    state->levels    = HDRBloomLevels(general.bloomhdriterations, scene);
     const int levels = state->levels;
 
     for (int level = 0; level < levels; ++level) {
         PutSceneRenderTarget(scene, undo, "_rt_hdr_bloom_" + std::to_string(level),
-                             BloomTarget(scene, 1.0 / static_cast<double>(1 << (level + 1))));
+                             BloomTarget(scene, 1.0 / static_cast<double>(1 << (level + 1)),
+                                 SceneRenderTarget::Bind::SizePolicy::NativeFramebuffer), &touched);
     }
-    PutSceneRenderTarget(scene, undo, "_rt_bloom_combine", BloomTarget(scene, 1.0));
+    PutSceneRenderTarget(scene, undo, "_rt_bloom_combine", BloomTarget(scene, 1.0), &touched);
     const std::string frame(SpecTex_Default);
     const auto        level_name = [](int level) { return "_rt_hdr_bloom_" + std::to_string(level); };
     const std::pair<std::string, ShaderValue> zero_var { "g_RenderVar0", Vec4Value({ 0, 0, 0, 0 }) };
@@ -5228,13 +7272,13 @@ bool BuildHdrBloom(ParseContext& context, const wpscene::WPSceneGeneral& general
           { "g_BloomStrength", ShaderValue(HDRBloomExtractionStrength(state->strength, state->scatter, levels)) },
           { "g_BloomBlendParams", Vec4Value(blend) },
           { "g_BloomTint", ShaderValue(general.bloomtint.data(), 3) } },
-        &extract_material);
+        &extract_material, {}, &undo);
     if (! extract) return false;
     post.name = "__hdr_bloom";
     post.steps.push_back(std::move(*extract));
     for (int level = 1; level < levels; ++level) {
         auto pass = BuildBloomPass(context, "hdr_downsample", { level_name(level - 1) }, level_name(level),
-                                   1.0f, { zero_var });
+                                   1.0f, { zero_var }, nullptr, {}, &undo);
         if (! pass) return false;
         post.steps.push_back(std::move(*pass));
     }
@@ -5242,81 +7286,239 @@ bool BuildHdrBloom(ParseContext& context, const wpscene::WPSceneGeneral& general
         std::shared_ptr<SceneMaterial> material;
         auto pass = BuildBloomPass(context, level >= levels - 2 ? cubic : "hdr_upsample",
                                    { level_name(level) }, level_name(level - 1), 0.5f,
-                                   { zero_var, { "g_BloomScatter", ShaderValue(state->scatter) } }, &material);
+                                   { zero_var, { "g_BloomScatter", ShaderValue(state->scatter) } }, &material,
+                                   {}, &undo);
         if (! pass) return false;
         up_materials.push_back(material);
         post.steps.push_back(std::move(*pass));
     }
-    auto combine = BuildBloomPass(context, "combine_hdr_upsample_linear", { frame, level_name(0) },
-                                  "_rt_bloom_combine", 0.0f, {});
+    std::shared_ptr<SceneMaterial> combine_material;
+    const float headroom = std::max(1.0f, scene.display_hdr_headroom);
+    auto combine = BuildBloomPass(context, combine_name, { frame, level_name(0) },
+                                  "_rt_bloom_combine", 0.0f,
+                                  {{"g_RenderVar0", Vec4Value({1.0f, headroom - 1.0f, 0.0f, 0.0f})}},
+                                  &combine_material, {}, &undo);
     if (! combine) return false;
     post.steps.push_back(std::move(*combine));
     post.steps.push_back(ScenePostProcessCopy { .src = "_rt_bloom_combine", .dst = frame });
+    scene.output_linear = true;
+    scene.display_hdr_combine_material = scene.display_hdr ? combine_material : nullptr;
 
-    if (auto* runtime = scene.runtime.get(); runtime != nullptr) {
-        const auto follow = [&](const nlohmann::json& setting, float HdrBloomState::* field,
-                                std::function<void()> apply) {
-            if (! HasDynamicSetting(setting)) return;
-            auto value = ResolveFloatSetting(*runtime, setting);
-            (*state).*field = value->getFloat();
-            runtime->RegisterDynamicValueListener(
-                std::move(value), [state, field, apply](const DynamicValue& now) {
-                    (*state).*field = now.getFloat();
-                    apply();
-                });
-        };
-        const auto apply_strength = [state, extract_material]() {
-            if (extract_material == nullptr) return;
-            extract_material->customShader.constValues["g_BloomStrength"] = ShaderValue(
-                HDRBloomExtractionStrength(state->strength, state->scatter, state->levels));
-        };
-        const auto apply_scatter = [state, up_materials, apply_strength]() {
-            for (const auto& material : up_materials) {
-                if (material != nullptr) {
-                    material->customShader.constValues["g_BloomScatter"] = ShaderValue(state->scatter);
-                }
-            }
-            apply_strength();
-        };
-        const auto apply_blend = [state, extract_material]() {
-            if (extract_material == nullptr) return;
-            extract_material->customShader.constValues["g_BloomBlendParams"] =
-                Vec4Value(HDRBloomBlend(state->threshold, state->feather));
-        };
-        follow(general.bloomhdrstrength_setting, &HdrBloomState::strength, apply_strength);
-        follow(general.bloomhdrscatter_setting, &HdrBloomState::scatter, apply_scatter);
-        follow(general.bloomhdrthreshold_setting, &HdrBloomState::threshold, apply_blend);
-        follow(general.bloomhdrfeather_setting, &HdrBloomState::feather, apply_blend);
-        if (general.dynamic_bloomtint && extract_material != nullptr) {
-            runtime->RegisterDynamicValueListener(
-                ResolveVec3Setting(*runtime, general.bloomtint_setting),
-                [extract_material](const DynamicValue& now) {
-                    const auto tint = now.getVec3();
-                    extract_material->customShader.constValues["g_BloomTint"] =
-                        ShaderValue(std::array<float, 3> { tint.x(), tint.y(), tint.z() });
-                });
-        }
-        apply_scatter();
-        apply_blend();
+    if (bindings) {
+        bindings->hdr = true;
+        bindings->levels = levels;
+        bindings->hdr_strength = general.bloomhdrstrength;
+        bindings->scatter = general.bloomhdrscatter;
+        bindings->hdr_threshold = general.bloomhdrthreshold;
+        bindings->feather = general.bloomhdrfeather;
+        bindings->tint = general.bloomtint;
+        bindings->extract = extract_material;
+        bindings->upsample.assign(up_materials.begin(), up_materials.end());
+    }
+    return true;
+}
+
+// A loaded HDR scene keeps its linear output contract when a script disables
+// bloom. WE's non-bloom HDR branch uses combine_srgb before color correction and
+// fade; omitting it changes filtering and alpha blending, even on an SDR screen.
+bool BuildHdrOutput(ParseContext& context, ScenePostProcess& post, UndoList& undo,
+                    const std::shared_ptr<BloomBindings>& bindings, TargetBackups& touched) {
+    auto& scene = *context.scene;
+    const std::string frame(SpecTex_Default);
+    PutSceneRenderTarget(scene, undo, "_rt_bloom_combine", BloomTarget(scene, 1.0), &touched);
+    auto pass = BuildBloomPass(context, "combine_srgb", {frame}, "_rt_bloom_combine",
+                               0.0f, {}, nullptr, {}, &undo);
+    if (!pass) return false;
+    post.name = "__hdr_output";
+    post.steps.push_back(std::move(*pass));
+    post.steps.push_back(ScenePostProcessCopy{.src="_rt_bloom_combine",.dst=frame});
+    scene.output_linear = true;
+    scene.display_hdr_combine_material.reset();
+    if (bindings) {
+        bindings->ClearRecipients();
+        bindings->hdr = true;
+        bindings->levels = 0;
     }
     return true;
 }
 
 /// Installs the bloom chain the scene's settings ask for (R105).
-void BuildBloom(ParseContext& context, const wpscene::WPSceneGeneral& general, bool bloom) {
-    if (! bloom) return;
+bool BuildBloom(ParseContext& context, const wpscene::WPSceneGeneral& authored, bool bloom,
+                const std::shared_ptr<BloomBindings>& bindings) {
+    if (!bloom && !context.scene->hdr) return false;
+    auto general = authored;
+    if (bindings) bindings->CopySettings(general);
+    if (context.scene->runtime) context.scene->runtime->CopySceneGeneralSettings(general);
     auto post = std::make_shared<ScenePostProcess>();
     UndoList undo;
+    TargetBackups touched;
     bool     built = false;
     try {
-        built = context.scene->hdr ? BuildHdrBloom(context, general, *post, undo)
-                                   : BuildLdrBloom(context, general, *post, undo);
+        built = context.scene->hdr
+            ? (bloom ? BuildHdrBloom(context, general, *post, undo, bindings, touched)
+                     : BuildHdrOutput(context, *post, undo, bindings, touched))
+            : BuildLdrBloom(context, general, *post, undo, bindings, touched);
     } catch (...) {
         RunUndo(undo);
         throw;
     }
-    if (built) context.scene->post_processes.push_back(std::move(post));
-    else RunUndo(undo);
+    if (built) {
+        context.scene->post_processes.push_back(std::move(post));
+        if (bindings) {
+            // A replacement first builds against the current targets. On success,
+            // keep the pre-bloom backup of shared names and retire only excess levels.
+            std::erase_if(bindings->targets, [&](const auto& saved) {
+                if (touched.contains(saved.first)) return false;
+                RestoreSceneRenderTarget(*context.scene, saved.first, saved.second);
+                return true;
+            });
+            for (auto& [name, previous] : touched)
+                bindings->targets.try_emplace(name, std::move(previous));
+        }
+    } else RunUndo(undo);
+    return built;
+}
+
+/// Wallpaper Engine's per-wallpaper colour options and image filter
+/// (wallpaper64.exe sub_140181F30): `materials/util/ccsimple.json` with `COL`
+/// and/or `LUT`, drawn after bloom and its combine (sub_14017FA70), reading the
+/// frame and writing it back. At the identity nothing is added, as in WE.
+/// Recorded in artifacts/we-parity/decompiles/D-14.md.
+void BuildColorCorrection(ParseContext& context, const WeUserOptions& options) {
+    auto& scene         = *context.scene;
+    scene.ccsimple_shape = CcsimpleShapeOf(options);
+    const auto shape    = scene.ccsimple_shape;
+    if (! shape.col && ! shape.lut) return;
+    UndoList          undo;
+    const std::string frame(SpecTex_Default);
+    PutSceneRenderTarget(scene, undo, "_rt_ccsimple", BloomTarget(scene, 1.0));
+    std::vector<std::string>                 textures { frame };
+    std::unordered_map<std::string, int32_t> combos;
+    if (shape.col) combos["COL"] = 1;
+    if (shape.lut) {
+        combos["LUT"] = 1;
+        textures.push_back("lut/" + shape.lut_name);
+    }
+    const auto                     params = CcsimpleParams(options);
+    std::shared_ptr<SceneMaterial> material;
+    auto pass = BuildBloomPass(context, "ccsimple", std::move(textures), "_rt_ccsimple", 0.0f,
+                               { { "g_Params", ShaderValue(params.data(), params.size()) },
+                                 { "g_LutParams", ShaderValue(CcsimpleLutParams(options)) } },
+                               &material, combos);
+    if (! pass || material == nullptr) {
+        LOG_ERROR("the colour options and image filter are not drawn: ccsimple did not load");
+        RunUndo(undo);
+        return;
+    }
+    auto post  = std::make_shared<ScenePostProcess>();
+    post->name = "__ccsimple";
+    post->steps.push_back(std::move(*pass));
+    post->steps.push_back(ScenePostProcessCopy { .src = "_rt_ccsimple", .dst = frame });
+    scene.post_processes.push_back(std::move(post));
+    scene.color_correction_material = std::move(material);
+}
+
+// Camera-path transitions are drawn after bloom and per-wallpaper colour correction.
+// The pass has no private target or sampled image. Its existing visibility predicate skips
+// the draw while the path is away from an endpoint, without rebuilding the graph per frame.
+void BuildCameraFade(ParseContext& context, bool enabled) {
+    auto* runtime = context.scene->runtime.get();
+    if (!runtime) return;
+    runtime->SetCameraFadeEnabled(enabled);
+    if (!enabled || !runtime->HasCameraPaths() || runtime->HasCameraFadeNode()) return;
+    const float tint[3] {0.315f, 0.135f, 0.1125f};
+    std::shared_ptr<SceneMaterial> material;
+    auto pass = BuildBloomPass(context, "fade", {}, std::string(SpecTex_Default), 0.0f,
+                              {{"g_Alpha", ShaderValue(0.0f)}, {"color", ShaderValue(tint, 3)}},
+                              &material);
+    if (!pass || !material) return;
+    pass->node->SetName("__camera_fade");
+    runtime->RegisterCameraFadeNode(pass->node);
+    runtime->RegisterMaterialConstant(material, "color", ResolveVec3Setting(*runtime,
+        {{"user", "schemecolor"}, {"value", nlohmann::json::array({tint[0], tint[1], tint[2]})}}));
+    auto post = std::make_shared<ScenePostProcess>();
+    post->name = "__camera_fade";
+    post->steps.push_back(std::move(*pass));
+    context.scene->post_processes.push_back(std::move(post));
+}
+
+bool RebuildSceneGeneralPostProcesses(ParseContext& context, const wpscene::WPSceneGeneral& general,
+                                      const std::shared_ptr<BloomBindings>& bindings,
+                                      bool has_authored_objects) {
+    auto& scene = *context.scene;
+    auto& runtime = *scene.runtime;
+    auto& posts = scene.post_processes;
+    const auto bloom = std::find_if(posts.begin(), posts.end(), [](const auto& post) {
+        return post && (post->name == "__bloom" || post->name == "__hdr_bloom" || post->name == "__hdr_output");
+    });
+    // A statically hidden authored object can be absent from the script layer
+    // list, but keeps the same bloom eligibility it had during initial loading.
+    const bool wanted = general.bloom && (has_authored_objects || runtime.LayerCount() != 0) &&
+        static_cast<PostProcessing>(scene.quality.post_processing) != PostProcessing::Disabled;
+    const std::shared_ptr<ScenePostProcess> previous = bloom == posts.end() ? nullptr : *bloom;
+    const bool needed = wanted || scene.hdr;
+    const bool reshape = previous && needed &&
+        ((previous->name == "__hdr_output") == wanted ||
+         (wanted && scene.hdr && bindings &&
+          bindings->levels != HDRBloomLevels(general.bloomhdriterations, scene)));
+    const auto retire = [&](const std::shared_ptr<ScenePostProcess>& post) {
+        if (!post) return;
+        for (const auto& step : post->steps) if (const auto* pass = std::get_if<ScenePostProcessPass>(&step)) {
+            if (!pass->node) continue;
+            if (pass->node->Mesh()) for (const auto& material : pass->node->Mesh()->MaterialSlots())
+                runtime.ForgetSceneUniformMaterial(material);
+            if (context.shader_updater) context.shader_updater->ForgetNode(pass->node.get());
+        }
+        std::erase(posts, post);
+    };
+    bool changed = false;
+    if (!needed && previous) {
+        retire(previous);
+        if (bindings) {
+            for (const auto& [name, saved] : bindings->targets)
+                RestoreSceneRenderTarget(scene, name, saved);
+            bindings->targets.clear();
+            bindings->ClearRecipients();
+        }
+        changed = true;
+    } else if (needed && (!previous || reshape)) {
+        try {
+            if (BuildBloom(context, general, wanted, bindings)) {
+                retire(previous);
+                // Keep the current colour/LUT object and values. A bloom appended by
+                // the builder belongs before it; an existing fade stays last.
+                std::rotate(posts.begin(), std::prev(posts.end()), posts.end());
+                for (const auto& step : posts.front()->steps)
+                    if (const auto* pass = std::get_if<ScenePostProcessPass>(&step))
+                        for (const auto& material : pass->node->Mesh()->MaterialSlots())
+                            runtime.AddSceneUniformMaterial(material);
+                changed = true;
+            }
+        } catch (const std::exception& error) {
+            // The builder rolls back targets and updater records before throwing.
+            // A failed lazy request must not unwind a QuickJS/frame callback.
+            LOG_ERROR("cannot enable scene bloom: %s", error.what());
+        }
+    }
+    const bool had_fade = runtime.HasCameraFadeNode();
+    BuildCameraFade(context, general.camerafade);
+    return changed || had_fade != runtime.HasCameraFadeNode();
+}
+
+/// The bars a fitted picture leaves on the display take the project's
+/// `schemecolor` (WE sub_140181F30 reads it; sub_14017FA70 clears with it for
+/// the alignments that leave room), followed live. Without the property they
+/// stay black.
+void FollowSchemeBorderColor(Scene& scene) {
+    auto* runtime = scene.runtime.get();
+    if (runtime == nullptr || runtime->FindPropertyValue("schemecolor") == nullptr) return;
+    Scene* target = &scene;
+    runtime->RegisterDynamicValueListener(
+        ResolveVec3Setting(*runtime, nlohmann::json { { "user", "schemecolor" }, { "value", "0 0 0" } }),
+        [target](const DynamicValue& now) {
+            const auto color    = now.getVec3();
+            target->border_color = { color.x(), color.y(), color.z() };
+        });
 }
 
 /// A light: a member of the tree with no picture of its own. Its colour, radius,
@@ -5328,6 +7530,7 @@ bool LoadLightEntry(ParseContext& context, std::size_t at, const nlohmann::json&
     if (! light.FromJson(entry, *context.vfs)) return false;
     auto* runtime_ptr = context.scene->runtime.get();
     auto& layer       = AddLayer(context, at, entry, plan, true, true);
+    layer.node->SetTransparentSort(SceneNode::TransparentSort::Depth);
     SetUnhittable(context, plan.key);
 
     auto source = std::make_unique<SceneLight>(ParseSceneLightType(light.light),
@@ -5336,13 +7539,50 @@ bool LoadLightEntry(ParseContext& context, std::size_t at, const nlohmann::json&
     source->setExponent(light.exponent);
     source->setCones(light.innercone, light.outercone);
     source->setControlPoint(Vector3f(light.controlpoint.data()));
+    source->setCookie(light.cookie);
+    if (!light.cookie.empty())
+        RegisterFileTexture(context, light.cookie, TextureHeaderOf(context, light.cookie));
+    source->setVolumetrics(light.density, light.volumetricsexponent, light.castvolumetrics);
+    source->setCascadeDistances(light.cascadedistance);
+    source->setSourceSize(light.lightsourcesize);
+    source->setFlags((light.castshadow ? SceneLight::kCastShadow : 0u) |
+                     (light.usecookie ? SceneLight::kUseCookie : 0u) |
+                     (light.castvolumetrics ? SceneLight::kCastVolumetrics : 0u));
+    source->setLegacySlot(static_cast<uint8_t>(plan.light_ordinal < 4 ? plan.light_ordinal : 0));
     source->setNode(layer.node);
+    if (context.shadow_capable || context.scene->quality.volumetrics!=0) {
+        const std::weak_ptr<Scene> weak = context.scene;
+        SceneLight* const changed_light = source.get();
+        const auto casts_volume = [changed_light] {
+            return changed_light->castsVolumetrics() &&
+                (changed_light->type() == SceneLightType::Point ||
+                 changed_light->type() == SceneLightType::Spot);
+        };
+        source->setTopologyChanged([weak, casts_volume, previously_cast = casts_volume()]() mutable {
+            const auto scene = weak.lock();
+            if (!scene) return;
+            const bool casts = casts_volume();
+            // Unrelated lights do not rebuild an absent volume chain. The old
+            // state still matters when casting is disabled or the kind changes.
+            const bool volume_changed = casts || previously_cast;
+            previously_cast = casts;
+            if (scene->runtime) {
+                scene->runtime->InvalidateShadowTopology();
+                if (volume_changed) scene->runtime->InvalidateVolumetricTopology();
+            } else {
+                if (scene->shadows.enabled) scene->shadows.dirty = true;
+                if (volume_changed && scene->quality.volumetrics != 0)
+                    scene->volumetric_dirty = true;
+            }
+        });
+    }
     SceneLight* raw = source.get();
     if (runtime_ptr == nullptr) {
         context.scene->lights.push_back(std::move(source));
         return true;
     }
     auto& runtime = *runtime_ptr;
+    runtime.RegisterLightLayer(plan.key, raw, light.light);
 
     const auto follow_float = [&](const nlohmann::json& setting, auto apply) {
         if (! HasDynamicSetting(setting)) return;
@@ -5462,12 +7702,27 @@ void BuildLayers(ParseContext& context, const wpscene::WPSceneGeneral& general,
                 authored = name->get<std::string>();
             }
             runtime->DeclareLayerName(plans[at].key, std::move(authored));
+            // `sortorder` (int @292 of every object, we_ss_reg_SceneObjectBase 0x1401E0530).
+            if (const auto order = objects[at].find("sortorder");
+                order != objects[at].end() && order->is_number()) {
+                const double value = order->get<double>();
+                if (std::isfinite(value)) {
+                    runtime->RegisterNodeSortOrder(
+                        plans[at].key,
+                        static_cast<int32_t>(std::clamp(std::trunc(value), -2147483648.0, 2147483647.0)));
+                }
+            }
         }
     }
     for (std::size_t at = 0; at < objects.size(); ++at) {
         const auto& plan  = plans[at];
         const auto& entry = objects[at];
         if (plan.admission == Admission::Skip) continue;
+        std::string authored_name = plan.key;
+        if (const auto name = entry.find("name"); name != entry.end() && name->is_string()) {
+            authored_name = name->get<std::string>();
+        }
+        const ParseObjectScope object_scope(plan.id, std::move(authored_name));
         const bool plain = plan.admission == Admission::Node;
         const bool typed_node = plan.kind == EntryKind::Light || plan.kind == EntryKind::Camera;
         if (plain || (plan.placeholder && ! typed_node)) {
@@ -5522,7 +7777,8 @@ void RegisterPuppetAttachments(ParseContext& context, const std::vector<std::siz
         by_parent[parent[at]].push_back(WPShaderValueUpdater::PuppetAttachment {
             .node           = layers[at].node.get(),
             .bone_index     = anchor->bone_index,
-            .bind_transform = puppet.bones[anchor->bone_index].world_bind * anchor->local_xform });
+            .bind_transform = puppet.bones[anchor->bone_index].world_bind * anchor->local_xform,
+            .attachment_index = static_cast<int32_t>(std::distance(puppet.attachments.begin(),anchor)) });
     }
     for (auto& [holder, attachments] : by_parent) {
         context.shader_updater->RegisterPuppetAttachments(layers[holder].puppet_layer,
@@ -5595,6 +7851,107 @@ bool LoadSoundEntry(ParseContext& context, const nlohmann::json& entry, const En
 // Scene settings and cameras (R12 to R30, R79 to R88, R111, R113).
 // ---------------------------------------------------------------------------
 
+/// The live scene uniforms of `general`: each one with a driven setting is registered with the
+/// runtime, and `general` takes the value it starts from. Static ones are left to
+/// `SetGlobalUniform`, which every material copies once.
+void BindLiveSceneUniforms(SceneRuntimeContext& runtime, wpscene::WPSceneGeneral& general) {
+    const auto colour = [&runtime](const char* uniform, const nlohmann::json& setting,
+                                   std::array<float, 3>& seed) {
+        if (! HasDynamicSetting(setting)) return;
+        std::vector<std::unique_ptr<DynamicValue>> inputs;
+        inputs.push_back(ResolveVec3Setting(runtime, setting));
+        if (std::string_view(uniform) == "g_LightAmbientColor") runtime.AliasSceneGeneralDriver("ambientcolor", inputs.front().get());
+        if (std::string_view(uniform) == "g_LightSkylightColor") runtime.AliasSceneGeneralDriver("skylightcolor", inputs.front().get());
+        if (std::string_view(uniform) == "g_FogHeightColor") runtime.AliasSceneGeneralDriver("fogheightcolor", inputs.front().get());
+        if (std::string_view(uniform) == "g_FogDistanceColor") runtime.AliasSceneGeneralDriver("fogdistancecolor", inputs.front().get());
+        const linalg::Vector3f start = inputs.front()->getVec3();
+        seed                         = { start.x(), start.y(), start.z() };
+        runtime.RegisterSceneUniform(uniform, std::move(inputs), [](std::span<DynamicValue* const> in) {
+            const linalg::Vector3f value = in[0]->getVec3();
+            const float            lanes[3] { value.x(), value.y(), value.z() };
+            return ShaderValue(lanes, 3);
+        });
+    };
+    // (start, end, start density, end density) -> (start, end - start, start density,
+    // end density - start density), as `SetGlobalUniform` packs them.
+    const auto fog = [&runtime](const char* uniform, std::array<const nlohmann::json*, 4> settings,
+                                std::array<float*, 4> seeds, std::array<const char*, 4> members) {
+        if (std::none_of(settings.begin(), settings.end(),
+                         [](const nlohmann::json* setting) { return HasDynamicSetting(*setting); })) {
+            return;
+        }
+        std::vector<std::unique_ptr<DynamicValue>> inputs;
+        for (std::size_t lane = 0; lane < 4; ++lane) {
+            inputs.push_back(HasDynamicSetting(*settings[lane])
+                                 ? ResolveFloatSetting(runtime, *settings[lane])
+                                 : std::make_unique<DynamicValue>(*seeds[lane]));
+            *seeds[lane] = inputs.back()->getFloat();
+            runtime.AliasSceneGeneralDriver(members[lane], inputs.back().get());
+        }
+        runtime.RegisterSceneUniform(uniform, std::move(inputs), [](std::span<DynamicValue* const> in) {
+            const float start = in[0]->getFloat(), end = in[1]->getFloat();
+            const float near  = in[2]->getFloat(), far = in[3]->getFloat();
+            const float lanes[4] { start, end - start, near, far - near };
+            return ShaderValue(lanes, 4);
+        });
+    };
+    colour("g_LightAmbientColor", general.ambientcolor_setting, general.ambientcolor);
+    colour("g_LightSkylightColor", general.skylightcolor_setting, general.skylightcolor);
+    colour("g_FogHeightColor", general.fogheightcolor_setting, general.fogheightcolor);
+    colour("g_FogDistanceColor", general.fogdistancecolor_setting, general.fogdistancecolor);
+    fog("g_FogHeightParams",
+        { &general.fogheightstart_setting, &general.fogheightend_setting,
+          &general.fogheightstartdensity_setting, &general.fogheightenddensity_setting },
+        { &general.fogheightstart, &general.fogheightend, &general.fogheightstartdensity,
+          &general.fogheightenddensity },
+        { "fogheightstart", "fogheightend", "fogheightstartdensity", "fogheightenddensity" });
+    fog("g_FogDistanceParams",
+        { &general.fogdistancestart_setting, &general.fogdistanceend_setting,
+          &general.fogdistancestartdensity_setting, &general.fogdistanceenddensity_setting },
+        { &general.fogdistancestart, &general.fogdistanceend, &general.fogdistancestartdensity,
+          &general.fogdistanceenddensity },
+        { "fogdistancestart", "fogdistanceend", "fogdistancestartdensity", "fogdistanceenddensity" });
+}
+
+/// Hands every material at or below `root` (the whole scene graph when null), of every effect
+/// chain and of every post-process step to the live scene uniforms. Nothing when there are none.
+void AddLiveSceneUniformMaterials(Scene& scene, SceneNode* root) {
+    auto* const runtime = scene.runtime.get();
+    if (runtime == nullptr || ! runtime->HasSceneUniforms()) return;
+    const auto add_node = [runtime](SceneNode& node) {
+        if (auto* mesh = node.Mesh(); mesh != nullptr) {
+            for (const auto& material : mesh->MaterialSlots()) runtime->AddSceneUniformMaterial(material);
+        }
+    };
+    std::vector<SceneNode*> nodes;
+    if (root != nullptr) nodes.push_back(root);
+    else if (scene.sceneGraph != nullptr) nodes.push_back(scene.sceneGraph.get());
+    for (std::size_t next = 0; next < nodes.size(); ++next) {
+        add_node(*nodes[next]);
+        for (const auto& child : nodes[next]->GetChildren()) nodes.push_back(child.get());
+    }
+    for (auto& [name, camera] : scene.cameras) {
+        if (camera == nullptr || ! camera->HasImgEffect()) continue;
+        auto& chain = *camera->GetImgEffect();
+        for (std::size_t index = 0; index < chain.EffectCount(); ++index) {
+            const auto& effect = chain.GetEffect(index);
+            if (effect == nullptr) continue;
+            for (auto& pass : effect->nodes) {
+                if (pass.sceneNode != nullptr) add_node(*pass.sceneNode);
+            }
+        }
+        add_node(chain.FinalNode());
+    }
+    for (const auto& post : scene.post_processes) {
+        if (post == nullptr) continue;
+        for (const auto& step : post->steps) {
+            if (const auto* pass = std::get_if<ScenePostProcessPass>(&step); pass != nullptr && pass->node) {
+                add_node(*pass->node);
+            }
+        }
+    }
+}
+
 void SetGlobalUniform(ParseContext& context, const char* name, std::initializer_list<float> lanes) {
     const std::vector<float> values(lanes);
     context.global_base_uniforms[name] = ShaderValue(values.data(), values.size());
@@ -5614,6 +7971,42 @@ std::shared_ptr<SceneNode> AddCameraNode(ParseContext& context, SceneCamera& cam
 }
 
 /// The cameras of the scene and the targets every scene has (R111, R113).
+/// Whether the scene draws shadows (Appendix C item 6, C-6.md): the shadows quality is on, the
+/// light config has a shadow subset, a light that is not statically hidden says `castshadow`,
+/// and a model that is not statically hidden casts (a model casts unless it says
+/// `castshadow: false`; an image layer never casts: probe P-S ps6).
+bool SceneDrawsShadows(const Scene& scene, const nlohmann::json& objects) {
+    const auto& c = scene.light_config;
+    if (scene.quality.shadows == 0 ||
+        c.spot_shadow_cookie + c.spot_shadow + c.point_shadow + c.directional_shadow == 0 ||
+        ! objects.is_array())
+        return false;
+    bool light = false, caster = false;
+    for (const auto& entry : objects) {
+        if (! entry.is_object() || StaticallyHidden(entry)) continue;
+        const EntryKind kind = ClassifyEntry(entry);
+        if (kind == EntryKind::Light) {
+            bool cast = false;
+            wpscene::ReadMiscFlag(entry, "castshadow", cast);
+            light = light || cast;
+        } else if (kind == EntryKind::Model) {
+            bool cast = true;
+            wpscene::ReadMiscFlag(entry, "castshadow", cast);
+            caster = caster || cast;
+        }
+    }
+    return light && caster;
+}
+
+/// Lays the shadow views out once every light exists and sizes the atlas to their packed extent.
+void FinishSceneShadows(ParseContext& context) {
+    context.scene->shadows.ortho_scene = context.is_ortho;
+    const auto& c = context.scene->light_config;
+    context.scene->shadows.cookie_features = c.spot_cookie + c.spot_shadow_cookie != 0;
+    if (context.shadow_capable) RefreshSceneShadows(*context.scene);
+    else if (context.scene->shadows.cookie_features) PlanSceneShadows(*context.scene, context.is_ortho);
+}
+
 void BuildCamerasAndTargets(ParseContext& context, const wpscene::WPScene& wp, double zoom) {
     auto&       scene   = *context.scene;
     const auto& general = wp.general;
@@ -5645,9 +8038,16 @@ void BuildCamerasAndTargets(ParseContext& context, const wpscene::WPScene& wp, d
         .bind         = { .enable = true, .name = std::string(SpecTex_Default) },
         .format       = format,
     };
-    targets["_rt_shadowAtlas"] =
-        SceneRenderTarget { .width = frame_w, .height = frame_h, .allowReuse = true };
-    scene.renderTargetAliases["_alias_lightCookie"] = "_rt_shadowAtlas";
+    // The shadow atlas (C-6.md, sub_1401AADB0 "_rt_shadowAtlas"): depth, kept at its own size,
+    // only while shadows are drawn; its packed extent is set once the lights exist
+    // (FinishSceneShadows). Cookie aliases keep a parse-time placeholder; once the
+    // lights exist they select a file image, and draw-time bindings follow that selection.
+    if (context.shadow_mapping) {
+        targets[std::string(kShadowAtlas)] = SceneRenderTarget {
+            .width = 2, .height = 2, .format = TextureFormat::Depth32F, .unscaled = true };
+    }
+    targets["_rt_lightCookie"] = SceneRenderTarget { .width = 2, .height = 2 };
+    scene.renderTargetAliases["_alias_lightCookie"] = "_rt_lightCookie";
     for (const auto& [name, divisor] :
          { std::pair<const char*, i32> { "_rt_4FrameBuffer", 4 }, { "_rt_8FrameBuffer", 8 },
            { "_rt_Bloom", 8 } }) {
@@ -5698,8 +8098,39 @@ void BuildCamerasAndTargets(ParseContext& context, const wpscene::WPScene& wp, d
         PlacePerspectiveCameraNode(*context.global_perspective_camera_node, wp.camera);
         perspective->Update();
         scene.activeCamera = perspective.get();
+        // A layer with the `perspective` flag in a 3D scene: the same camera seen from 2000
+        // units in front of its look-at point with the lens scaled to match (probes pcam-a..f).
+        auto far_view = std::make_shared<SceneCamera>(*perspective);
+        far_view->AttatchNode(context.global_perspective_camera_node);
+        const Vector3d eye(wp.camera.eye[0], wp.camera.eye[1], wp.camera.eye[2]);
+        const Vector3d centre(wp.camera.center[0], wp.camera.center[1], wp.camera.center[2]);
+        far_view->SetLookBack(kPerspectiveLayerDistance, (centre - eye).norm());
+        far_view->Update();
+        scene.cameras[std::string(kPerspectiveLayerCamera)] = far_view;
     }
     scene.cameras["global_perspective"] = perspective;
+    if (scene.runtime) {
+        SceneRuntimeContext::StaticCameraTransforms transforms { 0, 0, 0, 0, 0, -1, 0, 1, 0, zoom };
+        if (!context.is_ortho) {
+            for (std::size_t i = 0; i < 3; ++i) {
+                transforms[i] = wp.camera.eye[i];
+                transforms[i + 3] = wp.camera.center[i];
+                transforms[i + 6] = wp.camera.up[i];
+            }
+        }
+        scene.runtime->RegisterStaticCameraTransforms(transforms);
+        GlobalCameraPlayback paths;
+        for (const auto& filename : wp.camera.paths) {
+            // WE replaces the previous file's queue; the last listed file owns playback.
+            paths = GlobalCameraPlayback();
+            nlohmann::json document;
+            if (!filename.empty() && wpscene::ParseBoundedJson(
+                    fs::GetFileContent(*context.vfs,"/assets/"+filename),document))
+                paths = GlobalCameraPlayback(ParseGlobalCameraPaths(document));
+        }
+        if (!paths.empty()) scene.runtime->RegisterGlobalCameraPaths(scene.activeCamera,
+            scene.activeCamera->GetAttachedNode(),std::move(paths));
+    }
 }
 
 /// Every setting of the `general` block that reaches the scene or its runtime
@@ -5707,23 +8138,13 @@ void BuildCamerasAndTargets(ParseContext& context, const wpscene::WPScene& wp, d
 void ApplySceneSettings(ParseContext& context, const wpscene::WPScene& wp) {
     auto&       scene   = *context.scene;
     auto* const runtime_ptr = scene.runtime.get();
-    // The scene file's values, with the ambient and skylight colours and the height fog that a
-    // user property is bound to replaced by what the property holds as the scene loads. They
-    // are uniforms every material shares and nothing in the frame rewrites them: a change to
-    // such a property takes a reload (`NoteLoadOnlyProperty`).
+    // The scene file's values. The ambient and skylight colours and the height and distance
+    // fog are uniforms every material shares; one a script or a user property drives is
+    // followed every frame, as Wallpaper Engine evaluates them (`RegisterSceneUniform`), and
+    // the value it has as the scene loads is what the materials start from.
     auto general = wp.general;
-    if (runtime_ptr != nullptr) {
-        auto& runtime = *runtime_ptr;
-        ResolveLoadOnlySceneVec3(runtime, general.ambientcolor_setting, general.ambientcolor);
-        ResolveLoadOnlySceneVec3(runtime, general.skylightcolor_setting, general.skylightcolor);
-        ResolveLoadOnlySceneVec3(runtime, general.fogheightcolor_setting, general.fogheightcolor);
-        ResolveLoadOnlySceneSetting(runtime, general.fogheightstart_setting, general.fogheightstart);
-        ResolveLoadOnlySceneSetting(runtime, general.fogheightend_setting, general.fogheightend);
-        ResolveLoadOnlySceneSetting(runtime, general.fogheightstartdensity_setting,
-                                    general.fogheightstartdensity);
-        ResolveLoadOnlySceneSetting(runtime, general.fogheightenddensity_setting,
-                                    general.fogheightenddensity);
-    }
+    if (runtime_ptr != nullptr) runtime_ptr->CopySceneGeneralSettings(general);
+    if (runtime_ptr != nullptr) BindLiveSceneUniforms(*runtime_ptr, general);
 
     scene.clearEnabled = general.clearenabled;
     scene.clearColor   = general.clearcolor;
@@ -5731,10 +8152,13 @@ void ApplySceneSettings(ParseContext& context, const wpscene::WPScene& wp) {
         runtime_ptr->RegisterSceneClearColor(
             ResolveVec3Setting(*runtime_ptr, general.clearcolor_setting));
     }
-    scene.light_config = ParseSceneLightConfig(general.lightconfig);
+    scene.light_config = ParseSceneLightConfig(general.lightconfig, scene.quality.shadows != 0);
     scene.fog_distance = general.fogdistance;
     scene.fog_height   = general.fogheight;
-    scene.opaque_first = general.transparentsorting && ! context.is_ortho;
+    // WE selects either sort mode from the two flag bits; setting both selects neither.
+    scene.transparent_sorting = general.transparentsorting && !context.is_ortho;
+    if (runtime_ptr != nullptr)
+        runtime_ptr->SetCustomSortOrder(general.customsortorder && !general.transparentsorting);
 
     SetGlobalUniform(context, "g_LightAmbientColor",
                      { general.ambientcolor[0], general.ambientcolor[1], general.ambientcolor[2] });
@@ -5786,6 +8210,7 @@ void ApplySceneSettings(ParseContext& context, const wpscene::WPScene& wp) {
         if (HasDynamicSetting(general.cameraparallaxdelay_setting)) {
             auto value     = ResolveFloatSetting(runtime, general.cameraparallaxdelay_setting);
             parallax.delay = value->getFloat();
+            runtime.AliasSceneGeneralDriver("cameraparallaxdelay", value.get());
             auto* updater  = context.shader_updater;
             runtime.RegisterDynamicValueListener(std::move(value), [updater](const DynamicValue& now) {
                 auto current  = updater->CameraParallax();
@@ -5795,6 +8220,13 @@ void ApplySceneSettings(ParseContext& context, const wpscene::WPScene& wp) {
         }
     }
     context.shader_updater->SetCameraParallax(parallax);
+    if (runtime_ptr != nullptr) {
+        const float enabled = parallax.enable ? 1.0f : 0.0f;
+        runtime_ptr->SeedSceneGeneralValue("cameraparallax", std::span(&enabled, 1));
+        runtime_ptr->SeedSceneGeneralValue("cameraparallaxamount", std::span(&parallax.amount, 1));
+        runtime_ptr->SeedSceneGeneralValue("cameraparallaxdelay", std::span(&parallax.delay, 1));
+        runtime_ptr->SeedSceneGeneralValue("cameraparallaxmouseinfluence", std::span(&parallax.mouseinfluence, 1));
+    }
 }
 
 /// The scene's zoom: where it starts, and what keeps it going. A playable timeline
@@ -5861,19 +8293,35 @@ std::array<int32_t, 2> ResolveCanvas(ParseContext& context, const wpscene::WPSce
 /// The thread-local state of one parse: nothing from an earlier parse is left in
 /// it, and nothing of this one remains once it ends, however it ends.
 struct ParseSession {
-    ParseSession() {
+    ParseSession() : previous_missing_file_observer(fs::t_missing_file_observer) {
         g_pending_metal_translations.clear();
         g_shader_failures.clear();
         g_parse_layer_index = nullptr;
+        ClearMissingFiles();
+        fs::t_missing_file_observer = &missing_file_observer;
         WPShaderParser::BeginShaderSession();
     }
     ~ParseSession() {
         g_pending_metal_translations.clear();
         g_shader_failures.clear();
         g_parse_layer_index = nullptr;
+        fs::t_missing_file_observer = previous_missing_file_observer;
+        ClearMissingFiles();
         WPShaderParser::EndShaderSession();
     }
+    ParseSession(const ParseSession&)            = delete;
+    ParseSession& operator=(const ParseSession&) = delete;
+
+    static void ClearMissingFiles() {
+        g_missing_files.clear();
+        g_parse_object_id = -1;
+        g_parse_object_name.clear();
+    }
+
+    const fs::MissingFileObserver  missing_file_observer { [](std::string_view path) { RecordMissingFile(path); } };
+    const fs::MissingFileObserver* previous_missing_file_observer;
 };
+
 
 std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, const std::string& buf,
                                           fs::VFS& vfs, audio::SoundManager& sm) {
@@ -5889,12 +8337,15 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
     }
     auto& objects = *objects_found;
     ParseSession session;
+    // The leftover constants of every material of this scene, said in one line when the
+    // parse ends, however it ends.
+    UnmatchedConstantTally unmatched_constants;
 
     wpscene::WPScene wp;
     wp.FromJson(json, request.pkg_version);
     const auto& general = wp.general;
-    // Parented layers ride the outermost parent's parallax depth.
-    ResolveLayerParallax(objects);
+    // Keep each layer's authored depth. The draw resolves the current root,
+    // including a parent assigned later by a script; getters still read the layer.
 
     auto scene           = std::make_shared<Scene>();
     scene->scene_id      = request.scene_id;
@@ -5911,6 +8362,25 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
 
     ParseContext context {};
     context.objects        = &objects;
+    // The device's model gate is known before the first material, including an
+    // image authored before the model. It does not change for runtime layer clones.
+    if (request.quality.msaa > 1) {
+        context.uses_models = std::any_of(objects.begin(), objects.end(), [](const auto& object) {
+            return object.is_object() && object.contains("model") && !object["model"].is_null();
+        });
+    }
+    for (const auto& object : objects) {
+        const auto dependencies = object.find("dependencies");
+        if (dependencies == object.end() || !dependencies->is_array()) continue;
+        for (const auto& dependency : *dependencies) {
+            int32_t id = 0;
+            if (!dependency.is_object() || !dependency.contains("type") || !dependency["type"].is_string() ||
+                !wpscene::ReadInt32(dependency.value("id", nlohmann::json()), id)) continue;
+            const auto& type = dependency["type"].get_ref<const std::string&>();
+            if (type == "emitterimage") context.particle_image_targets.insert(id);
+            if (type == "emitterimage" || type == "collisionmodel") context.particle_link_targets_required.insert(id);
+        }
+    }
     context.scene          = scene;
     context.vfs            = &vfs;
     context.shader_updater = static_cast<WPShaderValueUpdater*>(scene->shaderValueUpdater.get());
@@ -5944,18 +8414,60 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
     if (request.project_properties != nullptr) {
         scene->runtime = std::make_unique<SceneRuntimeContext>(std::move(bootstrap));
         scene->runtime->AttachScene(scene.get());
+        // Before any program is created: a script may read localStorage as it starts.
+        scene->runtime->ScriptStorage().Configure(request.storage_directory, request.storage_screen_key,
+                                                  request.storage_read_only);
+        // A texture's variant records (TEXB0004) are answered from the user properties as the
+        // texture loads (`sub_14015C8D0` asks the loader's callback per record).
+        Scene* owner = scene.get();
+        scene->imageParser->SetVariantCondition([owner](std::string_view name, std::string_view condition) {
+            if (owner->runtime == nullptr) return false;
+            const DynamicValue* value = owner->runtime->FindPropertyValue(name);
+            if (value == nullptr) return false;
+            if (condition.empty()) {
+                const std::string text = value->toString();
+                return ! text.empty() && text != "0" && text != "false";
+            }
+            return DynamicValue::ChoiceMatches(*value, std::string(condition));
+        });
     }
 
     // What decides how the scene is built is read once, as it loads.
     bool bloom = general.bloom;
     if (scene->runtime != nullptr) {
+        scene->runtime->RegisterSceneGeneral(general);
+        scene->runtime->RegisterSceneForceSettings(general);
         ResolveLoadOnlySceneSetting(*scene->runtime, general.bloom_setting, bloom);
+        const float requested_bloom = bloom ? 1.0f : 0.0f;
+        scene->runtime->SeedSceneGeneralValue("bloom", std::span(&requested_bloom, 1));
     }
-    scene->hdr = general.hdr && bloom;
+    // The post-processing quality (WE sub_14010DF40): "disabled" drops bloom;
+    // HDR needs bloom && hdr && ultra or displayhdr; every other level is LDR
+    // bloom. Recorded in artifacts/we-parity/decompiles/H-P0-1.md.
+    scene->quality            = request.quality;
+    scene->reflection_enabled = request.quality.reflection;
+    const auto post_processing = static_cast<PostProcessing>(request.quality.post_processing);
+    if (post_processing == PostProcessing::Disabled) bloom = false;
+    scene->hdr = general.hdr && bloom &&
+                 (post_processing == PostProcessing::Ultra ||
+                  post_processing == PostProcessing::DisplayHdr);
+    scene->display_hdr = scene->hdr && post_processing == PostProcessing::DisplayHdr;
 
     ApplySceneSettings(context, wp);
+    const auto& shadow_config = scene->light_config;
+    context.shadow_capable = scene->quality.shadows != 0 &&
+        shadow_config.point_shadow + shadow_config.spot_shadow + shadow_config.spot_shadow_cookie +
+        shadow_config.directional_shadow != 0;
+    scene->shadows.enabled = context.shadow_capable;
+    scene->shadows.dirty = context.shadow_capable;
+    context.shadow_mapping = SceneDrawsShadows(*scene, objects);
+    // The per-wallpaper mouse-parallax toggle (WE sub_140115280 clears scene flag
+    // 0x200): cursor-driven camera parallax only.
+    context.shader_updater->SetUserMouseParallax(request.user_options.mouse_parallax);
+    FollowSchemeBorderColor(*scene);
     auto zoom = PlanSceneZoom(context, general);
     BuildCamerasAndTargets(context, wp, zoom.start);
+    ApplySceneMultisampling(context, request);
     InstallSceneZoom(context, std::move(zoom));
 
     // The layers other layers sample are known before any is built.
@@ -5963,15 +8475,30 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
     for (const auto& ref : early_refs) {
         if (ref.source_id != 0) context.referenced_layer_ids.insert(ref.source_id);
     }
+    if (scene->runtime != nullptr) {
+        std::vector<const std::string*> sources;
+        CollectScriptSources(objects, sources);
+        context.scripts_use_effects = std::any_of(
+            sources.begin(), sources.end(), [](const std::string* source) {
+                return source->find("getEffect") != std::string::npos;
+            });
+    }
 
     BuildLayers(context, general, objects, plans, sm);
     AttachLayers(context);
     LayOutPassthroughCards(context);
     SyncEffectFinals(context);
+    FinishSceneShadows(context);
 
     ApplyDefaultDepthTarget(context);
+    InstallVolumetrics(context);
     PrewarmParticleSystems(context);
-    BuildBloom(context, general, bloom);
+    // WE builds bloom only for a scene with objects (sub_14017FA70 tests
+    // scene+344 != scene+352, the object list every loaded object joins).
+    const auto bloom_bindings = BindBloomSettings(context, general);
+    BuildBloom(context, general, bloom && ! objects.empty(), bloom_bindings);
+    BuildColorCorrection(context, request.user_options);
+    BuildCameraFade(context, general.camerafade);
 
     // Layers that read other layers' pictures, and whether that is legal: the references
     // found before any layer was built (the files they came from do not change).
@@ -5979,7 +8506,10 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
     scene->layer_texture_error = ClassifyLayerTextureReferences(early_refs, index);
 
     FlushPendingMetalTranslations(*scene);
-    scene->shader_compile_error = ShaderFailureReason();
+    scene->shader_fallbacks = std::move(g_shader_failures);
+    g_shader_failures.clear();
+    scene->missing_files = std::move(g_missing_files);
+    g_missing_files.clear();
 
     // The registries a script may query (P3 R72): the declared order of the layers, and the
     // scene file's objects when some script says it reads them.
@@ -6023,9 +8553,39 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
             [weak, vfs_pointer, inputs](std::string_view template_path) {
                 return LoadLayerTemplate(weak.lock(), vfs_pointer, inputs, template_path);
             });
+        const auto text_inputs = std::make_shared<LazyParseInputs>(std::move(inputs));
+        scene->runtime->ConfigureModelData(
+            [weak, vfs_pointer, text_inputs](std::string_view path, uint32_t format, std::string& error) {
+                return MakeModelDataMaterial(weak, vfs_pointer, text_inputs, std::string(path), format, error);
+            },
+            [weak, vfs_pointer, text_inputs, select_samples = request.select_msaa_samples](
+                const std::shared_ptr<SceneNode>& node,
+                const std::vector<std::shared_ptr<ModelDataMaterial>>& materials,
+                const ModelDataLayerOptions& options) {
+                SetUpModelDataLayer(weak, vfs_pointer, text_inputs, select_samples, node, materials, options);
+            });
+        scene->runtime->SetSceneGeneralFactory(
+            [weak, vfs_pointer, text_inputs, bloom_bindings,
+             has_authored_objects = !objects.empty()](uint32_t) {
+                const auto scene = weak.lock();
+                if (!scene || !scene->runtime) return false;
+                auto general = text_inputs->general;
+                scene->runtime->CopySceneGeneralSettings(general);
+                LazyShaderParseScope scope(text_inputs->index);
+                auto lazy = MakeLazyParseContext(scene, *vfs_pointer, *text_inputs);
+                const bool changed = RebuildSceneGeneralPostProcesses(
+                    lazy, general, bloom_bindings, has_authored_objects);
+                FlushPendingMetalTranslations(*scene);
+                return changed;
+            });
         scene->runtime->SetTextLayerFactory(
-            [weak, vfs_pointer, inputs](const std::string& config, int32_t object_id) {
-                return MakeScriptTextLayer(weak.lock(), vfs_pointer, inputs, config, object_id);
+            [weak, vfs_pointer, text_inputs](const std::string& config, int32_t object_id) {
+                return MakeScriptTextLayer(weak.lock(), vfs_pointer, *text_inputs, config, object_id);
+            });
+        scene->runtime->SetTextMaterialFactory(
+            [weak, vfs_pointer, text_inputs](const std::string& name,
+                const SceneRuntimeContext::TextMaterialKey& key, const TextStyleUniforms& style) {
+                return MakeScriptTextMaterials(weak.lock(), vfs_pointer, *text_inputs, name, key, style);
             });
     }
 
@@ -6034,6 +8594,8 @@ std::shared_ptr<Scene> ParseSceneDocument(const SceneParseRequest& request, cons
         auto bindings = std::move(context.deferred_bindings);
         for (auto& bind : bindings) bind();
     }
+    // Every material exists now: the live scene uniforms reach each one that declares them.
+    AddLiveSceneUniformMaterials(*scene, nullptr);
 
     // Scene scripts start last, once every layer, id and hook they may use exists,
     // in the order the file declares their layers.

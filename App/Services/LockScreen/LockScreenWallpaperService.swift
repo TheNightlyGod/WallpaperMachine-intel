@@ -70,7 +70,6 @@ final class LockScreenWallpaperService {
   @ObservationIgnored private let contentRevision: () -> UInt64
   @ObservationIgnored private var lastLockScreenRequested: Bool?
   @ObservationIgnored private var lastScreenSaverRequested = false
-  @ObservationIgnored private var lastHasWebWallpapers = false
   @ObservationIgnored private var published: LockScreenConfiguration?
   /// The published activation whose first frame has not arrived, and when the wait for it gives
   /// up. A refresh that interrupts the wait waits on for the same revision until that deadline.
@@ -86,7 +85,11 @@ final class LockScreenWallpaperService {
   /// Exit watches on the extension processes that acknowledged the committed lock screen. macOS
   /// keeps a renderer whose process died as its wallpaper and shows nothing, never reloading it.
   @ObservationIgnored private var rendererWatches: [Int32: () -> Void] = [:]
+  /// A new publication reloads WallpaperAgent asynchronously. These processes may acknowledge
+  /// the new manifest before that reload ends them; only their replacements can confirm it.
+  @ObservationIgnored private var retiringRendererProcesses: Set<Int32> = []
   @ObservationIgnored private var rendererLosses: [ContinuousClock.Instant] = []
+  @ObservationIgnored private var rendererReleases: [ContinuousClock.Instant] = []
   @ObservationIgnored private var rendererFailure: String?
   @ObservationIgnored private let watchProcessExit: (Int32, @escaping @MainActor () -> Void) -> () -> Void
   @ObservationIgnored private let displaysAreAway: () -> Bool
@@ -158,14 +161,12 @@ final class LockScreenWallpaperService {
     return CFUUIDCreateString(nil, uuid) as String
   }
 
-  /// The session is locked, or no display is awake. Core Graphics lists no sleeping display as
-  /// active, so the bridge names none while they sleep.
+  /// The session is locked or switched away from (another user has the screens), or no
+  /// display is awake. Core Graphics lists no sleeping display as active, so the bridge names
+  /// none while they sleep.
   nonisolated static func displaysAreAway() -> Bool {
-    if (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool
-      == true
-    {
-      return true
-    }
+    let session = WallpaperPresentationAuthority.SessionState.current()
+    if session.locked || !session.onConsole { return true }
     var count: UInt32 = 0
     return CGGetActiveDisplayList(0, nil, &count) == .success && count == 0
   }
@@ -239,6 +240,7 @@ final class LockScreenWallpaperService {
     transientFailures = 0
     retrySkipsRemaining = 0
     rendererLosses.removeAll()
+    rendererReleases.removeAll()
     rendererFailure = nil
   }
 
@@ -297,6 +299,10 @@ final class LockScreenWallpaperService {
   /// Renderer exits recovered within `rendererRecoveryWindow` before the next one is a failure.
   static let rendererRecoveryLimit = 3
   static let rendererRecoveryWindow: Duration = .seconds(600)
+  /// Exits after macOS closed every connection, recovered within the same window before the
+  /// next one counts like any other exit. The marker shows the disconnection, not why the
+  /// process then ended, so a renderer that keeps dying in that state still reaches the limit.
+  static let rendererReleaseLimit = 10
 
   static func scheduleMonitorTimer(_ callback: @escaping @MainActor () -> Void) -> Timer {
     let timer = Timer.scheduledTimer(withTimeInterval: monitorInterval, repeats: true) { _ in
@@ -367,9 +373,6 @@ final class LockScreenWallpaperService {
         committed.revision = UUID().uuidString
         committed.lockScreenEnabled = committed.lockScreenEnabled && isRequested
         committed.screenSaverEnabled = committed.screenSaverEnabled && screenSaverRequested
-        if !committed.screenSaverEnabled {
-          committed.scenes.removeAll { $0.webEntryFile != nil }
-        }
         if !committed.lockScreenEnabled && !committed.screenSaverEnabled {
           committed.scenes.removeAll()
         }
@@ -382,7 +385,7 @@ final class LockScreenWallpaperService {
             try afterDeactivation?()
           }
         }
-        updateStatuses(committed, hasWebWallpapers: lastHasWebWallpapers)
+        updateStatuses(committed)
       }
       guard (isRequested && lockScreenActivationError == nil) || screenSaverRequested else {
         status = String(localized: "Restoring system wallpapers…")
@@ -399,11 +402,13 @@ final class LockScreenWallpaperService {
       try Task.checkCancellation()
       guard generation == revision else { return }
       // A display that sleeps or drops off while the Mac is locked or dark is not removed:
-      // that would hand its lock screen back to macOS just before the user wakes it.
-      if let lastInputs, displaysAreAway() {
+      // that would hand its lock screen back to macOS just before the user wakes it. Asked
+      // only when a display left: the session's state is a window-server round trip, and
+      // the monitor's steady ticks find every display still named.
+      if let lastInputs {
         let named = Set(records.map(\.displayId))
         let departed = lastInputs.map(\.displayID).filter { !named.contains($0) }
-        if !departed.isEmpty {
+        if !departed.isEmpty, displaysAreAway() {
           AppLog.debug("Native wallpaper topology held: display(s) \(departed) left while the Mac is locked or its displays sleep")
           return
         }
@@ -428,7 +433,10 @@ final class LockScreenWallpaperService {
           projectPath: record.projectPath, assetsPath: record.assetsPath, fps: record.fps,
           scalingMode: record.scalingMode.rendererValue, scalingFactor: record.scalingFactor,
           framing: LockScreenFraming(panX: record.framing.panX, panY: record.framing.panY),
-          propertiesJSON: record.propertiesJson, paused: record.paused))
+          propertiesJSON: record.propertiesJson, paused: record.paused,
+          engineOptions: record.engineOptions.map(WallpaperEngineOptions.init),
+          sceneQuality: record.sceneQuality.map(SceneQualitySettings.init),
+          borderColor: record.borderColor.map { [Double($0.red), Double($0.green), Double($0.blue)] }))
       }
       inputs.sort { $0.displayID < $1.displayID }
       let currentContentRevision = contentRevision()
@@ -443,7 +451,7 @@ final class LockScreenWallpaperService {
         // The selection takes over the former and reports the latter, rereading the
         // store only after something wrote it.
         try applySelection(published, inputs: inputs)
-        updateStatuses(published, hasWebWallpapers: lastHasWebWallpapers)
+        updateStatuses(published)
         return
       }
       guard !inputs.isEmpty else {
@@ -456,10 +464,10 @@ final class LockScreenWallpaperService {
       if screenSaverRequested { screenSaverStatus = String(localized: "Preparing committed wallpapers…") }
       let root = exchange
       let userAssets = UserAssetStorage.managedRootURL
-      let includeWeb = screenSaverRequested
+      let sceneStorage = ClientPaths.sceneStorageURL
       let staging = Task.detached(priority: .utility) {
         try LockScreenAssetPublisher.prepare(
-          inputs: inputs, exchange: root, userAssets: userAssets, includeWeb: includeWeb)
+          inputs: inputs, exchange: root, userAssets: userAssets, sceneStorage: sceneStorage)
       }
       let prepared = try await withTaskCancellationHandler {
         try await staging.value
@@ -470,7 +478,7 @@ final class LockScreenWallpaperService {
       guard generation == revision, anyRequested else { return }
       var configuration = prepared.configuration
       configuration.lockScreenEnabled = isRequested && lockScreenActivationError == nil
-        && configuration.scenes.contains { $0.webEntryFile == nil }
+        && !configuration.scenes.isEmpty
       configuration.screenSaverEnabled = screenSaverRequested && !configuration.scenes.isEmpty
       if (configuration.lockScreenEnabled || configuration.screenSaverEnabled)
         && (published?.scenes.isEmpty != false
@@ -502,11 +510,10 @@ final class LockScreenWallpaperService {
         lastContentRevision = currentContentRevision
         lastLockScreenRequested = isRequested
         lastScreenSaverRequested = screenSaverRequested
-        lastHasWebWallpapers = prepared.hasWebWallpapers
         try checkReadinessFailures(published)
         try applySelection(published, inputs: inputs)
         guard unconfirmed?.revision == published.revision else {
-          updateStatuses(published, hasWebWallpapers: prepared.hasWebWallpapers)
+          updateStatuses(published)
           return
         }
         // A refresh interrupted the wait for this activation's first frame. It is still not
@@ -517,6 +524,9 @@ final class LockScreenWallpaperService {
           try beforeActivation?()
           ownsDesktopProvider = true
         }
+        // Publishing notifies the old renderer before WallpaperAgent's reload ends it. Remember
+        // those processes before the notification can replace their readiness files.
+        retireRendererWatches()
         try publish(configuration)
         extensionPreparation = nil
         LockScreenAssetPublisher.collectGarbage(
@@ -556,14 +566,16 @@ final class LockScreenWallpaperService {
       lastContentRevision = currentContentRevision
       lastLockScreenRequested = isRequested
       lastScreenSaverRequested = screenSaverRequested
-      lastHasWebWallpapers = prepared.hasWebWallpapers
-      updateStatuses(configuration, hasWebWallpapers: prepared.hasWebWallpapers)
+      updateStatuses(configuration)
       copyRecoveryAttempted = false
       electionRepairOffered = false
       forceRepublish = false
       transientFailures = 0
       retrySkipsRemaining = 0
-      if !configuration.lockScreenEnabled { cancelRendererWatches() }
+      if !configuration.lockScreenEnabled {
+        cancelRendererWatches()
+        retiringRendererProcesses.removeAll()
+      }
       if isEnabled { defaults.set(true, forKey: Self.preference) }
       if screenSaverEnabled { defaults.set(true, forKey: Self.screenSaverPreference) }
     } catch is CancellationError {
@@ -621,20 +633,16 @@ final class LockScreenWallpaperService {
   private func applySelection(
     _ configuration: LockScreenConfiguration, inputs: [LockScreenPublishInput]
   ) throws {
-    let lockIDs = Set(configuration.scenes.lazy.filter { $0.webEntryFile == nil }.map(\.displayID))
-    let allIDs = Set(configuration.scenes.lazy.map(\.displayID))
+    let ids = Set(configuration.scenes.lazy.map(\.displayID))
+    let displays = Set(inputs.lazy.filter { ids.contains($0.displayID) }.map(\.displayUUID))
     try selection.synchronize(
-      desktopDisplays: configuration.lockScreenEnabled
-        ? Set(inputs.lazy.filter { lockIDs.contains($0.displayID) }.map(\.displayUUID)) : [],
-      screenSaverDisplays: configuration.screenSaverEnabled
-        ? Set(inputs.lazy.filter { allIDs.contains($0.displayID) }.map(\.displayUUID)) : [],
+      desktopDisplays: configuration.lockScreenEnabled ? displays : [],
+      screenSaverDisplays: configuration.screenSaverEnabled ? displays : [],
       revision: configuration.revision)
   }
 
-  private func updateStatuses(
-    _ configuration: LockScreenConfiguration, hasWebWallpapers: Bool = false
-  ) {
-    let lockCount = configuration.scenes.reduce(0) { $0 + ($1.webEntryFile == nil ? 1 : 0) }
+  private func updateStatuses(_ configuration: LockScreenConfiguration) {
+    let lockCount = configuration.scenes.count
     isEnabled = isRequested && configuration.lockScreenEnabled && lockCount > 0
     screenSaverEnabled = screenSaverRequested && configuration.screenSaverEnabled
       && !configuration.scenes.isEmpty
@@ -642,9 +650,7 @@ final class LockScreenWallpaperService {
     status = !isRequested ? String(localized: "Off") : errorMessage != nil
       ? String(localized: "Not enabled — action required") : isEnabled
         ? String(localized: "Enabled for \(lockCount) display(s)")
-        : hasWebWallpapers
-          ? String(localized: "Not applicable — web wallpapers have no lock-screen support")
-          : String(localized: "Waiting for an applied video or live scene on a connected display")
+        : String(localized: "Waiting for an applied wallpaper on a connected display")
     if isEnabled, errorMessage == nil, let held = heldNotice(for: configuration) {
       status += " — " + held
     }
@@ -669,6 +675,7 @@ final class LockScreenWallpaperService {
       if let data = try? Data(contentsOf: file),
         let state = try? JSONDecoder().decode(LockScreenReadiness.self, from: data),
         state.revision == configuration.revision, state.displayID == scene.displayID,
+        !retiringRendererProcesses.contains(state.processID ?? 0),
         let error = state.error
       {
         throw LockScreenWallpaperFailure(message: error)
@@ -692,6 +699,7 @@ final class LockScreenWallpaperService {
   private func deactivate() throws {
     cancelExtensionPreparation()
     cancelRendererWatches()
+    retiringRendererProcesses.removeAll()
     forceRepublish = false
     isEnabled = false
     screenSaverEnabled = false
@@ -734,7 +742,7 @@ final class LockScreenWallpaperService {
   /// those. An extension copy that does not report its process is not watched.
   private func armRendererWatches(_ configuration: LockScreenConfiguration) {
     let processes = Set(
-      configuration.scenes.lazy.filter { $0.webEntryFile == nil }.compactMap {
+      configuration.scenes.lazy.compactMap {
         self.readiness(displayID: $0.displayID, revision: configuration.revision)?.processID
       }.filter { $0 > 0 })
     for pid in rendererWatches.keys where !processes.contains(pid) {
@@ -743,6 +751,16 @@ final class LockScreenWallpaperService {
     for pid in processes where rendererWatches[pid] == nil {
       rendererWatches[pid] = watchProcessExit(pid) { [weak self] in self?.rendererExited(pid) }
     }
+  }
+
+  private func retireRendererWatches() {
+    retiringRendererProcesses.formUnion(rendererWatches.keys)
+    if let published {
+      retiringRendererProcesses.formUnion(published.scenes.compactMap {
+        readiness(displayID: $0.displayID, revision: published.revision)?.processID
+      }.filter { $0 > 0 })
+    }
+    cancelRendererWatches()
   }
 
   private func cancelRendererWatches() {
@@ -754,7 +772,7 @@ final class LockScreenWallpaperService {
     guard let cancel = rendererWatches.removeValue(forKey: pid) else { return }
     cancel()
     guard !stopping, isEnabled, let published, published.lockScreenEnabled else { return }
-    let lockScenes = published.scenes.filter { $0.webEntryFile == nil }
+    let lockScenes = published.scenes
     let serving = lockScenes.compactMap {
       readiness(displayID: $0.displayID, revision: published.revision)?.processID
     }
@@ -766,6 +784,20 @@ final class LockScreenWallpaperService {
       return
     }
     let now = ContinuousClock.now
+    rendererReleases = rendererReleases.filter { now - $0 < Self.rendererRecoveryWindow }
+    if Self.takeHostRelease(exchange: exchange, processID: pid),
+      rendererReleases.count < Self.rendererReleaseLimit
+    {
+      // macOS closed its connections first, which it does while the Mac is unlocked. That is
+      // not the renderer failing, so it does not count towards restoring the system wallpaper.
+      rendererReleases.append(now)
+      AppLog.info(
+        "Native lock screen: macOS ended the renderer process \(pid) after closing its connections; "
+          + "publishing again so macOS reloads it")
+      forceRepublish = true
+      if !isBusy { refresh() }
+      return
+    }
     rendererLosses = rendererLosses.filter { now - $0 < Self.rendererRecoveryWindow } + [now]
     if rendererLosses.count > Self.rendererRecoveryLimit {
       rendererLosses.removeAll()
@@ -779,6 +811,21 @@ final class LockScreenWallpaperService {
     }
     // A running update leaves either for the monitor's next tick.
     if !isBusy { refresh() }
+  }
+
+  /// Whether the ended process `processID` had left a host release marker. Removes it, and any
+  /// marker of another process that is gone, since only a watched process's is ever read.
+  static func takeHostRelease(exchange: URL, processID: Int32) -> Bool {
+    let manager = FileManager.default
+    let own = LockScreenHostRelease.fileName(processID: processID)
+    let released = manager.fileExists(atPath: exchange.appendingPathComponent(own).path)
+    let names = (try? manager.contentsOfDirectory(atPath: exchange.path)) ?? []
+    for name in names where name.hasPrefix(LockScreenHostRelease.prefix) {
+      let pid = Int32(name.dropFirst(LockScreenHostRelease.prefix.count))
+      guard name == own || pid.map({ kill($0, 0) != 0 && errno == ESRCH }) ?? true else { continue }
+      try? manager.removeItem(at: exchange.appendingPathComponent(name))
+    }
+    return released
   }
 
   private struct RendererUnavailable: LocalizedError {
@@ -797,6 +844,7 @@ final class LockScreenWallpaperService {
       try await awaitFrames(configuration, until: deadline)
       unconfirmed = nil
       armRendererWatches(configuration)
+      retiringRendererProcesses.removeAll()
       AppLog.info(
         "Native lock screen: first frame acknowledged after \(waited(until: deadline)) s "
           + "(waited from selection reload)")
@@ -821,11 +869,12 @@ final class LockScreenWallpaperService {
       try checkExtensionFailure(configuration)
       var ready = true
       var noted: [UInt32: String] = [:]
-      for scene in configuration.scenes where scene.webEntryFile == nil {
+      for scene in configuration.scenes {
         let file = exchange.appendingPathComponent("ready-\(scene.displayID).json")
         guard let data = try? Data(contentsOf: file),
           let state = try? JSONDecoder().decode(LockScreenReadiness.self, from: data),
-          state.revision == configuration.revision, state.displayID == scene.displayID
+          state.revision == configuration.revision, state.displayID == scene.displayID,
+          !retiringRendererProcesses.contains(state.processID ?? 0)
         else {
           ready = false
           continue
@@ -843,7 +892,7 @@ final class LockScreenWallpaperService {
     try checkExtensionFailure(configuration)
     let expected = expectedExtensionBundle.resolvingSymlinksInPath().standardizedFileURL
     if let other = runningExtensionBundles().first(where: {
-      !LockScreenExtensionDiagnostics.isSameBundle($0, expected)
+      !FileLocation.isSame($0, expected)
     }) {
       AppLog.error(
         "Native extension timeout: running bundle=\(other.path), expected=\(expected.path), "
@@ -912,6 +961,11 @@ private struct LockScreenPublishInput: Equatable, Sendable {
   var framing: LockScreenFraming
   var propertiesJSON: String?
   var paused: Bool
+  /// Wallpaper Engine's options as saved, the scene quality (scenes) and the scheme-colour
+  /// border (videos): what the lock screen shows is the saved look.
+  var engineOptions: WallpaperEngineOptions? = nil
+  var sceneQuality: SceneQualitySettings? = nil
+  var borderColor: [Double]? = nil
 }
 
 /// A source-tree metadata fingerprint reuses immutable snapshots without reading
@@ -929,15 +983,13 @@ private enum LockScreenAssetPublisher {
   struct Prepared {
     var configuration: LockScreenConfiguration
     var referencedRevisions: Set<String>
-    var hasWebWallpapers: Bool
   }
 
   static func prepare(
-    inputs: [LockScreenPublishInput], exchange: URL, userAssets: URL, includeWeb: Bool
+    inputs: [LockScreenPublishInput], exchange: URL, userAssets: URL, sceneStorage: URL
   ) throws -> Prepared {
     var sources: [String: String] = [:]
     var scenes: [LockScreenScene] = []
-    var hasWebWallpapers = false
     for input in inputs {
       try Task.checkCancellation()
       guard input.projectPath.hasPrefix("/"), input.assetsPath.hasPrefix("/") else {
@@ -958,8 +1010,6 @@ private enum LockScreenAssetPublisher {
           message: String(localized: "The committed wallpaper does not declare a project type."))
       }
       let isWeb = type.lowercased() == "web"
-      hasWebWallpapers = hasWebWallpapers || isWeb
-      if isWeb && !includeWeb { continue }
       guard ["video", "scene", "web"].contains(type.lowercased()) else {
         throw LockScreenWallpaperFailure(
           message: String(localized: "This wallpaper type cannot be presented by the native wallpaper provider."))
@@ -978,7 +1028,10 @@ private enum LockScreenAssetPublisher {
       } else {
         webEntry = nil
       }
-      var projectRevision = try snapshot(source: source, exchange: exchange, reused: &sources)
+      let isVideo = type.lowercased() == "video"
+      let nativeVideoFile = isVideo ? nativeVideoMedia(in: source, metadata: metadata) : nil
+      var projectRevision = try snapshot(
+        source: source, exchange: exchange, reused: &sources, retagging: nativeVideoFile)
       var assetsRevision: String
       if type.lowercased() == "scene" {
         assetsRevision = try snapshot(
@@ -995,8 +1048,29 @@ private enum LockScreenAssetPublisher {
           projectRevision: projectRevision, properties: properties, exchange: exchange, reused: &sources)
         assetsRevision = projectRevision
       }
-      let isVideo = type.lowercased() == "video"
-      let nativeVideoFile = isVideo ? nativeVideoMedia(in: source, metadata: metadata) : nil
+      // A scene's saved script storage is copied as it is now; the lock screen never writes it
+      // and is not republished when a script writes (plan decision I3).
+      var storagePath: String?
+      if type.lowercased() == "scene" {
+        let folder = sceneStorage.appendingPathComponent(input.wallpaperID, isDirectory: true)
+        if let saved = try? FileManager.default.contentsOfDirectory(atPath: folder.path),
+          saved.contains(where: { $0.hasSuffix(".json") })
+        {
+          storagePath = try snapshot(source: folder, exchange: exchange, reused: &sources)
+        }
+      }
+      // A video's image filter is published with it: the extension cannot read the shared
+      // assets, which only scenes snapshot.
+      var lutFile: String?
+      if isVideo, let filter = input.engineOptions?.imageFilter, !filter.isEmpty,
+        input.engineOptions?.isFilterIdentity == false
+      {
+        let folder = URL(fileURLWithPath: input.assetsPath, isDirectory: true)
+          .appendingPathComponent("materials/lut", isDirectory: true)
+        if FileManager.default.fileExists(atPath: folder.appendingPathComponent(filter + ".tex").path) {
+          lutFile = try snapshot(source: folder, exchange: exchange, reused: &sources) + "/" + filter + ".tex"
+        }
+      }
       scenes.append(
         LockScreenScene(
           displayID: input.displayID, title: input.title,
@@ -1006,11 +1080,18 @@ private enum LockScreenAssetPublisher {
           propertiesJSON: properties, paused: input.paused, webEntryFile: webEntry,
           // A web page fills its window, so it has no position to carry.
           framing: isWeb ? nil : input.framing,
-          plainVideo: isVideo ? true : nil, nativeVideoFile: nativeVideoFile))
+          plainVideo: isVideo ? true : nil, nativeVideoFile: nativeVideoFile,
+          sceneStoragePath: storagePath,
+          sceneStorageScreenKey: storagePath == nil
+            ? nil : SceneStorageKey.screenKey(uuid: input.displayUUID, displayID: input.displayID),
+          engineOptions: isWeb ? nil : input.engineOptions,
+          sceneQuality: type.lowercased() == "scene" ? input.sceneQuality : nil,
+          lutFile: lutFile,
+          borderColor: isVideo ? input.borderColor : nil))
     }
     return Prepared(
       configuration: LockScreenConfiguration(scenes: scenes),
-      referencedRevisions: Set(sources.values), hasWebWallpapers: hasWebWallpapers)
+      referencedRevisions: Set(sources.values))
   }
 
   /// The media file of a video project the extension may open natively: the project's `file`
@@ -1213,13 +1294,23 @@ private enum LockScreenAssetPublisher {
     }
   }
 
-  private static func snapshot(source: URL, exchange: URL, reused: inout [String: String]) throws
-    -> String
-  {
+  /// `media` names the clip of a video project. When it is HEVC tagged `hev1` that a retag makes
+  /// playable (`HevcSampleEntryRetag`), its copy in the revision is retagged `hvc1`, as the desktop
+  /// plays it from a retagged copy: the extension plays the revision, and the file in the library is
+  /// never written. Such a revision has a fingerprint of its own, so one staged before is not reused.
+  private static func snapshot(
+    source: URL, exchange: URL, reused: inout [String: String], retagging media: String? = nil
+  ) throws -> String {
     let source = source.standardizedFileURL
     if let existing = reused[source.path] { return existing }
     let items = try inventory(source)
-    let fingerprint = digest(source: source, items: items)
+    var retag: (file: String, plan: HevcSampleEntryRetag.Plan)?
+    if let media,
+      case let .retag(plan)? = try? HevcSampleEntryRetag.inspect(url: source.appendingPathComponent(media))
+    {
+      retag = (media, plan)
+    }
+    let fingerprint = digest(source: source, items: items, retagged: retag != nil)
     let relative = "revisions/\(fingerprint)"
     let destination = exchange.appendingPathComponent(relative, isDirectory: true)
     let manager = FileManager.default
@@ -1243,7 +1334,18 @@ private enum LockScreenAssetPublisher {
           try copyFile(from: source.appendingPathComponent(item.relative), to: target)
         }
       }
-      guard digest(source: source, items: try inventory(source)) == fingerprint else {
+      if let retag {
+        do {
+          try HevcSampleEntryRetag.apply(retag.plan, to: pending.appendingPathComponent(retag.file))
+        } catch {
+          // The plan was read from the project's file, so a copy it does not fit is a changed file.
+          throw LockScreenWallpaperFailure(
+            message:
+              String(localized: "Wallpaper assets changed while preparing native playback. Retry after the download or edit finishes.")
+          )
+        }
+      }
+      guard digest(source: source, items: try inventory(source), retagged: retag != nil) == fingerprint else {
         throw LockScreenWallpaperFailure(
           message:
             String(localized: "Wallpaper assets changed while preparing native playback. Retry after the download or edit finishes.")
@@ -1310,9 +1412,10 @@ private enum LockScreenAssetPublisher {
     return result.sorted { $0.relative < $1.relative }
   }
 
-  private static func digest(source: URL, items: [Item]) -> String {
+  private static func digest(source: URL, items: [Item], retagged: Bool = false) -> String {
     var hash = SHA256()
     hash.update(data: Data(source.path.utf8))
+    if retagged { hash.update(data: Data("\u{0}hvc1-retag".utf8)) }
     for item in items {
       hash.update(
         data: Data(

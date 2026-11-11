@@ -64,14 +64,16 @@ scheme excludes UI tests.
 
 ## Test layers
 
-Use Python 3.10 or newer for the routine gate: `test_brand.py` uses
-`zip(strict=True)`, which the Python 3.9 shipped with some Xcode installations
-does not support. If `python3 --version` reports 3.9, run the commands below
-with an installed newer interpreter (for example, `python3.12`).
+Use Python 3.11 or newer for the routine gate: the scripts and their tests use
+`zip(strict=True)` and `hashlib.file_digest`, which the Python 3.9 shipped with
+macOS and Command Line Tools does not have. If `python3 --version` reports 3.9,
+install Homebrew's `python` ([build prerequisites](../build.md#prerequisites)) or
+run the commands below with an installed newer interpreter (for example,
+`python3.12`).
 
 | Layer | Location | Command |
 | --- | --- | --- |
-| Python script tests | `scripts/tests/` | `python3 scripts/test.py` (runs first, before Xcode) |
+| Python script tests | `scripts/tests/` | `python3 scripts/test.py` (runs first, before Xcode); `--python-only` alone, which the Checks workflow runs on Linux for every pull request into `main` |
 | Swift unit/integration | `Tests/Unit/<Domain>/` | `python3 scripts/test.py` (`WallpaperMachineTests`); `--only <TestClass>` for a subset |
 | XCUITest (desktop) | `Tests/UI/` | `python3 scripts/test.py --ui` — opt-in only |
 | Media/device integration | `Tests/Unit/NativeVideo/`, `Tests/Unit/Library/VideoLetterboxProbeMediaTests.swift` | `WALLPAPER_MACHINE_MEDIA_TESTS=1 python3 scripts/test.py` — opt-in only |
@@ -172,7 +174,7 @@ afterwards. Standalone isolated checks do not replace the app-hosted gate.
 
 `Tests/Unit/` is grouped by domain, mirroring `App/Services/`: Appearance,
 Automation, Desktop, Diagnostics, GitHub, Library, Lifecycle, Localization,
-LockScreen, NativeVideo, Panel, Pixiv, Playlist, Preview, Steam, SystemMedia,
+LockScreen, NativeVideo, Network, Panel, Pixiv, Playlist, Preview, Steam, SystemMedia,
 UserAssets, WebWallpaper, Workshop; shared fixtures live in `Support/`.
 
 ### Opt-in layers
@@ -238,7 +240,11 @@ bundle runs inside the real app as its test host, so `UserDefaults.standard`
 `PanelController` (or other store) built without `defaults:` writes there —
 the first-run welcome's `welcomeSeen` flag, the learned drag-select hint, favorites — and
 silently changes what the app does at the next launch. Pass the test's own
-suite everywhere; `PanelFixture` does.
+suite everywhere; `PanelFixture` does. The panel fixtures (`PanelFixture`,
+`makeDiscoverPanel`, `makeBrowsingPanel`, `ShellHost`) also give the controller
+`WorkshopSearchTranslator.fake` over a `FakeTranslation`, so a Settings › General
+render or a search typed in another language never asks this Mac's Translation
+framework or depends on the languages it has downloaded.
 
 A named suite also outlives its test: `removePersistentDomain(forName:)` still
 leaves an empty `~/Library/Preferences/<suite>.plist`, because cfprefsd flushes
@@ -287,6 +293,14 @@ wait in a fixture now shows only as a slow test. Work off the main actor needs i
 own sync point: a nonisolated `async` double such as `ManualSleep` runs on the
 global executor, so flushing the main queue does not show it has run; wait for the
 state it records.
+
+The hosted suite has also repeatedly reported the runtime warning “This method
+should not be called on the main thread as it may lead to UI unresponsiveness.”
+The top-level `xcresulttool` summary omits the caller. Detailed issue records in
+the 2026-10-28 gate associate it with
+`VideoFormatSupportTests.testTheOpenedFilesAreKeyedByTheFileAndForgetAChangedOne()`;
+that test passed, and the record has no source location. Report the warning beside
+the pass/fail/skip counts and inspect the detailed issue records for attribution.
 
 A failed assertion in the app-hosted bundle can take about two minutes to
 report while XCTest symbolicates the failing frame, so a failure inside a loop
@@ -338,9 +352,10 @@ runs.
 scripts/clean.py` removes them (`--dry-run` previews). Only `scripts/test.py`
 prunes its own output: renderer runs (a few hundred megabytes each), Rust check
 runs, build logs and hand-made investigation folders stay until someone deletes
-them, so whoever produced them lists them and asks before deleting (see
-[AGENTS.md](../../AGENTS.md)). Result bundles are local: cite the numbers and
-the command, not a bundle path, when you report a result. Private GPU output,
+them. Before finishing, remove this task's output except evidence cited in the
+final reply, and report what was removed; preserve other tasks' output. Wider
+cleanup requires approval (see [AGENTS.md](../../AGENTS.md)). Result bundles are
+local: cite the numbers and the command, not a bundle path, when you report a result. Private GPU output,
 local asset inventories, screenshots, and traces stay out of Git.
 
 ## Current native coverage

@@ -25,7 +25,9 @@ final class SettingsBLocalizationTests: XCTestCase {
     let english = words()
     for language in AppLanguage.supported where language != .english {
       PanelLocale.shared.bind(to: AppLanguageStore(defaults: defaults, systemLanguages: [language.tag]))
-      for (translated, base) in zip(words(), english) {
+      // Portuguese abbreviates minutes as English does.
+      let same: Set<String> = language.tag == "pt-BR" ? ["min"] : []
+      for (translated, base) in zip(words(), english) where !same.contains(base) {
         XCTAssertNotEqual(translated, base, "\(language.tag): \(base)")
       }
     }

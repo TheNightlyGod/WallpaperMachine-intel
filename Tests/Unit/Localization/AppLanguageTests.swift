@@ -23,6 +23,8 @@ final class AppLanguageTests: XCTestCase {
       (["ja-JP"], "ja"), (["fr", "ja", "zh-CN"], "ja"),
       (["ko"], "ko"), (["ko-KR"], "ko"), (["fr", "ko-KR", "en"], "ko"),
       (["ko-KR", "ja-JP"], "ko"), (["ja-JP", "ko-KR"], "ja"),
+      (["pt-BR"], "pt-BR"), (["pt"], "pt-BR"), (["pt-PT"], "pt-BR"), (["fr", "pt-BR", "en"], "pt-BR"),
+      (["pt-BR", "ja-JP"], "pt-BR"), (["es"], "en"),
       (["en-GB"], "en"), (["fr"], "en"), ([], "en"), (["zhgarbage"], "en"),
     ]
     for (system, expected) in cases {
@@ -87,6 +89,7 @@ final class AppLanguageTests: XCTestCase {
     }
     let expected = [
       "en": "en-us", "zh-Hans": "zh-chs", "zh-Hant": "zh-cht", "ja": "ja-jp", "ko": "ko-kr",
+      "pt-BR": "pt-br",
     ]
     XCTAssertEqual(
       Dictionary(uniqueKeysWithValues: AppLanguage.supported.map { ($0.tag, $0.wallpaperEngineLocale) }),

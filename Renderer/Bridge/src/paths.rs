@@ -80,6 +80,18 @@ impl BridgePaths {
         self.app_support_root().join("shader-cache")
     }
 
+    /// Scene scripts' `localStorage` (plan decision I3): user data, never cleared with caches.
+    #[must_use]
+    pub fn scene_storage_root(&self) -> PathBuf {
+        self.app_support_root().join("SceneStorage")
+    }
+
+    /// One wallpaper's `localStorage` folder: `global.json` and `screen-<key>.json`.
+    #[must_use]
+    pub fn scene_storage_dir(&self, wallpaper_id: &str) -> PathBuf {
+        self.scene_storage_root().join(wallpaper_id)
+    }
+
     #[must_use]
     pub fn logs_root(&self) -> PathBuf {
         self.app_support_root().join("Logs")

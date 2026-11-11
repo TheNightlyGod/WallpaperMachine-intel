@@ -80,7 +80,7 @@ enum DesktopWindowState: String, Equatable, Sendable {
     /// The frame does not intersect the display the window belongs to, or the
     /// window is on no display.
     case outsideItsDisplay
-    /// The window or the window server's copy of it is not fully opaque.
+    /// The window or the window server's copy is below the wallpaper's visible opacity.
     case transparent
 
     static func classify(_ window: DesktopWindowObservation) -> DesktopWindowState {
@@ -91,7 +91,9 @@ enum DesktopWindowState: String, Equatable, Sendable {
         guard let display = window.displayFrame, window.frame.intersects(display) else {
             return .outsideItsDisplay
         }
-        guard window.alpha >= 1, server.alpha >= 1 else { return .transparent }
+        // AppKit and WindowServer can report slightly different rounded alpha values.
+        let visibleAlpha = Double(NSWindow.wallpaperVisibleAlpha) - 0.001
+        guard window.alpha >= visibleAlpha, server.alpha >= visibleAlpha else { return .transparent }
         return .ok
     }
 }
@@ -122,7 +124,7 @@ enum DesktopWindowReader {
         return DesktopWindowObservation(
             windowNumber: window.windowNumber,
             className: NSStringFromClass(type(of: window)),
-            displayID: screen.flatMap(WallpaperCoverageProbes.displayID(of:)),
+            displayID: screen.flatMap(SystemDisplays.id(of:)),
             frame: window.frame,
             displayFrame: screen?.frame,
             level: window.level.rawValue,

@@ -28,7 +28,8 @@ final class WebWallpaperWindow: NSWindow {
         isReleasedWhenClosed = false
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        isOpaque = true
+        isOpaque = false
+        alphaValue = Self.wallpaperVisibleAlpha
         hasShadow = false
         isMovable = false
         isRestorable = false
@@ -43,12 +44,23 @@ final class WebWallpaperWindow: NSWindow {
         // content view itself: suspension removes it from the window tree, and
         // the desktop poster sync identifies this surface by the content
         // layer, which must survive that.
-        let container = NSView(frame: NSRect(origin: .zero, size: frame.size))
-        container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.black.cgColor
+        let container = WebWallpaperBackgroundView(frame: NSRect(origin: .zero, size: frame.size))
         container.autoresizesSubviews = true
         contentView = container
         page.attach(to: container)
+        WebWallpaperWindowComposition.preserveLiveSurfaces(in: self)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(restoreTransitionComposition),
+            name: NSWindow.didEndLiveResizeNotification, object: self)
+    }
+
+    @objc private func restoreTransitionComposition(_ notification: Notification) {
+        // AppKit clears the transition tag after posting didEndLiveResize.
+        // Wait for that call to finish, without introducing idle or frame work.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            WebWallpaperWindowComposition.preserveLiveSurfaces(in: self)
+        }
     }
 
     override var canBecomeKey: Bool { false }
@@ -107,6 +119,9 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         var displayRefreshRate = 0
         /// Multiplies the page's `devicePixelRatio`; 1 is the display's own.
         var renderScale: Float = 1
+        /// Device pixels per point of the window the page is in, which the page
+        /// is zoomed out by (`WebWallpaperProtocol.pageZoom(forBackingScale:)`).
+        var backingScale: Double = 1
         var volume: Float = 1
         var muted = false
         /// The bridge's composed pause, not only the Play/Pause button: user
@@ -217,6 +232,11 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     private var audioResponseEnabled = false
     private var mediaIntegrationEnabled = false
     private var audioDemand = false
+    /// Feeds silence to a listener that no audio reaches; see `refreshSilence()`.
+    private var silenceTask: Task<Void, Never>?
+    /// How often a listener that no audio reaches is called with silence: the
+    /// spacing the audio pump keeps a quiet stretch fed at.
+    static let silenceInterval: Duration = .seconds(1)
     private var mediaDemand = MediaDemand()
     private var pendingRandomFileRequests: Set<String> = []
     /// Answers and directory deltas that arrived while the page was suspended.
@@ -225,11 +245,35 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// a dropped removal leaves a deleted file in its list.
     private var deferredRandomFileReplies: [RandomFileReply] = []
     private var deferredDirectoryChanges: [DirectoryChange] = []
+    /// What this document's own errors and warnings have put in the log, and its cap.
+    private(set) var pageDiagnostics = WebWallpaperPageDiagnostics()
     /// A page cannot be allowed to grow host memory by asking without waiting,
     /// nor to bank an unbounded replay across a long suspension.
     private static let maximumPendingRandomFileRequests = 32
     private static let maximumDeferredDirectoryChanges = 64
     private let messageProxy = ScriptMessageProxy()
+
+    /// Tells the page which display it is laid out for: the backing scale of the
+    /// window it is in, when it joins one and whenever that changes (the window
+    /// moved to a display with another scale). It says nothing while detached.
+    private final class PageWebView: WKWebView {
+        var onBackingScale: (@MainActor (Double) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            reportBackingScale()
+        }
+
+        override func viewDidChangeBackingProperties() {
+            super.viewDidChangeBackingProperties()
+            reportBackingScale()
+        }
+
+        private func reportBackingScale() {
+            guard let scale = window?.backingScaleFactor else { return }
+            onBackingScale?(Double(scale))
+        }
+    }
     /// Installing the host script replaces the controller's whole script list,
     /// so the scripts the page's owner adds beside it (the preview denies
     /// capture) are kept here and installed again after it.
@@ -336,9 +380,11 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             Self.fullRefreshUnavailableLogged = true
             AppLog.warn("WebKit rendering-rate control unavailable; web wallpapers stay near 60 fps")
         }
-        webView = WKWebView(frame: .zero, configuration: configuration)
+        let pageView = PageWebView(frame: .zero, configuration: configuration)
+        webView = pageView
         super.init()
         messageProxy.page = self
+        pageView.onBackingScale = { [weak self] scale in self?.applyBackingScale(scale) }
         // Registered on the web view's own controller: `WKWebView` copies the
         // configuration it is given, so only the one reached through the web
         // view is guaranteed to be the live object. The host script is added
@@ -424,7 +470,8 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// running document in step afterwards.
     private func installUserScripts() {
         let seed = WebWallpaperProtocol.Seed(
-            framePacing: true, frameLimit: frameLimit, renderScale: Double(committed.renderScale))
+            framePacing: true, frameLimit: frameLimit, renderScale: Double(committed.renderScale),
+            screenScale: committed.backingScale)
         let controller = webView.configuration.userContentController
         controller.removeAllUserScripts()
         for script in WebWallpaperProtocol.userScripts(seed: seed) { controller.addUserScript(script) }
@@ -468,6 +515,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         pendingRandomFileRequests.removeAll()
         deferredRandomFileReplies.removeAll()
         deferredDirectoryChanges.removeAll()
+        pageDiagnostics = WebWallpaperPageDiagnostics()
         refreshDemand()
     }
 
@@ -495,6 +543,23 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         posterOwed = true
         resetFirstFrameWindow()
         reconcileHostSuspension()
+    }
+
+    /// The backing scale of the display the page is on. The page is laid out in
+    /// that display's device pixels, as Wallpaper Engine lays one out
+    /// (`WebWallpaperProtocol.pageZoom(forBackingScale:)`): the web view is zoomed
+    /// out by the scale and the page's `screen` size is reported in device pixels.
+    /// The web view reports it itself when it joins a window, which the host does
+    /// before the first load, so a document starts with it; a later change (the
+    /// window moved to a display with another scale) reaches the running document,
+    /// which WebKit tells with a `resize` event.
+    func applyBackingScale(_ scale: Double) {
+        let clamped = WebWallpaperProtocol.clampedScreenScale(scale)
+        guard clamped != committed.backingScale else { return }
+        committed.backingScale = clamped
+        webView.pageZoom = WebWallpaperProtocol.pageZoom(forBackingScale: clamped)
+        AppLog.debug("web wallpaper \(projectURL.lastPathComponent): laid out at \(clamped)x", load: logLoad)
+        deliverScreenScale()
     }
 
     func applyGeneralProperties(fps: UInt32) {
@@ -743,12 +808,59 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// inactive scheduling policy keys off exactly this.
     var isInWindowTree: Bool { container != nil && webView.superview === container }
 
+    enum FrameConfirmation: Equatable, Sendable {
+        /// WebKit drew and committed a frame of the document.
+        case committed
+        /// WebKit refused the snapshot that waits for one (a view with no size).
+        case unavailable
+        /// No frame within the limit: a display that draws nothing, a page that holds its main thread.
+        case timedOut
+    }
+
+    /// Answers once WebKit has drawn and committed a frame of the current document, which
+    /// `didFinish` comes before: a snapshot taken after the pending screen updates returns
+    /// only once there has been one. It is a frame of the document, not necessarily its
+    /// finished picture, since a page that builds itself after load still draws in steps.
+    /// The snapshot is one point at the centre, so it costs nothing to read. An answer for
+    /// a document that has since been replaced is dropped.
+    func confirmFrame(within limit: Duration, _ completion: @escaping @MainActor (FrameConfirmation) -> Void) {
+        let generation = documentGeneration
+        let answer = FrameConfirmationAnswer(completion)
+        let bounds = webView.bounds
+        let configuration = WKSnapshotConfiguration()
+        configuration.afterScreenUpdates = true
+        configuration.rect = CGRect(x: bounds.midX.rounded(.down), y: bounds.midY.rounded(.down), width: 1, height: 1)
+        configuration.snapshotWidth = 1
+        webView.takeSnapshot(with: configuration) { [weak self] image, error in
+            MainActor.assumeIsolated {
+                guard let self, self.documentGeneration == generation else { return }
+                answer.give(image != nil && error == nil ? .committed : .unavailable)
+            }
+        }
+        Task { @MainActor [weak self, wait] in
+            try? await wait(limit)
+            guard let self, self.documentGeneration == generation else { return }
+            answer.give(.timedOut)
+        }
+    }
+
+    @MainActor
+    private final class FrameConfirmationAnswer {
+        private var completion: (@MainActor (FrameConfirmation) -> Void)?
+        init(_ completion: @escaping @MainActor (FrameConfirmation) -> Void) { self.completion = completion }
+        func give(_ confirmation: FrameConfirmation) {
+            let completion = self.completion
+            self.completion = nil
+            completion?(confirmation)
+        }
+    }
+
     /// `restaged` is not committed: a document that loads later is given the whole
     /// set, which already carries the new staged bytes.
     private func deliverUserProperties(restaged: Set<String> = []) {
         guard isLoaded, let json = committed.propertiesJSON else { return }
         run(
-            "window.__mweWallpaperHost.applyUserProperties(JSON.parse(json), restaged)",
+            WebWallpaperProtocol.hostCall(.applyUserProperties, "JSON.parse(json)", "restaged"),
             arguments: ["json": json, "restaged": restaged.sorted()])
     }
 
@@ -756,14 +868,19 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         guard isLoaded, let fps = committed.fps else { return }
         // One call, so the page's listener and its frame pacing change together.
         run("""
-            window.__mweWallpaperHost.applyGeneralProperties(general);
-            window.__mweWallpaperHost.setFrameLimit(limit);
+            \(WebWallpaperProtocol.hostCall(.applyGeneralProperties, "general"));
+            \(WebWallpaperProtocol.hostCall(.setFrameLimit, "limit"));
             """, arguments: ["general": ["fps": Int(fps)], "limit": frameLimit])
     }
 
     private func deliverRenderScale() {
         guard isLoaded else { return }
-        run("window.__mweWallpaperHost.setRenderScale(scale)", arguments: ["scale": Double(committed.renderScale)])
+        run(WebWallpaperProtocol.hostCall(.setRenderScale, "scale"), arguments: ["scale": Double(committed.renderScale)])
+    }
+
+    private func deliverScreenScale() {
+        guard isLoaded else { return }
+        run(WebWallpaperProtocol.hostCall(.setScreenScale, "scale"), arguments: ["scale": committed.backingScale])
     }
 
     private func deliverAudioOutput() {
@@ -773,7 +890,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
 
     private func deliverPaused() {
         guard isLoaded else { return }
-        run("window.__mweWallpaperHost.setPaused(paused)", arguments: ["paused": committed.isPaused])
+        run(WebWallpaperProtocol.hostCall(.setPaused, "paused"), arguments: ["paused": committed.isPaused])
     }
 
     /// Replays the whole committed snapshot into a freshly loaded document. A
@@ -785,6 +902,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
         deliverUserProperties()
         deliverGeneralProperties()
         deliverRenderScale()
+        deliverScreenScale()
         deliverPaused()
     }
 
@@ -799,7 +917,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             guard let self, self.documentGeneration == generation, self.audioDemand else { completion?(false); return }
             do {
                 let delivered = try await self.webView.callAsyncJavaScript(
-                    "return window.__mweWallpaperHost.deliverAudio(bins)",
+                    WebWallpaperProtocol.deliverAudioScript,
                     arguments: ["bins": bins.map { Double($0) }], in: nil, contentWorld: .page) as? Bool
                 completion?(delivered == true && self.documentGeneration == generation && self.audioDemand)
             } catch { completion?(false) }
@@ -812,7 +930,7 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     /// state on resume, and a stale event is worse than a late one.
     func deliverMediaEvent(slot: MediaSlot, event: [String: Any]) {
         guard mediaDemand.listening else { return }
-        run("window.__mweWallpaperHost.deliverMedia(slot, event)",
+        run(WebWallpaperProtocol.hostCall(.deliverMedia, "slot", "event"),
             arguments: ["slot": slot.rawValue, "event": event])
     }
 
@@ -858,17 +976,17 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
     }
 
     private func send(_ reply: RandomFileReply) {
-        run("window.__mweWallpaperHost.deliverRandomFile(requestId, property, path)",
+        run(WebWallpaperProtocol.hostCall(.deliverRandomFile, "requestId", "property", "path"),
             arguments: ["requestId": reply.requestId, "property": reply.property, "path": reply.path])
     }
 
     private func send(_ change: DirectoryChange) {
         if !change.added.isEmpty {
-            run("window.__mweWallpaperHost.userDirectoryFilesAddedOrChanged(property, files)",
+            run(WebWallpaperProtocol.hostCall(.userDirectoryFilesAddedOrChanged, "property", "files"),
                 arguments: ["property": change.property, "files": change.added])
         }
         if !change.removed.isEmpty {
-            run("window.__mweWallpaperHost.userDirectoryFilesRemoved(property, files)",
+            run(WebWallpaperProtocol.hostCall(.userDirectoryFilesRemoved, "property", "files"),
                 arguments: ["property": change.property, "files": change.removed])
         }
     }
@@ -901,29 +1019,66 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             mediaDemand = media
             onMediaDemandChanged?(media)
         }
+        refreshSilence()
     }
 
-    /// The one place that distrusts the page. Anything that is not a recognised
-    /// tagged object with well-formed fields is dropped.
+    /// Wallpaper Engine calls a page's audio listener on its fixed cadence whether
+    /// or not anything is playing, and pages are written for that: a visualiser that
+    /// starts its idle animation, or turns its lights on, only once the listener has
+    /// been called stayed dark here while the user had not turned Audio response on,
+    /// because nothing reached the listener at all. A registered listener that no
+    /// audio reaches (Audio response is off for this wallpaper) is therefore called
+    /// with silence, 128 zeros, once a second while the page plays: the spacing the
+    /// audio pump keeps a quiet stretch fed at. Nothing is captured for it, and the
+    /// inspector's audio status does not count it as delivery. With Audio response on,
+    /// the pump feeds the page, silence included, and this stays off.
+    private func refreshSilence() {
+        let wanted = isLoaded && !hostSuspended && !committed.userPaused
+            && audioListenerRegistered && !audioResponseEnabled
+        guard wanted != (silenceTask != nil) else { return }
+        silenceTask?.cancel()
+        silenceTask = nil
+        guard wanted else { return }
+        let generation = documentGeneration
+        silenceTask = Task { @MainActor [weak self, wait] in
+            while !Task.isCancelled {
+                guard let page = self, page.documentGeneration == generation else { return }
+                _ = try? await page.webView.callAsyncJavaScript(
+                    WebWallpaperProtocol.deliverAudioScript,
+                    arguments: ["bins": [Double](repeating: 0, count: 128)], in: nil, contentWorld: .page)
+                do { try await wait(WebWallpaperPage.silenceInterval) } catch { return }
+            }
+        }
+    }
+
+    /// What the page posts, once `WebWallpaperProtocol.PageMessage` has checked it. Anything that
+    /// is not a recognised tagged object with well-formed fields is dropped there.
     fileprivate func receiveScriptMessage(_ body: Any) {
-        guard let payload = body as? [String: Any], let type = payload["type"] as? String else {
+        let message: WebWallpaperProtocol.PageMessage
+        switch WebWallpaperProtocol.PageMessage.parse(body) {
+        case .success(let parsed): message = parsed
+        case .failure(.malformed):
             AppLog.debug("web wallpaper \(projectURL.lastPathComponent): malformed host message dropped", load: logLoad)
             return
+        case .failure(.unknownKind(let type)):
+            AppLog.debug("web wallpaper \(projectURL.lastPathComponent): unknown host message “\(type)” dropped", load: logLoad)
+            return
+        case .failure(.malformedRandomFileRequest):
+            logDroppedRandomFileRequest()
+            return
         }
-        switch type {
-        case "audioSubscribed": audioListenerRegistered = true
-        case "audioUnsubscribed": audioListenerRegistered = false
-        case "mediaSubscribed": mediaListenerRegistered = true
-        case "mediaUnsubscribed": mediaListenerRegistered = false
-        case "randomFileRequest":
-            guard let requestId = payload["requestId"] as? String, !requestId.isEmpty,
-                  let propertyId = payload["propertyId"] as? String, !propertyId.isEmpty,
-                  pendingRandomFileRequests.count < Self.maximumPendingRandomFileRequests
-            else {
-                AppLog.debug("""
-                    web wallpaper \(projectURL.lastPathComponent): random file request dropped \
-                    (malformed, or more than \(Self.maximumPendingRandomFileRequests) unanswered)
-                    """, load: logLoad)
+        switch message {
+        case .audioSubscribed: audioListenerRegistered = true
+        case .audioUnsubscribed: audioListenerRegistered = false
+        case .mediaSubscribed: mediaListenerRegistered = true
+        case .mediaUnsubscribed: mediaListenerRegistered = false
+        case .pageDiagnostic(let payload):
+            guard let line = pageDiagnostics.line(project: projectURL.lastPathComponent, payload: payload) else { return }
+            if line.level == .warn { AppLog.warn(line.text, load: logLoad) } else { AppLog.info(line.text, load: logLoad) }
+            return
+        case .randomFileRequest(let requestId, let propertyId):
+            guard pendingRandomFileRequests.count < Self.maximumPendingRandomFileRequests else {
+                logDroppedRandomFileRequest()
                 return
             }
             // The page numbers its requests from one per document, so the id it
@@ -934,11 +1089,15 @@ final class WebWallpaperPage: NSObject, WKNavigationDelegate {
             pendingRandomFileRequests.insert(token)
             onRandomFileRequest?(token, propertyId)
             return
-        default:
-            AppLog.debug("web wallpaper \(projectURL.lastPathComponent): unknown host message “\(type)” dropped", load: logLoad)
-            return
         }
         refreshDemand()
+    }
+
+    private func logDroppedRandomFileRequest() {
+        AppLog.debug("""
+            web wallpaper \(projectURL.lastPathComponent): random file request dropped \
+            (malformed, or more than \(Self.maximumPendingRandomFileRequests) unanswered)
+            """, load: logLoad)
     }
 
     private func run(_ script: String, arguments: [String: Any]) {

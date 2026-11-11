@@ -84,6 +84,40 @@ async fn host_startup_completion_applies_battery_pause_and_rejects_stale_identit
 }
 
 #[tokio::test]
+async fn a_saved_pause_takes_over_a_battery_pause_from_a_report_before_the_first_frame() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    let mut screen = display(7, 1);
+    screen.handle = None;
+    engine.set_snapshot(vec![screen]);
+    let mut state = state();
+    state.app_config.power.on_battery = crate::config::BatteryModeCfg::Pause;
+    state.apply_startup_power_source(crate::power::PowerSource::Battery);
+    state.app_config.general.paused = true;
+    state.pending_user_pause_after_initial_frame = true;
+    state.project_models.insert(
+        "100".into(),
+        crate::project::ProjectModel::parse("100", r#"{"type":"web","file":"index.html"}"#).unwrap(),
+    );
+    let bridge = build(&engine, state, &home);
+    let revision = bridge.web_wallpapers().await.unwrap()[0].startup_revision;
+
+    let early = bridge
+        .report_host_wallpaper_startup(7, "100".into(), revision, None, false)
+        .await
+        .unwrap();
+    assert_eq!(early.app.playback_state, crate::BridgePlaybackState::Paused, "the battery rule paused");
+    bridge.report_host_wallpaper_startup(7, "100".into(), revision, None, true).await.unwrap();
+    bridge.set_power_source_for_test(crate::power::PowerSource::External).await;
+
+    assert_eq!(
+        bridge.app_snapshot().await.unwrap().playback_state,
+        crate::BridgePlaybackState::Paused,
+        "external power does not end the pause the user saved"
+    );
+}
+
+#[tokio::test]
 async fn empty_bootstrap_does_not_wait_forever_for_a_first_frame() {
     let home = tempfile::tempdir().unwrap();
     let engine = FakeEngineFacade::default();

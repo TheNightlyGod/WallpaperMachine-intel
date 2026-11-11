@@ -4,14 +4,19 @@ import Foundation
 /// name the same key, so both read one saved value, both show one draft and both send through one
 /// typed setter: pressing either moves the other.
 enum SettingsSwitchKey: String, CaseIterable, Sendable {
-  case launchAtLogin, hideAfterActivating
+  case launchAtLogin, hideAfterActivating, libraryPreviewsOnHover
   case writeDesktopPicture, refreshDesktopPicture, keepWindowsOnWallpaperClick, livePropertyEdits
+  case hideDesktopIcons, hideNotch
   case lockScreenEnabled, screenSaverEnabled
   case wallpapersMuted, playOnlyOnActiveDisplay
-  case sceneOptimization, sceneOnDemand, sceneVideoPlaneSampling
+  case metalFXUpscaling
+  case sceneOptimization, sceneOnDemand, sceneVideoPlaneSampling, sceneDisplayFraming
+  case sceneReflections
   /// Different wallpaper for each desktop, on the display the Library applies wallpapers to: the
   /// same switch as that display's card in Settings › Displays and the toolbar's display menu.
   case desktopWallpapers
+  /// Settings › General: a Workshop search typed in another language is sent in English.
+  case translateWorkshopSearches
 }
 
 /// What the Settings views read and send beyond the typed values: the saved state of a switch, the
@@ -23,9 +28,12 @@ extension PanelController {
     switch key {
     case .launchAtLogin: generalSettings.launchAtLogin.isOn
     case .hideAfterActivating: generalSettings.hidesAfterActivating
+    case .libraryPreviewsOnHover: generalSettings.playsLibraryPreviewsOnHover
     case .writeDesktopPicture: desktopSettings.writesDesktopPicture
     case .refreshDesktopPicture: desktopSettings.refreshesDesktopPicture
     case .keepWindowsOnWallpaperClick: desktopSettings.keepsWindowsOnWallpaperClick
+    case .hideDesktopIcons: desktopSettings.hidesDesktopIcons
+    case .hideNotch: desktopSettings.hidesNotch
     case .livePropertyEdits: desktopSettings.livePropertyEdits
     case .lockScreenEnabled: lockScreenState.isRequested
     case .screenSaverEnabled: screenSaverState.isRequested
@@ -33,10 +41,14 @@ extension PanelController {
       { _ = revisions.playback; return playback.wallpapersMuted }()
     case .playOnlyOnActiveDisplay:
       { _ = revisions.playback; return playback.playsOnlyOnActiveDisplay }()
+    case .metalFXUpscaling: store.settingsSnapshot.metalfxUpscalingEnabled
     case .sceneOptimization: store.settingsSnapshot.sceneOptimizationEnabled
     case .sceneOnDemand: store.settingsSnapshot.sceneOnDemandEnabled
     case .sceneVideoPlaneSampling: store.settingsSnapshot.sceneVideoPlaneSamplingEnabled
+    case .sceneDisplayFraming: store.settingsSnapshot.sceneDisplayFramingEnabled
+    case .sceneReflections: store.settingsSnapshot.sceneQuality.reflections
     case .desktopWallpapers: automationState(for: targetDisplayID).mode == .spaces
+    case .translateWorkshopSearches: searchTranslation.isEnabled
     }
   }
 
@@ -69,18 +81,25 @@ extension PanelController {
     switch key {
     case .launchAtLogin: try await setLaunchAtLogin(on)
     case .hideAfterActivating: try await setHidesAfterActivating(on)
+    case .libraryPreviewsOnHover: try await setLibraryPreviewsOnHover(on)
     case .writeDesktopPicture: try await setWritesDesktopPicture(on)
     case .refreshDesktopPicture: try await setRefreshesDesktopPicture(on)
     case .keepWindowsOnWallpaperClick: try await setKeepsWindowsOnWallpaperClick(on)
+    case .hideDesktopIcons: try await setHidesDesktopIcons(on)
+    case .hideNotch: try await setHidesNotch(on)
     case .livePropertyEdits: try await setLivePropertyEdits(on)
     case .lockScreenEnabled: try await setLockScreenEnabled(on)
     case .screenSaverEnabled: try await setScreenSaverEnabled(on)
     case .wallpapersMuted: try await setWallpapersMuted(on)
     case .playOnlyOnActiveDisplay: try await setPlaysOnlyOnActiveDisplay(on)
+    case .metalFXUpscaling: try await setMetalFXUpscaling(on)
     case .sceneOptimization: try await setSceneOptimization(on)
     case .sceneOnDemand: try await setSceneOnDemand(on)
     case .desktopWallpapers: try await setDesktopWallpapers(on, display: targetDisplayID)
     case .sceneVideoPlaneSampling: try await setSceneVideoPlaneSampling(on)
+    case .sceneDisplayFraming: try await setSceneDisplayFraming(on)
+    case .sceneReflections: try await setSceneReflections(on)
+    case .translateWorkshopSearches: try await setTranslatesWorkshopSearches(on)
     }
   }
 }
@@ -119,8 +138,20 @@ extension OtherAudioAction {
   @MainActor var title: String {
     switch self {
     case .keepRunning: L("Keep running")
+    case .reduceVolume: L("Reduce volume")
     case .mute: L("Mute")
     case .pause: L("Pause")
+    }
+  }
+}
+
+extension OtherAppInFrontAction {
+  @MainActor var title: String {
+    switch self {
+    case .keepRunning: L("Keep running")
+    case .mute: L("Mute")
+    case .pause: L("Pause")
+    case .pauseOnBattery: L("Pause on battery")
     }
   }
 }
@@ -142,6 +173,21 @@ extension SystemConditionAction {
     case .pause: L("Pause")
     case .stop: L("Stop (free memory)")
     }
+  }
+}
+
+extension InactivityAction {
+  @MainActor var title: String {
+    switch self {
+    case .keepRunning: L("Keep running")
+    case .pause: L("Pause")
+    case .stop: L("Stop (free memory)")
+    }
+  }
+
+  /// An entry of the Inactive after menu: "10 minutes", or "1 hour".
+  @MainActor static func timeTitle(minutes: Int) -> String {
+    minutes == 60 ? L("1 hour") : L("\(minutes) minutes")
   }
 }
 
@@ -204,6 +250,18 @@ extension AppThemePreferences.Icon {
     case .minimal: L("Minimal")
     case .day: L("Day")
     case .night: L("Night")
+    }
+  }
+}
+
+extension AppThemePreferences.Halloween: CaseIterable {
+  static let allCases: [AppThemePreferences.Halloween] = [.automatic, .always, .off]
+
+  @MainActor var title: String {
+    switch self {
+    case .automatic: L("Halloween week")
+    case .always: L("Always")
+    case .off: L("Off")
     }
   }
 }

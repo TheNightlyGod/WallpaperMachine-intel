@@ -4,12 +4,15 @@
 // own parsed bytes equal the bytes already uploaded.
 //
 // Each display here is a `GpuScene`: a renderer on a detached layer, with private textures.
+#include "support/font_assets.hpp"
 #include "support/gpu_scene.hpp"
 
 #include "MetalRender/MetalRender.hpp"
+#include "Runtime/SceneRuntimeContext.hpp"
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -237,10 +240,11 @@ TEST_F(SharedPictures, AnotherWallpapersFileOfTheSameNameGetsItsOwnUpload)
 
 TEST_F(SharedPictures, PicturesTheRuntimeFillsStayPerDisplay)
 {
-    // A text layer is drawn from an image the runtime rasterises and replaces; it is not a
-    // file, and no display may bind another's.
+    // A text layer samples glyph atlases the runtime publishes and replaces; they are not
+    // files, and no display may bind another's.
     ScenePackage package;
     package.InstallStandardAssets();
+    wallpaper::test::WriteFontAssets(package.root());
     Json text = { { "id", 1 },
                   { "name", "label" },
                   { "text", "shared?" },
@@ -260,10 +264,63 @@ TEST_F(SharedPictures, PicturesTheRuntimeFillsStayPerDisplay)
     ASSERT_TRUE(first->ok()) << first->error();
     ASSERT_TRUE(second->ok()) << second->error();
     const Image drawn = first->Run(2);
-    second->Step(2);
+    const Image other = second->Run(2);
     ASSERT_FALSE(drawn.empty());
+    ASSERT_FALSE(other.empty());
+    EXPECT_TRUE(ExpectSamePicture(drawn, other)) << "both displays start with the same text";
     EXPECT_GT(CountDifferingPixels(drawn, Image::Solid(drawn.width, drawn.height, { 0, 0, 0, 255 })), 0u)
-        << "the text was drawn, from an image the runtime made";
+        << "the text was drawn, from glyph atlases the runtime made";
+
+    ASSERT_NE(first->runtime(), nullptr);
+    ASSERT_TRUE(first->runtime()->SetNodeText("label", "W"));
+    for (int attempt = 0; attempt < 400 && first->runtime()->NodeTextDirty("label"); ++attempt) {
+        ASSERT_TRUE(first->Step()) << first->error();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_FALSE(first->runtime()->NodeTextDirty("label")) << "the changed text layout must finish";
+    const Image changed = first->Run(2);
+    const Image unchanged = second->Run(2);
+    ASSERT_FALSE(changed.empty());
+    ASSERT_FALSE(unchanged.empty());
+    EXPECT_GT(CountDifferingPixels(changed, Image::Solid(changed.width, changed.height, { 0, 0, 0, 255 })), 0u)
+        << "the first display draws the changed text";
+    EXPECT_GT(CountDifferingPixels(drawn, changed), 0u) << "the first display updated its own glyphs";
+    EXPECT_TRUE(ExpectSamePicture(other, unchanged)) << "the second display kept its original text";
     EXPECT_EQ(MetalRender::SharedImageBytesForTests(), bytes_before) << "no runtime picture is shared";
     EXPECT_EQ(MetalRender::ImageUploadsForTests(), uploads_before);
+}
+
+// Every picture a scene loads is rearranged for sampling once; the frames drawn from it are the
+// frames drawn from the same picture left as the CPU wrote it (`WALLPAPER_MACHINE_OPTIMIZE_IMAGES=0`),
+// byte for byte, filtered and minified included.
+TEST_F(SharedPictures, AnOptimizedPictureDrawsTheSameBytesAsOneLeftAsWritten)
+{
+    struct OnAtExit {
+        ~OnAtExit() { MetalRender::SetImageOptimizationForTests(true); }
+    } restore;
+    const Image  picture = Pattern(300, 200, 7);
+    ScenePackage optimized_package;
+    MakePictureScene(optimized_package, "optimized_pic", picture, 4);
+    ScenePackage written_package;
+    MakePictureScene(written_package, "written_pic", picture, 4);
+    GpuSceneOptions minified;
+    minified.width  = 187;
+    minified.height = 105;
+
+    const uint64_t before = MetalRender::ImagesOptimizedForTests();
+    MetalRender::SetImageOptimizationForTests(true);
+    GpuScene optimized(optimized_package, minified);
+    ASSERT_TRUE(optimized.ok()) << optimized.error();
+    EXPECT_EQ(MetalRender::ImagesOptimizedForTests() - before, 1u) << "the picture was not optimized";
+
+    MetalRender::SetImageOptimizationForTests(false);
+    GpuScene written(written_package, minified);
+    ASSERT_TRUE(written.ok()) << written.error();
+    EXPECT_EQ(MetalRender::ImagesOptimizedForTests() - before, 1u) << "the switch did not leave it as written";
+
+    const Image a = optimized.Run(2);
+    const Image b = written.Run(2);
+    EXPECT_EQ(CountDifferingPixels(a, b), 0u) << "an optimized picture drew other bytes";
+    EXPECT_GT(CountDifferingPixels(a, Image::Solid(a.width, a.height, { 0, 0, 0, 255 })), 0u)
+        << "nothing was drawn";
 }

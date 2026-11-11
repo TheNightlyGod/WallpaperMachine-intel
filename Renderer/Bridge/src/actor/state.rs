@@ -33,6 +33,11 @@ pub struct BridgeActorState {
     /// Transient mute applied on top of each wallpaper's saved mute. Never
     /// persisted. A user unmute while this is set stays muted until it clears.
     pub audio_suppressed: bool,
+    /// Transient gain applied on top of each wallpaper's saved volume, for a
+    /// host that wants wallpapers turned down without muting them. Never
+    /// persisted. A volume the user saves while it is set plays reduced until
+    /// it clears.
+    pub audio_gain: crate::engine::AudioGain,
     /// Why the host currently asks for the reduced-quality profile, beyond the
     /// battery mode the user saved. Empty by default and never persisted, like
     /// `audio_suppressed`: the host reports the conditions again at every
@@ -104,6 +109,14 @@ pub struct BridgeActorState {
     /// frame. It is set by `apply_startup_power_source`
     /// and cleared when the frame arrives.
     pub pending_battery_pause_after_initial_frame: bool,
+    /// The previous session ended with the user's own pause in force
+    /// (`general.paused`): it returns once the first frame is up, as the
+    /// battery pause does, so a launch never leaves a display without one.
+    /// Cleared when it is applied or the user plays or pauses first.
+    pub pending_user_pause_after_initial_frame: bool,
+    /// The user's latest Play/Pause failed to reach the saved configuration,
+    /// so the same choice made again writes it once more.
+    pub user_pause_unsaved: bool,
     /// The library filter: whether wallpapers of each kind are listed.
     /// They are saved with the app settings, and `filter_enabled`
     /// answers for a kind.
@@ -118,6 +131,14 @@ pub struct BridgeActorState {
     /// handle-based audio accounting. Without this the system capture tap
     /// would stay shut for a display showing nothing but web wallpapers.
     pub web_audio_subscribers: BTreeMap<String, BTreeSet<u32>>,
+    /// The image filters the shared assets offer, read again when their folder
+    /// changes (see [`crate::engine::lut_catalog::LutCatalog::refreshed`]).
+    /// Refreshed when a wallpaper is selected or its options are asked for,
+    /// never per frame.
+    pub lut_catalog: Option<crate::engine::lut_catalog::LutCatalog>,
+    /// What each scene's own file says about the options Wallpaper Engine
+    /// offers for it, refreshed at the same moments as `lut_catalog`.
+    pub scene_traits: crate::engine::scene_traits::SceneTraitsCache,
 }
 
 impl Default for BridgeActorState {
@@ -128,6 +149,7 @@ impl Default for BridgeActorState {
             presentation_suspended: false,
             presentation_unloaded: false,
             audio_suppressed: false,
+            audio_gain: crate::engine::AudioGain::UNITY,
             quality_throttle: BTreeSet::new(),
             label_locales: vec![FALLBACK_LOCALE.to_owned()],
             suspended_displays: BTreeSet::new(),
@@ -164,6 +186,9 @@ impl Default for BridgeActorState {
             // later, once the startup sample has said where the power comes from.
             initial_frame_ready: false,
             pending_battery_pause_after_initial_frame: false,
+            // `from_app_config` sets it from the saved pause.
+            pending_user_pause_after_initial_frame: false,
+            user_pause_unsaved: false,
             // Every kind of wallpaper is listed until the saved filter, which
             // `from_app_config` applies, says otherwise.
             // A fresh state therefore hides nothing.
@@ -172,20 +197,28 @@ impl Default for BridgeActorState {
             filter_webpage: true,
             filter_unknown: true,
             web_audio_subscribers: BTreeMap::new(),
+            lut_catalog: None,
+            scene_traits: crate::engine::scene_traits::SceneTraitsCache::default(),
         }
     }
 }
 
 impl BridgeActorState {
     #[allow(clippy::single_call_fn)]
-    pub fn from_app_config(app_config: AppConfig) -> Self {
+    pub fn from_app_config(mut app_config: AppConfig) -> Self {
         let active_wallpaper_ids = state_values::configured_ids(&app_config);
+        // A saved pause with nothing assigned has nothing to hold still, and must
+        // not freeze the first wallpaper the user applies later on.
+        if active_wallpaper_ids.is_empty() {
+            app_config.general.paused = false;
+        }
         Self {
             filter_scene: app_config.ui.filter.scene,
             filter_video: app_config.ui.filter.video,
             filter_webpage: app_config.ui.filter.web,
             filter_unknown: app_config.ui.filter.unknown,
             selected_wallpaper_id: app_config.general.last_selected_wallpaper.clone(),
+            pending_user_pause_after_initial_frame: app_config.general.paused,
             active_wallpaper_ids,
             app_config,
             ..Self::default()
@@ -261,6 +294,66 @@ impl BridgeActorState {
         }))
     }
 
+    /// The kind of an installed wallpaper.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown.
+    pub fn wallpaper_kind(&self, wallpaper_id: &str) -> Result<BridgeWallpaperKind, BridgeError> {
+        self.library
+            .iter()
+            .find(|entry| entry.id == wallpaper_id)
+            .map(|entry| entry.kind)
+            .ok_or_else(|| BridgeError::invalid_input(format!("unknown wallpaper id {wallpaper_id}")))
+    }
+
+    /// The image filters as last read; none before the first read.
+    #[must_use]
+    pub fn image_filters(&self) -> &[String] {
+        self.lut_catalog.as_ref().map_or(&[], |catalog| catalog.names())
+    }
+
+    /// `pending` checked as edits of the per-wallpaper options of
+    /// `wallpaper_id` (see [`super::engine_options::check_edit`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown or an entry is refused.
+    pub fn checked_engine_edits(
+        &self,
+        wallpaper_id: &str,
+        pending: Vec<crate::api::BridgeEngineOptionEdit>,
+    ) -> Result<Vec<(crate::config::EngineOptionId, crate::project::PropertyValue)>, BridgeError> {
+        let kind = self.wallpaper_kind(wallpaper_id)?;
+        if pending.is_empty() {
+            return Ok(Vec::new());
+        }
+        super::engine_options::check_edits(
+            kind,
+            self.scene_traits.get(wallpaper_id),
+            self.image_filters(),
+            pending,
+        )
+    }
+
+    /// The per-wallpaper options a scene of `wallpaper_id` is shown while it
+    /// is being edited, with `pending` made to the draft for this answer alone,
+    /// and the saved ones.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown or a pending value is
+    /// refused.
+    pub fn pending_engine_options(
+        &self,
+        wallpaper_id: &str,
+        pending: Vec<crate::api::BridgeEngineOptionEdit>,
+    ) -> Result<(crate::config::EngineOptionsCfg, crate::config::EngineOptionsCfg), BridgeError> {
+        let edits = self.checked_engine_edits(wallpaper_id, pending)?;
+        let draft = self.wallpaper_draft(wallpaper_id)?.with_engine_edits(&edits);
+        Ok((draft.current().engine_options.clone(), draft.committed().engine_options.clone()))
+    }
+
     pub fn project_model(&self, wallpaper_id: &str) -> Result<&ProjectModel, BridgeError> {
         state_values::model_for(&self.library, &self.project_models, wallpaper_id)
     }
@@ -282,6 +375,7 @@ impl BridgeActorState {
         &self,
         wallpaper_id: &str,
         primary_identity_selector: Option<&SerializedSelector>,
+        user_initiated: bool,
     ) -> Result<PreparedApply, BridgeError> {
         state_values::prepare_apply(
             &self.library,
@@ -290,6 +384,7 @@ impl BridgeActorState {
             &self.wallpaper_drafts,
             wallpaper_id,
             primary_identity_selector,
+            user_initiated,
         )
     }
 

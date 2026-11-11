@@ -16,8 +16,11 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <numeric>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 // Scene-side raster arithmetic: how large each render target is for a given
 // output, render scale and display, and how the authored canvas is framed in
@@ -39,22 +42,25 @@ namespace render
 
 inline constexpr i32 kMinRenderTargetDimension = 4;
 
-inline i32 ResolveScreenBoundRenderTargetDimension(double source, double scale) {
-    if (! std::isfinite(source) || source <= 0.0) source = kMinRenderTargetDimension;
+inline i32 ResolveScreenBoundRenderTargetDimension(double source, double scale,
+    SceneRenderTarget::Bind::SizePolicy policy = SceneRenderTarget::Bind::SizePolicy::Effect) {
+    const bool native = policy == SceneRenderTarget::Bind::SizePolicy::NativeFramebuffer;
+    const i32 minimum = native ? 2 : kMinRenderTargetDimension;
+    if (! std::isfinite(source) || source <= 0.0) source = minimum;
     if (! std::isfinite(scale) || scale <= 0.0) scale = 1.0;
     // std::round takes halves away from zero. The product can overflow a double
     // (or an i32) for absurd sources, so it saturates rather than converting.
-    const double scaled = std::round(source * scale);
+    const double scaled = native ? std::floor(source * scale) : std::round(source * scale);
     if (! (scaled < static_cast<double>(std::numeric_limits<i32>::max())))
         return std::numeric_limits<i32>::max();
-    return std::max(kMinRenderTargetDimension, static_cast<i32>(scaled));
+    return std::max(minimum, static_cast<i32>(scaled));
 }
 
 inline void ResolveScreenBoundRenderTargetSize(SceneRenderTarget& target, const Extent2D& extent) {
     target.width  = ResolveScreenBoundRenderTargetDimension(static_cast<double>(extent.width),
-                                                           target.bind.scale);
+                                                           target.bind.scale, target.bind.size_policy);
     target.height = ResolveScreenBoundRenderTargetDimension(static_cast<double>(extent.height),
-                                                           target.bind.scale);
+                                                           target.bind.scale, target.bind.size_policy);
 }
 
 /// The smallest internal render scale that still leaves a usable image. Below
@@ -127,6 +133,10 @@ struct SceneRasterSurface {
     /// The longest side a render target may have on this device. Zero when the
     /// device's limit is not known, which caps nothing.
     uint32_t max_dimension { 0 };
+    /// For a framed SDR scene (`Scene::display_framed` without HDR): the part of its
+    /// canvas-cover raster it draws, in that raster's own pixels
+    /// (`SceneRasterWindow::size`). Empty for every other scene.
+    Extent2D window {};
 };
 
 /// Whether `Scene::resolution` decides anything for this scene.
@@ -231,6 +241,7 @@ inline void RefreshScreenBoundTextureResolutions(Scene& scene) {
             for (const auto& effect_node : effect->nodes) refresh(effect_node.sceneNode.get());
         }
     }
+    const auto* frame = scene.FindRenderTarget(SpecTex_Default);
     for (const auto& post : scene.post_processes) {
         if (post == nullptr) continue;
         for (const auto& step : post->steps) {
@@ -243,8 +254,20 @@ inline void RefreshScreenBoundTextureResolutions(Scene& scene) {
                 if (material == nullptr || material->textures.empty()) continue;
                 const auto* source = scene.FindRenderTarget(material->textures.front());
                 if (source == nullptr || source->width <= 0 || source->height <= 0) continue;
-                const float x = pass->source_texel_radius / source->width;
-                const float y = pass->source_texel_radius / source->height;
+                float x = pass->source_texel_radius / source->width;
+                float y = pass->source_texel_radius / source->height;
+                if (source->bind.enable && source->bind.screen &&
+                    std::isfinite(source->bind.scale) && source->bind.scale > 0.0 &&
+                    frame != nullptr && frame->width > 0 && frame->height > 0) {
+                    // WE scales the full-raster reciprocal for each bloom level
+                    // (0x140183610), before rounding or clamping its allocation.
+                    // Bicubic sampling also derives its coordinate grid from
+                    // this offset, so using the rounded texture size reshapes it.
+                    const float radius = pass->source_texel_radius /
+                                         static_cast<float>(source->bind.scale);
+                    x = radius / frame->width;
+                    y = radius / frame->height;
+                }
                 material->customShader.constValues["g_RenderVar0"] =
                     std::array<float, 4>{x, y, -x, -y};
             }
@@ -263,10 +286,11 @@ struct ScreenBoundSizingPlan {
     uint32_t cap { 0 };
 };
 
-inline Extent2D ScaleExtent(const Extent2D& extent, double scale) {
+inline Extent2D ScaleExtent(const Extent2D& extent, double scale,
+    SceneRenderTarget::Bind::SizePolicy policy = SceneRenderTarget::Bind::SizePolicy::Effect) {
     return {
-        static_cast<uint32_t>(ResolveScreenBoundRenderTargetDimension(extent.width, scale)),
-        static_cast<uint32_t>(ResolveScreenBoundRenderTargetDimension(extent.height, scale)),
+        static_cast<uint32_t>(ResolveScreenBoundRenderTargetDimension(extent.width, scale, policy)),
+        static_cast<uint32_t>(ResolveScreenBoundRenderTargetDimension(extent.height, scale, policy)),
     };
 }
 
@@ -278,12 +302,18 @@ inline ScreenBoundSizingPlan PlanScreenBoundSizing(const Scene& scene, const Ext
     plan.source = ResolveSceneSourceExtent(scene, fallback);
     const bool from_display =
         scene.resolution == SceneResolution::Display && SceneResolutionAffectsRaster(scene);
+    plan.cap = from_display ? surface.max_dimension : 0u;
+    if (from_display && scene.display_framed && surface.window.width > 0 &&
+        surface.window.height > 0) {
+        // A window of the capped canvas-cover raster, already in its pixels.
+        plan.raster = surface.window;
+        return plan;
+    }
     const Extent2D basis =
-        from_display
+        from_display && scene.display_framed ? fallback : from_display
             ? ResolveSceneDisplayExtent(plan.source, fallback, surface.display_scale_factor)
             : plan.source;
     plan.raster = ScaleExtent(basis, ResolveSceneRenderScale(scene));
-    plan.cap    = from_display ? surface.max_dimension : 0u;
     if (plan.cap != 0) plan.raster = CapRasterExtent(plan.raster, plan.cap);
     return plan;
 }
@@ -307,7 +337,7 @@ inline void SizeRecord(const ScreenBoundSizingPlan& plan, std::string_view key,
         return;
     }
     if (! record.bind.enable || ! record.bind.screen) return;
-    const Extent2D latched = ScaleExtent(plan.source, record.bind.scale);
+    const Extent2D latched = ScaleExtent(plan.source, record.bind.scale, record.bind.size_policy);
     LatchAuthoredSize(record, static_cast<i32>(latched.width), static_cast<i32>(latched.height));
     ResolveScreenBoundRenderTargetSize(record, plan.raster);
     if (plan.cap == 0) return;
@@ -339,6 +369,237 @@ inline SceneRasterExtents ResolveScreenBoundRenderTargetSizes(Scene& scene,
     detail::FollowSourceAspect(scene, plan.source);
     RefreshScreenBoundTextureResolutions(scene);
     return { plan.source, plan.raster };
+}
+
+// SDR display framing. The composition samples only part of the canvas-cover raster of a
+// Display-resolution scene: Fill crops the canvas that overhangs the display. Wallpaper
+// Engine never draws that part (its frame buffer is the window's size). A framed SDR scene
+// draws only a window of the cover raster: the texels the composition reads, rounded out to
+// the cover raster's own pixel grid and to the grid of every screen-sized target sampled at
+// a fraction of it. Drawn at the same pitch and phase, every pixel the composition reads is
+// the one the whole raster would hold, except where a screen-space effect reaches across the
+// window's edge, which now clamps there as Wallpaper Engine's does at the window's edge.
+
+/// The canvas-cover raster a Display-resolution scene is drawn at when nothing frames it:
+/// the Fill layout of its canvas at the display's scale, through the render scale and the
+/// device cap. `capped` says whether the cap shrank it.
+inline Extent2D ResolveSceneCoverRaster(const Scene& scene, const Extent2D& fallback,
+                                        const SceneRasterSurface& surface,
+                                        bool* capped = nullptr) {
+    const Extent2D source = ResolveSceneSourceExtent(scene, fallback);
+    const Extent2D scaled = detail::ScaleExtent(
+        ResolveSceneDisplayExtent(source, fallback, surface.display_scale_factor),
+        ResolveSceneRenderScale(scene));
+    const Extent2D cover = CapRasterExtent(scaled, surface.max_dimension);
+    if (capped != nullptr)
+        *capped = cover.width != scaled.width || cover.height != scaled.height;
+    return cover;
+}
+
+/// The part of a canvas-cover raster a framed SDR scene draws: `size` pixels at (`x`, `y`)
+/// of the `cover` raster's own pixel grid.
+struct SceneRasterWindow {
+    Extent2D cover {};
+    uint32_t x { 0 };
+    uint32_t y { 0 };
+    Extent2D size {};
+
+    /// Whether the window leaves part of the cover raster out.
+    bool Framed() const {
+        return size.width > 0 && size.height > 0 &&
+               (size.width < cover.width || size.height < cover.height);
+    }
+};
+
+/// How the composition lays the whole cover raster on its destination along one axis, as
+/// the unframed composition does: from `origin` over `extent` destination pixels, on a
+/// destination `output` pixels long. For a horizontally flipped composition, which reads the
+/// raster right to left, the origin is mirrored about the destination.
+struct RasterAxisPlacement {
+    double   origin { 0.0 };
+    double   extent { 1.0 };
+    uint32_t output { 1 };
+};
+
+namespace detail
+{
+
+/// A bilinear weight below this is zero in the sampler's 8-bit sub-texel position, so the
+/// texel it belongs to is not read.
+inline constexpr double kSubTexelTolerance = 1.0 / 512.0;
+
+/// The cover-raster texels one axis of the composition reads, half-open and clamped to the
+/// raster: the bilinear pair under every destination pixel centre the raster covers, less a
+/// texel whose weight rounds to zero. Empty when the raster is not seen at all.
+inline std::pair<uint32_t, uint32_t> SampledCoverTexels(uint32_t cover,
+                                                        const RasterAxisPlacement& place) {
+    if (cover == 0 || ! std::isfinite(place.origin) || ! std::isfinite(place.extent) ||
+        ! (place.extent > 0.0) || place.output == 0)
+        return { 0, cover };
+    const double first = std::max(0.0, std::ceil(place.origin - 0.5));
+    const double last =
+        std::min(static_cast<double>(place.output) - 1.0, std::floor(place.origin + place.extent - 0.5));
+    if (last < first) return { 0, 0 };
+    const double texels_per_pixel = static_cast<double>(cover) / place.extent;
+    // The texel-centre coordinate a destination pixel centre samples.
+    const auto sample = [&](double pixel) {
+        return (pixel + 0.5 - place.origin) * texels_per_pixel - 0.5;
+    };
+    const double low  = std::floor(sample(first) + kSubTexelTolerance);
+    const double high = std::floor(sample(last) - kSubTexelTolerance) + 2.0;
+    const auto clamp = [cover](double value) {
+        return static_cast<uint32_t>(std::clamp(value, 0.0, static_cast<double>(cover)));
+    };
+    return { clamp(low), clamp(high) };
+}
+
+inline uint32_t RoundDownTo(uint32_t value, uint32_t align) { return value / align * align; }
+inline uint32_t RoundUpTo(uint32_t value, uint32_t align) {
+    return (value + align - 1) / align * align;
+}
+
+/// One axis of `PlanSceneRasterWindow`: start and size.
+inline std::pair<uint32_t, uint32_t> PlanRasterWindowAxis(uint32_t cover,
+                                                          const RasterAxisPlacement& place,
+                                                          uint32_t align, bool headroom) {
+    const auto [low, high] = SampledCoverTexels(cover, place);
+    if (align == 0 || cover % align != 0 || high <= low) return { 0, cover };
+    const uint32_t start = RoundDownTo(low, align);
+    uint32_t       size  = std::min(cover, RoundUpTo(high, align)) - start;
+    // Room for the same span to be read at any phase of the alignment grid.
+    if (headroom) size = std::max(size, RoundUpTo(high - low + 1, align) + align);
+    if (size >= cover) return { 0, cover };
+    return { std::min(start, cover - size), size };
+}
+
+/// One axis of `PlaceSceneRasterWindow`: the start that keeps a window of `size` over what
+/// `place` reads, or nothing.
+inline std::optional<uint32_t> PlaceRasterWindowAxis(uint32_t cover, uint32_t size,
+                                                     const RasterAxisPlacement& place,
+                                                     uint32_t align) {
+    if (size >= cover) return 0u;
+    const auto [low, high] = SampledCoverTexels(cover, place);
+    if (align == 0 || high <= low) return std::nullopt;
+    const uint32_t start = std::min(RoundDownTo(low, align), cover - size);
+    if (start % align != 0 || start > low || start + size < high) return std::nullopt;
+    return start;
+}
+
+/// `value` as a fraction with a denominator up to `limit`, or nothing.
+inline std::optional<std::pair<uint64_t, uint64_t>> SmallFraction(double value, uint64_t limit) {
+    if (! std::isfinite(value) || ! (value > 0.0)) return std::nullopt;
+    for (uint64_t denominator = 1; denominator <= limit; ++denominator) {
+        const double numerator = value * static_cast<double>(denominator);
+        const double whole     = std::round(numerator);
+        if (whole >= 1.0 && std::abs(numerator - whole) <= 1e-9 * std::max(1.0, numerator))
+            return std::pair<uint64_t, uint64_t> { static_cast<uint64_t>(whole), denominator };
+    }
+    return std::nullopt;
+}
+
+} // namespace detail
+
+/// The largest denominator a window keeps whole; a finer fraction of the raster leaves the
+/// scene unframed.
+inline constexpr uint32_t kMaxRasterWindowAlignment = 64;
+
+/// The multiple a raster window's start and size keep on both axes so that every screen-sized
+/// target among `sampled` keeps the cover raster's texel grid: a target drawn at a fraction
+/// p/q of the raster, directly or through bound targets, has its texels start at multiples of
+/// q of the raster's, and the window must cut it there. Zero when no window can: a
+/// mip-mapped target (its smallest levels would need a window of nearly the whole raster) or
+/// a fraction with a denominator over `kMaxRasterWindowAlignment`.
+template <typename Keys>
+uint32_t ScreenBoundWindowAlignment(const Scene& scene, const Keys& sampled) {
+    uint64_t alignment = 1;
+    const std::string output(SpecTex_Default);
+    for (const std::string& name : sampled) {
+        std::string key = scene.ResolveRenderTargetName(name);
+        uint64_t    numerator = 1, denominator = 1, hops = 0;
+        bool        screen = false, mipmapped = false;
+        while (hops++ < 16) {
+            const auto found = scene.renderTargets.find(key);
+            if (found == scene.renderTargets.end()) break;
+            const SceneRenderTarget& target = found->second;
+            mipmapped = mipmapped || (target.has_mipmap && target.mipmap_level != 1);
+            if (key == output) {
+                screen = true;
+                break;
+            }
+            if (target.unscaled || ! target.bind.enable) break;
+            const auto fraction =
+                detail::SmallFraction(target.bind.scale, kMaxRasterWindowAlignment);
+            if (! fraction) return 0;
+            numerator *= fraction->first;
+            denominator *= fraction->second;
+            const uint64_t common = std::gcd(numerator, denominator);
+            numerator /= common;
+            denominator /= common;
+            alignment = std::lcm(alignment, denominator);
+            if (alignment > kMaxRasterWindowAlignment) return 0;
+            if (target.bind.screen) {
+                screen = true;
+                break;
+            }
+            key = target.bind.name;
+        }
+        if (screen && mipmapped) return 0;
+        if (! screen) continue;
+    }
+    return static_cast<uint32_t>(alignment);
+}
+
+/// The window of `cover` a framed SDR scene draws for the composition `x` and `y` describe,
+/// its start and size multiples of `align`. With `headroom` it is large enough for the
+/// composition to move by any amount without leaving it (a pan). The whole raster when
+/// nothing would be left out, when the cover raster is not a multiple of `align` on an axis
+/// it would cut, or when `align` is zero.
+inline SceneRasterWindow PlanSceneRasterWindow(const Extent2D& cover, const RasterAxisPlacement& x,
+                                               const RasterAxisPlacement& y, uint32_t align,
+                                               bool headroom) {
+    SceneRasterWindow window { .cover = cover, .x = 0, .y = 0, .size = cover };
+    if (align == 0) return window;
+    const auto [left, width]  = detail::PlanRasterWindowAxis(cover.width, x, align, headroom);
+    const auto [top, height]  = detail::PlanRasterWindowAxis(cover.height, y, align, headroom);
+    window.x    = left;
+    window.y    = top;
+    window.size = { width, height };
+    return window;
+}
+
+/// Moves `window` (same size) so it holds what the composition `x` and `y` describe reads.
+/// False, and `window` as it was, when it cannot.
+inline bool PlaceSceneRasterWindow(SceneRasterWindow& window, const RasterAxisPlacement& x,
+                                   const RasterAxisPlacement& y, uint32_t align) {
+    const auto left = detail::PlaceRasterWindowAxis(window.cover.width, window.size.width, x, align);
+    const auto top  = detail::PlaceRasterWindowAxis(window.cover.height, window.size.height, y, align);
+    if (! left || ! top) return false;
+    window.x = *left;
+    window.y = *top;
+    return true;
+}
+
+/// The clip-space scale and offset (`Scene::display_clip`) that draw the canvas, which fills
+/// the cover raster, into `window`.
+inline std::array<double, 4> SceneRasterWindowClip(const SceneRasterWindow& window) {
+    const double cover_w = window.cover.width, cover_h = window.cover.height;
+    const double width = std::max(1u, window.size.width), height = std::max(1u, window.size.height);
+    return { cover_w / width, cover_h / height, (cover_w - 2.0 * window.x) / width - 1.0,
+             1.0 - (cover_h - 2.0 * window.y) / height };
+}
+
+/// Where along one axis the composition draws a window of `size` texels starting at `start`
+/// of a `cover` raster that the unframed composition lays over `extent` destination pixels
+/// from `origin`, so each destination pixel samples the same cover-raster position:
+/// origin and length in destination pixels. `mirrored` for a flipped composition, which
+/// reads the raster right to left.
+inline std::pair<double, double> RasterWindowFootprint(uint32_t cover, uint32_t start, uint32_t size,
+                                                       double origin, double extent, bool mirrored) {
+    const double pixels_per_texel = extent / std::max(1u, cover);
+    const double length           = size * pixels_per_texel;
+    return { mirrored ? origin + extent - (static_cast<double>(start) + size) * pixels_per_texel
+                      : origin + start * pixels_per_texel,
+             length };
 }
 
 /// Fits the scene's authored canvas into an output of `width` x `height`.
@@ -385,21 +646,36 @@ inline void ApplyCameraFillMode(wallpaper::Scene& scene, wallpaper::FillMode mod
     perspective->Update();
 }
 
+/// What a static-reuse sample folds of one camera: a digest of its
+/// view-projection matrix, which carries the camera's position and visible
+/// extent alike.
+inline uint64_t CameraSampleDigest(const wallpaper::SceneCamera& camera) {
+    const linalg::Matrix4d matrix = camera.GetViewProjectionMatrix();
+    return StaticHashBytes(0xcbf29ce484222325ULL, matrix.data(), sizeof(double) * 16);
+}
+
 /// Folds into a static-reuse sample the cameras a pass depends on: the one it
 /// draws through -- `camera_override` when the graph set one, else its node's --
 /// and the scene's active camera, which a compose layer samples the screen with.
 /// Neither is covered by the node transform, and both move without a graph
-/// rebuild: a fill-mode change, a camera layer's zoom or pan, a script. The
-/// view-projection matrix carries the camera's position and visible extent
-/// alike. Every caller shares this one definition, so caches invalidate on
-/// the same camera changes.
+/// rebuild: a fill-mode change, a camera layer's zoom or pan, a script. Every
+/// caller shares this one definition, so caches invalidate on the same camera
+/// changes. `active_camera` false leaves the active camera out, for a pass whose
+/// uniforms are proven not to read it (`IShaderValueUpdater::TransformInputs`);
+/// the camera it draws through is folded either way.
+///
+/// `digest` gives each camera's `CameraSampleDigest`. A caller sampling many
+/// passes of one frame may remember it per camera for that frame, since nearly
+/// every pass draws through the same one or two cameras, but never across
+/// frames.
+template <typename Digest>
 inline uint64_t FoldPassCameras(uint64_t hash, const wallpaper::Scene& scene,
                                 const std::string& camera_override,
-                                const wallpaper::SceneNode* node) {
-    const auto fold = [&hash](const wallpaper::SceneCamera* camera) {
+                                const wallpaper::SceneNode* node, Digest&& digest,
+                                bool active_camera = true) {
+    const auto fold = [&hash, &digest](const wallpaper::SceneCamera* camera) {
         if (camera == nullptr) return;
-        const linalg::Matrix4d matrix = camera->GetViewProjectionMatrix();
-        hash = StaticHashBytes(hash, matrix.data(), sizeof(double) * 16);
+        hash = StaticHashMix(hash, digest(*camera));
     };
     const std::string& camera_name =
         ! camera_override.empty() ? camera_override
@@ -408,8 +684,17 @@ inline uint64_t FoldPassCameras(uint64_t hash, const wallpaper::Scene& scene,
         const auto found = scene.cameras.find(camera_name);
         fold(found != scene.cameras.end() ? found->second.get() : nullptr);
     }
-    fold(scene.activeCamera);
+    if (active_camera) fold(scene.activeCamera);
     return hash;
+}
+
+inline uint64_t FoldPassCameras(uint64_t hash, const wallpaper::Scene& scene,
+                                const std::string& camera_override,
+                                const wallpaper::SceneNode* node) {
+    return FoldPassCameras(hash, scene, camera_override, node,
+                           [](const wallpaper::SceneCamera& camera) {
+                               return CameraSampleDigest(camera);
+                           });
 }
 
 } // namespace render

@@ -34,7 +34,7 @@ was run.
       choose Control Panel from the status menu: it appears on the Space you are on,
       and the green button still offers full screen. Minimize the panel, then choose
       Control Panel from the status menu, click the Dock icon, and Command-Tab to the
-      app: each brings it back from the Dock. Repeat the Space check with What's New,
+      app: each brings it back from the Dock. Repeat the Space check with the update window,
       a wallpaper preview and a Steam or pixiv sign-in window.
 - [ ] Close the window with its close button and with Command-W, and reopen it
       each time, without quitting or crashing.
@@ -73,6 +73,24 @@ was run.
       battery is low row adds "In effect now. Wallpapers are paused.". Set On battery to
       Pause: the module's line goes away; set the rule to Stop: it reads "… Wallpapers are
       stopped." again. Plug in: the line and the row's In effect now go away.
+- [ ] Set **When the Mac is inactive** to Pause and **Inactive after** to 5 minutes, with
+      display sleep set longer, and leave the Mac alone: after five minutes every wallpaper
+      holds its last frame and the log reads "the Mac counts as inactive". Move the mouse:
+      they play again at once. Wait again and press only a key: they play again within about
+      two seconds. Repeat with Stop (free memory): the wallpapers reload at the first input.
+      Your own Pause from the menu bar stays as you left it throughout.
+- [ ] On a laptop, set **When another app is in front** to Pause on battery and leave a
+      non-maximized window of another app in front of an animated wallpaper. Plugged in, the
+      wallpaper keeps animating in the gaps; unplug: it holds its frame at once; click the
+      desktop: it plays; click the other app: it holds again; plug in: it plays without a
+      click. The menu bar's **On Battery** submenu shows **Pause While Using Other Apps**
+      ticked, and unticking it there turns the row back to Keep running. On battery, zoom a
+      window of another app to fill the screen (not full screen) and minimize it: the
+      wallpaper plays without a click; restore it from the Dock: it holds again.
+- [ ] On a laptop that never answered it, with both battery choices on Keep running, unplug
+      while a wallpaper plays and open the panel: **Save battery when your Mac is unplugged?**
+      appears once (not on the same day as another prompt). Each of its three choices sets only
+      its own row of Playback & Power; **Keep running** changes nothing; it does not return.
 
 ## Appearance
 
@@ -84,6 +102,9 @@ was run.
 - [ ] Set an accent and a surface tone; relaunch and confirm both persist.
 - [ ] Try white and black accents, then Reset appearance. Wallpapers and
       playback must not change.
+- [ ] Choose **Always** under Halloween look: the window, the pumpkin beside the
+      traffic lights and the Dock icon change at once, in light and dark; **Off** brings
+      back your own accent, tone and Dock icon.
 
 ## Library and import
 
@@ -384,9 +405,9 @@ describes what should happen and the log lines to read afterwards.
 - [ ] Switch a web page to another web page (a project with a different entry page): the
       previous picture stays until the new page has loaded and painted, then fades out, and
       the new page is never seen empty or black behind it. The log has `frame captured`,
-      `adopted by host` and `released ... (host ready)`, half a second after the page finished
-      loading. Look for a flash of an empty page as the picture goes, which would mean 500 ms
-      after `didFinish` is not enough for that project's first paint, and for the system
+      `adopted by host` and `released ... (host ready)`, once the page has committed its first
+      frame. Look for a flash of an empty page as the picture goes, which would mean that
+      project's first frame shows too little of it, and for the system
       picture between the old page closing and the new one opening, which the host cannot
       cover.
 - [ ] Switch a web page to a scene: the page's snapshot answers the request for a still (the
@@ -423,6 +444,38 @@ describes what should happen and the log lines to read afterwards.
 
 ## Native desktop posters and Mission Control
 
+- [ ] Stage Manager frame continuity: import the asset-free
+      [test wallpaper](../../Tests/UI/Fixtures/WebFrameContinuity/project.json)
+      (the folder contains WebGL, Canvas 2D and CSS moving strips), enable Stage
+      Manager and leave the Library panel and inspector open.
+      Record the playback rules and power source first. Use Keep running for
+      the foreground-app and covered-desktop rules during the continuity check,
+      then restore them: an intentional Pause on battery hold is not this stutter.
+      Click the exposed desktop, then the panel, at least ten times. Watch the wallpaper
+      throughout each transition: it must keep advancing, without holding a frame
+      and jumping forward afterwards. Repeat with the library filtered to one tile,
+      and with the panel closed while switching between another app and the desktop.
+      Also switch among three apps through Stage Manager: start in one app, select
+      a second app, select the wallpaper app's panel, then return to the first app.
+      Repeat this sequence at least ten times; desktop/panel clicks alone do not
+      cover app-to-app transitions.
+      Keep the same wallpaper selected during each trial: changing it creates a
+      new window and invalidates any temporary window configuration under test.
+      One smooth attempt is insufficient: this regression can be intermittent.
+      Confirm that the unchanged baseline still fails the same sequence before
+      attributing a smooth trial to a candidate fix. If both are smooth, the
+      comparison is inconclusive.
+      Record the display, refresh rate, power source and Stage Manager state for
+      each trial. Repeat the baseline after a display change or sleep/wake; a
+      smooth trial on an external display does not validate the built-in display.
+      For the final build, relaunch and reapply the wallpaper before repeating
+      both sequences, so the result covers newly created windows rather than a
+      temporary debugger setting. Also repeat after changing display geometry;
+      AppKit's live-resize completion can reset the transition composition policy.
+      Repeat with the reported wallpaper and restore the previous settings after the run.
+      Show Desktop shortcuts are not a substitute for these clicks. If recording
+      `requestAnimationFrame` timestamps, compare them with the visible result:
+      healthy callback timing does not prove that WindowServer presents the frames.
 - [ ] Create multiple Desktops, apply a video, and immediately open Mission
       Control **without** switching Desktops.
 - [ ] Apply a different scene and repeat, including rapid A→B→C changes. All
@@ -564,8 +617,11 @@ counters (`nativeVideoPlaybackStalled`, `nativeVideoPlaybackKick`,
 
 Two effects are open questions for window-based video wallpapers on recent macOS builds:
 the translucent menu bar keeping the tint of the first frame instead of following the
-picture, and a new picture showing only after another app is clicked. Neither has been
-seen in this app, and nothing in the code or the tests can show either. The native window
+picture, and a new picture showing only after another app is clicked. Issue
+[#169](https://github.com/MMFoundation/WallpaperMachine/issues/169) reports the menu bar
+keeping the old wallpaper after a playlist rotates until the desktop is revealed.
+Native tests cover an empty poster read while a clip prepares, retried on readiness even
+while covered; they do not establish how macOS samples the menu bar. The native window
 is opaque (`isOpaque = true` in `NativeVideoWallpaperWindow`) and nothing re-commits it
 after a switch.
 
@@ -576,6 +632,9 @@ after a switch.
       or an entry under **Recently used**) without touching any other app: the new
       picture appears at once, not only after another app or window is clicked. Repeat
       from the panel's Apply, and for clip to clip, clip to scene and scene to clip.
+- [ ] Leave another app covering the desktop while a playlist rotates between visibly
+      different clips, including one that takes time to load. The menu bar and Dock
+      pick up the new wallpaper without revealing the desktop or clicking another app.
 - [ ] Press **Next Wallpaper** several times in a row over native clips: only the last
       one appears on the desktop, with no flash of the ones in between. The log says
       `superseded while its metadata was read` for any that were overtaken.
@@ -594,6 +653,11 @@ until such a measurement says otherwise.
 Needs two displays that each show their own wallpaper. The layout and the commands are
 unit-tested; how the menu draws and reads on real screens is not.
 
+- [ ] In the menu bar panel, show a wallpaper with a square preview, then mouse-click each
+      display segment above the large cover in both directions: the selected segment, title
+      and cover follow the chosen display. Repeat with a portrait preview and a 16:9 preview.
+      Use actual pointer clicks; an accessibility press alone does not exercise the cover
+      hit-testing regression ([#171](https://github.com/MMFoundation/WallpaperMachine/issues/171)).
 - [ ] Open the menu bar item: there is one submenu per display instead of the flat
       Previous / Next / Recently used, the main display first and the others left to
       right as the screens sit on the desk. Long display names stay readable, and
@@ -678,6 +742,27 @@ closed lid has not been seen on a desktop
       check after the wake. If there is one, measure it with the power harness before
       changing anything; the cost of the check's video output on a 4K clip is unmeasured.
 
+### HEVC tagged hev1
+
+- [ ] Apply an MP4 whose HEVC is tagged `hev1` with its parameter sets in `hvcC` (FFmpeg's
+      `-tag:v hev1` writes one): it plays on the desktop, in the preview and on the lock screen,
+      and the log says it plays from a clone retagged `hvc1`; the file in the library keeps its
+      size, date and bytes. If the Windows VM is available, compare a frame with Wallpaper
+      Engine's (`scripts/we_reference.py`).
+- [ ] With the library on an external drive, apply it again: the inspector reads **Loading
+      wallpaper content…** with the message that the corrected copy is being made, the clip opens
+      when the log says a full copy was made (a clip over 2 GB fails saying it is too large for
+      one), and other displays open meanwhile without waiting for it. Import the same clip from
+      that drive: its library tile gets a picture, and the inspector's black-bar check reads it.
+- [ ] Rotate a playlist of `hev1` clips from that drive past 2 GB in total: each one plays, the
+      copies of clips no longer shown making room for it. Eject the drive while one plays, press
+      **Clear unused caches…**, reconnect: the clip plays again (from a copy made again, never
+      stalling on its file).
+- [ ] Eject that drive while a full copy is being made: the log says the copy was not made, the
+      inspector shows the wallpaper failed with the read error, and the log shows no new copy
+      until a wallpaper is applied again. Delete an `hev1` wallpaper, put it back from the
+      Trash and apply it: it plays from a copy made again.
+
 ## Audio responsiveness
 
 - [ ] Use an authored audio-reactive scene, leave Audio response enabled, and
@@ -694,6 +779,14 @@ closed lid has not been seen on a desktop
       muted: it starts silent. Add an app rule that mutes, turn **Mute all wallpapers** off
       while that app runs: the wallpapers stay silent until the rule ends. Quit and reopen
       while muted: the wallpapers start silent and the item is still ticked.
+- [ ] With the same three wallpapers, set **When another app plays sound** to **Reduce
+      volume**: **Reduce volume to** appears at 30%. Play music in another app: after about
+      half a second every wallpaper is quieter and keeps playing; drag the slider while the
+      music plays and the level follows on release; at 0% they are silent. Stop the music: about
+      two seconds later each wallpaper is back at its own volume, and its **Volume** slider never
+      moved. A Web wallpaper that makes its sound with Web Audio keeps its level, as it does
+      for its own Volume. Turn **Mute all wallpapers** on while turned down, then off: silent,
+      then turned down again, not at full volume.
 - [ ] Verify that the final disabled or removed scene stops capture.
 - [ ] Verify that denied permission surfaces an error.
 
@@ -705,13 +798,22 @@ closed lid has not been seen on a desktop
       replacement of the app in Applications. Update tests use fixture JSON, a
       fake client and locally made images, so this path is manual only.
 - [ ] With an update available (a build older than the latest release) and
-      another app full-screen, no update alert appears and the log has
-      `update prompt deferred`; leaving full screen shows the alert once, and
-      opening the control panel while a display is covered shows it too.
+      another app full-screen, no update window appears and the log has
+      `update prompt deferred`; leaving full screen shows the window once, and
+      opening the control panel while a display is covered shows it too. The window
+      lists the versions since the running one that the manifest carries (its 20
+      newest changelog sections), newest first, in the app's language, with linked
+      issue and commit references; **Install Update** downloads with a progress bar,
+      then quits and reopens; **Skip This Version** keeps the next launch quiet.
 - [ ] Opening the disk image shows one window without toolbar or sidebar: the
       app and Applications at their places over the background, labels readable,
-      the volume icon. Dragging installs; the first launch is refused and opens
-      from System Settings → Privacy & Security → **Open Anyway**.
+      the volume icon. Dragging installs; a release (Developer ID signed and
+      notarized) opens on its first launch without **Open Anyway**, also with the
+      network off, and `spctl --assess -vv` on the installed app says
+      `source=Notarized Developer ID`. After updating from a project-certificate
+      copy (1.8.0 to 1.8.2), macOS asks for system audio and Apple Events again,
+      and the keychain asks once before handing over the saved pixiv and Steam
+      sign-ins.
 
 ## Cross-cutting
 

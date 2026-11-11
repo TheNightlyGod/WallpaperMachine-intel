@@ -33,17 +33,18 @@ use crate::{
         messages::{
             self, AudioRequirementChanged, Bootstrap,
             ClearShaderCache,
-            CompleteAudioResponse, EditProperty,
+            CompleteAudioResponse, EditEngineOption, EditProperty,
             GetAllSnapshots, GetAppSnapshot, GetLibrarySnapshot, GetLockScreenScenes, GetWallpaperPreview,
-            GetMonitorInformationSnapshot, GetSettingsSnapshot, GetWallpaperOptionsSnapshot,
-            GetWebWallpapers,
+            GetMonitorInformationSnapshot, GetSceneProbeRequest, GetSettingsSnapshot,
+            GetWallpaperOptionsSnapshot, GetWebWallpapers,
             InitialFrameReady, InjectDisplayForTest, InjectSceneProjectForTest,
             InjectSceneWallpaperConfigForTest, InjectWallpaperForTest, PollMousePosition,
             GetNativeVideoWallpapers, RefreshDisplays, RefreshLibrary,
             PreviewDisplayPosition, PreviewWallpaperProperties, ReleaseHeldWallpaper,
             RendererCounters,
             ReplaceLibraryForTest,
-            ReplaceWallpaperConfigForTest, RestoreAllPropertyDefaults, RestorePropertyDefault,
+            ReplaceWallpaperConfigForTest, RestoreAllEngineOptionDefaults, RestoreAllPropertyDefaults,
+            RestoreEngineOptionDefault, RestorePropertyDefault,
             SelectWallpaper,
             SetAudioResponseEnabled, SetBatteryQualityProfile,
             SetDisplayConfigEnabled, SetDisplayPosition,
@@ -52,12 +53,12 @@ use crate::{
             GetSystemMediaSceneHandles, SetFilter,
             SetFrameRateCap, SetGlobalPlayback, SetQualityThrottle,
             SetLaunchAtLogin, SetMediaIntegrationEnabled,
-            SetMuted, SetAudioSuppressed, SetBatteryMode, SetLabelLanguages, SetPowerSource,
+            SetMuted, SetAudioGain, SetAudioSuppressed, SetBatteryMode, SetLabelLanguages, SetPowerSource,
             SetPresentationSuspended, SetPresentationUnloaded, SetPropertyPath,
-            SetRenderScale,
+            SetMetalFxUpscalingEnabled, SetRenderScale,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
-            SetSceneOnDemandEnabled, SetSceneOptimizationEnabled,
-            SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
+            SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneQuality,
+            SetSceneDisplayFramingEnabled, SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
             SetTargetFps, SetVerboseLogging, SetVolume, SetWebAudioSubscribed,
             Shutdown,
         },
@@ -68,7 +69,7 @@ use crate::{
         BridgeAppSnapshot, BridgeDisplayMutationBundle,
         BridgeError, BridgeLibrarySnapshot,
         BridgeLockScreenScene, BridgeNativeVideoWallpaper, BridgePlaybackState,
-        BridgePropertyEdit, FirstFrameDelivery, FirstFrameTarget,
+        BridgeEngineOptionEdit, BridgePropertyEdit, FirstFrameDelivery, FirstFrameTarget,
         BridgeRendererCountersReport, BridgeRendererSurfaceCounters, BridgeScalingMode,
         BridgeSnapshotBundle, BridgeWallpaperKind,
         BridgeWallpaperMutationBundle, BridgeWallpaperPreview, BridgeWebWallpaper, MousePollingControl,
@@ -79,7 +80,7 @@ use crate::{
     },
     display::{DisplaySelectorExt, DisplaySnapshotExt},
     engine::{
-        ActivationInputs, AudioCaptureDemand, EngineFacade, LoadJournal,
+        ActivationInputs, AudioCaptureDemand, AudioGain, EngineFacade, LoadJournal,
     },
     library::scan,
     login::LaunchAtLoginController,
@@ -108,6 +109,7 @@ pub struct BridgeActor<E: EngineFacade> {
     /// Which wallpapers were being opened, so one that killed the app twice
     /// in a row is held back. See [`LoadJournal`].
     load_journal: LoadJournal,
+    desktop_preloads: BTreeMap<(u32, String), crate::engine::LoadTicket>,
     /// Scenes a position drag has shown at a position nobody committed, so
     /// that finishing the drag back where it began still puts the renderer on
     /// the saved position instead of being skipped as already held.
@@ -129,6 +131,8 @@ pub struct BridgeActor<E: EngineFacade> {
 enum PlaybackChangeOrigin {
     Manual,
     Power,
+    /// The pause the previous session ended with, brought back after the first frame.
+    Restored,
 }
 
 
@@ -168,6 +172,7 @@ pub(super) fn assemble_actor<E: EngineFacade>(
         paths,
         mouse_polling,
         load_journal,
+        desktop_preloads: BTreeMap::new(),
         previewed_framing: HashSet::new(),
         previewed_properties: HashSet::new(),
     };
@@ -534,6 +539,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         wallpaper_id: &str,
         show: bool,
         pending: Vec<BridgePropertyEdit>,
+        pending_engine_options: Vec<BridgeEngineOptionEdit>,
     ) -> Result<(), BridgeError> {
         let Some(documents) = self
             .state
@@ -541,12 +547,19 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         else {
             return Ok(());
         };
+        // Wallpaper Engine's per-wallpaper options follow the edit the same
+        // way; a pending value is checked before any scene is told anything.
+        let (shown_options, saved_options) = self
+            .state
+            .pending_engine_options(wallpaper_id, pending_engine_options)?;
         let shown = if show {
             documents.shown
         } else {
             documents.saved.clone()
         };
-        if shown == documents.saved && !self.previewed_properties.contains(wallpaper_id) {
+        let shown_options = if show { shown_options } else { saved_options.clone() };
+        let unchanged = shown == documents.saved && shown_options == saved_options;
+        if unchanged && !self.previewed_properties.contains(wallpaper_id) {
             return Ok(());
         }
         let handles = self.wallpaper_handles(wallpaper_id, true);
@@ -562,6 +575,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             .project_json(wallpaper_id)
             .to_string_lossy()
             .into_owned();
+        let scene_options = shown_options.to_scene();
         let mut drawn = false;
         for handle in handles {
             let outcome = self
@@ -570,14 +584,44 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                 .await
                 .map_err(|error| BridgeError::engine(error.to_string()))?;
             drawn |= outcome == PropertyPreview::Shown;
+            let outcome = self
+                .engine
+                .preview_user_options(handle, scene_path.clone(), scene_options.clone())
+                .await
+                .map_err(|error| BridgeError::engine(error.to_string()))?;
+            drawn |= outcome == PropertyPreview::Shown;
         }
         // A scene the engine declined no longer draws this wallpaper, so there
         // is nothing on it to show or to put back; with none left, no scene
         // shows an edit of it.
-        if shown == documents.saved || !drawn {
+        if unchanged || !drawn {
             self.previewed_properties.remove(wallpaper_id);
         }
         Ok(())
+    }
+
+    /// Reads again what the per-wallpaper options of `wallpaper_id` depend on
+    /// outside its configuration: the image filters of the shared assets and,
+    /// for a scene, whether its file offers the mouse-parallax switch. Each is
+    /// read only when its file changed since the last read.
+    fn refresh_engine_option_inputs(&mut self, wallpaper_id: &str) {
+        let Ok(kind) = self.state.wallpaper_kind(wallpaper_id) else {
+            return;
+        };
+        if !matches!(kind, BridgeWallpaperKind::ProjectScene | BridgeWallpaperKind::Video) {
+            return;
+        }
+        self.state.lut_catalog = Some(crate::engine::lut_catalog::LutCatalog::refreshed(
+            self.state.lut_catalog.as_ref(),
+            &self.paths.assets_root(),
+        ));
+        if kind == BridgeWallpaperKind::ProjectScene {
+            let project = self.paths.project_json(wallpaper_id);
+            let engine = &self.engine;
+            self.state
+                .scene_traits
+                .refresh(wallpaper_id, &project, |path| engine.read_scene_traits(path));
+        }
     }
 
     fn wallpaper_handles(&self, wallpaper_id: &str, include_mirrors: bool) -> Vec<SceneHandle> {
@@ -636,6 +680,10 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
         }
         match origin {
             PlaybackChangeOrigin::Manual => {
+                // The user's latest choice is what the next launch restores, and it
+                // overrides a restored pause that has not come back yet.
+                self.state.pending_user_pause_after_initial_frame = false;
+                self.save_user_pause(playback_state == BridgePlaybackState::Paused);
                 if playback_state == BridgePlaybackState::Playing
                     && self.state.power_source == crate::power::PowerSource::Battery
                 {
@@ -645,10 +693,54 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                     self.state.auto_paused_for_battery = false;
                 }
             }
-            PlaybackChangeOrigin::Power => {}
+            PlaybackChangeOrigin::Power | PlaybackChangeOrigin::Restored => {}
         }
         self.invalidate_operations();
         Ok(())
+    }
+
+    /// Saves the user's own Play/Pause for the next launch. A failed save keeps the
+    /// pause in force for this session: it is logged, not reported as a failed pause,
+    /// and the same choice made again tries the save again.
+    fn save_user_pause(&mut self, paused: bool) {
+        if self.state.app_config.general.paused == paused && !self.state.user_pause_unsaved {
+            return;
+        }
+        self.state.app_config.general.paused = paused;
+        let Some(store) = &self.config_store else { return };
+        self.state.user_pause_unsaved = match store.save_app_config(&self.state.app_config) {
+            Ok(()) => false,
+            Err(error) => {
+                log::warn!("could not save the playback choice for the next launch: {error}");
+                true
+            }
+        };
+    }
+
+    /// Brings back the pause the previous session ended with, once the first
+    /// frame is up. Before the battery policy runs, so a pause on battery that
+    /// waited for the same frame finds playback already paused by the user.
+    /// A pause that fails is logged and stays pending for the next ready report;
+    /// the report itself and the battery policy after it go on.
+    async fn restore_user_pause(&mut self) {
+        if !self.state.pending_user_pause_after_initial_frame {
+            return;
+        }
+        if self.state.playback_state != BridgePlaybackState::Paused {
+            log::info!("pausing wallpaper playback as the previous session ended paused");
+            let restored = self
+                .set_playback(BridgePlaybackState::Paused, PlaybackChangeOrigin::Restored)
+                .await;
+            if let Err(error) = restored {
+                log::warn!("could not bring back the saved pause, trying again at the next ready report: {error}");
+                return;
+            }
+        } else {
+            // Paused already, by the battery rule on a report before this one: the
+            // pause is now the user's, so external power does not end it.
+            self.state.auto_paused_for_battery = false;
+        }
+        self.state.pending_user_pause_after_initial_frame = false;
     }
 
 
@@ -971,8 +1063,29 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             project_models: &self.state.project_models,
             frame_rate_cap: self.active_target_fps_cap(),
             audio_suppressed: self.state.audio_suppressed,
+            audio_gain: self.state.audio_gain,
             held: &self.state.held_wallpapers,
         }
+    }
+
+    /// The configured scenes that are open now, each with its handle: where a
+    /// live change of the transient mute or gain is sent. `scene` carries the
+    /// saved volume and mute, without either transient on top.
+    fn open_configured_scenes(&self) -> Result<Vec<(SceneHandle, SceneDesc)>, BridgeError> {
+        let displays = self.engine.display_snapshot();
+        let scenes = self
+            .activation_inputs(&displays, self.playback_paused())
+            .build()?;
+        Ok(scenes
+            .into_iter()
+            .filter_map(|scene| {
+                let handle = displays
+                    .iter()
+                    .find(|entry| entry.desc.display_id == scene.display.display_id)
+                    .and_then(|entry| entry.handle)?;
+                Some((handle, scene))
+            })
+            .collect())
     }
 
     /// Committed plain-video wallpapers, played by the host's own player. Empty only while
@@ -982,8 +1095,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             return Ok(Vec::new());
         }
         let displays = self.engine.display_snapshot();
-        self.activation_inputs(&displays, self.playback_paused())
-            .build_native_video()?
+        self.native_video_wallpapers_from(self.activation_inputs(&displays, self.playback_paused()))
+    }
+
+    fn native_video_wallpapers_from(&self, inputs: ActivationInputs<'_>) -> Result<Vec<BridgeNativeVideoWallpaper>, BridgeError> {
+        inputs.build_native_video()?
             .into_iter()
             .map(|desc| {
                 let title = self
@@ -1003,6 +1119,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                 Ok(BridgeNativeVideoWallpaper {
                     display_id: desc.display.display_id,
                     startup_revision: self.reserved_startup_revision(),
+                    audio_source_display_id: desc.audio_source_display_id,
                     wallpaper_id: desc.wallpaper_id,
                     title,
                     media_path,
@@ -1013,6 +1130,15 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                     muted: desc.muted,
                     scaling_mode: BridgeScalingMode::from(desc.scaling_mode),
                     scaling_factor: desc.scaling_factor,
+                    lut_path: crate::engine::lut_catalog::lut_file(
+                        &self.paths.assets_root(),
+                        &desc.engine_options.image_filter,
+                    )
+                    .filter(|file| file.is_file())
+                    .and_then(|file| std::path::absolute(file).ok())
+                    .and_then(|file| file.into_os_string().into_string().ok()),
+                    engine_options: (&desc.engine_options).into(),
+                    border_color: desc.border_color.map(Into::into),
                 })
             })
             .collect()
@@ -1047,8 +1173,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             return Ok(Vec::new());
         }
         let displays = self.engine.display_snapshot();
-        self.activation_inputs(&displays, self.playback_paused())
-            .build_web()?
+        self.web_wallpapers_from(self.activation_inputs(&displays, self.playback_paused()))
+    }
+
+    fn web_wallpapers_from(&self, inputs: ActivationInputs<'_>) -> Result<Vec<BridgeWebWallpaper>, BridgeError> {
+        inputs.build_web()?
             .into_iter()
             .map(|desc| {
                 let title = self
@@ -1099,6 +1228,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
 
     fn wallpaper_preview(
         &self, wallpaper_id: &str, display_id: &str, pending: Vec<BridgePropertyEdit>,
+        pending_engine_options: Vec<BridgeEngineOptionEdit>,
     ) -> Result<BridgeWallpaperPreview, BridgeError> {
         use std::path::{Component, Path, PathBuf};
         let mut components = Path::new(wallpaper_id).components();
@@ -1112,7 +1242,12 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             return Err(BridgeError::invalid_input("this wallpaper type cannot be previewed"));
         }
         let edits = model.checked_edits(pending)?;
-        let draft = self.state.wallpaper_draft(wallpaper_id)?.with_edits(model, &edits);
+        let engine_edits = self.state.checked_engine_edits(wallpaper_id, pending_engine_options)?;
+        let draft = self
+            .state
+            .wallpaper_draft(wallpaper_id)?
+            .with_edits(model, &edits)
+            .with_engine_edits(&engine_edits);
         let config = draft.current();
         let render = config.monitors.iter().find(|render| render.selector.id() == display_id);
         let overrides = model.override_values(&config.property_overrides);
@@ -1143,6 +1278,13 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             scaling_mode: render.map(|render| render.parse_scaling_mode().into()).unwrap_or(BridgeScalingMode::Fill),
             scaling_factor: render.map_or(1.0, |render| render.scaling_factor),
             volume: config.audio.volume,
+            engine_options: (entry.kind != BridgeWallpaperKind::Webpage)
+                .then(|| (&config.engine_options).into()),
+            lut_path: crate::engine::lut_catalog::lut_file(&self.paths.assets_root(), &config.engine_options.image_filter)
+                .filter(|file| file.is_file())
+                .map(path)
+                .transpose()?,
+            scene_quality: self.state.app_config.quality.scene.to_scene().into(),
         })
     }
 
@@ -1190,6 +1332,11 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                     })?
                     .title
                     .clone();
+                let is_video = self
+                    .state
+                    .project_models
+                    .get(&wallpaper_id)
+                    .is_some_and(|model| model.project_type == wallpaper_core::project::WallpaperProjectType::Video);
                 scene.media_integration_enabled = false;
                 for path in [&mut scene.scene_path, &mut scene.assets_path] {
                     if !std::path::Path::new(path.as_str()).is_absolute() {
@@ -1219,7 +1366,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                     .transpose()?;
                 Ok(BridgeLockScreenScene {
                     display_id: scene.display.display_id,
-                    wallpaper_id,
+                    wallpaper_id: wallpaper_id.clone(),
                     title,
                     project_path: scene.scene_path,
                     assets_path: scene.assets_path,
@@ -1229,6 +1376,20 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                     framing: scene.framing.into(),
                     properties_json,
                     paused: scene.paused,
+                    engine_options: self
+                        .state
+                        .wallpaper_configs
+                        .get(&wallpaper_id)
+                        .map(|config| (&config.engine_options).into()),
+                    scene_quality: (!is_video).then(|| scene.quality.into()),
+                    border_color: is_video
+                        .then(|| {
+                            self.state.wallpaper_configs.get(&wallpaper_id).and_then(|config| {
+                                inputs.scheme_color(&wallpaper_id, config)
+                            })
+                        })
+                        .flatten()
+                        .map(Into::into),
                 })
             })
             .collect::<Result<Vec<_>, BridgeError>>()?;
@@ -1281,6 +1442,9 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                 framing: SceneFraming::default().into(),
                 properties_json: Some(properties_json),
                 paused: desc.paused,
+                engine_options: None,
+                scene_quality: None,
+                border_color: None,
             });
         }
         Ok(scenes)
@@ -1312,6 +1476,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                 scene.clone(),
                 self.active_target_fps_cap(),
                 self.state.audio_suppressed,
+                self.state.audio_gain,
             );
             snapshot.iter().any(|entry| {
                 entry.handle.is_some()
@@ -1464,16 +1629,24 @@ fn capped_frame_rate(rate: u32, cap: Option<u32>) -> u32 {
 }
 
 /// `scene` as its renderer runs it: the saved rate under the frame-rate
-/// ceiling in force, and the saved mute with the transient mute on top.
+/// ceiling in force, the saved mute with the transient mute on top, and the
+/// saved volume under the transient gain.
 ///
-/// Both are applied live, and applying them rewrites the open scene's
+/// All three are applied live, and applying them rewrites the open scene's
 /// descriptor. The engine reopens any scene whose descriptor differs from the
 /// one it is handed, so every reconcile hands over, and every unchanged check
-/// compares against, this form. The saved values would reload each capped or
-/// muted scene on every Apply, display edit, backend switch or repair.
-fn live_scene(mut scene: SceneDesc, fps_cap: Option<u32>, audio_suppressed: bool) -> SceneDesc {
+/// compares against, this form. The saved values would reload each capped,
+/// muted or turned-down scene on every Apply, display edit, backend switch or
+/// repair.
+fn live_scene(
+    mut scene: SceneDesc,
+    fps_cap: Option<u32>,
+    audio_suppressed: bool,
+    audio_gain: AudioGain,
+) -> SceneDesc {
     scene.fps = capped_frame_rate(scene.fps, fps_cap);
     scene.audio_muted = scene.audio_muted || audio_suppressed;
+    scene.audio_volume = audio_gain.applied_to_volume(scene.audio_volume);
     scene
 }
 
@@ -1515,6 +1688,17 @@ impl<E: EngineFacade + Clone> Message<Bootstrap> for BridgeActor<E> {
             .engine
             .set_scene_video_plane_sampling_enabled(experimental.scene_video_plane_sampling)
         {
+            self.state.errors.push(error.to_string());
+        }
+        if let Err(error) = self
+            .engine
+            .set_scene_display_framing_enabled(experimental.scene_display_framing)
+        {
+            self.state.errors.push(error.to_string());
+        }
+        if let Err(error) = self.engine.set_metalfx_upscaling_enabled(
+            self.state.app_config.quality.metalfx_upscaling_enabled,
+        ) {
             self.state.errors.push(error.to_string());
         }
 
@@ -1698,7 +1882,8 @@ impl<E: EngineFacade + Clone> Message<GetWallpaperPreview> for BridgeActor<E> {
     type Reply = Result<BridgeWallpaperPreview, BridgeError>;
 
     async fn handle(&mut self, msg: GetWallpaperPreview, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.wallpaper_preview(&msg.wallpaper_id, &msg.display_id, msg.pending)
+        self.refresh_engine_option_inputs(&msg.wallpaper_id);
+        self.wallpaper_preview(&msg.wallpaper_id, &msg.display_id, msg.pending, msg.pending_engine_options)
     }
 }
 
@@ -1710,8 +1895,46 @@ impl<E: EngineFacade + Clone> Message<GetWallpaperOptionsSnapshot> for BridgeAct
         msg: GetWallpaperOptionsSnapshot,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.refresh_engine_option_inputs(&msg.wallpaper_id);
         let displays = self.engine.display_snapshot();
         self.state.options(&displays, msg.wallpaper_id, &self.paths)
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<GetSceneProbeRequest> for BridgeActor<E> {
+    type Reply = messages::SceneProbeRequestReply;
+
+    async fn handle(
+        &mut self,
+        msg: GetSceneProbeRequest,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let entry = self
+            .state
+            .library
+            .iter()
+            .find(|entry| entry.id == msg.wallpaper_id)
+            .ok_or_else(|| BridgeError::invalid_input("the wallpaper is not installed"))?;
+        if entry.kind != BridgeWallpaperKind::ProjectScene {
+            return Err(BridgeError::invalid_input("only a scene wallpaper can be read this way"));
+        }
+        // What a load would use: the saved choices, not edits still waiting for Apply.
+        let saved = self
+            .state
+            .wallpaper_configs
+            .get(&msg.wallpaper_id)
+            .map(|config| config.property_overrides.clone())
+            .unwrap_or_default();
+        let property_overrides = crate::project::scene_property_override_json(
+            self.state.project_models.get(&msg.wallpaper_id),
+            &saved,
+        );
+        Ok(crate::engine::SceneProbeRequest {
+            project_file: self.paths.project_json(&msg.wallpaper_id),
+            assets: self.paths.assets_root(),
+            shader_cache: self.paths.shader_cache_root(),
+            property_overrides,
+        })
     }
 }
 
@@ -1856,6 +2079,7 @@ impl<E: EngineFacade + Clone> Message<SelectWallpaper> for BridgeActor<E> {
         }
         self.state.app_config.general.last_selected_wallpaper = Some(msg.id.clone());
         self.state.selected_wallpaper_id = Some(msg.id.clone());
+        self.refresh_engine_option_inputs(&msg.id);
         self.invalidate_operations();
         self.snapshots_with_options(msg.id)
     }
@@ -2045,20 +2269,32 @@ impl<E: EngineFacade + Clone> Message<SetAudioSuppressed> for BridgeActor<E> {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.state.audio_suppressed = msg.suppressed;
-        let displays = self.engine.display_snapshot();
-        let scenes = self
-            .activation_inputs(&displays, self.playback_paused())
-            .build()?;
-        for scene in &scenes {
-            let Some(handle) = displays
-                .iter()
-                .find(|entry| entry.desc.display_id == scene.display.display_id)
-                .and_then(|entry| entry.handle)
-            else {
-                continue;
-            };
+        for (handle, scene) in self.open_configured_scenes()? {
             self.engine
                 .set_audio_muted(handle, scene.audio_muted || msg.suppressed)
+                .await
+                .map_err(|error| BridgeError::engine(error.to_string()))?;
+        }
+        self.invalidate_operations();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetAudioGain> for BridgeActor<E> {
+    type Reply = messages::SetAudioGainReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetAudioGain,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let gain = AudioGain::new(msg.gain)?;
+        self.state.audio_gain = gain;
+        // Scenes take the new volume live. Web pages and native video take it
+        // from the descriptors in the snapshots this returns.
+        for (handle, scene) in self.open_configured_scenes()? {
+            self.engine
+                .set_audio_volume(handle, gain.applied_to_volume(scene.audio_volume))
                 .await
                 .map_err(|error| BridgeError::engine(error.to_string()))?;
         }
@@ -2218,10 +2454,66 @@ impl<E: EngineFacade + Clone> Message<SetDisplayParkedWallpapers> for BridgeActo
             .set_parked_scenes(display_id, scene_paths)
             .await
             .map_err(|error| BridgeError::engine(error.to_string()))?;
+        self.desktop_preloads.retain(|(display, wallpaper), _| *display != display_id || msg.wallpaper_ids.contains(wallpaper));
         log::info!(
             "display {display_id} keeps {} wallpaper(s) paused when it moves on",
             msg.wallpaper_ids.len()
         );
+        Ok(())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<messages::PreloadDesktopWallpaper> for BridgeActor<E> {
+    type Reply = Result<crate::api::BridgeDesktopPreload, BridgeError>;
+
+    async fn handle(&mut self, msg: messages::PreloadDesktopWallpaper, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        let empty = crate::api::BridgeDesktopPreload::default();
+        if self.state.presentation_unloaded || self.state.held_wallpapers.contains(&msg.wallpaper_id) { return Ok(empty); }
+        self.state.ensure_wallpaper_exists(&msg.wallpaper_id)?;
+        if !self.state.wallpaper_configs.contains_key(&msg.wallpaper_id) {
+            let config = self.config_store.as_ref().map(|store| store.load_wallpaper(&msg.wallpaper_id)).transpose()?
+                .unwrap_or_else(|| crate::config::WallpaperConfig::new_for(&msg.wallpaper_id, "scene"));
+            self.state.wallpaper_configs.insert(msg.wallpaper_id.clone(), config);
+        }
+        let displays = self.engine.display_snapshot();
+        if !displays.iter().any(|display| display.desc.display_id == msg.display_id) { return Ok(empty); }
+        // Resolve the saved rendering options through the ordinary activation builder, against a
+        // temporary assignment. Neither the user's selected item nor any persisted config changes.
+        let ticket = self.load_journal.begin(vec![(msg.wallpaper_id.clone(), msg.display_id)]);
+        let target = (msg.display_id, msg.wallpaper_id.clone());
+        let mut config = self.state.app_config.clone();
+        let selector = config.monitors.iter().find(|monitor| {
+            monitor.enabled && !monitor.mode.eq_ignore_ascii_case(MIRROR_DISPLAY_MODE)
+                && monitor.selector.to_selector().resolve_display(&displays)
+                    .is_some_and(|display| display.desc.display_id == msg.display_id)
+        }).map(|monitor| monitor.selector.clone()).map_or_else(
+            || self.resolve_operation_selector(&msg.display_id.to_string(), &displays), Ok)?;
+        config.monitors = vec![crate::config::MonitorCfg {
+            selector,
+            wallpaper: Some(msg.wallpaper_id), ..Default::default()
+        }];
+        let inputs = || ActivationInputs { app_config: &config, paused: true, audio_suppressed: true,
+            ..self.activation_inputs(&displays, true) };
+        if let Some(scene) = inputs().build()?.into_iter().next() {
+            let scene = live_scene(scene, self.active_target_fps_cap(), true, self.state.audio_gain);
+            self.engine.preload_scene(scene, f64::from(self.effective_render_scale())).await
+                .map_err(|error| BridgeError::engine(error.to_string()))?;
+        }
+        let result = crate::api::BridgeDesktopPreload {
+            web: self.web_wallpapers_from(inputs())?.into_iter().next(),
+            video: self.native_video_wallpapers_from(inputs())?.into_iter().next(),
+        };
+        self.desktop_preloads.insert(target, ticket);
+        Ok(result)
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<messages::CompleteDesktopPreload> for BridgeActor<E> {
+    type Reply = Result<(), BridgeError>;
+    async fn handle(&mut self, msg: messages::CompleteDesktopPreload, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        if let Some(ticket) = self.desktop_preloads.remove(&(msg.display_id, msg.wallpaper_id)) {
+            if msg.succeeded { ticket.succeed(); }
+        }
         Ok(())
     }
 }
@@ -2258,6 +2550,38 @@ impl<E: EngineFacade + Clone> Message<SetSceneResolution> for BridgeActor<E> {
             .set_scene_resolution(scene_resolution(msg.resolution))
             .map_err(|error| BridgeError::engine(error.to_string()))?;
         self.apply_effective_render_scale().await?;
+        self.invalidate_operations();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetSceneQuality> for BridgeActor<E> {
+    type Reply = messages::SetSceneQualityReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetSceneQuality,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.state.app_config.quality.scene == msg.quality {
+            return Ok(self.all_snapshots());
+        }
+        self.state.app_config.quality.scene = msg.quality;
+        if let Some(store) = &self.config_store {
+            store.save_app_config(&self.state.app_config)?;
+        }
+        // Shadows, volumetrics, reflection and post-processing change how a
+        // scene is parsed, so each running scene loads once more: the new
+        // quality makes its description differ. Videos and web pages carry no
+        // scene quality and are left as they are.
+        let app_config = self.state.app_config.clone();
+        let wallpaper_configs = self.state.wallpaper_configs.clone();
+        let result = self
+            .reconcile_snapshot_operation(app_config, wallpaper_configs, false)
+            .await;
+        self.refresh_mouse_polling_policy();
+        let scenes = result?;
+        self.state.set_active_ids_from_scenes(&scenes);
         self.invalidate_operations();
         Ok(self.all_snapshots())
     }
@@ -2373,6 +2697,53 @@ impl<E: EngineFacade + Clone> Message<SetSceneVideoPlaneSamplingEnabled> for Bri
         // anything.
         self.engine
             .set_scene_video_plane_sampling_enabled(msg.enabled)
+            .map_err(|error| BridgeError::engine(error.to_string()))?;
+        self.invalidate_operations();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetSceneDisplayFramingEnabled> for BridgeActor<E> {
+    type Reply = messages::SetSceneDisplayFramingEnabledReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetSceneDisplayFramingEnabled,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.state.app_config.experimental.scene_display_framing = msg.enabled;
+        if let Some(store) = &self.config_store {
+            store.save_app_config(&self.state.app_config)?;
+        }
+        // How much of a scene's layout is drawn, not what a scene is: a
+        // running scene picks the change up at its next frame by sizing its
+        // render targets again in place, so nothing here rebuilds, reparses
+        // or reopens anything.
+        self.engine
+            .set_scene_display_framing_enabled(msg.enabled)
+            .map_err(|error| BridgeError::engine(error.to_string()))?;
+        self.invalidate_operations();
+        Ok(self.all_snapshots())
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<SetMetalFxUpscalingEnabled> for BridgeActor<E> {
+    type Reply = messages::SetMetalFxUpscalingEnabledReply;
+
+    async fn handle(
+        &mut self,
+        msg: SetMetalFxUpscalingEnabled,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.state.app_config.quality.metalfx_upscaling_enabled = msg.enabled;
+        if let Some(store) = &self.config_store {
+            store.save_app_config(&self.state.app_config)?;
+        }
+        // How a finished frame is brought to the display, not what a scene
+        // draws: running scenes pick it up at their next presented frame, so
+        // nothing here rebuilds, reparses or reopens anything.
+        self.engine
+            .set_metalfx_upscaling_enabled(msg.enabled)
             .map_err(|error| BridgeError::engine(error.to_string()))?;
         self.invalidate_operations();
         Ok(self.all_snapshots())
@@ -2770,13 +3141,22 @@ impl<E: EngineFacade + Clone> Message<RendererCounters> for BridgeActor<E> {
                 RendererSharedCounterKind::AudioAcceptedFrames,
             ),
             audio_active_consumers: self.audio_consumer_count(),
-            // The renderer presents through a CAMetalLayer and exposes no presentation
-            // feedback here. Present requests are reported as requests; the
-            // frames the compositor actually showed are not observable, and are
-            // never approximated by the request count.
-            presentation_feedback_available: false,
+            // Each presented drawable reports when the display showed it, or
+            // that it never did; the surfaces carry those counts. Present
+            // requests stay requests and are never relabelled as shown frames.
+            // `WALLPAPER_MACHINE_PRESENT_FEEDBACK=0` asks for no reports, and
+            // then zero shown frames must not read as a measurement.
+            presentation_feedback_available: present_feedback_requested(
+                std::env::var("WALLPAPER_MACHINE_PRESENT_FEEDBACK").ok().as_deref(),
+            ),
         })
     }
+}
+
+/// Whether presents ask their drawables for reports: the renderer reads the same
+/// switch (`PresentFeedbackEnabled` in MetalRender.mm), on unless it is `0`.
+pub(crate) fn present_feedback_requested(switch: Option<&str>) -> bool {
+    switch != Some("0")
 }
 
 /// Maps one renderer surface's counters onto the reported row. Named fields
@@ -2811,8 +3191,14 @@ fn renderer_surface_row(counters: &RendererSurfaceCounters) -> BridgeRendererSur
         gpu_completions: counters.value(K::GpuCompletions),
         simulation_ticks: counters.value(K::SimulationTicks),
         presents_skipped_unchanged: counters.value(K::PresentsSkippedUnchanged),
+        presented_frames: counters.value(K::PresentedFrames),
+        presents_dropped: counters.value(K::PresentsDropped),
+        present_gaps_1_vsync: counters.value(K::PresentGaps1Vsync),
+        present_gaps_2_vsync: counters.value(K::PresentGaps2Vsync),
+        present_gaps_3plus_vsync: counters.value(K::PresentGaps3PlusVsync),
         tick_interval_micros: counters.value(K::TickIntervalMicros),
         content_period_micros: counters.value(K::ContentPeriodMicros),
+        vsync_period_micros: counters.value(K::VsyncPeriodMicros),
         video_decode_outputs: counters.value(K::VideoDecodeOutputs),
         video_seeks: counters.value(K::VideoSeeks),
         video_frames_selected: counters.value(K::VideoFramesSelected),
@@ -2860,6 +3246,7 @@ impl<E: EngineFacade + Clone> Message<InitialFrameReady> for BridgeActor<E> {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.state.initial_frame_ready = true;
+        self.restore_user_pause().await;
         if self.state.pending_battery_pause_after_initial_frame {
             self.state.pending_battery_pause_after_initial_frame = false;
             self.apply_power_policy().await?;
@@ -2891,6 +3278,9 @@ impl<E: EngineFacade + Clone> Message<messages::ReportHostWallpaperStartup> for 
         };
         if !current { return Ok(self.all_snapshots()); }
         self.state.initial_frame_ready |= msg.ready;
+        if msg.ready {
+            self.restore_user_pause().await;
+        }
         if self.state.pending_battery_pause_after_initial_frame {
             self.state.pending_battery_pause_after_initial_frame = false;
             self.apply_power_policy().await?;
@@ -2970,9 +3360,11 @@ impl<E: EngineFacade + Clone> Message<SetVolume> for BridgeActor<E> {
             .set_volume_immediate(volume)?;
         self.save_wallpaper(wallpaper_id.clone(), saved)?;
         // Mirrors follow their source, so only the scenes of their own are told.
+        // What is saved is `volume`; what plays is its share under the gain in force.
+        let live = self.state.audio_gain.applied_to_volume(level);
         for handle in self.wallpaper_handles(&wallpaper_id, false) {
             self.engine
-                .set_audio_volume(handle, level)
+                .set_audio_volume(handle, live)
                 .await
                 .map_err(engine_failed)?;
         }
@@ -3326,7 +3718,7 @@ impl<E: EngineFacade + Clone> Message<PreviewWallpaperProperties> for BridgeActo
         msg: PreviewWallpaperProperties,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.show_wallpaper_properties(&msg.wallpaper_id, msg.show, msg.pending)
+        self.show_wallpaper_properties(&msg.wallpaper_id, msg.show, msg.pending, msg.pending_engine_options)
             .await
     }
 }
@@ -3430,6 +3822,77 @@ impl<E: EngineFacade + Clone> Message<RestoreAllPropertyDefaults> for BridgeActo
         self.state
             .wallpaper_draft_mut(&msg.wallpaper_id)?
             .restore_all_property_defaults(&keep);
+        self.invalidate_operations();
+        self.wallpaper_bundle(msg.wallpaper_id)
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<EditEngineOption> for BridgeActor<E> {
+    type Reply = messages::WallpaperMutationReply;
+
+    async fn handle(
+        &mut self,
+        msg: EditEngineOption,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.refresh_engine_option_inputs(&msg.wallpaper_id);
+        let edits = self.state.checked_engine_edits(
+            &msg.wallpaper_id,
+            vec![BridgeEngineOptionEdit { option: msg.option, value: msg.value }],
+        )?;
+        let draft = self.state.wallpaper_draft_mut(&msg.wallpaper_id)?;
+        for (option, value) in &edits {
+            draft.edit_engine_option(*option, value);
+        }
+        self.invalidate_operations();
+        self.wallpaper_bundle(msg.wallpaper_id)
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<RestoreEngineOptionDefault> for BridgeActor<E> {
+    type Reply = messages::WallpaperMutationReply;
+
+    async fn handle(
+        &mut self,
+        msg: RestoreEngineOptionDefault,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.refresh_engine_option_inputs(&msg.wallpaper_id);
+        let kind = self.state.wallpaper_kind(&msg.wallpaper_id)?;
+        let option = crate::config::EngineOptionId::from(msg.option);
+        if !super::engine_options::offered(kind, self.state.scene_traits.get(&msg.wallpaper_id))
+            .contains(&option)
+        {
+            return Err(BridgeError::invalid_input(format!(
+                "{:?} is not a Wallpaper Engine option of this wallpaper",
+                msg.option
+            )));
+        }
+        self.state
+            .wallpaper_draft_mut(&msg.wallpaper_id)?
+            .restore_engine_option_default(option);
+        self.invalidate_operations();
+        self.wallpaper_bundle(msg.wallpaper_id)
+    }
+}
+
+impl<E: EngineFacade + Clone> Message<RestoreAllEngineOptionDefaults> for BridgeActor<E> {
+    type Reply = messages::WallpaperMutationReply;
+
+    async fn handle(
+        &mut self,
+        msg: RestoreAllEngineOptionDefaults,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let kind = self.state.wallpaper_kind(&msg.wallpaper_id)?;
+        if !matches!(kind, BridgeWallpaperKind::ProjectScene | BridgeWallpaperKind::Video) {
+            return Err(BridgeError::invalid_input(
+                "only scene and video wallpapers have Wallpaper Engine options",
+            ));
+        }
+        self.state
+            .wallpaper_draft_mut(&msg.wallpaper_id)?
+            .restore_all_engine_option_defaults();
         self.invalidate_operations();
         self.wallpaper_bundle(msg.wallpaper_id)
     }

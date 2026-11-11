@@ -1,15 +1,17 @@
 import Foundation
 import IOKit.ps
 
-/// One reading of the Mac's internal battery: how full it is and whether the Mac is running on
-/// it right now.
+/// One reading of the Mac's internal battery: how full it is, whether the Mac is running on it
+/// right now, and whether it is charging (on power, a battery held at a level is not).
 struct BatteryReading: Equatable, Sendable {
     var percent: Int
     var isDischarging: Bool
+    var isCharging = false
 
-    init(percent: Int, isDischarging: Bool) {
+    init(percent: Int, isDischarging: Bool, isCharging: Bool = false) {
         self.percent = percent
         self.isDischarging = isDischarging
+        self.isCharging = isCharging
     }
 
     /// Reads one power-source description from IOKit. Only the internal battery counts: a UPS or
@@ -22,6 +24,7 @@ struct BatteryReading: Equatable, Sendable {
               maximum > 0, current.isFinite, maximum.isFinite else { return nil }
         percent = Int(min(100, max(0, (current * 100 / maximum).rounded(.down))))
         isDischarging = description[kIOPSPowerSourceStateKey] as? String == kIOPSBatteryPowerValue
+        isCharging = !isDischarging && (description[kIOPSIsChargingKey] as? Bool ?? false)
     }
 
     /// The internal battery as it is now, or nil on a Mac without one or when IOKit cannot say.

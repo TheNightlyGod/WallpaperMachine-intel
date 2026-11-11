@@ -14,18 +14,23 @@
 #include "Scene/SceneWallpaper.hpp"
 #include "Scene/SceneWallpaperSurface.hpp"
 #include "RenderCommon/StaticSubgraphCache.hpp"
+#include "support/command_buffer_gpu_time.hpp"
+#include "support/scene_quality_environment.hpp"
 
+#import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
-#import <objc/runtime.h>
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -33,13 +38,17 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 #include <libproc.h>
 #include <mach/mach.h>
+#include <mach/mach_time.h>
 #include <sys/resource.h>
 
 // Private libsystem exports, read the way `scripts/power_benchmark.py` and the
@@ -179,7 +188,7 @@ std::filesystem::path WriteStaticScene(const std::filesystem::path& root)
               "attribute vec2 a_TexCoord;\n"
               "varying vec2 v_TexCoord;\n"
               "void main() {\n"
-              "gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+              "gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
               "v_TexCoord = a_TexCoord;\n"
               "}\n");
     WriteText(root / "shaders/card.frag",
@@ -281,14 +290,14 @@ std::filesystem::path WriteHistoryScene(const std::filesystem::path& root)
               "attribute vec2 a_TexCoord;\n"
               "varying vec2 v_TexCoord;\n"
               "void main() {\n"
-              "gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+              "gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
               "v_TexCoord = a_TexCoord;\n"
               "}\n");
     WriteText(root / "shaders/echo.frag",
               "uniform sampler2D g_Texture0;\n"
               "varying vec2 v_TexCoord;\n"
               "void main() {\n"
-              "gl_FragColor = vec4(texture(g_Texture0, v_TexCoord).rgb, 1.0);\n"
+              "gl_FragColor = vec4(texSample2D(g_Texture0, v_TexCoord).rgb, 1.0);\n"
               "}\n");
     WriteText(root / "layout.json",
               R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
@@ -840,108 +849,333 @@ TEST_F(UnchangedPresent, ASceneResizedOntoADisplayOfAnotherShapeFillsItLikeAFres
 namespace
 {
 
-/// GPU time of every Metal command buffer this process commits, whichever
-/// code made it: they are all command buffers of the one device.
-/// Counted from each buffer's own GPU start and end, so other processes'
-/// work on the GPU is not in it.
-std::atomic<uint64_t> g_command_buffer_gpu_ns { 0 };
-std::atomic<uint64_t> g_command_buffers { 0 };
-IMP                   g_original_commit = nullptr;
-
-void CountedCommit(id self, SEL command)
+/// Mach absolute time in nanoseconds: rusage's CPU times are counted in those
+/// ticks (125/3 ns each on Apple Silicon), so reading them as nanoseconds
+/// undercounts.
+double MachTicksToNs(uint64_t ticks)
 {
-    [(id<MTLCommandBuffer>)self addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
-        const double seconds = buffer.GPUEndTime - buffer.GPUStartTime;
-        if (seconds > 0.0) g_command_buffer_gpu_ns += static_cast<uint64_t>(seconds * 1e9);
-        ++g_command_buffers;
-    }];
-    reinterpret_cast<void (*)(id, SEL)>(g_original_commit)(self, command);
+    static const mach_timebase_info_data_t timebase = [] {
+        mach_timebase_info_data_t value {};
+        mach_timebase_info(&value);
+        return value;
+    }();
+    return double(ticks) * double(timebase.numer) / double(timebase.denom);
 }
 
-/// Wraps `commit` of the device's command buffer class once per process.
-bool CountCommandBufferGpuTime(id<MTLDevice> device)
+/// One resource coalition's counters: GPU busy time, CPU energy and GPU energy.
+struct CoalitionCounters
 {
-    if (g_original_commit != nullptr) return true;
-    id<MTLCommandQueue> queue = [device newCommandQueue];
-    Class retained   = [[queue commandBuffer] class];
-    Class unretained = [[queue commandBufferWithUnretainedReferences] class];
-    // One implementation of `commit` serves both kinds on this GPU; were they
-    // ever two, one of the renderers would go uncounted, so say so instead.
-    Method method = class_getInstanceMethod(retained, @selector(commit));
-    if (method == nullptr ||
-        method != class_getInstanceMethod(unretained, @selector(commit))) {
-        return false;
-    }
-    g_original_commit = method_setImplementation(method, reinterpret_cast<IMP>(&CountedCommit));
-    return true;
-}
-
-/// Whole-GPU and process counters at one instant.
-struct EnergySample
-{
-    std::chrono::steady_clock::time_point at;
-    double   cpu_seconds { 0.0 };
-    uint64_t own_gpu_ns { 0 };
-    uint64_t own_command_buffers { 0 };
+    uint64_t gpu_ns { 0 };
     uint64_t cpu_energy_nj { 0 };
     uint64_t gpu_energy_nj { 0 };
-    uint64_t gpu_time_ns { 0 };
-    uint64_t footprint { 0 };
-    SurfaceHealthSnapshot health;
+};
+using Coalitions = std::map<uint64_t, CoalitionCounters>;
+
+/// Every resource coalition's counters at one instant.
+Coalitions ReadCoalitions()
+{
+    Coalitions coalitions;
+    for (std::size_t capacity = 1024; capacity <= 65536; capacity *= 2) {
+        // Each entry is a uint64 id then two uint32 words.
+        std::vector<uint64_t> entries(capacity * 2);
+        const int bytes = proc_listcoalitions(2, 0, entries.data(),
+                                              int(entries.size() * sizeof(uint64_t)));
+        if (bytes <= 0) return coalitions;
+        const std::size_t count = std::size_t(bytes) / 16;
+        if (count >= capacity) continue;
+        for (std::size_t i = 0; i < count; ++i) {
+            std::array<uint64_t, 45> fields {};
+            if (coalition_info_resource_usage(entries[i * 2], fields.data(), sizeof(fields)) != 0) {
+                continue;
+            }
+            coalitions[entries[i * 2]] = { fields[8], fields[11], fields[41] };
+        }
+        return coalitions;
+    }
+    return coalitions;
+}
+
+/// The resource coalition a process belongs to (the first field of
+/// `proc_pidcoalitioninfo`, flavor 20), or 0 when it cannot be read.
+uint64_t CoalitionOf(pid_t pid)
+{
+    std::array<uint64_t, 5> info {};
+    const int size = proc_pidinfo(pid, 20, 0, info.data(), int(sizeof(info)));
+    return size == int(sizeof(info)) ? info[0] : 0;
+}
+
+/// What a set of coalitions accrued between two reads.
+struct CoalitionDelta
+{
+    uint64_t    gpu_ns { 0 };
+    uint64_t    cpu_energy_nj { 0 };
+    uint64_t    gpu_energy_nj { 0 };
+    std::size_t counted { 0 };
 };
 
-EnergySample SampleEnergy(const SceneWallpaper& wallpaper)
+/// Only coalitions present at both ends count, and one whose counters went down
+/// (an id reused) is left out: a coalition that ended during the window took its
+/// lifetime totals with it, and subtracting one whole-machine sum from another
+/// across that would undercount, or wrap around.
+CoalitionDelta Accrued(const Coalitions& before, const Coalitions& after,
+                       const std::function<bool(uint64_t)>& include)
+{
+    CoalitionDelta delta;
+    for (const auto& [id, old] : before) {
+        if (! include(id)) continue;
+        const auto found = after.find(id);
+        if (found == after.end()) continue;
+        const auto& now = found->second;
+        if (now.gpu_ns < old.gpu_ns || now.cpu_energy_nj < old.cpu_energy_nj ||
+            now.gpu_energy_nj < old.gpu_energy_nj) {
+            continue;
+        }
+        delta.gpu_ns += now.gpu_ns - old.gpu_ns;
+        delta.cpu_energy_nj += now.cpu_energy_nj - old.cpu_energy_nj;
+        delta.gpu_energy_nj += now.gpu_energy_nj - old.gpu_energy_nj;
+        ++delta.counted;
+    }
+    return delta;
+}
+
+/// One surface of the energy run: a display's pixel size and backing scale, and
+/// the scaling mode the host pushes there (`default` pushes none).
+struct EnergySurface
+{
+    uint16_t    width { 1920 };
+    uint16_t    height { 1080 };
+    double      scale { 1.0 };
+    std::string scaling { "default" };
+};
+
+std::vector<std::string> SplitList(std::string_view text)
+{
+    std::vector<std::string> items;
+    for (;;) {
+        const auto comma = text.find(',');
+        items.emplace_back(text.substr(0, comma));
+        if (comma == std::string_view::npos) break;
+        text.remove_prefix(comma + 1);
+    }
+    return items;
+}
+
+/// `WE_TEST_ENERGY_SURFACES`: `<width>x<height>@<scale>` entries separated by
+/// commas, e.g. `3840x2160@2,3456x2234@2`. Nothing on a malformed list.
+std::optional<std::vector<EnergySurface>> ParseEnergySurfaces(std::string_view text)
+{
+    std::vector<EnergySurface> surfaces;
+    for (const auto& item : SplitList(text)) {
+        unsigned width = 0, height = 0;
+        double   scale = 0.0;
+        char     tail  = '\0';
+        if (std::sscanf(item.c_str(), "%ux%u@%lf%c", &width, &height, &scale, &tail) != 3 ||
+            width == 0 || height == 0 || width > 16384 || height > 16384 || ! (scale >= 1.0) ||
+            scale > 4.0) {
+            return std::nullopt;
+        }
+        surfaces.push_back({ uint16_t(width), uint16_t(height), scale, "default" });
+    }
+    return surfaces;
+}
+
+std::string ThermalName(NSProcessInfoThermalState state)
+{
+    switch (state) {
+    case NSProcessInfoThermalStateNominal: return "nominal";
+    case NSProcessInfoThermalStateFair: return "fair";
+    case NSProcessInfoThermalStateSerious: return "serious";
+    case NSProcessInfoThermalStateCritical: return "critical";
+    }
+    return "unknown";
+}
+
+// A small JSON writer for the run's record: numbers, strings, objects, arrays.
+std::string JsonNumber(double value)
+{
+    if (! std::isfinite(value)) return "null";
+    std::ostringstream text;
+    text.precision(12);
+    text << value;
+    return text.str();
+}
+
+std::string JsonNumber(uint64_t value) { return std::to_string(value); }
+
+std::string JsonString(std::string_view value)
+{
+    std::string text = "\"";
+    for (const char c : value) {
+        if (c == '"' || c == '\\') {
+            text += '\\';
+            text += c;
+        } else if (static_cast<unsigned char>(c) < 0x20) {
+            char escaped[8];
+            std::snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+            text += escaped;
+        } else {
+            text += c;
+        }
+    }
+    return text + "\"";
+}
+
+std::string JsonBool(bool value) { return value ? "true" : "false"; }
+
+using JsonFields = std::vector<std::pair<std::string, std::string>>;
+
+std::string JsonObject(const JsonFields& fields)
+{
+    std::string text = "{";
+    for (const auto& [key, value] : fields) {
+        if (text.size() > 1) text += ",";
+        text += JsonString(key) + ":" + value;
+    }
+    return text + "}";
+}
+
+std::string JsonArray(const std::vector<std::string>& items)
+{
+    std::string text = "[";
+    for (const auto& item : items) {
+        if (text.size() > 1) text += ",";
+        text += item;
+    }
+    return text + "]";
+}
+
+/// Process, GPU and whole-machine counters at one instant.
+struct EnergySample
+{
+    std::chrono::steady_clock::time_point  at;
+    double                                 cpu_seconds { 0.0 };
+    rusage_info_v6                         usage {};
+    bool                                   usage_read { false };
+    uint64_t                               own_gpu_ns { 0 };
+    uint64_t                               own_command_buffers { 0 };
+    tests::CommandBufferGpuTime::Histogram histogram {};
+    Coalitions                             coalitions;
+    uint64_t                               footprint { 0 };
+    NSProcessInfoThermalState              thermal { NSProcessInfoThermalStateNominal };
+    std::vector<SurfaceHealthSnapshot>     health;
+    std::vector<Counters>                  counters;
+    /// Passes drawn and reused by scene optimisation, every surface together.
+    render::SceneOptimizationTotals        scene_passes {};
+};
+
+EnergySample SampleEnergy(const std::vector<std::unique_ptr<SceneWallpaper>>& wallpapers)
 {
     EnergySample sample;
     sample.at                  = std::chrono::steady_clock::now();
-    sample.own_gpu_ns          = g_command_buffer_gpu_ns.load();
-    sample.own_command_buffers = g_command_buffers.load();
+    const auto& gpu            = tests::GpuTimeCounters();
+    sample.own_gpu_ns          = gpu.gpu_ns.load();
+    sample.own_command_buffers = gpu.completed.load();
+    sample.histogram           = gpu.HistogramSnapshot();
     rusage usage {};
     getrusage(RUSAGE_SELF, &usage);
     sample.cpu_seconds = double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) +
                          double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6;
-    rusage_info_v6 info {};
-    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V6, reinterpret_cast<rusage_info_t*>(&info)) == 0) {
-        sample.cpu_energy_nj = info.ri_energy_nj;
-    }
-    // Every coalition: the GPU's whole energy, which the kernel only shares
-    // out between coalitions, and this process shares one with whatever
-    // launched it.
-    std::vector<uint64_t> entries(2 * 4096);
-    const int bytes = proc_listcoalitions(2, 0, entries.data(), int(entries.size() * 8));
-    for (int i = 0; bytes > 0 && i < bytes / 16; ++i) {
-        std::array<uint64_t, 45> fields {};
-        if (coalition_info_resource_usage(entries[std::size_t(i) * 2], fields.data(),
-                                          sizeof(fields)) != 0) {
-            continue;
-        }
-        sample.gpu_time_ns += fields[8];
-        sample.gpu_energy_nj += fields[41];
-    }
+    sample.usage_read  = proc_pid_rusage(getpid(), RUSAGE_INFO_V6,
+                                         reinterpret_cast<rusage_info_t*>(&sample.usage)) == 0;
+    // Every coalition: the GPU's whole energy, which the kernel only shares out
+    // between coalitions, and this process's own coalition among them.
+    sample.coalitions = ReadCoalitions();
     task_vm_info_data_t vm {};
     mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm), &count) ==
         KERN_SUCCESS) {
         sample.footprint = vm.phys_footprint;
     }
-    sample.health = wallpaper.surfaceHealth();
+    sample.thermal = [NSProcessInfo processInfo].thermalState;
+    sample.scene_passes = render::CurrentSceneOptimizationTotals();
+    for (const auto& wallpaper : wallpapers) {
+        sample.health.push_back(wallpaper->surfaceHealth());
+        Counters values {};
+        wallpaper->counters(values.data(), values.size());
+        sample.counters.push_back(values);
+    }
     return sample;
 }
 
 } // namespace
 
-// Headless A/B of what one real wallpaper costs on one renderer: the
-// production `SceneWallpaper` with its own frame clock at 60 FPS, drawing into
-// an unattached layer, so nothing reaches the desktop. One scene and one
-// renderer per process, so footprint and compiled state belong to that run.
-// Prints one `ENERGY {json}` line; asserts only that the scene kept drawing on
-// the renderer asked for. Skipped unless `WE_TEST_ENERGY_PROJECT` is set.
+// The arithmetic the energy record rests on, without a GPU or a wallpaper.
+TEST(EnergyAccounting, ACoalitionThatEndsDuringTheWindowIsLeftOutRatherThanWrapping)
+{
+    // Coalition 2 exits during the window with a lifetime total larger than what
+    // the others accrued: a whole-machine sum taken at each end would wrap.
+    const Coalitions before { { 1, { 100, 10, 1000 } }, { 2, { 5000, 50, 90000 } },
+                              { 3, { 7, 7, 7 } } };
+    const Coalitions after { { 1, { 150, 15, 1600 } }, { 3, { 9, 8, 10 } },
+                             { 4, { 300, 30, 3000 } } };
+    const auto all = Accrued(before, after, [](uint64_t) { return true; });
+    EXPECT_EQ(all.gpu_ns, 52u);
+    EXPECT_EQ(all.cpu_energy_nj, 6u);
+    EXPECT_EQ(all.gpu_energy_nj, 603u);
+    EXPECT_EQ(all.counted, 2u);
+    const auto others = Accrued(before, after, [](uint64_t id) { return id != 1; });
+    EXPECT_EQ(others.gpu_ns, 2u);
+    EXPECT_EQ(others.counted, 1u);
+}
+
+TEST(EnergyAccounting, ACoalitionWhoseCountersWentDownIsLeftOut)
+{
+    // An id reused by a new coalition starts again from zero.
+    const Coalitions before { { 1, { 100, 10, 1000 } }, { 2, { 500, 50, 5000 } } };
+    const Coalitions after { { 1, { 110, 11, 1100 } }, { 2, { 20, 2, 200 } } };
+    const auto all = Accrued(before, after, [](uint64_t) { return true; });
+    EXPECT_EQ(all.gpu_ns, 10u);
+    EXPECT_EQ(all.gpu_energy_nj, 100u);
+    EXPECT_EQ(all.counted, 1u);
+}
+
+TEST(EnergyAccounting, CommandBufferQuantilesAreTheUpperEdgeOfTheirBucket)
+{
+    tests::CommandBufferGpuTime::Histogram before {}, after {};
+    after[3]  = 50; // 0.3 - 0.4 ms
+    after[10] = 45; // 1.0 - 1.1 ms
+    after[40] = 5;  // 4.0 - 4.1 ms
+    before[3] = 10; // counted before the window: not in it
+    after[3] += 10;
+    EXPECT_DOUBLE_EQ(tests::HistogramQuantileMs(before, after, 0.5), 0.4);
+    EXPECT_DOUBLE_EQ(tests::HistogramQuantileMs(before, after, 0.95), 1.1);
+    EXPECT_DOUBLE_EQ(tests::HistogramQuantileMs(before, after, 0.99), 4.1);
+    EXPECT_DOUBLE_EQ(tests::HistogramQuantileMs(before, before, 0.5), 0.0);
+}
+
+TEST(EnergyAccounting, SurfacesAreReadAsDisplaysWithTheirBackingScale)
+{
+    const auto surfaces = ParseEnergySurfaces("3840x2160@2,3456x2234@2");
+    ASSERT_TRUE(surfaces.has_value());
+    ASSERT_EQ(surfaces->size(), 2u);
+    EXPECT_EQ((*surfaces)[0].width, 3840);
+    EXPECT_EQ((*surfaces)[0].height, 2160);
+    EXPECT_EQ((*surfaces)[1].width, 3456);
+    EXPECT_EQ((*surfaces)[1].height, 2234);
+    EXPECT_DOUBLE_EQ((*surfaces)[1].scale, 2.0);
+    EXPECT_FALSE(ParseEnergySurfaces("3840x2160").has_value());
+    EXPECT_FALSE(ParseEnergySurfaces("3840x2160@2,").has_value());
+    EXPECT_FALSE(ParseEnergySurfaces("3840x2160@0.5").has_value());
+    EXPECT_FALSE(ParseEnergySurfaces("3840x2160@2x").has_value());
+}
+
+// Headless A/B of what one real wallpaper costs: the production
+// `SceneWallpaper` with its own frame clock, drawing into unattached layers, so
+// nothing reaches the desktop. One scene per process, so footprint and compiled
+// state belong to that run. Prints one `ENERGY {json}` line and, with
+// `WE_TEST_ENERGY_OUTPUT`, writes the schema-2 record there; asserts only that
+// the scene kept drawing on every surface. Skipped unless
+// `WE_TEST_ENERGY_PROJECT` is set.
 //
-// Process CPU time and CPU energy are this process's own, and so is the GPU
-// time of its command buffers (`gpu_own_s`), whichever renderer committed
-// them. GPU energy and busy time over all coalitions are the whole GPU's,
-// other processes included: compare those only in alternating windows
-// against an idle window of the same length on an otherwise quiet machine.
+// The run takes the settings the app applies: render scale, frame rate, saved
+// properties, scene quality, the 2D scene resolution and one surface per
+// display (`WE_TEST_ENERGY_SURFACES`), each its own scene wallpaper as the app
+// runs one per display. Process CPU time and energy are this process's own, and
+// so is the GPU time of its command buffers (`gpu_own_s`). The coalition figures
+// are this process's coalition's, which is its own only when it was not started
+// from a terminal (`coalition_shared`); the all-coalition figures are the whole
+// GPU's, other processes included, differenced only over coalitions present at
+// both ends of the window.
 TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
 {
     const char* project = std::getenv("WE_TEST_ENERGY_PROJECT");
@@ -953,17 +1187,30 @@ TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
         const char* value = std::getenv(name);
         return value != nullptr ? std::strtod(value, nullptr) : fallback;
     };
-    // The 2D scene resolution the run draws at, and the backing scale of the
-    // surface it draws on: a 3456 x 2234 surface at 2 is a laptop panel.
+    // The 2D scene resolution the run draws at.
     const char* resolution_name = std::getenv("WE_TEST_ENERGY_RESOLUTION");
     const bool  display =
         resolution_name != nullptr && std::string_view(resolution_name) == "display";
-    const double scale_factor = number("WE_TEST_ENERGY_SCALE_FACTOR", 1.0);
-    // The scaling mode the host pushes: `fill`, `fit`, `fit_blurred`,
-    // `stretch` or `none`. Unset, none is pushed and the scene keeps its own.
-    const std::string_view scaling_name = std::getenv("WE_TEST_ENERGY_SCALING") != nullptr
-                                              ? std::getenv("WE_TEST_ENERGY_SCALING")
-                                              : "default";
+    // The surfaces: one per display, or the single one `WE_TEST_ENERGY_WIDTH`,
+    // `_HEIGHT` and `_SCALE_FACTOR` describe (a 3456 x 2234 surface at 2 is a
+    // laptop panel).
+    std::vector<EnergySurface> surfaces;
+    if (const char* listed = std::getenv("WE_TEST_ENERGY_SURFACES")) {
+        auto parsed = ParseEnergySurfaces(listed);
+        ASSERT_TRUE(parsed.has_value())
+            << "WE_TEST_ENERGY_SURFACES must be <width>x<height>@<scale>,...: " << listed;
+        surfaces = std::move(*parsed);
+    } else {
+        surfaces.push_back({ static_cast<uint16_t>(number("WE_TEST_ENERGY_WIDTH", 1920)),
+                             static_cast<uint16_t>(number("WE_TEST_ENERGY_HEIGHT", 1080)),
+                             number("WE_TEST_ENERGY_SCALE_FACTOR", 1.0), "default" });
+    }
+    // The scaling mode the host pushes on each surface: `fill`, `fit`,
+    // `fit_blurred`, `stretch` or `none`, one for all or one per surface. Unset,
+    // none is pushed and the scene keeps its own.
+    const std::string scaling_list = std::getenv("WE_TEST_ENERGY_SCALING") != nullptr
+                                         ? std::getenv("WE_TEST_ENERGY_SCALING")
+                                         : "default";
     const std::map<std::string_view, WallpaperScalingMode> scaling_modes {
         { "none", WallpaperScalingMode::NONE },
         { "stretch", WallpaperScalingMode::STRETCH },
@@ -971,18 +1218,38 @@ TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
         { "fill", WallpaperScalingMode::FILL },
         { "fit_blurred", WallpaperScalingMode::FIT_BLURRED },
     };
-    ASSERT_TRUE(scaling_name == "default" || scaling_modes.contains(scaling_name))
-        << "no scaling mode " << scaling_name;
-    const double warmup  = number("WE_TEST_ENERGY_WARMUP", 5.0);
-    const double window  = number("WE_TEST_ENERGY_SECONDS", 20.0);
-    const auto   width   = static_cast<uint16_t>(number("WE_TEST_ENERGY_WIDTH", 1920));
-    const auto   height  = static_cast<uint16_t>(number("WE_TEST_ENERGY_HEIGHT", 1080));
-    const auto   cache   = std::getenv("WE_TEST_ENERGY_CACHE") != nullptr
-                               ? std::filesystem::path(std::getenv("WE_TEST_ENERGY_CACHE"))
-                               : root_ / "cache";
+    const auto scalings = SplitList(scaling_list);
+    ASSERT_TRUE(scalings.size() == 1 || scalings.size() == surfaces.size())
+        << "WE_TEST_ENERGY_SCALING names " << scalings.size() << " modes for "
+        << surfaces.size() << " surfaces";
+    for (std::size_t i = 0; i < surfaces.size(); ++i) {
+        surfaces[i].scaling = scalings[scalings.size() == 1 ? 0 : i];
+        ASSERT_TRUE(surfaces[i].scaling == "default" || scaling_modes.contains(surfaces[i].scaling))
+            << "no scaling mode " << surfaces[i].scaling;
+    }
+    const double warmup = number("WE_TEST_ENERGY_WARMUP", 5.0);
+    const double window = number("WE_TEST_ENERGY_SECONDS", 20.0);
+    const double fps    = number("WE_TEST_ENERGY_FPS", 60.0);
+    ASSERT_TRUE(fps >= 1.0 && fps <= 1000.0) << "WE_TEST_ENERGY_FPS " << fps;
+    // The render scale the host sends after the configuration, as the app does
+    // for anything below 1; unset sends none.
+    std::optional<double> render_scale;
+    if (std::getenv("WE_TEST_ENERGY_RENDER_SCALE") != nullptr) {
+        render_scale = number("WE_TEST_ENERGY_RENDER_SCALE", 1.0);
+        ASSERT_TRUE(std::isfinite(*render_scale) && *render_scale > 0.0)
+            << "WE_TEST_ENERGY_RENDER_SCALE must be above 0";
+    }
+    const char*        properties = std::getenv("WE_TEST_PROPERTIES");
+    const SceneQuality quality    = tests::SceneQualityFromEnvironment();
+    const bool counting = std::getenv("WE_TEST_ENERGY_COUNTERS") != nullptr &&
+                          std::string_view(std::getenv("WE_TEST_ENERGY_COUNTERS")) == "1";
+    const auto cache = std::getenv("WE_TEST_ENERGY_CACHE") != nullptr
+                           ? std::filesystem::path(std::getenv("WE_TEST_ENERGY_CACHE"))
+                           : root_ / "cache";
 
-    // Production defaults: counting off, scene optimisation on.
-    RendererCounters::SetEnabled(false);
+    // Production defaults: counting off unless asked for (the same in both builds
+    // compared), scene optimisation on.
+    RendererCounters::SetEnabled(counting);
     render::SetSceneOptimizationEnabled(true);
     SetSceneResolution(display ? SceneResolution::Display : SceneResolution::Canvas);
     struct RestoreResolution
@@ -990,80 +1257,293 @@ TEST_F(UnchangedPresent, LocalProjectEnergyIsMeasuredHeadlessly)
         ~RestoreResolution() { SetSceneResolution(SceneResolution::Canvas); }
     } restore_resolution;
 
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    ASSERT_TRUE(tests::CountCommandBufferGpuTime(device))
+        << "this GPU's command buffers could not be counted";
+
     std::mutex              mutex;
     std::condition_variable changed;
-    bool                    first_frame = false;
-    CAMetalLayer*           layer = [CAMetalLayer layer];
-    layer.device                  = MTLCreateSystemDefaultDevice();
-    ASSERT_TRUE(CountCommandBufferGpuTime(layer.device))
-        << "this GPU's command buffers could not be counted";
-    layer.pixelFormat             = MTLPixelFormatBGRA8Unorm;
-    layer.contentsScale           = 1.0;
-    layer.frame                   = CGRectMake(0, 0, width, height);
-    layer.drawableSize            = CGSizeMake(width, height);
+    std::vector<bool>       drew(surfaces.size(), false);
+    std::vector<CAMetalLayer*> layers;
+    // After what their callbacks use, so they are shut down before it goes.
+    struct Wallpapers
+    {
+        std::vector<std::unique_ptr<SceneWallpaper>> list;
+    } wallpapers;
+    for (std::size_t index = 0; index < surfaces.size(); ++index) {
+        const auto&   surface = surfaces[index];
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device        = device;
+        layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+        layer.contentsScale = surface.scale;
+        layer.frame         = CGRectMake(0, 0, surface.width / surface.scale,
+                                         surface.height / surface.scale);
+        layer.drawableSize  = CGSizeMake(surface.width, surface.height);
+        layers.push_back(layer);
 
-    SceneWallpaper wallpaper;
-    ASSERT_TRUE(wallpaper.init());
-    wallpaper.setPropertyObject(PROPERTY_FIRST_FRAME_CALLBACK,
-                                std::make_shared<FirstFrameCallback>([&] {
-                                    std::scoped_lock lock(mutex);
-                                    first_frame = true;
-                                    changed.notify_all();
-                                }));
-    RenderInitInfo info;
-    info.metal_layer      = (__bridge void*)layer;
-    info.width            = width;
-    info.height           = height;
-    info.render_width     = width;
-    info.render_height    = height;
-    info.display_scale_factor = scale_factor;
-    wallpaper.initSurface(info);
-    if (scaling_name != "default") {
-        wallpaper.setPropertyInt32(PROPERTY_SCALINGMODE,
-                                   static_cast<int32_t>(scaling_modes.at(scaling_name)));
+        auto wallpaper = std::make_unique<SceneWallpaper>();
+        ASSERT_TRUE(wallpaper->init());
+        wallpaper->setPropertyObject(PROPERTY_FIRST_FRAME_CALLBACK,
+                                     std::make_shared<FirstFrameCallback>([&, index] {
+                                         std::scoped_lock lock(mutex);
+                                         drew[index] = true;
+                                         changed.notify_all();
+                                     }));
+        RenderInitInfo info;
+        info.metal_layer          = (__bridge void*)layer;
+        info.width                = surface.width;
+        info.height               = surface.height;
+        info.render_width         = surface.width;
+        info.render_height        = surface.height;
+        info.display_scale_factor = surface.scale;
+        wallpaper->initSurface(info);
+        if (surface.scaling != "default") {
+            wallpaper->setPropertyInt32(PROPERTY_SCALINGMODE,
+                                        static_cast<int32_t>(scaling_modes.at(surface.scaling)));
+        }
+        // In the app's order: the quality is kept for the load the configuration
+        // starts, and the render scale follows the configuration.
+        wallpaper->setSceneQuality(quality);
+        SceneWallpaperConfig config;
+        config.source     = project;
+        config.assets     = assets;
+        config.cache_path = cache.string();
+        config.fps        = static_cast<uint32_t>(std::lround(fps));
+        config.paused     = false;
+        // A measurement makes no sound, whatever the scene mounts: muted in its
+        // configuration, so no output device is ever started for it.
+        config.volume     = 0.0f;
+        config.muted      = true;
+        if (properties != nullptr) {
+            config.project_property_override_json = properties;
+            config.has_project_property_override  = true;
+        }
+        wallpaper->applyConfig(config);
+        if (render_scale.has_value()) {
+            wallpaper->setPropertyFloat(PROPERTY_RENDER_SCALE, static_cast<float>(*render_scale));
+        }
+        wallpapers.list.push_back(std::move(wallpaper));
     }
-    SceneWallpaperConfig config;
-    config.source     = project;
-    config.assets     = assets;
-    config.cache_path = cache.string();
-    config.fps        = 60;
-    config.paused     = false;
-    // A measurement makes no sound, whatever the scene mounts: muted in its
-    // configuration, so no output device is ever started for it.
-    config.volume     = 0.0f;
-    config.muted      = true;
-    wallpaper.applyConfig(config);
     {
         std::unique_lock lock(mutex);
-        ASSERT_TRUE(changed.wait_for(lock, 120s, [&] { return first_frame; }))
-            << "the wallpaper never drew a frame";
+        ASSERT_TRUE(changed.wait_for(lock, 120s, [&] { return std::find(drew.begin(), drew.end(), false) == drew.end(); }))
+            << "the wallpaper never drew a frame on every surface";
     }
     std::this_thread::sleep_for(std::chrono::duration<double>(warmup));
 
-    const auto selection = wallpaper.sceneBackendSelection();
-    const auto before    = SampleEnergy(wallpaper);
+    std::vector<SceneBackendSelection> selections;
+    for (const auto& wallpaper : wallpapers.list) {
+        selections.push_back(wallpaper->sceneBackendSelection());
+    }
+    const auto before = SampleEnergy(wallpapers.list);
     std::this_thread::sleep_for(std::chrono::duration<double>(window));
-    const auto after = SampleEnergy(wallpaper);
-    wallpaper.shutdown();
+    const auto after = SampleEnergy(wallpapers.list);
+    for (auto& wallpaper : wallpapers.list) wallpaper->shutdown();
 
     const double seconds = std::chrono::duration<double>(after.at - before.at).count();
-    const uint64_t completed = after.health.frames_completed - before.health.frames_completed;
-    const uint64_t presented = after.health.frames_presented - before.health.frames_presented;
-    std::cout << "ENERGY {\"renderer\":\"native\",\"scaling\":\"" << scaling_name
+    uint64_t     completed = 0, presented = 0, failed = 0;
+    bool         held      = false;
+    std::vector<std::string> surface_records;
+    for (std::size_t i = 0; i < surfaces.size(); ++i) {
+        const uint64_t surface_completed =
+            after.health[i].frames_completed - before.health[i].frames_completed;
+        const uint64_t surface_presented =
+            after.health[i].frames_presented - before.health[i].frames_presented;
+        completed += surface_completed;
+        presented += surface_presented;
+        failed += after.health[i].failed_frames;
+        held = held || selections[i].failed();
+        std::string counters = "null";
+        if (counting) {
+            const auto delta = Delta(before.counters[i], after.counters[i]);
+            counters = JsonObject({
+                { "timer_wakeups", JsonNumber(delta[OWE_RC_TIMER_WAKEUPS]) },
+                { "draw_requests", JsonNumber(delta[OWE_RC_DRAW_REQUESTS]) },
+                { "draw_ticks_suppressed", JsonNumber(delta[OWE_RC_DRAW_TICKS_SUPPRESSED]) },
+                { "draws_executed", JsonNumber(delta[OWE_RC_DRAWS_EXECUTED]) },
+                { "render_submissions", JsonNumber(delta[OWE_RC_RENDER_SUBMISSIONS]) },
+                { "present_requests", JsonNumber(delta[OWE_RC_PRESENT_REQUESTS]) },
+                { "presents_skipped_unchanged",
+                  JsonNumber(delta[OWE_RC_PRESENTS_SKIPPED_UNCHANGED]) },
+                { "gpu_completions", JsonNumber(delta[OWE_RC_GPU_COMPLETIONS]) },
+            });
+        }
+        surface_records.push_back(JsonObject({
+            { "width", JsonNumber(uint64_t(surfaces[i].width)) },
+            { "height", JsonNumber(uint64_t(surfaces[i].height)) },
+            { "scale", JsonNumber(surfaces[i].scale) },
+            { "scaling", JsonString(surfaces[i].scaling) },
+            { "backend", JsonString(selections[i].failed() ? "held" : "native") },
+            { "frames_completed", JsonNumber(surface_completed) },
+            { "frames_presented", JsonNumber(surface_presented) },
+            { "failed_frames", JsonNumber(uint64_t(after.health[i].failed_frames)) },
+            { "counters", counters },
+        }));
+    }
+    const auto all = Accrued(before.coalitions, after.coalitions, [](uint64_t) { return true; });
+    std::cout << "ENERGY {\"renderer\":\"native\",\"scaling\":\"" << scaling_list
               << "\",\"resolution\":\""
               << (display ? "display" : "canvas") << "\",\"backend\":\""
-              << (selection.failed() ? "held" : "native")
+              << (held ? "held" : "native")
               << "\",\"seconds\":" << seconds
               << ",\"cpu_seconds\":" << (after.cpu_seconds - before.cpu_seconds)
-              << ",\"cpu_mj\":" << double(after.cpu_energy_nj - before.cpu_energy_nj) / 1e6
+              << ",\"cpu_mj\":"
+              << double(after.usage.ri_energy_nj - before.usage.ri_energy_nj) / 1e6
               << ",\"gpu_own_s\":" << double(after.own_gpu_ns - before.own_gpu_ns) / 1e9
               << ",\"command_buffers\":" << (after.own_command_buffers - before.own_command_buffers)
-              << ",\"gpu_all_mj\":" << double(after.gpu_energy_nj - before.gpu_energy_nj) / 1e6
-              << ",\"gpu_all_busy_s\":" << double(after.gpu_time_ns - before.gpu_time_ns) / 1e9
+              << ",\"gpu_all_mj\":" << double(all.gpu_energy_nj) / 1e6
+              << ",\"gpu_all_busy_s\":" << double(all.gpu_ns) / 1e9
               << ",\"frames_completed\":" << completed << ",\"frames_presented\":" << presented
+              << ",\"passes_executed\":"
+              << (after.scene_passes.executed_passes - before.scene_passes.executed_passes)
+              << ",\"passes_skipped\":"
+              << (after.scene_passes.skipped_passes - before.scene_passes.skipped_passes)
               << ",\"footprint_mb\":" << double(after.footprint) / 1048576.0
-              << ",\"failed_frames\":" << after.health.failed_frames << "}" << std::endl;
-    EXPECT_FALSE(selection.failed()) << selection.failure_reason;
-    EXPECT_GT(completed, 0u) << "the wallpaper stopped drawing during the window";
-    EXPECT_EQ(after.health.failed_frames, 0u);
+              << ",\"failed_frames\":" << failed << "}" << std::endl;
+
+    if (const char* output = std::getenv("WE_TEST_ENERGY_OUTPUT"); output != nullptr && *output) {
+        const auto& u0 = before.usage;
+        const auto& u1 = after.usage;
+        const bool  usage = before.usage_read && after.usage_read;
+        const auto  ticks = [&](uint64_t rusage_info_v6::*field) {
+            return usage ? JsonNumber(MachTicksToNs(u1.*field - u0.*field) / 1e9) : "null";
+        };
+        const auto count = [&](uint64_t rusage_info_v6::*field) {
+            return usage ? JsonNumber(uint64_t(u1.*field - u0.*field)) : "null";
+        };
+        const auto per_second = [&](uint64_t rusage_info_v6::*field) {
+            return usage ? JsonNumber(double(u1.*field - u0.*field) / seconds) : "null";
+        };
+        const auto qos_ms = [&](uint64_t rusage_info_v6::*field) {
+            return usage ? JsonNumber(MachTicksToNs(u1.*field - u0.*field) / 1e6) : "null";
+        };
+        const std::string p_seconds =
+            usage ? JsonNumber(MachTicksToNs((u1.ri_user_ptime - u0.ri_user_ptime) +
+                                             (u1.ri_system_ptime - u0.ri_system_ptime)) /
+                               1e9)
+                  : "null";
+        const auto energy_mj = [&](uint64_t rusage_info_v6::*field) {
+            return usage ? JsonNumber(double(u1.*field - u0.*field) / 1e6) : "null";
+        };
+
+        const uint64_t own    = CoalitionOf(getpid());
+        const bool     shared = own != 0 && CoalitionOf(getppid()) == own;
+        const auto     mine   = Accrued(before.coalitions, after.coalitions,
+                                        [own](uint64_t id) { return id == own; });
+        const auto others = Accrued(before.coalitions, after.coalitions,
+                                    [own](uint64_t id) { return id != own; });
+        const bool     known  = own != 0 && mine.counted == 1;
+        const uint64_t own_gpu_ns  = after.own_gpu_ns - before.own_gpu_ns;
+        const uint64_t own_buffers = after.own_command_buffers - before.own_command_buffers;
+
+        const std::string record = JsonObject({
+            { "schema", "2" },
+            { "test", JsonString("UnchangedPresent.LocalProjectEnergyIsMeasuredHeadlessly") },
+            { "project", JsonString(project) },
+            { "settings",
+              JsonObject({
+                  { "render_scale", render_scale ? JsonNumber(*render_scale) : "null" },
+                  { "fps", JsonNumber(fps) },
+                  { "resolution", JsonString(display ? "display" : "canvas") },
+                  { "properties", properties != nullptr ? JsonString(properties) : "null" },
+                  { "quality", JsonObject({
+                                   { "msaa", JsonNumber(uint64_t(quality.msaa)) },
+                                   { "shadows", JsonNumber(uint64_t(quality.shadows)) },
+                                   { "volumetrics", JsonNumber(uint64_t(quality.volumetrics)) },
+                                   { "reflection", JsonBool(quality.reflection) },
+                                   { "post_processing",
+                                     JsonNumber(uint64_t(quality.post_processing)) },
+                               }) },
+                  { "counters", JsonBool(counting) },
+                  { "scene_optimization", "true" },
+              }) },
+            { "surfaces", JsonArray(surface_records) },
+            { "window", JsonObject({ { "warmup_s", JsonNumber(warmup) },
+                                     { "seconds", JsonNumber(seconds) } }) },
+            { "cpu",
+              JsonObject({
+                  { "seconds", JsonNumber(after.cpu_seconds - before.cpu_seconds) },
+                  { "user_s", ticks(&rusage_info_v6::ri_user_time) },
+                  { "system_s", ticks(&rusage_info_v6::ri_system_time) },
+                  { "p_s", p_seconds },
+                  { "energy_mj", energy_mj(&rusage_info_v6::ri_energy_nj) },
+                  { "p_energy_mj", energy_mj(&rusage_info_v6::ri_penergy_nj) },
+                  { "idle_wakeups", count(&rusage_info_v6::ri_pkg_idle_wkups) },
+                  { "interrupt_wakeups", count(&rusage_info_v6::ri_interrupt_wkups) },
+                  { "idle_wakeups_per_s", per_second(&rusage_info_v6::ri_pkg_idle_wkups) },
+                  { "interrupt_wakeups_per_s", per_second(&rusage_info_v6::ri_interrupt_wkups) },
+                  { "instructions", count(&rusage_info_v6::ri_instructions) },
+                  { "cycles", count(&rusage_info_v6::ri_cycles) },
+                  { "qos_ms",
+                    JsonObject({
+                        { "default", qos_ms(&rusage_info_v6::ri_cpu_time_qos_default) },
+                        { "maintenance", qos_ms(&rusage_info_v6::ri_cpu_time_qos_maintenance) },
+                        { "background", qos_ms(&rusage_info_v6::ri_cpu_time_qos_background) },
+                        { "utility", qos_ms(&rusage_info_v6::ri_cpu_time_qos_utility) },
+                        { "legacy", qos_ms(&rusage_info_v6::ri_cpu_time_qos_legacy) },
+                        { "user_initiated",
+                          qos_ms(&rusage_info_v6::ri_cpu_time_qos_user_initiated) },
+                        { "user_interactive",
+                          qos_ms(&rusage_info_v6::ri_cpu_time_qos_user_interactive) },
+                    }) },
+              }) },
+            { "gpu",
+              JsonObject({
+                  { "own_busy_s", JsonNumber(double(own_gpu_ns) / 1e9) },
+                  { "cb_count", JsonNumber(own_buffers) },
+                  { "frames_completed", JsonNumber(completed) },
+                  { "ms_per_frame",
+                    completed > 0 ? JsonNumber(double(own_gpu_ns) / 1e6 / double(completed))
+                                  : "null" },
+                  { "cb_per_frame",
+                    completed > 0 ? JsonNumber(double(own_buffers) / double(completed)) : "null" },
+                  { "cb_ms_p50", JsonNumber(tests::HistogramQuantileMs(before.histogram,
+                                                                       after.histogram, 0.50)) },
+                  { "cb_ms_p95", JsonNumber(tests::HistogramQuantileMs(before.histogram,
+                                                                       after.histogram, 0.95)) },
+                  { "cb_ms_p99", JsonNumber(tests::HistogramQuantileMs(before.histogram,
+                                                                       after.histogram, 0.99)) },
+                  { "coalition_id", own != 0 ? JsonNumber(own) : "null" },
+                  { "coalition_shared", JsonBool(shared) },
+                  { "coalition_energy_mj",
+                    known ? JsonNumber(double(mine.gpu_energy_nj) / 1e6) : "null" },
+                  { "coalition_cpu_energy_mj",
+                    known ? JsonNumber(double(mine.cpu_energy_nj) / 1e6) : "null" },
+                  { "coalition_busy_s", known ? JsonNumber(double(mine.gpu_ns) / 1e9) : "null" },
+                  { "all_energy_mj", JsonNumber(double(all.gpu_energy_nj) / 1e6) },
+                  { "all_busy_s", JsonNumber(double(all.gpu_ns) / 1e9) },
+                  { "other_busy_s", JsonNumber(double(others.gpu_ns) / 1e9) },
+                  { "other_busy_share", JsonNumber(double(others.gpu_ns) / 1e9 / seconds) },
+                  { "coalitions_counted", JsonNumber(uint64_t(all.counted)) },
+              }) },
+            { "memory",
+              JsonObject({
+                  { "footprint_mb_end", JsonNumber(double(after.footprint) / 1048576.0) },
+                  { "footprint_mb_peak",
+                    after.usage_read
+                        ? JsonNumber(double(after.usage.ri_lifetime_max_phys_footprint) / 1048576.0)
+                        : "null" },
+              }) },
+            { "thermal", JsonObject({ { "before", JsonString(ThermalName(before.thermal)) },
+                                      { "after", JsonString(ThermalName(after.thermal)) } }) },
+            // What scene optimisation drew and reused, every surface together.
+            { "scene_passes",
+              JsonObject({
+                  { "executed", JsonNumber(after.scene_passes.executed_passes -
+                                           before.scene_passes.executed_passes) },
+                  { "skipped", JsonNumber(after.scene_passes.skipped_passes -
+                                          before.scene_passes.skipped_passes) },
+              }) },
+        });
+        std::ofstream file(output);
+        file << record << "\n";
+        EXPECT_TRUE(file.good()) << "the record could not be written to " << output;
+    }
+    for (std::size_t i = 0; i < surfaces.size(); ++i) {
+        SCOPED_TRACE("surface " + std::to_string(i));
+        EXPECT_FALSE(selections[i].failed()) << selections[i].failure_reason;
+        EXPECT_GT(after.health[i].frames_completed, before.health[i].frames_completed)
+            << "the wallpaper stopped drawing during the window";
+        EXPECT_EQ(after.health[i].failed_frames, 0u);
+    }
 }

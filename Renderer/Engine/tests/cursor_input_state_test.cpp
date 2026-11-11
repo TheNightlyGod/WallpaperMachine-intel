@@ -340,7 +340,7 @@ TEST(CursorInputState, SceneScriptStillGetsTheReleaseAfterThePointerLeftTheWindo
     EXPECT_TRUE(probes.Shown(ProbeName("leave", 1))) << "the pointer left";
     EXPECT_TRUE(probes.Shown(ProbeName("up", 1))) << "the release, though outside";
     EXPECT_TRUE(probes.Shown(ProbeName("enter", 1)));
-    EXPECT_TRUE(probes.Shown(ProbeName("click", 1)));
+    EXPECT_TRUE(probes.Shown(ProbeName("click", 0))) << "a release off the wallpaper is no click";
     EXPECT_FALSE(probes.Shown("bad"));
 }
 

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace wallpaper::metal
 {
@@ -28,7 +29,7 @@ public:
 
     /// Compiles the shaders and builds the pipelines for compositions into `destination`.
     /// False, with `error()`, if that fails; nothing is then drawn and the bars stay clear.
-    bool buildPipelines(id<MTLDevice> device, MTLPixelFormat destination);
+    bool buildPipelines(id<MTLDevice> device, MTLPixelFormat destination, bool source_linear = false);
     [[nodiscard]] bool pipelinesBuilt() const { return built_; }
     /// Whether a composition into this format can draw the copy.
     [[nodiscard]] bool canDraw(MTLPixelFormat destination) const;
@@ -64,6 +65,8 @@ private:
     id<MTLSamplerState>        sampler_ { nil };
     MTLPixelFormat             stretch_format_ { MTLPixelFormatInvalid };
     bool                       built_ { false };
+    bool                       source_linear_ { false };
+    std::unordered_map<uint32_t, id<MTLRenderPipelineState>> stretches_;
 
     /// What the reductions write, in order; the last is the small image that is blurred and
     /// later stretched. `scratch_` takes the horizontal blur on its way back into it.

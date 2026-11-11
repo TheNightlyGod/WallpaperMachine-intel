@@ -5,6 +5,13 @@
 use super::support::*;
 use crate::request::StageKind;
 
+/// The reference side of a lowering comparison is already GLSL, not author input.
+fn generated_glsl(decls: &str, body: &str) -> Compiled {
+    let converted = crate::dialect::convert_stage_with(StageKind::Fragment, &stage(decls, body),
+        crate::dialect::ConvertOptions { glsl_builtins: true, ..Default::default() }).unwrap();
+    compile_glsl(StageKind::Fragment, &converted.text).unwrap()
+}
+
 // ----- HLSL type aliases (R8) -----
 
 #[test]
@@ -50,7 +57,7 @@ void main() {
   vec3 b = CAST3(0.5);
   vec4 c = CAST4(g_F);
   vec2 d = CAST2(g_V3);
-  vec3 e = CAST3X3(g_M) * g_V3;
+  vec3 e = mul(g_V3, CAST3X3(g_M));
   gl_FragColor = vec4(a, b.x, c.x + d.y + e.z);
 }",
     );
@@ -69,14 +76,11 @@ fn cast3_of_a_wider_value_narrows_next_to_a_narrower_operand() {
 }
 
 #[test]
-fn cast3x3_works_as_operand_of_star_mul_and_in_macros() {
-    let a = ok("", "vec3 r = CAST3X3(um4) * u3; o = vec4(r, 1.0);");
-    let b = ok("", "vec3 r = mat3(um4) * u3; o = vec4(r, 1.0);");
+fn cast3x3_works_in_mul_and_macros_and_matches_generated_matrix_products() {
+    let a = ok("", "vec3 r = mul(u3, CAST3X3(um4)); o = vec4(r, 1.0);");
+    let b = generated_glsl("", "vec3 r = mat3(um4) * u3; o = vec4(r, 1.0);");
     assert_eq!(a.msl, b.msl);
-    let c = ok("", "vec3 r = mul(u3, CAST3X3(um4)); o = vec4(r, 1.0);");
-    let d = ok("", "vec3 r = mat3(um4) * u3; o = vec4(r, 1.0);");
-    assert_eq!(c.msl, d.msl);
-    let m = ok("#define ROT(m) CAST3X3(m)\n", "vec3 r = ROT(um4) * u3; o = vec4(r, 1.0);");
+    let m = ok("#define ROT(m) CAST3X3(m)\n", "vec3 r = mul(u3, ROT(um4)); o = vec4(r, 1.0);");
     assert_eq!(m.msl, a.msl);
     // weighted sums of several 3x3 blocks, as the skinning code writes them
     ok("", "vec3 r = mul(u3, CAST3X3(um4) * uf + CAST3X3(um4) * 0.5); o = vec4(r, 1.0);");
@@ -84,7 +88,7 @@ fn cast3x3_works_as_operand_of_star_mul_and_in_macros() {
 
 #[test]
 fn cast3x3_of_a_mat4x3_bone_element_gives_a_mat3() {
-    let c = ok("", "mat3 b = CAST3X3(ub[uuv4.x]); vec3 r = b * u3; o = vec4(r, 1.0);");
+    let c = ok("", "mat3 b = CAST3X3(ub[uuv4.x]); vec3 r = mul(u3, b); o = vec4(r, 1.0);");
     assert_eq!(c.local_type("b"), "mat3x3");
     ok("", "vec3 n = mul(u3, CAST3X3(ub[uuv4.x]) * u4.x + CAST3X3(ub[uuv4.y]) * u4.y); o = vec4(n, 1.0);");
 }
@@ -113,7 +117,7 @@ void main() {
 fn a_shader_that_defines_a_cast_macro_itself_keeps_its_meaning() {
     let c = ok("#define CAST2(x) (vec2(x, x))\n#define CASTU(x) uint(x + 1.0)\n", "vec2 a = CAST2(uf); uint b = CASTU(uf); o = vec4(a, float(b), 1.0);");
     assert_eq!(c.local_type("a"), "vec2<f32>");
-    let t = text("#define CASTU(x) uint(x + 1.0)\n", "uint b = CASTU(uf); o = vec4(float(b));");
+    let t = text("#define CASTU(x) uint(x + 1.0)\n", "uint b = CASTU(uf); o = CAST4(float(b));");
     assert!(t.contains("uint(uf + 1.0)"), "{t}");
 }
 
@@ -121,29 +125,29 @@ fn a_shader_that_defines_a_cast_macro_itself_keeps_its_meaning() {
 
 #[test]
 fn mul_is_the_swapped_product_for_every_operand_shape() {
-    assert_eq!(ok("", "o = mul(u4, um4);").msl, ok("", "o = um4 * u4;").msl);
-    assert_eq!(ok("", "o = mul(um4, um4) * u4;").msl, ok("", "o = (um4 * um4) * u4;").msl);
-    assert_eq!(ok("", "o = mul(u4.yxzw, um4);").msl, ok("", "o = um4 * u4.yxzw;").msl);
-    assert_eq!(ok("", "o = mul(u4 * 2.0, um4);").msl, ok("", "o = um4 * (u4 * 2.0);").msl);
-    assert_eq!(ok("", "o = mul(vec4(i3, 1.0), um4);").msl, ok("", "o = um4 * vec4(i3, 1.0);").msl);
+    assert_eq!(ok("", "o = mul(u4, um4);").msl, generated_glsl("", "o = um4 * u4;").msl);
+    assert_eq!(ok("", "o = mul(u4, mul(um4, um4));").msl, generated_glsl("", "o = (um4 * um4) * u4;").msl);
+    assert_eq!(ok("", "o = mul(u4.yxzw, um4);").msl, generated_glsl("", "o = um4 * u4.yxzw;").msl);
+    assert_eq!(ok("", "o = mul(u4 * 2.0, um4);").msl, generated_glsl("", "o = um4 * (u4 * 2.0);").msl);
+    assert_eq!(ok("", "o = mul(vec4(i3, 1.0), um4);").msl, generated_glsl("", "o = um4 * vec4(i3, 1.0);").msl);
 }
 
 #[test]
 fn mul_nests_and_swaps_at_every_level() {
-    assert_eq!(ok("", "o = mul(mul(u4, um4), um4);").msl, ok("", "o = um4 * (um4 * u4);").msl);
+    assert_eq!(ok("", "o = mul(mul(u4, um4), um4);").msl, generated_glsl("", "o = um4 * (um4 * u4);").msl);
     let a = ok("", "mat4 p = um4; o = mul(mul(u4, p), um4);");
-    let b = ok("", "mat4 p = um4; o = um4 * (p * u4);");
+    let b = generated_glsl("", "mat4 p = um4; o = um4 * (p * u4);");
     assert_eq!(a.msl, b.msl);
 }
 
 #[test]
 fn mul_with_a_user_function_result_and_a_matrix_first_operand() {
     let decls = "mat4 make(float k) { return um4 * k; }\nvec4 vecfn() { return u4; }";
-    assert_eq!(ok(decls, "o = mul(u4, make(uf));").msl, ok(decls, "o = make(uf) * u4;").msl);
-    assert_eq!(ok(decls, "o = mul(make(uf), u4);").msl, ok(decls, "o = u4 * make(uf);").msl);
-    assert_eq!(ok(decls, "o = mul(vecfn().yxzw, um4);").msl, ok(decls, "o = um4 * vecfn().yxzw;").msl);
+    assert_eq!(ok(decls, "o = mul(u4, make(uf));").msl, generated_glsl(decls, "o = make(uf) * u4;").msl);
+    assert_eq!(ok(decls, "o = mul(make(uf), u4);").msl, generated_glsl(decls, "o = u4 * make(uf);").msl);
+    assert_eq!(ok(decls, "o = mul(vecfn().yxzw, um4);").msl, generated_glsl(decls, "o = um4 * vecfn().yxzw;").msl);
     // a mat3 first, a vector second: the transposed product
-    assert_eq!(ok("", "vec3 v = mul(um3, u3); o = vec4(v, 1.0);").msl, ok("", "vec3 v = u3 * um3; o = vec4(v, 1.0);").msl);
+    assert_eq!(ok("", "vec3 v = mul(um3, u3); o = vec4(v, 1.0);").msl, generated_glsl("", "vec3 v = u3 * um3; o = vec4(v, 1.0);").msl);
 }
 
 #[test]
@@ -169,17 +173,17 @@ fn a_user_two_argument_mul_wins() {
 #[test]
 fn mul_inside_a_macro_replacement_is_converted() {
     let a = ok("#define XFORM(v, m) mul(v, m)\n", "o = XFORM(u4, um4);");
-    assert_eq!(a.msl, ok("", "o = um4 * u4;").msl);
+    assert_eq!(a.msl, generated_glsl("", "o = um4 * u4;").msl);
     // the macro that stands for a mul, used as an operand of another mul
     let b = ok("#define MVP mul(um4, um4)\n", "o = mul(u4, MVP);");
-    assert_eq!(b.msl, ok("", "o = (um4 * um4) * u4;").msl);
+    assert_eq!(b.msl, generated_glsl("", "o = (um4 * um4) * u4;").msl);
 }
 
 #[test]
 fn mul_of_two_vectors_of_one_width_is_the_dot_product() {
-    let c = ok("", "float d = mul(u3, i3); o = vec4(d);");
+    let c = ok("", "float d = mul(u3, i3); o = CAST4(d);");
     assert_eq!(c.local_type("d"), "f32");
-    assert_eq!(ok("", "float d = mul(u3, i3); o = vec4(d);").msl, ok("", "float d = dot(u3, i3); o = vec4(d);").msl);
+    assert_eq!(ok("", "float d = mul(u3, i3); o = CAST4(d);").msl, generated_glsl("", "float d = dot(u3, i3); o = vec4(d);").msl);
     // mixed widths keep the swapped product and the failure that comes with it
     let t = text("", "vec3 d = mul(u3, i2); o = vec4(d, 1.0);");
     assert!(t.contains("i2 * u3"), "{t}");
@@ -192,13 +196,13 @@ fn saturate_clamps_scalars_vectors_and_integers() {
     let c = ok("", "float a = saturate(uf); vec3 b = saturate(u3 * 2.0); float c = saturate(2); o = vec4(a, b.x, c, 1.0);");
     assert_eq!(c.local_type("a"), "f32");
     assert_eq!(c.local_type("b"), "vec3<f32>");
-    let t = text("", "float c = saturate(2); o = vec4(c);");
+    let t = text("", "float c = saturate(2); o = CAST4(c);");
     assert!(t.contains("clamp(2.0, 0.0, 1.0)"), "{t}");
 }
 
 #[test]
 fn frac_lerp_and_atan2_map_to_their_glsl_names_and_argument_order() {
-    let t = text("", "float a = frac(uf); vec3 b = lerp(u3, vec3(1.0), 0.5); float c = atan2(uf, 2.0); o = vec4(a, b.x, c, 1.0);");
+    let t = text("", "float a = frac(uf); vec3 b = lerp(u3, CAST3(1.0), 0.5); float c = atan2(uf, 2.0); o = vec4(a, b.x, c, 1.0);");
     assert!(t.contains("fract(uf)"), "{t}");
     assert!(t.contains("mix(u3, vec3(1.0), 0.5)"), "{t}");
     assert!(t.contains("atan(uf, 2.0)"), "{t}");
@@ -211,15 +215,79 @@ fn frac_lerp_and_atan2_map_to_their_glsl_names_and_argument_order() {
 
 #[test]
 fn ddx_and_ddy_are_screen_derivatives() {
-    let t = text("", "float a = ddx(i1); float b = ddy(i1); o = vec4(a * a + b * b);");
+    let t = text("", "float a = ddx(i1); float b = ddy(i1); o = CAST4(a * a + b * b);");
     assert!(t.contains("dFdx(i1)"), "{t}");
     assert!(t.contains("dFdy(-(i1))"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
 }
 
+// ----- GLSL built-ins Wallpaper Engine refuses (probes T6, T13) -----
+
+/// One argument list per arity, made of values every refused built-in's overloads accept closely
+/// enough to name the call; the call is refused before its arguments matter.
+fn args_of(arity: usize) -> String {
+    vec!["uf"; arity].join(", ")
+}
+
+#[test]
+fn every_glsl_built_in_wallpaper_engine_refuses_is_refused_with_its_dialect_spelling() {
+    for (name, arity, spelling) in crate::dialect::builtins::WE_REFUSED_GLSL_CALLS {
+        let arity = arity.unwrap_or(1);
+        let d = convert_err(StageKind::Fragment, &stage("", &format!("float r = float({name}({})); o = CAST4(r);", args_of(arity))));
+        assert!(d.iter().any(|m| m.contains(&format!("unsupported construct `{name}`"))), "{name}: {d:?}");
+        if let Some(spelling) = spelling {
+            assert!(d.iter().any(|m| m.contains(&format!("`{spelling}`"))), "{name}: {d:?}");
+        }
+    }
+    // One-argument `atan` is HLSL's own and stays.
+    let c = ok("", "float r = atan(uf); o = CAST4(r);");
+    assert_eq!(c.local_type("r"), "f32");
+}
+
+#[test]
+fn a_refused_built_in_fails_its_stage_even_in_a_function_nothing_calls() {
+    // Wallpaper Engine compiles every function of the stage (probe T13, `uncalled_fract`).
+    let d = convert_err(StageKind::Fragment, &stage("float unused(float x) { return fract(x); }", "o = vec4(1.0);"));
+    assert!(d.iter().any(|m| m.contains("unsupported construct `fract`")), "{d:?}");
+}
+
+#[test]
+fn a_function_the_stage_declares_under_a_refused_name_is_called() {
+    let t = text("float fract(float x) { return x * 0.5; }", "float r = fract(uf); o = CAST4(r);");
+    assert!(t.contains("float r = fract(uf);") && t.contains("float fract(float x)"), "{t}");
+    // With another argument count it is the refused built-in again.
+    let d = convert_err(StageKind::Fragment, &stage("float fract(float x) { return x * 0.5; }", "o = vec4(fract(uf, 2.0));"));
+    assert!(d.iter().any(|m| m.contains("unsupported construct `fract`")), "{d:?}");
+}
+
+#[test]
+fn the_hlsl_spellings_of_the_refused_built_ins_convert() {
+    let t = text(
+        "",
+        "float a = rsqrt(uf); uint b = asuint(uf); int c = asint(uf); float d = asfloat(uu); float e = asfloat(ui);
+uint f = countbits(uu); int g = firstbithigh(uu); int h = firstbitlow(uu); uint k = asuint(ui); int m = asint(uu);
+o = CAST4(a + d + e + float(b + f + k) + float(c + g + h + m));",
+    );
+    for expected in [
+        "inversesqrt(uf)",
+        "floatBitsToUint(uf)",
+        "floatBitsToInt(uf)",
+        "uintBitsToFloat(uu)",
+        "intBitsToFloat(ui)",
+        "bitCount(uu)",
+        "findMSB(uu)",
+        "findLSB(uu)",
+        "uint(ui)",
+        "int(uu)",
+    ] {
+        assert!(t.contains(expected), "{expected}: {t}");
+    }
+    compile_glsl(StageKind::Fragment, &t).unwrap();
+}
+
 #[test]
 fn fmod_is_a_truncated_remainder_for_scalars_and_vectors() {
-    let c = ok("", "float a = fmod(uf, 3.0); vec3 b = fmod(u3, 2.0); vec3 c = fmod(2.0, u3); o = vec4(a + b.x + c.y);");
+    let c = ok("", "float a = fmod(uf, 3.0); vec3 b = fmod(u3, 2.0); vec3 c = fmod(2.0, u3); o = CAST4(a + b.x + c.y);");
     assert_eq!(c.local_type("a"), "f32");
     assert_eq!(c.local_type("b"), "vec3<f32>");
     assert!(c.msl.contains("fmod"), "{}", c.msl);
@@ -235,8 +303,8 @@ fn log10_is_log2_times_a_constant() {
 #[test]
 fn fmod_and_float_remainder_call_a_side_effecting_operand_once() {
     let decls = "float n = 0.0;\nfloat tick() { n += 1.0; return n; }";
-    let source = count(&stage(decls, "float r = fmod(tick(), 3.0);\nfloat s = tick() % 2.0;\nfloat q = 7.0 % tick();\no = vec4(r + s + q);"), "tick(");
-    let t = text(decls, "float r = fmod(tick(), 3.0);\nfloat s = tick() % 2.0;\nfloat q = 7.0 % tick();\no = vec4(r + s + q);");
+    let source = count(&stage(decls, "float r = fmod(tick(), 3.0);\nfloat s = tick() % 2.0;\nfloat q = 7.0 % tick();\no = CAST4(r + s + q);"), "tick(");
+    let t = text(decls, "float r = fmod(tick(), 3.0);\nfloat s = tick() % 2.0;\nfloat q = 7.0 % tick();\no = CAST4(r + s + q);");
     assert_eq!(count(&t, "tick("), source, "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
 }
@@ -245,17 +313,17 @@ fn fmod_and_float_remainder_call_a_side_effecting_operand_once() {
 
 #[test]
 fn clip_discards_for_negative_scalars_and_any_negative_component() {
-    let c = ok("", "clip(uf - 0.5); clip(u3); clip(u2); clip(u4); o = vec4(1.0);");
+    let c = ok("", "clip(uf - 0.5); clip(u3); clip(u2); clip(u4); o = CAST4(1.0);");
     assert!(count(&c.msl, "discard_fragment") >= 4, "{}", c.msl);
-    let t = text("", "clip(uf); o = vec4(1.0);");
+    let t = text("", "clip(uf); o = CAST4(1.0);");
     assert!(t.contains("clip(float v)"), "{t}");
     assert!(!t.contains("clip(vec3"), "only the overload in use is emitted: {t}");
 }
 
 #[test]
 fn clip_is_generated_only_when_used_and_not_when_the_shader_defines_it() {
-    assert!(!text("", "o = vec4(1.0);").contains("clip"));
-    let t = text("void clip(float v) { if (v < 0.0) discard; }", "clip(uf); o = vec4(1.0);");
+    assert!(!text("", "o = CAST4(1.0);").contains("clip"));
+    let t = text("void clip(float v) { if (v < 0.0) discard; }", "clip(uf); o = CAST4(1.0);");
     assert_eq!(count(&t, "void clip(float v)"), 1, "{t}");
     assert!(!t.contains("_wm_clip"), "{t}");
     // a vertex stage has no `clip`: it is an ordinary identifier there
@@ -266,12 +334,12 @@ fn clip_is_generated_only_when_used_and_not_when_the_shader_defines_it() {
 // ----- texture calls (R16, R19, R84) -----
 
 #[test]
-fn every_sampling_spelling_samples_a_2d_coordinate() {
-    for call in ["texSample2D(g_Texture0, v_T)", "tex2D(g_Texture0, v_T)", "texture2D(g_Texture0, v_T)", "texture(g_Texture0, v_T)"] {
+fn dialect_sampling_calls_take_a_2d_coordinate() {
+    for call in ["texSample2D(g_Texture0, v_T)"] {
         let c = legacy_frag(&format!("uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() {{ vec4 s = {call}; gl_FragColor = s; }}"));
         assert_eq!(c.local_type("s"), "vec4<f32>", "{call}");
     }
-    for call in ["texSample2DLod(g_Texture0, v_T, 1.0)", "textureLod(g_Texture0, v_T, 1)"] {
+    for call in ["texSample2DLod(g_Texture0, v_T, 1.0)"] {
         let c = legacy_frag(&format!("uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() {{ vec4 s = {call}; gl_FragColor = s; }}"));
         assert_eq!(c.local_type("s"), "vec4<f32>", "{call}");
     }
@@ -300,7 +368,7 @@ fn a_sampler_function_parameter_is_not_required_to_work_for_unknown_names() {
 #[test]
 fn shader_defined_log10_saturate_and_lerp_are_called() {
     let decls = "float log10(float x) { return x * 10.0; }\nfloat saturate(float x) { return x * 3.0; }\nfloat lerp(float a, float b, float t) { return a + b + t; }";
-    let t = text(decls, "float a = log10(uf); float b = saturate(uf); float c = lerp(uf, uf, uf); o = vec4(a + b + c);");
+    let t = text(decls, "float a = log10(uf); float b = saturate(uf); float c = lerp(uf, uf, uf); o = CAST4(a + b + c);");
     assert!(t.contains("log10(uf)") && t.contains("saturate(uf)") && t.contains("lerp(uf, uf, uf)"), "{t}");
     assert!(!t.contains("log2("), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
@@ -341,11 +409,36 @@ fn macros_defined_in_a_function_body_apply_from_there_and_undef_stops_them() {
 // ----- unsupported names (R22) -----
 
 #[test]
-fn unsupported_constructs_fail_with_a_diagnostic_that_names_them() {
-    let d = convert_err(StageKind::Fragment, "uniform sampler2D g_T; varying vec2 v;\nvoid main() { gl_FragColor = vec4(texSample2DCompare(g_T, v, 0.5)); }");
-    assert!(d.iter().any(|m| m.contains("texSample2DCompare")), "{d:?}");
-    let d = convert_err(StageKind::Fragment, "uniform sampler2DComparison g_S;\nvoid main() { }");
-    assert!(d.iter().any(|m| m.contains("sampler2DComparison")), "{d:?}");
-    let d = convert_err(StageKind::Fragment, "uniform sampler2D g_T; varying vec2 v;\nvoid main() { gl_FragColor = texLoad2D(g_T, v) + texSample2DBackBuffer(g_T, v, v); }");
-    assert!(d.iter().any(|m| m.contains("texLoad2D")) && d.iter().any(|m| m.contains("texSample2DBackBuffer")), "{d:?}");
+fn comparison_sampling_reads_a_shadow_sampler_at_level_zero() {
+    // E-D8: `sampler2DComparison` is a depth texture with a comparison sampler and
+    // `texSample2DCompare(s, u, d)` is `SampleCmpLevelZero`.
+    let t = frag("uniform sampler2DComparison g_S; varying vec2 v;\nvoid main() { float s = texSample2DCompare(g_S, v, 0.5); gl_FragColor = CAST4(s); }");
+    assert!(t.contains("uniform sampler2DShadow g_S"), "{t}");
+    assert!(t.contains("textureLod(g_S, vec3(v, 0.5), 0.0)"), "{t}");
+    let t = frag("varying vec2 v; uniform sampler2DComparison g_S;\nfloat f(DECLARE_SAMPLER2D_COMPARE_PARAMETER(s), vec2 u) { return texSample2DCompare(s, u, 0.25); }\nvoid main() { gl_FragColor = CAST4(f(MAKE_SAMPLER2D_COMPARE_ARGUMENT(g_S), v)); }");
+    assert!(t.contains("textureLod(g_S, vec3(u, 0.25), 0.0)"), "{t}");
+}
+
+#[test]
+fn tex_load_2d_fetches_the_texel_under_the_coordinate() {
+    // E-D8: `s.Load(int3((u) * (r), 0))`.
+    let t = frag("uniform sampler2D g_T; uniform vec4 g_R; varying vec2 v;\nvoid main() { gl_FragColor = texLoad2D(g_T, v, g_R.xy); }");
+    assert!(t.contains("texelFetch(g_T, ivec2((v) * (g_R.xy)), 0)"), "{t}");
+}
+
+#[test]
+fn back_buffer_sampling_loads_sample_zero_when_multisampled_and_samples_otherwise() {
+    let src = "uniform sampler2DBackBuffer g_B; uniform vec2 g_R; varying vec2 v;\nvoid main() { gl_FragColor = texSample2DBackBuffer(g_B, v, g_R); }";
+    let t = frag(src);
+    assert!(t.contains("uniform sampler2D g_B") && t.contains("texture(g_B, v)"), "{t}");
+    let ms = crate::dialect::convert_stage_with(StageKind::Fragment, src, crate::dialect::ConvertOptions { backbuffer_ms: true, ..Default::default() })
+        .expect("converts")
+        .text;
+    assert!(ms.contains("uniform sampler2DMS g_B") && ms.contains("texelFetch(g_B, ivec2((v) * (g_R)), 0)"), "{ms}");
+}
+
+#[test]
+fn names_outside_the_dialect_fail_with_a_diagnostic_that_names_them() {
+    let d = convert_err(StageKind::Fragment, "uniform sampler2D g_T; varying vec2 v;\nvoid main() { gl_FragColor = vec4(textureCompare(g_T, v, 0.5)); }");
+    assert!(d.iter().any(|m| m.contains("textureCompare")), "{d:?}");
 }

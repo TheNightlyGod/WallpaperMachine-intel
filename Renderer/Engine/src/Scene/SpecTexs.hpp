@@ -63,6 +63,9 @@ constexpr std::string_view WE_IN_TEXCOORDVEC3C2 { "a_TexCoordVec3C2" };
 constexpr std::string_view WE_IN_TEXCOORDC2 { "a_TexCoordC2" };
 constexpr std::string_view WE_IN_TEXCOORDC3 { "a_TexCoordC3" };
 constexpr std::string_view WE_IN_TEXCOORDC4 { "a_TexCoordC4" };
+/// The vertex of a rope piece's emitted strip that a lowered geometry stage keeps,
+/// in place of the quad corner the vertex-only path expands.
+constexpr std::string_view WE_IN_GEOMETRYVERTEX { "a_GeometryVertex" };
 // Combo that switches the thick particle record on.
 constexpr std::string_view WE_CB_THICK_FORMAT { "THICKFORMAT" };
 /// Set on a mesh the sprite-particle generator owns: its vertex stream is
@@ -81,12 +84,17 @@ constexpr std::string_view WE_PRENDER_TRAIL { "PRENDER_TRAIL" };
 /// one particle's own recorded path rather than joining neighbouring particles,
 /// so a renderer can name the case without re-reading the project file.
 constexpr std::string_view WE_PRENDER_ROPETRAIL { "PRENDER_ROPETRAIL" };
+/// Set on a rope mesh whose shader keeps its geometry stage: each piece's four
+/// vertices carry the strip vertex they select instead of a quad corner.
+constexpr std::string_view WE_PRENDER_GEOMETRY { "PRENDER_GEOMETRY" };
 
 // Transform uniforms, matched by exact text when a material's uniforms are bound.
 constexpr std::string_view G_M { "g_ModelMatrix" };                                // model
 constexpr std::string_view G_VP { "g_ViewProjectionMatrix" };                      // camera
 constexpr std::string_view G_MVP { "g_ModelViewProjectionMatrix" };                // both
 constexpr std::string_view G_AM { "g_AltModelMatrix" };                            // alternate model
+constexpr std::string_view G_ANM { "g_AltNormalModelMatrix" };                     // alternate normal model
+constexpr std::string_view G_AVP { "g_AltViewProjectionMatrix" };                  // alternate view projection
 constexpr std::string_view G_MI { "g_ModelMatrixInverse" };                        // model, inverted
 constexpr std::string_view G_MVPI { "g_ModelViewProjectionMatrixInverse" };        // both, inverted
 // What an effect's pass samples through, and where the lights are.
@@ -94,6 +102,7 @@ constexpr std::string_view G_ETVP { "g_EffectTextureProjectionMatrix" };        
 constexpr std::string_view G_ETVPI { "g_EffectTextureProjectionMatrixInverse" };   // and its inverse
 constexpr std::string_view G_LP { "g_LightsPosition" };                            // light positions
 constexpr std::string_view G_LCP { "g_LightsColorPremultiplied" };                 // colour x intensity
+constexpr std::string_view G_LCR { "g_LightsColorRadius" };                        // colour x intensity, radius
 constexpr std::string_view G_EYEPOSITION { "g_EyePosition" };
 constexpr std::string_view G_VIEWFORWARD { "g_ViewForward" };
 constexpr std::string_view G_VIEWUP { "g_ViewUp" };
@@ -112,6 +121,10 @@ constexpr std::string_view G_EFFECTMVPI { "g_EffectModelViewProjectionMatrixInve
 constexpr std::string_view G_TEXELSIZE { "g_TexelSize" };
 constexpr std::string_view G_TEXELSIZEHALF { "g_TexelSizeHalf" };
 constexpr std::string_view G_BONES { "g_Bones" };
+// Per-bone alpha of a SKINNING_ALPHA puppet (we_BindBuiltinUniforms case 0x72).
+constexpr std::string_view G_BONESALPHA { "g_BonesAlpha" };
+/// A puppet's texture channel weights, four channels to a row.
+constexpr std::string_view G_BLENDMAP { "g_BlendMap" };
 constexpr std::string_view G_SCREEN { "g_Screen" };
 constexpr std::string_view G_PARALLAXPOSITION { "g_ParallaxPosition" };
 constexpr std::string_view G_ORIENTATIONUP { "g_OrientationUp" };

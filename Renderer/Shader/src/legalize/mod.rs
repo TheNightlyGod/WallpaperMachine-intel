@@ -40,7 +40,8 @@ pub use stage::LegalStage;
 
 use bindings::{Bindings, allocate_program, allocate_standalone};
 use block::{Member, plan_block};
-use collect::{StageDecls, TexKind, collect, normalize};
+use collect::{StageDecls, collect, normalize};
+pub use collect::TexKind;
 use interface::{StageInterface, assign_program, assign_standalone, input_plans, output_plans, reconcile};
 
 /// What to legalize. A missing stage means the other one is legalized alone.
@@ -53,11 +54,22 @@ pub struct ProgramInput<'a> {
     /// Leave the model's highest binding index (R30) to the reflection step, which reports a
     /// resource the stage uses above it, instead of refusing the layout here.
     pub unlimited_bindings: bool,
+    /// `BACKBUFFER_MS` is set for the program (E-D8): `sampler2DBackBuffer` is multisampled.
+    pub backbuffer_ms: bool,
+    /// MS declarations whose bound image is resolved and has one physical sample.
+    pub single_sample_slots: &'a [u8],
 }
 
 impl<'a> ProgramInput<'a> {
     pub fn program(vertex: &'a str, fragment: &'a str) -> ProgramInput<'a> {
-        ProgramInput { vertex: Some(vertex), fragment: Some(fragment), planar_slots: &[], unlimited_bindings: false }
+        ProgramInput {
+            vertex: Some(vertex),
+            fragment: Some(fragment),
+            planar_slots: &[],
+            unlimited_bindings: false,
+            backbuffer_ms: false,
+            single_sample_slots: &[],
+        }
     }
 
     pub fn with_planes(mut self, slots: &'a [u8]) -> ProgramInput<'a> {
@@ -69,6 +81,12 @@ impl<'a> ProgramInput<'a> {
     /// [`ProgramInput::unlimited_bindings`].
     pub fn without_binding_limit(mut self) -> ProgramInput<'a> {
         self.unlimited_bindings = true;
+        self
+    }
+
+    /// The program is compiled with `BACKBUFFER_MS`; see [`ProgramInput::backbuffer_ms`].
+    pub fn with_backbuffer_ms(mut self, on: bool) -> ProgramInput<'a> {
+        self.backbuffer_ms = on;
         self
     }
 }
@@ -99,7 +117,8 @@ pub struct TexturePlan {
     pub sampler_name: String,
     pub texture_binding: u32,
     pub sampler_binding: u32,
-    pub three_dimensional: bool,
+    /// What the texture is (2D, 3D, a comparison depth texture, multisampled).
+    pub kind: TexKind,
     pub in_vertex: bool,
     pub in_fragment: bool,
 }
@@ -192,10 +211,20 @@ pub fn legalize(input: &ProgramInput<'_>) -> Result<LegalProgram, LegalizeError>
     let mut decl_list: Vec<(StageKind, StageDecls)> = Vec::new();
     for p in parsed {
         let kind = p.kind;
-        let c = convert_parsed(kind, p.module, p.taken, &p.text).map_err(LegalizeError::Front)?;
+        let options = crate::dialect::ConvertOptions { backbuffer_ms: input.backbuffer_ms, ..Default::default() };
+        let c = convert_parsed(kind, p.module, p.taken, &p.text, options).map_err(LegalizeError::Front)?;
         let mut module = c.module;
         normalize(&mut module);
-        decl_list.push((kind, collect(&module, kind)?));
+        let mut decls = collect(&module, kind)?;
+        for texture in &mut decls.textures {
+            if texture.kind == TexKind::D2Ms && texture.encoded()
+                .is_some_and(|slot| input.single_sample_slots.iter().any(|s| u32::from(*s) == slot)) {
+                // texelFetch(..., sample 0) and texelFetch(..., mip 0) have the
+                // same coordinates and value for this one-sample resource.
+                texture.kind = TexKind::D2;
+            }
+        }
+        decl_list.push((kind, decls));
         work.push((kind, p.text, module));
     }
     let find = |kind: StageKind| decl_list.iter().find(|(k, _)| *k == kind).map(|(_, d)| d);
@@ -314,7 +343,7 @@ fn program_textures(v: Option<&StageDecls>, f: Option<&StageDecls>, bindings: &B
                     sampler_name: sampler_name(&t.name),
                     texture_binding: b.texture,
                     sampler_binding: b.sampler,
-                    three_dimensional: t.kind == TexKind::D3,
+                    kind: t.kind,
                     in_vertex: s.kind == StageKind::Vertex,
                     in_fragment: s.kind == StageKind::Fragment,
                 }),
@@ -327,8 +356,22 @@ fn program_textures(v: Option<&StageDecls>, f: Option<&StageDecls>, bindings: &B
 /// Legalizes one stage alone with the numbering of R31 and R41.
 pub fn legalize_stage(kind: StageKind, text: &str) -> Result<(LegalStage, ProgramLayout), LegalizeError> {
     let input = match kind {
-        StageKind::Vertex => ProgramInput { vertex: Some(text), fragment: None, planar_slots: &[], unlimited_bindings: false },
-        StageKind::Fragment => ProgramInput { vertex: None, fragment: Some(text), planar_slots: &[], unlimited_bindings: false },
+        StageKind::Vertex => ProgramInput {
+            vertex: Some(text),
+            fragment: None,
+            planar_slots: &[],
+            unlimited_bindings: false,
+            backbuffer_ms: false,
+            single_sample_slots: &[],
+        },
+        StageKind::Fragment => ProgramInput {
+            vertex: None,
+            fragment: Some(text),
+            planar_slots: &[],
+            unlimited_bindings: false,
+            backbuffer_ms: false,
+            single_sample_slots: &[],
+        },
     };
     let program = legalize(&input)?;
     let stage = match kind {

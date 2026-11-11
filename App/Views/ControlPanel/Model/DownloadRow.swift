@@ -45,6 +45,8 @@ struct DownloadRow: Identifiable, Equatable {
   let ownership: WorkshopDownloader.WallpaperEngineOwnership
   /// **Download and apply** is pending for this item.
   let appliesOnArrival: Bool
+  /// Runs on the QR sign-in, whose account is changed by logging out in Settings, not per job.
+  let signsInWithQRCode: Bool
 
   /// Holding a slot: transferring, signing in or installing.
   var isRunning: Bool { isPending && !isQueued }
@@ -87,7 +89,7 @@ struct DownloadRow: Identifiable, Equatable {
     errorMessage: String? = nil, prompt: WorkshopDownloader.Prompt? = nil,
     challenge: WorkshopDownloader.SteamGuardChallenge? = nil, warning: String? = nil,
     ownership: WorkshopDownloader.WallpaperEngineOwnership = .unknown,
-    appliesOnArrival: Bool = false
+    appliesOnArrival: Bool = false, signsInWithQRCode: Bool = false
   ) {
     self.id = id
     self.source = source
@@ -114,6 +116,7 @@ struct DownloadRow: Identifiable, Equatable {
     self.warning = warning
     self.ownership = ownership
     self.appliesOnArrival = appliesOnArrival
+    self.signsInWithQRCode = signsInWithQRCode
   }
 
   /// How Steam's job reads.
@@ -131,7 +134,7 @@ struct DownloadRow: Identifiable, Equatable {
       bytesPerSecond: job.bytesPerSecond, secondsRemaining: job.secondsRemaining,
       errorMessage: job.errorMessage, prompt: worker.prompt, challenge: worker.steamGuardChallenge,
       warning: worker.sessionWarning, ownership: worker.wallpaperEngineOwnership,
-      appliesOnArrival: appliesOnArrival)
+      appliesOnArrival: appliesOnArrival, signsInWithQRCode: job.steamCMD == nil)
   }
 
   /// How a pixiv save reads in the shared queue.

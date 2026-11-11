@@ -242,6 +242,57 @@ TEST(MaterialConstantKeys, AKeyWithoutAUniformOrACompletePairIsReported)
     }
 }
 
+// A scene whose every material carries the same leftover key (a model importer's `Alpha`
+// on hundreds of models) says it once, with the count, and never as an error: a scene
+// parse holds a tally, and a load under one reports nothing of its own.
+TEST(MaterialConstantKeys, ATallyGathersTheLeftoverKeysOfAScopeAndSaysThemOnce)
+{
+    KeyedMaterial ranged = RangeFixture();
+    ranged.Key("frequencyRange", { 0.0f, 31.73f }).Key("volumeScale", { 0.8f });
+    KeyedMaterial plain;
+    plain.Alias("color", "g_TintColor");
+    plain.Key("Alpha", { 1.0f }).Key("Color", { 1.0f, 1.0f, 1.0f }).Key("color", { 0.5f, 0.5f, 0.5f });
+
+    ErrorCapture capture;
+    {
+        UnmatchedConstantTally tally;
+        for (int repeat = 0; repeat < 3; ++repeat) plain.Load();
+        ranged.Load();
+        EXPECT_EQ(tally.Summary(), "Alpha x3, Color x3, frequencyRange x1");
+    }
+    EXPECT_FALSE(capture.Saw("not found in glsl")) << "a gathered key is not also an error of its own";
+    // The constants that do name a uniform are loaded as before.
+    ExpectLanes(plain.scene, "g_TintColor", { 0.5f, 0.5f, 0.5f });
+    ExpectLanes(ranged.scene, "u_VolumeScale", { 0.8f });
+
+    // With no tally the same load is reported on its own, as a constant loaded outside a
+    // scene parse always was.
+    plain.Load();
+    EXPECT_TRUE(capture.Saw("ShaderValue: Alpha not found in glsl"));
+}
+
+TEST(MaterialConstantKeys, ATallyNamesTheFirstKeysAndCountsTheRestAndTheInnermostTakesThem)
+{
+    UnmatchedConstantTally outer;
+    {
+        UnmatchedConstantTally inner;
+        for (int index = 0; index < 14; ++index) {
+            KeyedMaterial f;
+            f.Key("key" + std::string(index < 10 ? "0" : "") + std::to_string(index), { 1.0f });
+            f.Load();
+        }
+        const std::string summary = inner.Summary();
+        EXPECT_EQ(summary.find("key00 x1, key01 x1"), 0u);
+        EXPECT_NE(summary.find("key11 x1, and 2 more"), std::string::npos) << summary;
+        EXPECT_EQ(summary.find("key12"), std::string::npos) << summary;
+    }
+    EXPECT_TRUE(outer.Summary().empty()) << "the inner scope took every key";
+    KeyedMaterial f;
+    f.Key("late", { 1.0f });
+    f.Load();
+    EXPECT_EQ(outer.Summary(), "late x1") << "the outer scope takes them again once the inner one ended";
+}
+
 // ---- a layer copied from a template -------------------------------------------------------------
 
 TEST(MaterialConstants, ALayerCopiedFromATemplateKeepsTheTemplatesConstantBindings)

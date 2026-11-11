@@ -13,8 +13,10 @@ import UniformTypeIdentifiers
 /// choices, muting, the low-battery level, app rules, hiding after applying) are not here.
 enum RenderingSetting: String, CaseIterable, Sendable {
   case batteryMode, batteryRenderScale, batteryTargetFps, frameRateCap, qualityPreset, renderScale
+  case metalFXUpscaling
   case sceneOptimization, sceneOnDemand
-  case sceneVideoPlaneSampling, sceneResolution
+  case sceneVideoPlaneSampling, sceneDisplayFraming, sceneResolution
+  case sceneMSAA, sceneShadows, sceneVolumetrics, sceneReflections, scenePostProcessing
   case lowPowerModeAction, thermalAction, lowBatteryAction
 }
 
@@ -61,6 +63,16 @@ extension PanelController {
     }
   }
 
+  /// `libraryPreviewsOnHover`: whether Library tiles play their animated preview only while the
+  /// pointer rests on one, instead of every tile on screen playing. Applies to the grid at once.
+  func setLibraryPreviewsOnHover(_ onHover: Bool) async throws {
+    try await change {
+      defaults.set(onHover, forKey: PanelPreferences.libraryPreviewsOnHoverKey)
+      refreshSystemReadings()
+      library.previewModeChanged()
+    }
+  }
+
   /// Takes the readings nothing notifies the app about again: the battery charge and the preferences
   /// that live outside the stores. Views call it when the panel appears and when the window becomes key,
   /// and the setters that write those preferences call it themselves.
@@ -104,6 +116,33 @@ extension PanelController {
     }
   }
 
+  /// `hideDesktopIcons`. Writes Finder's own "show icons on the desktop" the other way round and
+  /// restarts Finder so the desktop follows, after asking, since a restart interrupts whatever
+  /// Finder is doing: Cancel, or no window to ask in, changes nothing, and so does a choice Finder
+  /// already has. Finder tells nobody when the choice changes elsewhere, so the switch reads it
+  /// again afterwards.
+  func setHidesDesktopIcons(_ hides: Bool) async throws {
+    defer { refreshSystemReadings() }
+    let icons = FinderDesktopIcons()
+    guard icons.areShown == hides else { return }
+    guard
+      await dialogs.confirm(
+        hides ? L("Hide desktop icons?") : L("Show desktop icons?"),
+        detail: L("Finder restarts to apply this. Let any copy or move in Finder finish first."),
+        button: L("Restart Finder"))
+    else { return }
+    try await change { try icons.setShown(!hides) }
+  }
+
+  /// `hideNotch`: the black strip behind the menu bar of displays with a camera notch, which the
+  /// app delegate's `NotchMaskController` puts up or takes down as soon as the choice is written.
+  func setHidesNotch(_ hides: Bool) async throws {
+    try await change {
+      NotchMaskController.setEnabled(hides, defaults: defaults)
+      refreshSystemReadings()
+    }
+  }
+
   /// `livePropertyEdits`. Turning it off also puts the saved look back on what the displays were
   /// shown; the edits stay pending in the inspector.
   func setLivePropertyEdits(_ enabled: Bool) async throws {
@@ -123,7 +162,7 @@ extension PanelController {
       }
       if enabled,
         store.settingsSnapshot.displays.contains(where: {
-          $0.enabled && $0.mode == .standalone
+          $0.isIndependent
             && automations.configuration(for: $0.displayId).mode == .spaces
         })
       {
@@ -178,15 +217,37 @@ extension PanelController {
     try await change { playback.otherAudioAction = action }
   }
 
+  /// `otherAudioVolume`: the share of its own volume, in whole percent from 0 to 100
+  /// (`PlaybackPreferences.otherAudioVolumeRange`), each wallpaper keeps under Reduce volume.
+  func setOtherAudioVolume(_ percent: Int) async throws {
+    guard PlaybackPreferences.otherAudioVolumeRange.contains(percent) else {
+      throw InvalidControlValue()
+    }
+    try await change { playback.otherAudioVolume = percent }
+  }
+
+  /// `otherAppInFrontAction`. Choosing here answers the one-time battery question, since the row
+  /// offers Pause on battery.
+  func setOtherAppInFrontAction(_ action: OtherAppInFrontAction) async throws {
+    try await change {
+      playback.otherAppInFrontAction = action
+      store.supportPrompt?.recordBatteryAsked()
+    }
+  }
+
   /// `displaySleepAction`.
   func setDisplaySleepAction(_ action: DisplaySleepAction) async throws {
     try await change { playback.displaySleepAction = action }
   }
 
   /// `batteryMode`: the engine's own choice of what to do on battery. Its Reduced quality is named
-  /// `reducedQuality`, one letter from the condition choices' `reduceQuality`, on purpose.
+  /// `reducedQuality`, one letter from the condition choices' `reduceQuality`, on purpose. Choosing
+  /// here answers the one-time battery question.
   func setBatteryMode(_ mode: BridgeBatteryMode) async throws {
-    try await change(.batteryMode) { try await store.setBatteryModeAsync(mode) }
+    try await change(.batteryMode) {
+      try await store.setBatteryModeAsync(mode)
+      store.supportPrompt?.recordBatteryAsked()
+    }
   }
 
   /// `lowPowerModeAction`.
@@ -211,6 +272,19 @@ extension PanelController {
       throw InvalidControlValue()
     }
     try await change { playback.lowBatteryThreshold = percent }
+  }
+
+  /// `inactivityAction`.
+  func setInactivityAction(_ action: InactivityAction) async throws {
+    try await change { playback.inactivityAction = action }
+  }
+
+  /// `inactivityMinutes`: only a time the menu offers (`PlaybackPreferences.inactivityMinuteChoices`).
+  func setInactivityMinutes(_ minutes: Int) async throws {
+    guard PlaybackPreferences.inactivityMinuteChoices.contains(minutes) else {
+      throw InvalidControlValue()
+    }
+    try await change { playback.inactivityMinutes = minutes }
   }
 
   /// `batteryRenderScale`. The engine owns the battery scale and frame rate as one value, so this
@@ -261,6 +335,12 @@ extension PanelController {
     return Float(min(max(scale, Self.renderScaleRange.lowerBound), Self.renderScaleRange.upperBound))
   }
 
+  /// `metalFXUpscaling`: a scene drawn below full resolution is brought back to full size by
+  /// MetalFX instead of being stretched. Running scenes pick it up at their next frame.
+  func setMetalFXUpscaling(_ enabled: Bool) async throws {
+    try await change(.metalFXUpscaling) { try await store.setMetalFXUpscalingEnabledAsync(enabled) }
+  }
+
   /// `sceneOptimization`.
   func setSceneOptimization(_ enabled: Bool) async throws {
     try await change(.sceneOptimization) { try await store.setSceneOptimizationEnabledAsync(enabled) }
@@ -278,9 +358,48 @@ extension PanelController {
     }
   }
 
+  /// `sceneDisplayFraming` (experimental): running 2D scenes take it at their next frame.
+  func setSceneDisplayFraming(_ enabled: Bool) async throws {
+    try await change(.sceneDisplayFraming) {
+      try await store.setSceneDisplayFramingEnabledAsync(enabled)
+    }
+  }
+
   /// `sceneResolution`: running 2D scenes resize their render targets in place.
   func setSceneResolution(_ mode: SceneResolutionMode) async throws {
     try await change(.sceneResolution) { try await store.setSceneResolutionAsync(mode.rawValue) }
+  }
+
+  /// The scene quality rows. Each sends the saved quality with one field replaced; running scenes
+  /// load once more with it.
+  func setSceneMSAA(_ msaa: BridgeMsaa) async throws {
+    try await changeSceneQuality(.sceneMSAA) { $0.msaa = msaa }
+  }
+
+  func setSceneShadows(_ level: BridgeQualityLevel) async throws {
+    try await changeSceneQuality(.sceneShadows) { $0.shadows = level }
+  }
+
+  func setSceneVolumetrics(_ level: BridgeQualityLevel) async throws {
+    try await changeSceneQuality(.sceneVolumetrics) { $0.volumetrics = level }
+  }
+
+  func setSceneReflections(_ enabled: Bool) async throws {
+    try await changeSceneQuality(.sceneReflections) { $0.reflections = enabled }
+  }
+
+  func setScenePostProcessing(_ level: BridgePostProcessing) async throws {
+    try await changeSceneQuality(.scenePostProcessing) { $0.postProcessing = level }
+  }
+
+  private func changeSceneQuality(
+    _ setting: RenderingSetting, _ edit: @escaping (inout BridgeSceneQuality) -> Void
+  ) async throws {
+    try await change(setting) {
+      var updated = store.settingsSnapshot.sceneQuality
+      edit(&updated)
+      try await store.setSceneQualityAsync(updated)
+    }
   }
 
   // MARK: Troubleshooting and Steam

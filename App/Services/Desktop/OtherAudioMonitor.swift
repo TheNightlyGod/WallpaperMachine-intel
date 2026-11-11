@@ -24,11 +24,26 @@ protocol ProcessAudioSource: AnyObject {
 func responsibilityGetPIDResponsibleForPID(_ pid: pid_t) -> pid_t
 
 /// Reports whether any process other than this app (and the processes it is
-/// responsible for) is producing audio output. Becoming active waits out a
+/// responsible for) is producing audio output, leaving out the Mac's own
+/// feedback sounds (`systemSoundServices`). Becoming active waits out a
 /// short settle; becoming inactive waits longer so a gap between tracks does
 /// not flap. Runs only while `otherAudioAction` is not `.keepRunning`.
 @MainActor
 final class OtherAudioMonitor {
+    /// System programs whose output is the Mac's own feedback rather than another app
+    /// playing: alerts and UI sounds, the login sound, the volume-change click and Siri
+    /// listening, which keeps an output stream running while it waits. Matched by full
+    /// path on the sealed system volume, so a program elsewhere with the same name still
+    /// counts.
+    nonisolated static let systemSoundServices: Set<String> = [
+        "/usr/sbin/systemsoundserverd",
+        "/usr/libexec/audiomxd",
+        "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
+        "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter",
+        "/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd",
+        "/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd_system",
+    ]
+
     var onChange: (@MainActor () -> Void)?
     private(set) var isActive = false
 
@@ -37,6 +52,7 @@ final class OtherAudioMonitor {
     private let source: ProcessAudioSource
     private let ownPID: pid_t
     private let responsiblePID: (pid_t) -> pid_t
+    private let executablePath: (pid_t) -> String?
     private let activateDelay: Duration
     private let deactivateDelay: Duration
 
@@ -51,6 +67,7 @@ final class OtherAudioMonitor {
         source: ProcessAudioSource? = nil,
         ownPID: pid_t = ProcessInfo.processInfo.processIdentifier,
         responsiblePID: ((pid_t) -> pid_t)? = nil,
+        executablePath: ((pid_t) -> String?)? = nil,
         activateDelay: Duration = .milliseconds(500),
         deactivateDelay: Duration = .seconds(2)
     ) {
@@ -59,6 +76,7 @@ final class OtherAudioMonitor {
         self.source = source ?? CoreAudioProcessSource()
         self.ownPID = ownPID
         self.responsiblePID = responsiblePID ?? { responsibilityGetPIDResponsibleForPID($0) }
+        self.executablePath = executablePath ?? { InstanceHandOff.executablePath(ofProcess: $0) }
         self.activateDelay = activateDelay
         self.deactivateDelay = deactivateDelay
     }
@@ -124,7 +142,9 @@ final class OtherAudioMonitor {
     private func othersProducing() -> Bool {
         source.sample().contains { sample in
             guard sample.isRunningOutput, sample.pid != ownPID else { return false }
-            return responsiblePID(sample.pid) != ownPID
+            guard responsiblePID(sample.pid) != ownPID else { return false }
+            guard let path = executablePath(sample.pid) else { return true }
+            return !Self.systemSoundServices.contains(path)
         }
     }
 

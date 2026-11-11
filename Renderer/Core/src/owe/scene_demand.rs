@@ -279,6 +279,9 @@ pub struct SceneRuntimeReport {
     /// failure. `None` when the renderer returned no reading, which is not the
     /// same as a healthy surface.
     pub surface: Option<SurfaceHealth>,
+    /// The scene quality the renderer actually draws (features it does not draw
+    /// yet read off). `None` before a scene loaded or when it could not say.
+    pub quality_in_force: Option<crate::project::SceneQuality>,
 }
 
 /// What stopped a scene from being drawn.

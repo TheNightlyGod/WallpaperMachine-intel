@@ -2,7 +2,7 @@ import XCTest
 
 @testable import WallpaperMachine
 
-/// Installed's five sort keys, in both directions.
+/// Installed's six sort keys, in both directions.
 @MainActor
 final class LibrarySortTests: XCTestCase {
   private let locale = Locale(identifier: "en_US")
@@ -49,10 +49,27 @@ final class LibrarySortTests: XCTestCase {
       order(.added, flipped: true), ["Gamma", "Delta", "Beta", "alpha"], "no date still last")
   }
 
+  func testLastUsedPutsTheNewestUseFirstWithNeverUsedRowsLastEitherWayAndTiesByName() {
+    let used: [String: Date] = [
+      "b": Date(timeIntervalSince1970: 500), "d": Date(timeIntervalSince1970: 900),
+      "c": Date(timeIntervalSince1970: 500),
+    ]
+    func order(descending: Bool) -> [String] {
+      LibraryRows.titles(
+        LibrarySort.lastUsed.sorted(
+          rows, descending: descending, favorites: [], lastUsed: used, locale: locale))
+    }
+    XCTAssertTrue(LibrarySort.lastUsed.startsDescending)
+    XCTAssertEqual(order(descending: true), ["Delta", "Beta", "Gamma", "alpha"], "most recent first")
+    XCTAssertEqual(
+      order(descending: false), ["Beta", "Gamma", "Delta", "alpha"],
+      "a wallpaper never used sorts last in both directions, and equal dates read A to Z")
+  }
+
   func testChoosingAKeyStartsItInItsNaturalDirection() {
     XCTAssertEqual(
-      LibrarySort.allCases.filter(\.startsDescending), [.favorites, .size, .added],
-      "names and types read A to Z; favorites, size and date start with the most")
+      LibrarySort.allCases.filter(\.startsDescending), [.favorites, .size, .added, .lastUsed],
+      "names and types read A to Z; favorites, size and the dates start with the most")
   }
 
   func testNumbersInTitlesCountAsNumbersAndAccentsAndCaseAreIgnored() {

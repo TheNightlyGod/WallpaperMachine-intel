@@ -103,8 +103,9 @@ std::unique_ptr<ParticleSubSystem> MakeTestSubsystem(ParticleSystem&            
 
 // The recording clock and the frame clock are kept apart in these tests -- half
 // a period per tick, in binary-exact numbers -- so a tick either records a point
-// or does not, and a particle's birth point can be told from a recorded one.
-TEST(ParticleTrailHistory, FirstTickRecordsBirthPosition) {
+// or does not, and a particle's birth point can be told from a recorded one. The
+// clock is WE's countdown (0x1402308A0): it starts due, so the first tick records.
+TEST(ParticleTrailHistory, FirstTickRecordsWhereTheParticleMovedAfterItsBirthPosition) {
     Scene scene;
     scene.frameTime = 0.125;
 
@@ -128,8 +129,9 @@ TEST(ParticleTrailHistory, FirstTickRecordsBirthPosition) {
     subsystem->Emitt();
 
     ASSERT_EQ(cap->slots.size(), 1u);
-    ASSERT_EQ(cap->slots[0].trail_count, 1u);
-    ExpectVec3(cap->slots[0].trail[0].data(), { 3.0f, 4.0f, 5.0f });
+    ASSERT_EQ(cap->slots[0].trail_count, 2u);
+    ExpectVec3(cap->slots[0].trail[0].data(), { 4.25f, 4.0f, 5.0f });
+    ExpectVec3(cap->slots[0].trail[1].data(), { 3.0f, 4.0f, 5.0f });
     EXPECT_FLOAT_EQ(cap->slots[0].particle.position.x(), 4.25f);
 }
 
@@ -154,12 +156,12 @@ TEST(ParticleTrailHistory, LaterTicksAppendPointsUpToCapacityThenDropOldest) {
         particles.emplace_back(particle);
     });
 
-    // The birth point on the first tick, then one recorded point on every
-    // second tick, until the history is full and the oldest is dropped.
+    // The birth point, then one recorded point on the first tick and on every
+    // second tick after it, until the history is full and the oldest is dropped.
     for (int tick = 1; tick <= 10; ++tick) {
         subsystem->Emitt();
         ASSERT_EQ(cap->slots.size(), 1u) << tick;
-        EXPECT_EQ(cap->slots[0].trail_count, static_cast<uint32_t>(std::min(1 + tick / 2, 4)))
+        EXPECT_EQ(cap->slots[0].trail_count, static_cast<uint32_t>(std::min(1 + (tick + 1) / 2, 4)))
             << tick;
     }
     ASSERT_EQ(cap->slots[0].trail.size(), 4u);
@@ -263,15 +265,17 @@ TEST(ParticleTrailHistory, RespawnedParticleRestartsTrailHistoryAtNewBirth) {
 
     subsystem->Emitt();
     ASSERT_EQ(cap->slots.size(), 1u);
-    ASSERT_EQ(cap->slots[0].trail_count, 1u);
-    ExpectVec3(cap->slots[0].trail[0].data(), { 3.0f, 4.0f, 5.0f });
+    ASSERT_EQ(cap->slots[0].trail_count, 2u);
+    ExpectVec3(cap->slots[0].trail[1].data(), { 3.0f, 4.0f, 5.0f });
 
     subsystem->Emitt();
     subsystem->Emitt();
 
+    // Born again on the third tick, which records where it moved to.
     ASSERT_EQ(cap->slots.size(), 1u);
-    ASSERT_EQ(cap->slots[0].trail_count, 1u);
-    ExpectVec3(cap->slots[0].trail[0].data(), { 9.0f, 8.0f, 7.0f });
+    ASSERT_EQ(cap->slots[0].trail_count, 2u);
+    ExpectVec3(cap->slots[0].trail[1].data(), { 9.0f, 8.0f, 7.0f });
+    ExpectVec3(cap->slots[0].trail[0].data(), { 10.25f, 8.0f, 7.0f });
 }
 
 uint32_t IndexAt(const SceneIndexArray& array, usize i) {

@@ -87,6 +87,40 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertEqual(past.total, 127)
   }
 
+  func testAnUnrecognizedSubscriptionsResponseNeverBecomesAnEmptyList() throws {
+    for html in [
+      "", "<html><title>Steam Community :: Error</title><p>Please try again later.</p></html>",
+      "<html><title>Steam Community :: Me :: Workshop Items</title><div>Loading…</div></html>",
+    ] {
+      XCTAssertThrowsError(try WorkshopService.decodeProfileListing(html)) {
+        XCTAssertTrue($0 is WorkshopFailure)
+      }
+    }
+  }
+
+  func testSubscriptionRowsAllowHTMLAttributeQuotesAndWhitespace() throws {
+    let listing = try WorkshopService.decodeProfileListing("""
+      <html><title>Steam Community :: Me :: Workshop Items</title>
+      <div id = 'Subscription300'></div><a data-publishedfileid = '100'></a>
+      <span onclick='UnsubscribeItem( "200", "431960" );'></span>
+      Showing 1-3 of 3 entries</html>
+      """)
+    XCTAssertEqual(listing.ids, ["300", "100", "200"])
+    XCTAssertEqual(listing.total, 3)
+  }
+
+  func testAnAnonymousPageCannotAnswerAPersonalList() throws {
+    let html = """
+      <html><title>Steam Community :: Me :: Workshop Items</title>
+      <script>g_steamID = false;</script>
+      <div class="inventory_msg_content">No matching files were found for Me.</div></html>
+      """
+    XCTAssertEqual(try WorkshopService.decodeProfileListing(html).ids, [])
+    XCTAssertThrowsError(try WorkshopService.decodeProfileListing(html, requiresSignIn: true)) {
+      XCTAssertTrue($0 is SteamSignInRequired)
+    }
+  }
+
   /// Every Steam page links to the sign-in page from its header, so only a page titled so means
   /// the session is gone; an author with nothing published is simply empty.
   func testOnlySteamsSignInPageMeansSigningInAgain() throws {
@@ -94,7 +128,9 @@ final class WorkshopSourceTests: XCTestCase {
       "<html><head><title>Sign In</title></head><a href=\"https://steamcommunity.com/login/home/\">Sign in</a></html>"
     )) { XCTAssertTrue($0 is SteamSignInRequired) }
     let empty = try WorkshopService.decodeProfileListing(
-      "<html><head><title>Steam Community :: Rabscuttle</title></head><a href=\"https://steamcommunity.com/login/home/?goto=\">Sign in</a></html>")
+      "<html><head><title>Steam Community :: Rabscuttle</title></head>"
+        + "<a href=\"https://steamcommunity.com/login/home/?goto=\">Sign in</a>"
+        + "<div class=\"inventory_msg_content\">No matching files were found for Rabscuttle.</div></html>")
     XCTAssertEqual(empty.ids, [])
     XCTAssertEqual(empty.total, 0)
     XCTAssertEqual(empty.name, "Rabscuttle")
@@ -223,6 +259,64 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertEqual(fixture.cookies, ["steamLoginSecure=\(session.cookie)", "steamLoginSecure=\(session.cookie)"])
   }
 
+  func testAnUnreadableRefreshKeepsKnownSubscriptionsAndCanBeRetried() async throws {
+    let store = fixture.store
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    fixture.details = ["1": detailsRow("1", tags: ["Scene", "Everyone"])]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    store.open(.subscriptions)
+    try await finished(store)
+    try await store.refreshSubscribedIDs()
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+
+    fixture.subscriptionPages = [1: Data("<html><title>Steam Community :: Error</title></html>".utf8)]
+    store.search()
+    try await finished(store)
+    XCTAssertNotNil(store.errorMessage)
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+    XCTAssertEqual(store.totalCount, 1)
+    XCTAssertNotNil(store.steamWebSession)
+    do {
+      try await store.refreshSubscribedIDs()
+      XCTFail("an unreadable response must not erase subscription marks")
+    } catch { XCTAssertTrue(error is WorkshopFailure) }
+    XCTAssertEqual(store.subscribedIDs, ["1"])
+
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["2"], total: "1")]
+    fixture.details = ["2": detailsRow("2", tags: ["Video", "Everyone"])]
+    store.retrySearch()
+    try await finished(store)
+    XCTAssertNil(store.errorMessage)
+    XCTAssertEqual(store.items.map(\.id), ["2"])
+  }
+
+  func testSubscriptionRatingsFollowSteamsTagsAndKeepTheUnfilteredCount() async throws {
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1", "2", "3"], total: "3")]
+    fixture.details = [
+      "1": detailsRow("1", tags: ["Scene", "Everyone"]),
+      "2": detailsRow("2", tags: ["Web", "Mature"]),
+      "3": detailsRow("3", tags: ["Video", "Questionable"]),
+    ]
+    let store = fixture.store
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    store.open(.subscriptions)
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+    XCTAssertEqual(store.totalCount, 3)
+
+    store.excludedTags.removeAll { $0 == "Mature" }
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1", "2"])
+    XCTAssertEqual(store.totalCount, 3)
+
+    store.excludedTags.removeAll { $0 == "Questionable" }
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1", "2", "3"])
+    XCTAssertEqual(store.totalCount, 3)
+  }
+
   // MARK: Store
 
   func testOpeningAnAuthorFromACollectionComesBackTheWayItWent() async throws {
@@ -255,6 +349,241 @@ final class WorkshopSourceTests: XCTestCase {
     store.open(.browse)
     XCTAssertEqual(store.sourceHistory, [])
     try await finished(store)
+  }
+
+  /// Subscribing and unsubscribing change the account's subscriptions on Steam: a POST to
+  /// steamcommunity.com carrying the session and a CSRF token Steam checks against its cookie.
+  /// The store's set of subscribed items, which the tiles mark, follows what Steam accepted.
+  func testSubscribingChangesTheAccountsSubscriptionsAndWhatIsMarked() async throws {
+    let store = fixture.store
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    try await store.refreshSubscribedIDs()
+    XCTAssertEqual(store.subscribedIDs, ["1"])
+
+    try await store.setSubscribed(true, itemID: "2")
+    XCTAssertEqual(store.subscribedIDs, ["1", "2"])
+    let subscribe = try XCTUnwrap(fixture.subscribeRequests.last)
+    XCTAssertEqual(subscribe.path, "/sharedfiles/subscribe")
+    let fields = Dictionary(
+      subscribe.form.split(separator: "&").map { pair -> (String, String) in
+        let parts = pair.split(separator: "=", maxSplits: 1).map(String.init)
+        return (parts[0], parts.count > 1 ? parts[1] : "")
+      }, uniquingKeysWith: { first, _ in first })
+    XCTAssertEqual(fields["id"], "2")
+    XCTAssertEqual(fields["appid"], "431960")
+    let token = try XCTUnwrap(fields["sessionid"])
+    XCTAssertFalse(token.isEmpty)
+    let cookie = try XCTUnwrap(subscribe.cookie)
+    XCTAssertTrue(cookie.contains("sessionid=\(token)"), "the CSRF token is the cookie Steam compares it with")
+    XCTAssertTrue(cookie.contains("steamLoginSecure="))
+
+    try await store.setSubscribed(false, itemID: "1")
+    XCTAssertEqual(store.subscribedIDs, ["2"])
+    XCTAssertEqual(fixture.subscribeRequests.last?.path, "/sharedfiles/unsubscribe")
+
+    fixture.subscribeAnswer = Data(#"{"success":2}"#.utf8)
+    do {
+      try await store.setSubscribed(true, itemID: "3")
+      XCTFail("Steam refusing the change must be reported")
+    } catch {}
+    XCTAssertEqual(store.subscribedIDs, ["2"], "nothing Steam refused is marked")
+
+    fixture.subscribeAnswer = Data("<html><head><title>Sign In</title></head></html>".utf8)
+    do {
+      try await store.setSubscribed(true, itemID: "3")
+      XCTFail("A sign-in page is an ended session")
+    } catch is SteamSignInRequired {}
+    XCTAssertNil(store.steamWebSession)
+    XCTAssertEqual(store.subscribedIDs, [], "signed out, nothing is marked as subscribed")
+  }
+
+  /// The page can ask for the marks before the saved sign-in has come back from the keychain:
+  /// the read waits for it, and answers whether there was a session to read with, so a page
+  /// opened signed out can ask again later.
+  func testReadingSubscriptionsWaitsForTheSavedSignInAndSaysWhetherItRead() async throws {
+    let store = fixture.store
+    let readSignedOut = try await store.refreshSubscribedIDs()
+    XCTAssertNil(readSignedOut, "signed out, nothing is read")
+
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    let relaunched = fixture.relaunchedStore()
+    relaunched.restoreSteamWebSession()
+    let readRestored = try await relaunched.refreshSubscribedIDs()
+    XCTAssertNotNil(readRestored, "the read waited for the saved sign-in")
+    XCTAssertEqual(relaunched.subscribedIDs, ["1"])
+  }
+
+  /// A read of the subscriptions that Steam answers after a subscribe went through is still
+  /// shown, with the subscribe laid over it, so neither the list nor the change is lost.
+  func testASubscriptionsReadKeepsASubscribeMadeWhileItWasAnswered() async throws {
+    let store = fixture.store
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    let gate = DispatchSemaphore(value: 0)
+    fixture.subscriptionsGate = gate
+    let read = Task { try await store.refreshSubscribedIDs() }
+    for _ in 0..<500 where fixture.subscriptionReads == 0 { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(fixture.subscriptionReads, 1, "the read is held at Steam")
+    try await store.setSubscribed(true, itemID: "2")
+    gate.signal()
+    let used = try await read.value
+    XCTAssertEqual(used, store.steamWebSession, "the read answers the session it read with")
+    XCTAssertEqual(store.subscribedIDs, ["1", "2"], "the list Steam sent, and the subscribe made meanwhile")
+  }
+
+  /// Steam ending the session a request was sent with does not sign out a newer sign-in made
+  /// while it was answering.
+  func testAnEndedSessionDoesNotForgetTheSignInThatReplacedIt() async throws {
+    let store = fixture.store
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    let gate = DispatchSemaphore(value: 0)
+    fixture.subscriptionsGate = gate
+    let read = Task { try await store.refreshSubscribedIDs() }
+    for _ in 0..<500 where fixture.subscriptionReads == 0 { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(fixture.subscriptionReads, 1, "the read is held at Steam")
+    store.signOutOfSteamWeb()
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||fedcba9876543210fedc") }
+    fixture.subscriptionPages = [1: Data("<html><head><title>Sign In</title></head></html>".utf8)]
+    gate.signal()
+    do {
+      _ = try await read.value
+      XCTFail("Steam ended the session the read was sent with")
+    } catch is SteamSignInRequired {}
+    XCTAssertNotNil(store.steamWebSession, "the new sign-in stays")
+  }
+
+  /// The same holds for the read behind "download the subscriptions not in the library": the
+  /// session it was sent with ending does not sign out, or erase from this Mac, a newer sign-in.
+  func testAnEndedSessionReadingMissingSubscriptionsKeepsTheSignInThatReplacedIt() async throws {
+    let store = fixture.store
+    fixture.subscriptionPages = [1: subscriptionsHTML(ids: ["1"], total: "1")]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    let gate = DispatchSemaphore(value: 0)
+    fixture.subscriptionsGate = gate
+    let read = Task { try await store.missingSubscriptions(installed: []) }
+    for _ in 0..<500 where fixture.subscriptionReads == 0 { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertEqual(fixture.subscriptionReads, 1, "the read is held at Steam")
+    store.signOutOfSteamWeb()
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||fedcba9876543210fedc") }
+    fixture.subscriptionPages = [1: Data("<html><head><title>Sign In</title></head></html>".utf8)]
+    gate.signal()
+    do {
+      _ = try await read.value
+      XCTFail("Steam ended the session the read was sent with")
+    } catch is SteamSignInRequired {}
+    XCTAssertNotNil(store.steamWebSession, "the new sign-in stays")
+    XCTAssertNotNil(fixture.webSessions.session, "and so does its saved copy")
+  }
+
+  func testSubscribingWithoutASignInChangesNothing() async throws {
+    do {
+      try await fixture.store.setSubscribed(true, itemID: "2")
+      XCTFail("Subscribing needs a Steam Community sign-in")
+    } catch is SteamSignInRequired {}
+    XCTAssertTrue(fixture.subscribeRequests.isEmpty)
+  }
+
+  /// An item's comments come from Steam's public comment thread, newest first, read as plain
+  /// text: markup is dropped, line breaks kept and entities decoded. No session is sent.
+  func testCommentsAreReadAsPlainTextFromThePublicThread() async throws {
+    let html = """
+      <div class="commentthread_comment responsive_body_text" id="comment_1">
+        <div class="commentthread_comment_content"><div class="commentthread_comment_author">
+          <a class="hoverunderline commentthread_author_link" href="https://steamcommunity.com/id/a" data-miniprofile="1">
+          <bdi>Tom &amp; Jerry</bdi></a>
+          <span class="commentthread_comment_timestamp" title="1 Oct" data-timestamp="1759312800">1 Oct</span>
+        </div>
+        <div class="commentthread_comment_text" id="comment_content_1">
+          Lovely &lt;3<br>Second line <a href="https://example.com" class="bb_link">link</a>
+        </div></div>
+      </div>
+      <div class="commentthread_comment responsive_body_text" id="comment_2">
+        <a class="hoverunderline commentthread_author_link" href="x"><bdi>B</bdi></a>
+        <span class="commentthread_comment_timestamp" data-timestamp="1759226400">x</span>
+        <div class="commentthread_comment_text" id="comment_content_2">  Nice  </div>
+      </div>
+      """
+    fixture.comments = try JSONSerialization.data(withJSONObject: [
+      "success": true, "start": 0, "total_count": 12, "comments_html": html,
+    ])
+    let thread = try await fixture.service.comments(itemID: "55", creatorID: Self.author)
+    XCTAssertEqual(thread.total, 12)
+    XCTAssertEqual(thread.comments.count, 2)
+    XCTAssertEqual(thread.comments[0].author, "Tom & Jerry")
+    XCTAssertEqual(thread.comments[0].text, "Lovely <3\nSecond line link")
+    XCTAssertEqual(thread.comments[0].date, Date(timeIntervalSince1970: 1_759_312_800))
+    XCTAssertEqual(thread.comments[1].author, "B")
+    XCTAssertEqual(thread.comments[1].text, "Nice")
+    XCTAssertEqual(fixture.commentPaths, ["/comment/PublishedFile_Public/render/\(Self.author)/55?start=0&count=10"])
+    XCTAssertEqual(fixture.cookies.compactMap { $0 }, [], "the public thread is read without the session")
+
+    fixture.comments = Data("not json".utf8)
+    do {
+      _ = try await fixture.service.comments(itemID: "55", creatorID: Self.author)
+      XCTFail("An answer that is not the thread must be reported")
+    } catch {}
+  }
+
+  func testFavoritesAreTheSignedInAccountsOwnInTheOrderChosen() async throws {
+    let store = fixture.store
+    store.open(.favorites)
+    try await finished(store)
+    XCTAssertNotNil(store.errorMessage, "a favorites list needs the account it belongs to")
+    XCTAssertEqual(store.items, [])
+
+    fixture.favoritePages = [
+      "subscriptiondate": profileHTML(ids: ["2", "1"], name: "Me", total: "2"),
+      "alpha": profileHTML(ids: ["1", "2"], name: "Me", total: "2"),
+    ]
+    fixture.details = ["1": detailsRow("1", tags: ["Scene", "Everyone"]), "2": detailsRow("2", tags: ["Video", "Everyone"])]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["2", "1"])
+    XCTAssertEqual(store.totalCount, 2)
+    XCTAssertTrue(fixture.cookies.contains("steamLoginSecure=\(Self.author)||0123456789abcdef0123"))
+
+    store.favoritesOrder = .alphabetical
+    store.search()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1", "2"])
+    XCTAssertEqual(fixture.favoriteOrdersRequested, ["subscriptiondate", "alpha"])
+    XCTAssertEqual(fixture.favoriteProfilesRequested, [Self.author, Self.author], "the signed-in account's own favorites")
+    let url = try XCTUnwrap(URLComponents(url: store.browseURL, resolvingAgainstBaseURL: false))
+    XCTAssertEqual(url.path, "/profiles/\(Self.author)/myworkshopfiles/")
+    XCTAssertEqual(url.queryItems?.first { $0.name == "browsefilter" }?.value, "myfavorites")
+    XCTAssertEqual(url.queryItems?.first { $0.name == "sortmethod" }?.value, "alpha")
+
+    store.signOutOfSteamWeb()
+    XCTAssertEqual(store.items, [], "signing out empties the account's own list")
+  }
+
+  /// Signing out while the account's favorites are on their way, opened from a public list,
+  /// leaves nothing of that account on show once Steam answers.
+  func testSigningOutWhileFavoritesLoadLeavesNothingOfTheAccountOnShow() async throws {
+    let store = fixture.store
+    fixture.profiles[Self.author] = profileHTML(ids: ["1"], name: "Fixture Author", total: "1")
+    fixture.favoritePages = ["subscriptiondate": profileHTML(ids: ["2"], name: "Me", total: "1")]
+    fixture.details = ["1": detailsRow("1", tags: ["Scene", "Everyone"]), "2": detailsRow("2", tags: ["Scene", "Everyone"])]
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    store.open(.creator(id: Self.author, name: "Fixture Author"))
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["1"])
+
+    let gate = fixture.holdFavorites()
+    store.open(.favorites)
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while !gate.isHolding, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    XCTAssertTrue(gate.isHolding, "the favorites request reached Steam with the session")
+    let load = try XCTUnwrap(store.searchTask)
+    store.signOutOfSteamWeb()
+    gate.open()
+    // The cancelled load settles only after Steam's answer was handed over, or was dropped.
+    await load.value
+    XCTAssertEqual(store.items, [])
+    XCTAssertFalse(store.hasLoaded)
   }
 
   func testSubscriptionsWaitForASignInAndAnEndedSessionIsForgotten() async throws {
@@ -753,6 +1082,56 @@ final class WorkshopSourceTests: XCTestCase {
     XCTAssertEqual(fixture.browsePagesRequested.count, 6)
   }
 
+  /// Steam lists the Workshop differently for an account than for anyone (the age-rated items
+  /// its preferences allow, as its region allows), so signed in, search and collections are read
+  /// with the session, and signing in or out reads what is on show again.
+  func testBrowsingIsReadAsTheSignedInAccountAndAsAnyoneSignedOut() async throws {
+    let store = fixture.store
+    let signedIn = "steamLoginSecure=\(Self.author)||0123456789abcdef0123"
+    fixture.browse = browseHTML(rows: [wallpaperRow("12", tags: ["Scene", "Everyone"])])
+    store.open(.browse)
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["12"])
+    XCTAssertNil(fixture.cookies.last ?? nil, "signed out, Steam is read as anyone")
+
+    try await store.signInToSteamWeb { WebSignInCookies(session: "\(Self.author)||0123456789abcdef0123") }
+    try await finished(store)
+    XCTAssertEqual(fixture.browsePagesRequested.count, 2, "signing in reads the list on show again")
+    XCTAssertEqual(fixture.cookies.last, signedIn)
+
+    // Screened collections are filled from several Steam pages, each read with the session too.
+    fixture.browse = browseHTML(rows: [collectionRow("901", children: [("12", 0, 0)])])
+    fixture.details = ["12": detailsRow("12", tags: ["Scene", "Everyone"])]
+    store.open(.collections)
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["901"])
+    XCTAssertEqual(fixture.browseSections.last, "collections")
+    XCTAssertEqual(fixture.cookies.last, signedIn)
+
+    store.signOutOfSteamWeb()
+    try await finished(store)
+    XCTAssertEqual(store.items.map(\.id), ["901"], "a public list stays on show")
+    XCTAssertEqual(fixture.browseSections.count, 4, "signing out reads it again")
+    XCTAssertNil(fixture.cookies.last ?? nil)
+  }
+
+  /// A session Steam will not renew ends, and the public list is still read, as anyone.
+  func testABrowseWhoseSessionCannotBeRenewedIsReadAsAnyone() async throws {
+    let store = fixture.store
+    let expired = SteamWebFixtures.cookie(SteamWebFixtures.token(expiresIn: -60))
+    let refresh = SteamWebFixtures.cookie(SteamWebFixtures.token(expiresIn: 86_400, salt: "r"))
+    try await store.signInToSteamWeb { WebSignInCookies(session: expired, companion: refresh) }
+    fixture.browse = browseHTML(rows: [wallpaperRow("12", tags: ["Scene", "Everyone"])])
+    store.open(.browse)
+    try await finished(store)
+    XCTAssertEqual(fixture.renewalForms.count, 1)
+    XCTAssertNil(store.errorMessage)
+    XCTAssertEqual(store.items.map(\.id), ["12"])
+    XCTAssertNil(store.steamWebSession)
+    XCTAssertNil(fixture.webSessions.session)
+    XCTAssertEqual(fixture.cookies, [nil], "the expired cookie is never sent")
+  }
+
   // MARK: Fixtures
 
   private func finished(_ store: WorkshopStore) async throws {
@@ -931,6 +1310,20 @@ private final class SourceFixture {
     get { answers.read { $0.subscriptionPages } }
     set { answers.write { $0.subscriptionPages = newValue } }
   }
+  /// Holds every subscriptions read until it is signalled; `subscriptionReads` counts the reads
+  /// that reached the fixture, so a test can act while one is held.
+  var subscriptionsGate: DispatchSemaphore? {
+    get { answers.read { $0.subscriptionsGate } }
+    set { answers.write { $0.subscriptionsGate = newValue } }
+  }
+  var subscriptionReads: Int { answers.read { $0.subscriptionReads } }
+  var favoritePages: [String: Data] {
+    get { answers.read { $0.favoritePages } }
+    set { answers.write { $0.favoritePages = newValue } }
+  }
+  var favoriteOrdersRequested: [String] { answers.read { $0.favoriteOrdersRequested } }
+  /// The SteamID64 in the path of each favorites request.
+  var favoriteProfilesRequested: [String] { answers.read { $0.favoriteProfilesRequested } }
   var browseSections: [String] { answers.read { $0.browseSections } }
   var browsePagesRequested: [Int] { answers.read { $0.browsePagesRequested } }
   var detailsRequests: Int { answers.read { $0.detailsRequests } }
@@ -942,6 +1335,23 @@ private final class SourceFixture {
   }
   /// The form of each renewal request.
   var renewalForms: [String] { answers.read { $0.renewalForms } }
+  var subscribeAnswer: Data {
+    get { answers.read { $0.subscribeAnswer } }
+    set { answers.write { $0.subscribeAnswer = newValue } }
+  }
+  var subscribeRequests: [(path: String, form: String, cookie: String?)] { answers.read { $0.subscribeRequests } }
+  var comments: Data {
+    get { answers.read { $0.comments } }
+    set { answers.write { $0.comments = newValue } }
+  }
+  var commentPaths: [String] { answers.read { $0.commentPaths } }
+
+  /// Holds Steam's favorites answers until the gate returned is opened.
+  func holdFavorites() -> AnswerGate {
+    let gate = AnswerGate()
+    answers.write { $0.favoritesGate = gate }
+    return gate
+  }
 
   init() throws {
     root = FileManager.default.temporaryDirectory.appendingPathComponent(
@@ -987,17 +1397,42 @@ private final class SourceAnswers: @unchecked Sendable {
     var details: [String: [String: Any]] = [:]
     var profiles: [String: Data] = [:]
     var subscriptionPages: [Int: Data] = [:]
+    var subscriptionsGate: DispatchSemaphore?
+    var subscriptionReads = 0
+    /// Steam's favorites answer, by the `sortmethod` asked for.
+    var favoritePages: [String: Data] = [:]
+    var favoriteOrdersRequested: [String] = []
+    var favoriteProfilesRequested: [String] = []
     var browseSections: [String] = []
     var browsePagesRequested: [Int] = []
     var detailsRequests = 0
     var cookies: [String?] = []
     var renewal = Data(#"{"response":{}}"#.utf8)
     var renewalForms: [String] = []
+    /// What Steam answers a subscribe or unsubscribe with, and each such request.
+    var subscribeAnswer = Data(#"{"success":1}"#.utf8)
+    var subscribeRequests: [(path: String, form: String, cookie: String?)] = []
+    /// What the public comment thread answers, and the paths it was asked for.
+    var comments = Data()
+    var commentPaths: [String] = []
+    var favoritesGate: AnswerGate?
   }
   private let lock = NSLock()
   private var state = State()
   func read<T>(_ body: (State) -> T) -> T { lock.withLock { body(state) } }
   func write(_ body: (inout State) -> Void) { lock.withLock { body(&state) } }
+
+  /// The gate a subscriptions read waits at before it is answered, counting the read.
+  func hold(_ request: URLRequest) -> DispatchSemaphore? {
+    guard let url = request.url,
+      URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+        .contains(where: { $0.name == "browsefilter" && $0.value == "mysubscriptions" }) == true
+    else { return nil }
+    return lock.withLock {
+      state.subscriptionReads += 1
+      return state.subscriptionsGate
+    }
+  }
 
   /// The status and body Steam would answer `request` with.
   func answer(_ request: URLRequest, body: Data) -> (Int, Data) {
@@ -1006,6 +1441,7 @@ private final class SourceAnswers: @unchecked Sendable {
     let value = { (name: String) in query.first { $0.name == name }?.value }
     // `URL.path` drops a trailing slash.
     let path = url.path.hasSuffix("/") ? String(url.path.dropLast()) : url.path
+    if value("browsefilter") == "myfavorites", let gate = read({ $0.favoritesGate }) { gate.hold() }
     return lock.withLock {
       if host == "steamcommunity.com" { state.cookies.append(request.value(forHTTPHeaderField: "Cookie")) }
       switch (host, path) {
@@ -1015,6 +1451,13 @@ private final class SourceAnswers: @unchecked Sendable {
         state.browsePagesRequested.append(page)
         if !state.browseQueue.isEmpty { return (200, state.browseQueue.removeFirst()) }
         return (200, state.browsePages[page] ?? state.browse)
+      case ("steamcommunity.com", "/sharedfiles/subscribe"), ("steamcommunity.com", "/sharedfiles/unsubscribe"):
+        state.subscribeRequests.append(
+          (path, String(decoding: body, as: UTF8.self), request.value(forHTTPHeaderField: "Cookie")))
+        return (200, state.subscribeAnswer)
+      case (_, _) where host == "steamcommunity.com" && path.hasPrefix("/comment/PublishedFile_Public/render/"):
+        state.commentPaths.append(path + "?" + (url.query ?? ""))
+        return (200, state.comments)
       case ("api.steampowered.com", "/IAuthenticationService/GenerateAccessTokenForApp/v1"):
         state.renewalForms.append(String(decoding: body, as: UTF8.self))
         return (200, state.renewal)
@@ -1035,10 +1478,30 @@ private final class SourceAnswers: @unchecked Sendable {
         if value("browsefilter") == "mysubscriptions" {
           return (200, state.subscriptionPages[Int(value("p") ?? "1") ?? 1] ?? Data())
         }
+        if value("browsefilter") == "myfavorites" {
+          let order = value("sortmethod") ?? ""
+          state.favoriteOrdersRequested.append(order)
+          state.favoriteProfilesRequested.append(String(parts[1]))
+          return (200, state.favoritePages[order] ?? Data())
+        }
         return (200, state.profiles[String(parts[1])] ?? Data())
       }
     }
   }
+}
+
+/// Keeps a request at Steam, on the loading thread, until it is opened (or five seconds pass).
+private final class AnswerGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private let opened = DispatchSemaphore(value: 0)
+  private var holding = false
+  var isHolding: Bool { lock.withLock { holding } }
+
+  func hold() {
+    lock.withLock { holding = true }
+    _ = opened.wait(timeout: .now() + 5)
+  }
+  func open() { opened.signal() }
 }
 
 private final class SourceFixtureProtocol: URLProtocol, @unchecked Sendable {
@@ -1060,11 +1523,20 @@ private final class SourceFixtureProtocol: URLProtocol, @unchecked Sendable {
       client?.urlProtocol(self, didFailWithError: URLError(.resourceUnavailable))
       return
     }
-    let (status, data) = answers.answer(request, body: Self.body(of: request))
-    let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
-    client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-    client?.urlProtocol(self, didLoad: data)
-    client?.urlProtocolDidFinishLoading(self)
+    let body = Self.body(of: request)
+    let finish = { [self] in
+      let (status, data) = answers.answer(request, body: body)
+      let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
+      client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+      client?.urlProtocol(self, didLoad: data)
+      client?.urlProtocolDidFinishLoading(self)
+    }
+    // A held read waits off the session's loading thread, so other requests are still answered.
+    guard let gate = answers.hold(request) else { return finish() }
+    DispatchQueue.global().async {
+      gate.wait()
+      finish()
+    }
   }
   override func stopLoading() {}
 

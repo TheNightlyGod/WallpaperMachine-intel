@@ -21,7 +21,7 @@ TEST(MdlSchema, GenMeshIncludesNormals) {
     src.tangents  = { { 1.0f, 0.0f, 0.0f, 1.0f },
                       { 1.0f, 0.0f, 0.0f, 1.0f },
                       { 1.0f, 0.0f, 0.0f, 1.0f } };
-    src.texcoords = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 0.0f, 1.0f } };
+    src.SetStream(0x8, 2, { 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f });
     src.indices   = { { 0, 1, 2 } };
 
     SceneMesh::Submesh submesh;

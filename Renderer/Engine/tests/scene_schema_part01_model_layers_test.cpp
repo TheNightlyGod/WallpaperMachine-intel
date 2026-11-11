@@ -1,6 +1,7 @@
 // Scene file schema, part 1: what the scene parser builds from text layers and model layers
 // (parent wiring, leaf model nodes, cursor targets, material state words, bones).
 #include "support/schema_fixtures.hpp"
+#include "mdl_fixtures.hpp"
 
 #include "Interface/IShaderValueUpdater.h"
 #include "Scene/SceneMaterial.h"
@@ -13,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <bit>
 #include <string>
 #include <vector>
 
@@ -154,6 +156,33 @@ TEST(ModelLayerParse, ModelLayersAreCursorTargetsUnlessTheySayOtherwise)
     EXPECT_FALSE(scene->runtime->NodeCursorTargetOf("nobody").has_value());
 }
 
+// B-D9 (we_ss_reg_ModelLayer 0x140227470): `rootmotion` and `castshadow` are stored per model
+// layer and scripts read and write them through SetModelFlag / ModelFlag. `rootmotion` defaults
+// off; a model casts a shadow unless it says `castshadow: false` (C-6.md probe P-S, ps1 vs ps2).
+TEST(ModelLayerParse, RootMotionAndCastShadowAreRead)
+{
+    ParseRig rig(LeafModelAssets());
+    auto     scene = rig.Parse(QuietScene(Json::array({ ModelObject(1, "plain"),
+                                                         ModelObject(2, "flagged", { { "rootmotion", true }, { "castshadow", false } }) })),
+                           { .live = true });
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto& runtime = *scene->runtime;
+    EXPECT_EQ(runtime.ModelFlag("plain", "rootmotion"), std::optional<bool>(false));
+    EXPECT_EQ(runtime.ModelFlag("plain", "castshadow"), std::optional<bool>(true));
+    EXPECT_EQ(runtime.ModelFlag("flagged", "rootmotion"), std::optional<bool>(true));
+    EXPECT_EQ(runtime.ModelFlag("flagged", "castshadow"), std::optional<bool>(false));
+    EXPECT_FALSE(runtime.ModelFlag("flagged", "perspective").has_value());
+    EXPECT_FALSE(runtime.ModelFlag("nobody", "rootmotion").has_value());
+
+    EXPECT_TRUE(runtime.SetModelFlag("plain", "castshadow", false));
+    EXPECT_EQ(runtime.ModelFlag("plain", "castshadow"), std::optional<bool>(false));
+    EXPECT_TRUE(runtime.SetModelFlag("flagged", "rootmotion", false));
+    EXPECT_EQ(runtime.ModelFlag("flagged", "rootmotion"), std::optional<bool>(false));
+    EXPECT_FALSE(runtime.SetModelFlag("nobody", "rootmotion", true));
+    EXPECT_FALSE(runtime.SetModelFlag("plain", "solid", false));
+}
+
 // ---- perspective scene -------------------------------------------------------------------
 
 // R-1.12 / B-1.12
@@ -207,11 +236,13 @@ TEST(ModelLayerParse, ModelMaterialsDefaultToOpaqueAndDepthTestedAndExplicitStat
     EXPECT_EQ(slots[1]->blenmode, BlendMode::Translucent);
 }
 
-// R-1.14 / B-1.14
+// R-1.14 / B-1.14. Wallpaper Engine matches each word case-sensitively against its table and
+// takes the table's first entry for anything else (`sub_1401587D0`, tables in `sub_1401577E0`):
+// "bogus" and "Additive" both blend as normal.
 TEST(ModelLayerParse, PassStateWordsOutsideTheListsReadAsTheFirstEntry)
 {
-    ParseRig rig(LeafAssetsWith({ { "blending", "normal" }, { "cullmode", "inverted" }, { "depthtest", "greater" }, { "depthwrite", "always" } },
-                                { { "blending", "normal" }, { "cullmode", "nocull" }, { "depthtest", "less" }, { "depthwrite", "enabled" } }));
+    ParseRig rig(LeafAssetsWith({ { "blending", "bogus" }, { "cullmode", "inverted" }, { "depthtest", "greater" }, { "depthwrite", "always" } },
+                                { { "blending", "Additive" }, { "cullmode", "nocull" }, { "depthtest", "less" }, { "depthwrite", "enabled" } }));
     auto     scene = rig.Parse(PerspectiveScene(Json::array({ { { "id", 1 }, { "name", "model" }, { "model", "planet.mdl" } } })));
     ASSERT_NE(scene, nullptr);
     const auto slots = SlotsOf(*scene, "model");
@@ -220,15 +251,37 @@ TEST(ModelLayerParse, PassStateWordsOutsideTheListsReadAsTheFirstEntry)
     EXPECT_FALSE(slots[0]->depth_test);
     EXPECT_FALSE(slots[0]->depth_write);
     EXPECT_EQ(slots[0]->cull_mode, CullMode::Back);
+    EXPECT_EQ(slots[0]->blenmode, BlendMode::Normal);
 
     EXPECT_FALSE(slots[1]->depth_test);
     EXPECT_TRUE(slots[1]->depth_write);
     EXPECT_EQ(slots[1]->cull_mode, CullMode::None);
+    EXPECT_EQ(slots[1]->blenmode, BlendMode::Normal) << "the words are matched case-sensitively";
 
     // Drawn, a pass that does not depth-test writes no depth either.
-    const auto drawn = ResolveSceneDepthState(*slots[1], true);
+    const auto drawn = ResolveSceneDepthState(*slots[1], slots[1]->blenmode, true);
     EXPECT_FALSE(drawn.test);
     EXPECT_FALSE(drawn.write);
+}
+
+// Probe T10 (artifacts/we-parity/probes/texshader2): an image layer whose material names no
+// `blending` writes its fragment as it is, as `normal` does; the enum field starts at its first
+// entry. A missing key is not translucent.
+TEST(ModelLayerParse, AnImageMaterialWithoutABlendingWordBlendsAsNormal)
+{
+    FileMap assets = BasicAssets();
+    PutJson(assets, "/mat.json",
+            { { "passes", Json::array({ { { "shader", "genericimage" }, { "cullmode", "nocull" },
+                                          { "depthtest", "disabled" }, { "depthwrite", "disabled" },
+                                          { "textures", Json::array({ "a.tex" }) } } }) } });
+    ParseRig rig(assets);
+    auto     scene = rig.Parse(QuietScene(Json::array({ { { "id", 1 }, { "name", "img" }, { "image", "image.json" } } })));
+    ASSERT_NE(scene, nullptr);
+    auto* node = FindRootChild(*scene, "img");
+    ASSERT_NE(node, nullptr);
+    ASSERT_NE(node->Mesh(), nullptr);
+    ASSERT_NE(node->Mesh()->Material(), nullptr);
+    EXPECT_EQ(node->Mesh()->Material()->blenmode, BlendMode::Normal);
 }
 
 // B-1.14: the depth rule on materials that do test.
@@ -242,17 +295,28 @@ TEST(ModelLayerParse, DepthStateFollowsTheTargetsDepthAttachment)
     ASSERT_TRUE(slots[0]->depth_test);
     ASSERT_TRUE(slots[0]->depth_write);
 
-    const auto with_depth = ResolveSceneDepthState(*slots[0], true);
+    const auto with_depth = ResolveSceneDepthState(*slots[0], slots[0]->blenmode, true);
     EXPECT_TRUE(with_depth.test);
     EXPECT_TRUE(with_depth.write);
-    const auto without_depth = ResolveSceneDepthState(*slots[0], false);
+    const auto without_depth = ResolveSceneDepthState(*slots[0], slots[0]->blenmode, false);
     EXPECT_FALSE(without_depth.test);
     EXPECT_FALSE(without_depth.write);
 
     ASSERT_TRUE(slots[1]->depth_test);
     ASSERT_FALSE(slots[1]->depth_write);
-    EXPECT_TRUE(ResolveSceneDepthState(*slots[1], true).test);
-    EXPECT_FALSE(ResolveSceneDepthState(*slots[1], true).write);
+    EXPECT_TRUE(ResolveSceneDepthState(*slots[1], slots[1]->blenmode, true).test);
+    EXPECT_FALSE(ResolveSceneDepthState(*slots[1], slots[1]->blenmode, true).write);
+
+    // Wallpaper Engine's device (`sub_140099F60`) gives a draw that blends no depth write
+    // whatever its material says; it still tests. `normal` and `alphatocoverage` write.
+    for (const auto blend : { BlendMode::Translucent, BlendMode::Additive }) {
+        const auto drawn = ResolveSceneDepthState(*slots[0], blend, true);
+        EXPECT_TRUE(drawn.test);
+        EXPECT_FALSE(drawn.write);
+    }
+    for (const auto blend : { BlendMode::Normal, BlendMode::AlphaToCoverage, BlendMode::Disable }) {
+        EXPECT_TRUE(ResolveSceneDepthState(*slots[0], blend, true).write);
+    }
 }
 
 // ---- bones -------------------------------------------------------------------------------
@@ -291,6 +355,49 @@ TEST(ModelLayerParse, BonesReachEveryMaterialAndTheBindPoseIsTheIdentity)
         });
         EXPECT_EQ(calls, 1) << "g_Bones is written once per material, and the identity stands even though no clip has animation 99";
     }
+}
+
+TEST(ModelLayerParse, ImagePuppetsSolveIkButThreeDimensionalModelsKeepForwardKinematics)
+{
+    // The same MDLS chain is routed through both scene object kinds. WE's image composer
+    // (0x1401FDF90) solves it; the model composer (0x14021C480) does not. The v1 model probe
+    // and the target-shifted known-good image puppet distinguish the two paths visibly.
+    mdltest::MeshSpec mesh;
+    mesh.material = "mat/head.json";
+    mesh.flag = mdltest::kSkinned;
+    auto file = mdltest::mdlFile(23, { mesh });
+    std::vector<mdltest::BoneSpec> bones {
+        { "anchor", mdltest::kNone }, { "root", 0 },
+        { "joint", 1, { 8, 6, 0 } }, { "tip", 2, { 8, -6, 0 } }
+    };
+    bones[3].simulation = R"({"ik":true,"ikd":2})";
+    mdltest::SkeletonTail tail;
+    tail.targets = { { "goal", 3, 0, { 12, 5, 0 } } };
+    tail.table = { 0, 0, 10, 10 };
+    tail.groups = { {}, { { 2, { 0.8f, 0.6f, 0 } } }, { { 3, { 0.8f, -0.6f, 0 } } }, {} };
+    tail.chains = { { 1, { 0 }, { { 1, { { 3, 1, std::bit_cast<uint32_t>(20.0f), 0, { 1, 2, 3 } } } } } } };
+    mdltest::writeSkeleton(file, 4, bones, tail, { 1, 3, 3, 3 });
+    file.stamp("MDLA", 0).u8(0);
+    auto assets = PuppetAssets();
+    assets["/puppet.mdl"].assign(reinterpret_cast<const char*>(file.data().data()), file.size());
+    ParseRig rig(std::move(assets));
+    auto scene = rig.Parse(QuietScene(Json::array({
+        { { "id", 1 }, { "name", "model" }, { "model", "puppet.mdl" } },
+        { { "id", 2 }, { "name", "image" }, { "image", "puppet_image.json" } }
+    })), { .live = true });
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    auto* model = scene->runtime->FindPuppetLayer("model");
+    auto* image = scene->runtime->FindPuppetLayer("image");
+    ASSERT_NE(model, nullptr);
+    ASSERT_NE(image, nullptr);
+    model->genFrame(0);
+    image->genFrame(0);
+    ASSERT_EQ(model->modelBones().size(), 4u);
+    ASSERT_EQ(image->modelBones().size(), 4u);
+    EXPECT_NEAR(model->modelBones()[3].translation().x(), 16, 1e-4);
+    EXPECT_NEAR(model->modelBones()[3].translation().y(), 0, 1e-4);
+    EXPECT_LE((image->modelBones()[3].translation() - linalg::Vector3f(12, 5, 0)).squaredNorm(), 0.1f);
 }
 
 } // namespace

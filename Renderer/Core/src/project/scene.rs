@@ -310,6 +310,192 @@ impl Default for SceneFraming {
 }
 
 
+/// Shadow and volumetric quality. Numbers are Wallpaper Engine's
+/// (wallpaper64.exe `sub_14010DF40`): "disabled" 0 … "ultra" 4.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum QualityLevel {
+    Off = 0,
+    Low = 1,
+    #[default]
+    Medium = 2,
+    High = 3,
+    Ultra = 4,
+}
+
+/// Post-processing level, Wallpaper Engine's words disabled / enabled / ultra /
+/// displayhdr. Only Ultra and Display HDR draw HDR bloom; Enabled is LDR bloom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum PostProcessing {
+    Disabled = 0,
+    #[default]
+    Enabled = 2,
+    Ultra = 4,
+    DisplayHdr = 5,
+}
+
+/// The scene quality a scene is parsed with. The defaults are Wallpaper
+/// Engine's first-run "medium" preset (its UI's `getQualityPreset("medium")`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SceneQuality {
+    /// MSAA samples: 0, 2, 4 or 8.
+    pub msaa: u8,
+    pub shadows: QualityLevel,
+    pub volumetrics: QualityLevel,
+    pub reflection: bool,
+    pub post_processing: PostProcessing,
+}
+
+impl Default for SceneQuality {
+    fn default() -> Self {
+        Self {
+            msaa: 0,
+            shadows: QualityLevel::Medium,
+            volumetrics: QualityLevel::Medium,
+            reflection: true,
+            post_processing: PostProcessing::Enabled,
+        }
+    }
+}
+
+impl SceneQuality {
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when `msaa` is not 0, 2, 4 or 8.
+    pub fn validate(self) -> Result<(), EngineError> {
+        if matches!(self.msaa, 0 | 2 | 4 | 8) {
+            Ok(())
+        } else {
+            Err(invalid("msaa must be 0, 2, 4 or 8"))
+        }
+    }
+
+    /// The quality a renderer read-back (`owe_scene_quality`) describes; `None`
+    /// when a value is outside the known sets.
+    #[must_use]
+    pub fn from_raw(msaa: i32, shadows: i32, volumetrics: i32, reflection: bool, post: i32) -> Option<Self> {
+        let level = |value: i32| match value {
+            0 => Some(QualityLevel::Off),
+            1 => Some(QualityLevel::Low),
+            2 => Some(QualityLevel::Medium),
+            3 => Some(QualityLevel::High),
+            4 => Some(QualityLevel::Ultra),
+            _ => None,
+        };
+        let post_processing = match post {
+            0 => PostProcessing::Disabled,
+            2 => PostProcessing::Enabled,
+            4 => PostProcessing::Ultra,
+            5 => PostProcessing::DisplayHdr,
+            _ => return None,
+        };
+        let quality = Self {
+            msaa: u8::try_from(msaa).ok()?,
+            shadows: level(shadows)?,
+            volumetrics: level(volumetrics)?,
+            reflection,
+            post_processing,
+        };
+        quality.validate().ok().map(|()| quality)
+    }
+
+    /// A short stable text for cache keys and logs.
+    #[must_use]
+    pub fn key(self) -> String {
+        format!(
+            "msaa={} shadows={} volumetrics={} reflection={} post={}",
+            self.msaa,
+            self.shadows as i32,
+            self.volumetrics as i32,
+            u8::from(self.reflection),
+            self.post_processing as i32
+        )
+    }
+}
+
+/// Wallpaper Engine's per-wallpaper options (plan decision I2; wallpaper64.exe
+/// `sub_140104B60` builds them, `sub_140181F30` / `sub_140115280` apply them to
+/// a scene). Values are as stored: sliders 0..=100 with 50 unchanged,
+/// `lut_strength` 0..=100, `playback_rate` 10..=200 percent. The default changes
+/// nothing.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SceneUserOptions {
+    pub color_enabled: bool,
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub hue: f32,
+    /// A file stem under `materials/lut`; empty for no image filter.
+    pub lut: String,
+    pub lut_strength: f32,
+    pub flip_horizontal: bool,
+    pub mouse_parallax: bool,
+    /// Percent; a scene runs its clock at `max(rate / 100, 0.1)`.
+    pub playback_rate: f32,
+}
+
+impl Default for SceneUserOptions {
+    fn default() -> Self {
+        Self {
+            color_enabled: false,
+            brightness: 50.0,
+            contrast: 50.0,
+            saturation: 50.0,
+            hue: 50.0,
+            lut: String::new(),
+            lut_strength: 100.0,
+            flip_horizontal: false,
+            mouse_parallax: true,
+            playback_rate: 100.0,
+        }
+    }
+}
+
+impl SceneUserOptions {
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when a slider is outside 0..=100 or not finite, the
+    /// playback rate is outside 10..=200, or `lut` is not a plain file stem
+    /// (1..=64 of `[A-Za-z0-9._-]`, not `.` or `..`).
+    pub fn validate(&self) -> Result<(), EngineError> {
+        let sliders = [self.brightness, self.contrast, self.saturation, self.hue, self.lut_strength];
+        if sliders.iter().any(|value| !value.is_finite() || !(0.0..=100.0).contains(value)) {
+            return Err(invalid("user option sliders must be between 0 and 100"));
+        }
+        if !self.playback_rate.is_finite() || !(10.0..=200.0).contains(&self.playback_rate) {
+            return Err(invalid("the playback rate must be between 10 and 200 percent"));
+        }
+        if !self.lut.is_empty() && !is_plain_lut_name(&self.lut) {
+            return Err(invalid("the image filter must be a plain file name"));
+        }
+        Ok(())
+    }
+
+    /// Whether the options leave the picture, the pointer and the clock as they are.
+    #[must_use]
+    pub fn is_identity(&self) -> bool {
+        let colour_unchanged = !self.color_enabled
+            || [self.brightness, self.contrast, self.saturation, self.hue]
+                .iter()
+                .all(|value| (*value - 50.0).abs() <= f32::EPSILON);
+        let filter_unchanged = self.lut.is_empty() || self.lut_strength <= 0.0;
+        colour_unchanged
+            && filter_unchanged
+            && !self.flip_horizontal
+            && self.mouse_parallax
+            && (self.playback_rate - 100.0).abs() <= f32::EPSILON
+    }
+}
+
+fn is_plain_lut_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name != "."
+        && name != ".."
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct SceneDesc {
@@ -330,6 +516,13 @@ pub struct SceneDesc {
     pub property_override_json: Option<String>,
     pub shader_cache_path: Option<String>,
     pub force_shader_refresh: bool,
+    /// The scene quality settings; a change reloads the scene.
+    pub quality: SceneQuality,
+    /// Folder of the scripts' `localStorage` (plan decision I3); `None` keeps it in memory.
+    pub scene_storage_dir: Option<String>,
+    /// Wallpaper Engine's per-wallpaper options; a change reloads the scene, and an
+    /// edit that is not saved yet is shown through `OweScene::preview_user_options`.
+    pub user_options: SceneUserOptions,
     /// Set when `with_audio_volume` was given a value the volume type refuses;
     /// `validate` reports it.
     rejected_audio_volume: bool,
@@ -384,6 +577,9 @@ impl SceneDesc {
             property_override_json: None,
             shader_cache_path: None,
             force_shader_refresh: false,
+            quality: SceneQuality::default(),
+            scene_storage_dir: None,
+            user_options: SceneUserOptions::default(),
         }
     }
 
@@ -411,6 +607,9 @@ impl SceneDesc {
             property_override_json: None,
             shader_cache_path: None,
             force_shader_refresh: false,
+            quality: SceneQuality::default(),
+            scene_storage_dir: None,
+            user_options: SceneUserOptions::default(),
             rejected_audio_volume: false,
         }
     }
@@ -431,6 +630,8 @@ impl SceneDesc {
             self.scaling_factor,
             self.framing,
         )?;
+        self.quality.validate()?;
+        self.user_options.validate()?;
         if self.rejected_audio_volume {
             return Err(invalid(AUDIO_VOLUME_MESSAGE));
         }
@@ -500,6 +701,24 @@ impl SceneDesc {
     }
 
     #[must_use]
+    pub fn with_quality(mut self, quality: SceneQuality) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    #[must_use]
+    pub fn with_scene_storage_dir(mut self, dir: impl Into<String>) -> Self {
+        self.scene_storage_dir = Some(dir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_user_options(mut self, user_options: SceneUserOptions) -> Self {
+        self.user_options = user_options;
+        self
+    }
+
+    #[must_use]
     pub fn with_force_shader_refresh(mut self, force_shader_refresh: bool) -> Self {
         self.force_shader_refresh = force_shader_refresh;
         self
@@ -530,6 +749,7 @@ impl SceneDesc {
             )
             .property_override_json(self.property_override_json.clone())
             .force_refresh(self.force_shader_refresh)
+            .scene_quality_key(self.quality.key())
             .build()?;
         let decision = ShaderCacheDecision::prepare(&inputs)?;
         Ok(Some(decision.scene_cache_path().to_string_lossy().into_owned()))
@@ -562,6 +782,9 @@ impl SceneDesc {
             && switches == other_switches
             && self.audio_volume == other.audio_volume
             && self.property_override_json == other.property_override_json
+            && self.quality == other.quality
+            && self.scene_storage_dir == other.scene_storage_dir
+            && self.user_options == other.user_options
     }
 
     /// Called once the renderer has rebuilt its shader cache, so a later
@@ -590,6 +813,12 @@ pub struct SceneTemplate {
     pub property_override_json: Option<String>,
     pub shader_cache_path: Option<String>,
     pub force_shader_refresh: bool,
+    /// The scene quality settings; a change reloads the scene.
+    pub quality: SceneQuality,
+    /// Folder of the scripts' `localStorage` (plan decision I3); `None` keeps it in memory.
+    pub scene_storage_dir: Option<String>,
+    /// Wallpaper Engine's per-wallpaper options; a change reloads the scene.
+    pub user_options: SceneUserOptions,
 }
 
 impl SceneTemplate {
@@ -610,6 +839,9 @@ impl SceneTemplate {
             property_override_json: None,
             shader_cache_path: None,
             force_shader_refresh: false,
+            quality: SceneQuality::default(),
+            scene_storage_dir: None,
+            user_options: SceneUserOptions::default(),
         }
     }
 
@@ -631,6 +863,9 @@ impl SceneTemplate {
             property_override_json,
             shader_cache_path,
             force_shader_refresh,
+            quality,
+            scene_storage_dir,
+            user_options,
             ..
         } = scene;
         Self {
@@ -648,6 +883,9 @@ impl SceneTemplate {
             property_override_json: property_override_json.clone(),
             shader_cache_path: shader_cache_path.clone(),
             force_shader_refresh: *force_shader_refresh,
+            quality: *quality,
+            scene_storage_dir: scene_storage_dir.clone(),
+            user_options: user_options.clone(),
         }
     }
 
@@ -671,6 +909,9 @@ impl SceneTemplate {
         scene.property_override_json.clone_from(&self.property_override_json);
         scene.shader_cache_path.clone_from(&self.shader_cache_path);
         scene.force_shader_refresh = self.force_shader_refresh;
+        scene.quality = self.quality;
+        scene.scene_storage_dir.clone_from(&self.scene_storage_dir);
+        scene.user_options.clone_from(&self.user_options);
         scene
     }
 
@@ -683,7 +924,9 @@ impl SceneTemplate {
             self.fps,
             self.scaling_factor,
             self.framing,
-        )
+        )?;
+        self.quality.validate()?;
+        self.user_options.validate()
     }
 }
 
@@ -704,6 +947,9 @@ pub struct SceneTemplateBuilder {
     property_override_json: Option<String>,
     shader_cache_path: Option<String>,
     force_shader_refresh: bool,
+    quality: SceneQuality,
+    scene_storage_dir: Option<String>,
+    user_options: SceneUserOptions,
 }
 
 impl SceneTemplateBuilder {
@@ -787,6 +1033,24 @@ impl SceneTemplateBuilder {
         self
     }
 
+    #[must_use]
+    pub fn quality(mut self, quality: SceneQuality) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    #[must_use]
+    pub fn scene_storage_dir(mut self, dir: impl Into<String>) -> Self {
+        self.scene_storage_dir = Some(dir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn user_options(mut self, user_options: SceneUserOptions) -> Self {
+        self.user_options = user_options;
+        self
+    }
+
     /// # Errors
     ///
     /// Returns `InvalidInput` for the first problem found; a bad audio volume is
@@ -807,6 +1071,9 @@ impl SceneTemplateBuilder {
             property_override_json,
             shader_cache_path,
             force_shader_refresh,
+            quality,
+            scene_storage_dir,
+            user_options,
         } = self;
         let (audio_volume, volume_rejected) = match AudioVolume::try_from(requested_volume) {
             Ok(volume) => (volume, false),
@@ -827,6 +1094,9 @@ impl SceneTemplateBuilder {
             property_override_json,
             shader_cache_path,
             force_shader_refresh,
+            quality,
+            scene_storage_dir,
+            user_options,
         };
         template.validate()?;
         if volume_rejected {
@@ -904,6 +1174,9 @@ pub struct SceneDescBuilder {
     property_override_json: Option<String>,
     shader_cache_path: Option<String>,
     force_shader_refresh: bool,
+    quality: SceneQuality,
+    scene_storage_dir: Option<String>,
+    user_options: SceneUserOptions,
 }
 
 impl SceneDescBuilder {
@@ -987,6 +1260,24 @@ impl SceneDescBuilder {
         self
     }
 
+    #[must_use]
+    pub fn quality(mut self, quality: SceneQuality) -> Self {
+        self.quality = quality;
+        self
+    }
+
+    #[must_use]
+    pub fn scene_storage_dir(mut self, dir: impl Into<String>) -> Self {
+        self.scene_storage_dir = Some(dir.into());
+        self
+    }
+
+    #[must_use]
+    pub fn user_options(mut self, user_options: SceneUserOptions) -> Self {
+        self.user_options = user_options;
+        self
+    }
+
     /// # Errors
     ///
     /// Returns `InvalidInput` for the first problem found in the wallpaper
@@ -1009,12 +1300,17 @@ impl SceneDescBuilder {
             property_override_json,
             shader_cache_path,
             force_shader_refresh,
+            quality,
+            scene_storage_dir,
+            user_options,
         } = self;
         let (audio_volume, volume_rejected) = match AudioVolume::try_from(requested_volume) {
             Ok(volume) => (volume, false),
             Err(_) => (full_volume(), true),
         };
         check_wallpaper_fields(&scene_path, fps, scaling_factor, framing)?;
+        quality.validate()?;
+        user_options.validate()?;
         if volume_rejected {
             return Err(invalid(AUDIO_VOLUME_MESSAGE));
         }
@@ -1034,6 +1330,9 @@ impl SceneDescBuilder {
             property_override_json,
             shader_cache_path,
             force_shader_refresh,
+            quality,
+            scene_storage_dir,
+            user_options,
             rejected_audio_volume: false,
         })
     }

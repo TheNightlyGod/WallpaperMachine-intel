@@ -12,9 +12,7 @@ enum DisplayGeometry {
     /// `nil` when no attached screen has that id, for example a display that was unplugged.
     @MainActor static func screen(displayID: String, title: String) -> NSScreen? {
         guard let physicalID = ResolvedDisplayTitles.liveDisplayID(displayID, title: title) else { return nil }
-        return NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == physicalID
-        }
+        return SystemDisplays.screen(for: physicalID)
     }
 
     /// Width over height of the display, within `aspectRange`; `nil` when the screen is unknown.

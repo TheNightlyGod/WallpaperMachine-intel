@@ -62,6 +62,8 @@ fn sample_reflection() -> Reflection {
             descriptor: DescriptorKind::UniformBuffer,
             stages: StageMask::BOTH,
             count: 1,
+            image: Default::default(),
+            comparison: false,
         }],
         uniform_blocks: vec![UniformBlock {
             name: "GlobalUniforms".into(),
@@ -76,6 +78,7 @@ fn sample_reflection() -> Reflection {
             format: VertexFormat::new(VertexScalar::Float, 3).unwrap(),
         }],
         active_texture_slots: BTreeSet::from([0]),
+        ..Reflection::default()
     }
 }
 

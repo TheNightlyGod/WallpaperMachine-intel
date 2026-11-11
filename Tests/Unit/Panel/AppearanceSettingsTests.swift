@@ -53,12 +53,15 @@ final class AppearanceSettingsTests: PanelTestCase {
       settings.applyTheme { try controller.setThemeAccent("#B43271") }
       settings.applyTheme { try controller.setThemeTone(.warm) }
       settings.applyTheme { try controller.setThemeIcon(.night) }
+      settings.applyTheme { try controller.setThemeHalloween(.off) }
       XCTAssertEqual(controller.themePreferences.mode, .dark)
       XCTAssertEqual(controller.themePreferences.accent, "#b43271", "The accent is kept in lower case")
       XCTAssertEqual(controller.themePreferences.tone, .warm)
       XCTAssertEqual(controller.themePreferences.icon, .night)
+      XCTAssertEqual(controller.themePreferences.halloween, .off)
       let saved = try XCTUnwrap(panel.defaults.dictionary(forKey: AppThemeStore.defaultsKey) as? [String: String])
-      XCTAssertEqual(saved, ["mode": "dark", "accent": "#b43271", "tone": "warm", "icon": "night"])
+      XCTAssertEqual(
+        saved, ["mode": "dark", "accent": "#b43271", "tone": "warm", "icon": "night", "halloween": "off"])
 
       settings.applyTheme { controller.resetTheme() }
       XCTAssertEqual(controller.themePreferences, AppThemePreferences())
@@ -73,6 +76,8 @@ final class AppearanceSettingsTests: PanelTestCase {
     XCTAssertEqual(AppThemePreferences.Mode.allCases.map(\.title), ["System (Auto)", "Light", "Dark"])
     XCTAssertEqual(AppThemePreferences.Tone.allCases.map(\.title), ["Neutral", "Warm", "Cool"])
     XCTAssertEqual(AppThemePreferences.Icon.allCases.map(\.title), ["Minimal", "Day", "Night"])
+    XCTAssertEqual(
+      AppThemePreferences.Halloween.allCases.map(\.title), ["Halloween week", "Always", "Off"])
     for appearance in [PanelAppearance.light, .dark] {
       let tones = AppThemePreferences.Tone.allCases.map {
         SurfacePalette.miniature(tone: $0, appearance: appearance).background
@@ -82,12 +87,52 @@ final class AppearanceSettingsTests: PanelTestCase {
     XCTAssertNotEqual(
       SurfacePalette.miniature(tone: .neutral, appearance: .light).background,
       SurfacePalette.miniature(tone: .neutral, appearance: .dark).background)
+    for appearance in [PanelAppearance.light, .dark] {
+      let halloween = SurfacePalette.miniature(season: .halloween, appearance: appearance)
+      XCTAssertNotNil(halloween.moon, "The Halloween card has its moon")
+      for tone in AppThemePreferences.Tone.allCases {
+        let everyday = SurfacePalette.miniature(tone: tone, appearance: appearance)
+        XCTAssertNil(everyday.moon)
+        XCTAssertNotEqual(halloween.background, everyday.background, "\(tone) \(appearance)")
+      }
+    }
+  }
+
+  func testWhileTheHalloweenLookIsOnTheWindowAndTheDockWearItAndTheChoicesUnderItAreKept() async throws {
+    try await withRecordingPanel { panel, _ in
+      let controller = panel.controller
+      let settings = controller.settings
+      settings.applyTheme { try controller.setThemeAccent("#30d158") }
+      settings.applyTheme { try controller.setThemeIcon(.night) }
+      XCTAssertNil(controller.season, "The panel fixture's date is outside Halloween week")
+      XCTAssertEqual(controller.dockIconName, AppThemePreferences.Icon.night.imageName)
+
+      settings.applyTheme { try controller.setThemeHalloween(.always) }
+      XCTAssertEqual(controller.season, .halloween)
+      XCTAssertEqual(controller.dockIconName, Season.halloween.dockImageName)
+      XCTAssertEqual(controller.themePreferences.accent, "#30d158", "The person's accent is kept")
+      XCTAssertEqual(controller.themePreferences.icon, .night, "The person's icon is kept")
+
+      settings.applyTheme { controller.resetTheme() }
+      XCTAssertNil(controller.season)
+      XCTAssertEqual(controller.dockIconName, AppThemePreferences.Icon.day.imageName)
+    }
   }
 
   func testEveryAppIconTheCardsShowIsInTheAssetCatalogAndLoadsForTheDock() throws {
     for icon in AppThemePreferences.Icon.allCases {
       XCTAssertNotNil(NSImage(named: NSImage.Name(icon.imageName)), "\(icon.imageName) is not in the asset catalog")
       XCTAssertNoThrow(try icon.image(), "\(icon) must load as the Dock icon")
+    }
+  }
+
+  func testEveryPictureTheHalloweenLookDrawsIsInTheAssetCatalog() {
+    let names =
+      [Season.halloween.dockImageName, SeasonHorizon.flock(.halloween)]
+      + SeasonHorizon.pieces(.halloween).map(\.name)
+      + [SeasonalArt.emptyLibrary, .noResults].map { $0.imageName(in: .halloween) }
+    for name in names {
+      XCTAssertNotNil(NSImage(named: NSImage.Name(name)), "\(name) is not in the asset catalog")
     }
   }
 

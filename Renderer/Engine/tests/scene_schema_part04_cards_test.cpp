@@ -435,7 +435,11 @@ TEST(PuppetAttachmentFollowing, TheAttachmentUsesTheSamePoseAsTheSkinnedDrawAndK
     for (int column = 0; column < 4; ++column) {
         for (int row = 0; row < 4; ++row) later(row, column) = last_bones[static_cast<std::size_t>(column * 4 + row)];
     }
-    const linalg::Matrix4d moved_pose = rig.Pose(25, 35, 0.75 * kQuarterTurn, 1.75, 2.5);
+    // Key frames are blended by nlerp (B-D4, 0x1401F89A0), so three quarters of the way from 0
+    // to a quarter turn is the angle of normalize(0.25·q0 + 0.75·q1), not 0.75 of the turn.
+    const double     half_turn  = 0.5 * kQuarterTurn;
+    const double     nlerp_turn = 2.0 * std::atan2(0.75 * std::sin(half_turn), 0.25 + 0.75 * std::cos(half_turn));
+    const linalg::Matrix4d moved_pose = rig.Pose(25, 35, nlerp_turn, 1.75, 2.5);
     EXPECT_TRUE(later.isApprox(moved_pose.cast<float>(), 1e-5f));
     rig.child->UpdateTrans();
     expected = rig.parent->ModelTrans() * (moved_pose * rig.attachment) * Moved(4, 6, 0);

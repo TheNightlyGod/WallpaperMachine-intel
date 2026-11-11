@@ -7,6 +7,9 @@ Scene.cpp
 SceneUpdateDemand.cpp
 SceneResolution.cpp
 SceneCamera.cpp
+SceneShadows.cpp
+SceneVolumetrics.cpp
+SceneReflection.cpp
 SceneImageEffectLayer.cpp
 SceneIndexArray.cpp
 SceneNode.cpp

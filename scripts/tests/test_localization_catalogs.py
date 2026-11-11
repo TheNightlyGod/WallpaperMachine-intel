@@ -8,39 +8,25 @@ used as format strings: a translation must take the same arguments as its key, a
 `%` must be escaped exactly where Foundation reads the string as a format. See
 docs/localization.md.
 """
-from collections import Counter
 import json
 from pathlib import Path
 import re
+import sys
 import unittest
 
-ROOT = Path(__file__).resolve().parents[2]
-SOURCE_LANGUAGE = "en"
+SCRIPTS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SCRIPTS))
+
+from lib.localization import ARGUMENT, SOURCE_LANGUAGE, arguments, stray_percent, swift_languages  # noqa: E402
+
+ROOT = SCRIPTS.parent
 CATALOGS = [
     ROOT / "App/Resources/Localizable.xcstrings",
     ROOT / "Extension/Localizable.xcstrings",
 ]
-# A format argument as the catalogs write one: `%@`, `%lld`, `%d`, `%u`, `%f`, with an optional
-# position (`%2$@`). No flags or widths: those never appear, and without them a raw `% o` in
-# "1% of a battery" is not mistaken for an argument.
-ARGUMENT = re.compile(r"%(?:(\d+)\$)?((?:hh|h|ll|l|z|j|t|q)?[@diuxXfs])")
 # `${name}` is how App Intents parameter summaries refer to a parameter; it is not a leftover.
 PLACEHOLDER = re.compile(r"(?<!\$)\{\w+\}")
 SHOWN = 8
-
-
-def swift_languages():
-    """Tags of `AppLanguage.supported`, English first, in picker order."""
-    source = (ROOT / "App/Services/Localization/AppLanguage.swift").read_text()
-    body = source[source.index("static let supported"):]
-    body = body[body.index("= [") + 3:]
-    body = body[:body.index("]")]
-    tags = []
-    for line in body.splitlines():
-        if re.match(r"\s*english,", line):
-            tags.append(SOURCE_LANGUAGE)
-        tags.extend(re.findall(r'AppLanguage\(tag: "([^"]+)"', line))
-    return tags
 
 
 def load(path):
@@ -56,16 +42,6 @@ def load(path):
         return seen
 
     return json.loads(path.read_text(), object_pairs_hook=pairs), duplicates
-
-
-def arguments(text):
-    """Multiset of argument types in a string, positions ignored (`%1$@` and `%@` agree)."""
-    return Counter(kind for _, kind in ARGUMENT.findall(text.replace("%%", "")))
-
-
-def stray_percent(text):
-    """A `%` that is neither an escaped `%%` nor an argument; Foundation misreads it in a format."""
-    return "%" in ARGUMENT.sub("", text.replace("%%", ""))
 
 
 def values(entry):

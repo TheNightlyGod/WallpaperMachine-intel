@@ -31,7 +31,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     func enqueue(_ id: String) throws -> WorkshopDownload {
       let requested = WorkshopItem(
@@ -114,7 +114,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     let executable = root.appendingPathComponent("runtime/steamcmd")
     for id in ["1", "2"] {
       manager.start(
@@ -159,7 +159,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     for id in ["123456", "234567"] {
       let requested = WorkshopItem(
         id: id, title: id, creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 0,
@@ -194,7 +194,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 2)
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 2, downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     let jobs = try ["1", "2", "3", "4"].map { id in
       manager.start(
@@ -248,6 +248,55 @@ final class DownloadQueueTests: DownloaderTestCase {
     }
   }
 
+  /// **Download next** moves a waiting job ahead of the other waiting ones, never ahead of one
+  /// that runs, and the saved queue keeps the new order.
+  func testDownloadNextStartsAWaitingJobAtTheNextFreeSlot() async throws {
+    let root = try makeParallelRuntime()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let manager = WorkshopDownloadManager(
+      sessionDirectory: root.appendingPathComponent("SteamSession"),
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1, downloadRegion: { .steamsChoice })
+    let queueFolder = root.appendingPathComponent("Queue", isDirectory: true)
+    manager.configurePersistence(at: queueFolder)
+    let jobs = try ["1", "2", "3", "4"].map { id in
+      manager.start(
+        item: WorkshopItem(
+          id: id, title: "Batch \(id)", creator: "Test", summary: "", previewURL: nil,
+          tags: ["Video"], size: 0, subscriptions: 0),
+        username: "localtest", executable: root.appendingPathComponent("runtime/steamcmd"),
+        library: root.appendingPathComponent("Library")
+      ) {}
+      return try XCTUnwrap(manager.download(for: id))
+    }
+    let started = { (id: String) in
+      FileManager.default.fileExists(atPath: root.appendingPathComponent("running-\(id)").path)
+    }
+    do {
+      try await waitUntil { jobs[0].worker.prompt == .password }
+      XCTAssertFalse(manager.canPrioritize(jobs[0]), "a running job is not in line")
+      XCTAssertFalse(manager.canPrioritize(jobs[1]), "the first waiting job is already next")
+      XCTAssertTrue(manager.canPrioritize(jobs[3]))
+
+      manager.prioritize(jobs[3])
+      XCTAssertEqual(manager.downloads.map(\.id), ["1", "4", "2", "3"])
+      XCTAssertFalse(manager.canPrioritize(jobs[3]))
+      let saved = try JSONSerialization.jsonObject(
+        with: Data(contentsOf: queueFolder.appendingPathComponent("queue.json"))) as? [[String: Any]]
+      XCTAssertEqual(saved?.compactMap { $0["id"] as? String }, ["1", "4", "2", "3"])
+
+      jobs[0].worker.submitSecret("local-password")
+      try await waitUntil { started("1") }
+      try Data().write(to: root.appendingPathComponent("release-1"))
+      try await waitUntil { started("4") }
+      XCTAssertFalse(started("2"), "the moved job took the free slot")
+      for id in ["4", "2", "3"] { try Data().write(to: root.appendingPathComponent("release-\(id)")) }
+      try await waitUntil { !manager.isRunning }
+    } catch {
+      await manager.shutdown()
+      throw error
+    }
+  }
+
   /// With a sign-in already saved, a batch does not wait for its first job to get through
   /// Steam's login: every job restores the saved sign-in itself and they start together.
   func testSavedSignInStartsAWholeBatchAtOnceWithoutWaitingForTheFirstLogin() async throws {
@@ -255,7 +304,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     func enqueue(_ id: String) throws -> WorkshopDownload {
       manager.start(
@@ -299,7 +348,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1)
+      runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1, downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     func enqueue(_ id: String) throws -> WorkshopDownload {
       manager.start(
@@ -369,7 +418,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     var imported = Set<String>()
     let jobs = try ["1", "2"].map { id in
       manager.start(
@@ -430,7 +479,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     defer { try? FileManager.default.removeItem(at: root) }
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     for id in ["1", "2", "3"] {
       let requested = WorkshopItem(
         id: id, title: id, creator: "Test", summary: "", previewURL: nil, tags: ["Video"], size: 0,
@@ -442,7 +491,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     }
     do {
       try await waitUntil { manager.download(for: "2")?.worker.prompt == .password }
-      XCTAssertTrue(manager.download(for: "1")?.worker.canRetryAuthentication == true)
+      XCTAssertTrue(manager.download(for: "1")?.steamCMD?.canRetryAuthentication == true)
       XCTAssertTrue(manager.download(for: "3")?.isQueued == true)
       await manager.shutdown()
       XCTAssertFalse(manager.isRunning)
@@ -466,7 +515,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     try setSessionMode("cancel", in: root)
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
-      runtimeProvider: ShellRuntimeProvider())
+      runtimeProvider: ShellRuntimeProvider(), downloadRegion: { .steamsChoice })
     manager.start(
       item: item, username: "localtest",
       executable: root.appendingPathComponent("runtime/steamcmd"),
@@ -548,7 +597,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     do {
       let manager = WorkshopDownloadManager(
         sessionDirectory: root.appendingPathComponent("SteamSession"),
-        runtimeProvider: ShellRuntimeProvider(), wakeCenter: center)
+        runtimeProvider: ShellRuntimeProvider(), wakeCenter: center, downloadRegion: { .steamsChoice })
       XCTAssertEqual(center.added, 1)
       XCTAssertEqual(center.removed, 0)
       XCTAssertTrue(manager.downloads.isEmpty)
@@ -565,7 +614,7 @@ final class DownloadQueueTests: DownloaderTestCase {
     let manager = WorkshopDownloadManager(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
       runtimeProvider: ShellRuntimeProvider(), maximumConcurrentDownloads: 1,
-      networkMonitorFactory: { FixtureNetworkMonitor() }, wakeCenter: center)
+      networkMonitorFactory: { FixtureNetworkMonitor() }, wakeCenter: center, downloadRegion: { .steamsChoice })
     func enqueue(_ id: String) throws -> WorkshopDownload {
       manager.start(
         item: WorkshopItem(
@@ -582,10 +631,10 @@ final class DownloadQueueTests: DownloaderTestCase {
       try await authenticate(running.worker, guardCode: false)
       try await waitUntil { running.worker.phase == .transferring }
       XCTAssertTrue(waiting.isQueued)
-      XCTAssertNil(running.worker.resumedAt)
+      XCTAssertNil(running.steamCMD?.resumedAt)
       center.post(name: NSWorkspace.didWakeNotification, object: nil)
-      try await waitUntil { running.worker.resumedAt != nil }
-      XCTAssertNil(waiting.worker.resumedAt)
+      try await waitUntil { running.steamCMD?.resumedAt != nil }
+      XCTAssertNil(waiting.steamCMD?.resumedAt)
       XCTAssertTrue(waiting.isQueued)
       await manager.shutdown()
     } catch {

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use wallpaper_core::project::ScalingMode;
+use wallpaper_core::project::{PostProcessing, QualityLevel, ScalingMode, SceneQuality};
 use wallpaper_core::{DisplayIdentity, DisplaySelector};
 
 use super::{Presence, read_frame_rate, resolve_frame_rate};
@@ -50,6 +50,11 @@ impl Default for AppConfig {
 pub struct GeneralCfg {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_selected_wallpaper: Option<String>,
+    /// The user's own Play/Pause: set when they pause every wallpaper, cleared when they
+    /// play again. Power rules and presentation never write it. The next launch pauses
+    /// again once its first frame is up (`pending_user_pause_after_initial_frame`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +93,10 @@ pub struct QualityCfg {
     pub scene_optimization_enabled: bool,
     pub scene_on_demand_enabled: bool,
     pub scene_resolution: SceneResolutionCfg,
+    /// `[quality.scene]`: Wallpaper Engine's scene quality words.
+    pub scene: SceneQualityCfg,
+    /// MetalFX upscaling of a scene drawn below full resolution. Off by default.
+    pub metalfx_upscaling_enabled: bool,
 }
 
 impl Default for QualityCfg {
@@ -100,6 +109,142 @@ impl Default for QualityCfg {
             scene_optimization_enabled: true,
             scene_on_demand_enabled: false,
             scene_resolution: SceneResolutionCfg::default(),
+            scene: SceneQualityCfg::default(),
+            metalfx_upscaling_enabled: false,
+        }
+    }
+}
+
+/// A word of `[quality.scene]`: Wallpaper Engine's own config words, read the way
+/// wallpaper64.exe `sub_14010DF40` reads them (an unknown word takes that
+/// function's fallback and is logged; the file still loads).
+macro_rules! quality_word {
+    ($name:ident, $fallback:ident, { $($variant:ident => $word:literal),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum $name { $($variant),+ }
+
+        impl Default for $name {
+            fn default() -> Self { Self::$fallback }
+        }
+
+        impl $name {
+            #[must_use]
+            pub fn word(self) -> &'static str {
+                match self { $(Self::$variant => $word),+ }
+            }
+
+            #[must_use]
+            pub fn from_word(word: &str) -> Option<Self> {
+                match word { $($word => Some(Self::$variant),)+ _ => None }
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                serializer.serialize_str(self.word())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                let value = serde_json::Value::deserialize(deserializer).unwrap_or(serde_json::Value::Null);
+                let parsed = value.as_str().and_then(Self::from_word);
+                if parsed.is_none() {
+                    log::warn!(
+                        "unknown {} word {value}; using {}",
+                        stringify!($name),
+                        Self::$fallback.word()
+                    );
+                }
+                Ok(parsed.unwrap_or(Self::$fallback))
+            }
+        }
+    };
+}
+
+// MSAA: only "x2"/"x4"/"x8" turn it on in WE; anything else is none.
+quality_word!(MsaaCfg, None, { None => "none", X2 => "x2", X4 => "x4", X8 => "x8" });
+// Shadows and volumetrics: an unknown word is medium in WE.
+quality_word!(QualityLevelCfg, Medium, {
+    Off => "disabled", Low => "low", Medium => "medium", High => "high", Ultra => "ultra",
+});
+// Post-processing: only "disabled", "ultra" and "displayhdr" are told apart; the
+// rest is LDR bloom ("enabled").
+quality_word!(PostProcessingCfg, Enabled, {
+    Disabled => "disabled", Enabled => "enabled", Ultra => "ultra", DisplayHdr => "displayhdr",
+});
+
+/// `[quality.scene]`. Defaults are Wallpaper Engine's first-run "medium" preset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SceneQualityCfg {
+    pub msaa: MsaaCfg,
+    pub shadows: QualityLevelCfg,
+    pub volumetrics: QualityLevelCfg,
+    pub reflection: bool,
+    pub post_processing: PostProcessingCfg,
+}
+
+impl Default for SceneQualityCfg {
+    fn default() -> Self {
+        Self::from_scene(SceneQuality::default())
+    }
+}
+
+impl SceneQualityCfg {
+    #[must_use]
+    pub fn to_scene(self) -> SceneQuality {
+        let level = |value: QualityLevelCfg| match value {
+            QualityLevelCfg::Off => QualityLevel::Off,
+            QualityLevelCfg::Low => QualityLevel::Low,
+            QualityLevelCfg::Medium => QualityLevel::Medium,
+            QualityLevelCfg::High => QualityLevel::High,
+            QualityLevelCfg::Ultra => QualityLevel::Ultra,
+        };
+        SceneQuality {
+            msaa: match self.msaa {
+                MsaaCfg::None => 0,
+                MsaaCfg::X2 => 2,
+                MsaaCfg::X4 => 4,
+                MsaaCfg::X8 => 8,
+            },
+            shadows: level(self.shadows),
+            volumetrics: level(self.volumetrics),
+            reflection: self.reflection,
+            post_processing: match self.post_processing {
+                PostProcessingCfg::Disabled => PostProcessing::Disabled,
+                PostProcessingCfg::Enabled => PostProcessing::Enabled,
+                PostProcessingCfg::Ultra => PostProcessing::Ultra,
+                PostProcessingCfg::DisplayHdr => PostProcessing::DisplayHdr,
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn from_scene(quality: SceneQuality) -> Self {
+        let level = |value: QualityLevel| match value {
+            QualityLevel::Off => QualityLevelCfg::Off,
+            QualityLevel::Low => QualityLevelCfg::Low,
+            QualityLevel::Medium => QualityLevelCfg::Medium,
+            QualityLevel::High => QualityLevelCfg::High,
+            QualityLevel::Ultra => QualityLevelCfg::Ultra,
+        };
+        Self {
+            msaa: match quality.msaa {
+                2 => MsaaCfg::X2,
+                4 => MsaaCfg::X4,
+                8 => MsaaCfg::X8,
+                _ => MsaaCfg::None,
+            },
+            shadows: level(quality.shadows),
+            volumetrics: level(quality.volumetrics),
+            reflection: quality.reflection,
+            post_processing: match quality.post_processing {
+                PostProcessing::Disabled => PostProcessingCfg::Disabled,
+                PostProcessing::Enabled => PostProcessingCfg::Enabled,
+                PostProcessing::Ultra => PostProcessingCfg::Ultra,
+                PostProcessing::DisplayHdr => PostProcessingCfg::DisplayHdr,
+            },
         }
     }
 }
@@ -108,6 +253,10 @@ impl Default for QualityCfg {
 #[serde(default)]
 pub struct ExperimentalCfg {
     pub scene_video_plane_sampling: bool,
+    /// Draw only the part of an SDR scene at Display resolution that the display shows,
+    /// instead of its whole canvas-cover layout cropped. Off by default: it is not
+    /// byte-identical to drawing the whole layout.
+    pub scene_display_framing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

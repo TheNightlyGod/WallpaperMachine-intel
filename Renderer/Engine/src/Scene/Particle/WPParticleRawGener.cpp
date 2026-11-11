@@ -46,6 +46,8 @@ struct Target {
     uint64_t          quads { 0 };       // quads written so far
     uint64_t          wanted { 0 };      // quads asked for, written or not
     bool              thick { false };
+    /// Vertices of the strip the geometry stage emits for one rope record; 0 for quads.
+    uint32_t          strip { 0 };
 };
 
 /// Stores one quad of four vertices, `data` holding `floats` for each.
@@ -53,6 +55,40 @@ void StoreQuad(Target& t, const float* data) {
     t.vertices->SetVertexs(static_cast<std::size_t>(t.quads) * 4,
                            std::span<const float>(data, t.floats * 4));
     ++t.quads;
+}
+
+/// Stores one rope record as the `t.strip` vertices its geometry stage keeps, `data`
+/// holding `floats` for each; `t.quads` counts records.
+void StoreStrip(Target& t, const float* data) {
+    t.vertices->SetVertexs(static_cast<std::size_t>(t.quads) * t.strip,
+                           std::span<const float>(data, t.floats * t.strip));
+    ++t.quads;
+}
+
+/// Extends the index data to name `records` strips of `strip` vertices, in the order D3D
+/// draws a triangle strip: triangle k is (k, k+1, k+2), every odd one with its first two
+/// swapped. Written once and only ever extended.
+void ExtendStripIndices(SceneIndexArray& indices, uint64_t records, uint32_t strip) {
+    const bool     wide        = indices.Width() == SceneIndexWidth::UInt32;
+    const uint64_t per_record  = 3ull * (strip - 2);           // indices; even, as strip is
+    const uint64_t slots       = wide ? per_record : per_record / 2;
+    thread_local std::vector<uint32_t> wide_pattern;
+    thread_local std::vector<uint16_t> half_pattern;
+    for (uint64_t written = indices.DataCount() / slots; written < records; ++written) {
+        const uint64_t base = written * strip;
+        wide_pattern.clear();
+        for (uint32_t k = 0; k + 2 < strip; ++k) {
+            const uint64_t a = base + k + (k % 2), b = base + k + 1 - (k % 2), c = base + k + 2;
+            wide_pattern.insert(wide_pattern.end(), { static_cast<uint32_t>(a), static_cast<uint32_t>(b),
+                                                      static_cast<uint32_t>(c) });
+        }
+        if (wide) {
+            indices.Assign(static_cast<std::size_t>(written * per_record), wide_pattern);
+        } else {
+            half_pattern.assign(wide_pattern.begin(), wide_pattern.end());
+            indices.AssignHalf(static_cast<std::size_t>(written * per_record), half_pattern);
+        }
+    }
 }
 
 /// Extends the index data to name `quads` quads: vertices (0,1,3) and (1,2,3) of
@@ -121,11 +157,11 @@ void WriteSprite(Target& t, const Particle& p, const Vector3d& anchor, float ani
 }
 
 void GenerateSprites(std::span<const std::unique_ptr<ParticleInstance>> instances, Target& t,
-                     ParticleRawGenSpecOp& spec) {
+                     ParticleRawGenSpecOp& spec, const ParticleRenderScale& scale) {
     for (const auto& instance : instances) {
         if (! instance || instance->IsNoLiveParticle()) continue;
         const auto& bound  = instance->GetBoundedData();
-        const Vector3d anchor { bound.pos.x(), bound.pos.y(), bound.pos.z() };
+        const Vector3d anchor = scale.positions_include_binding ? Vector3d::Zero() : bound.pos.cast<double>();
         for (const auto& p : instance->Particles()) {
             if (! PM::LifetimeOk(p)) continue;
             ++t.wanted;
@@ -163,8 +199,8 @@ Station Between(const Station& a, const Station& b, double s) {
 struct StripParams {
     uint32_t pieces { 1 };     // pieces drawn between two connected stations
     float    uv_scale { 1.0f };
-    bool     smoothing { false };
-    float    length { 0.0f };  // the strip's length before the uv scale is applied
+    float    length { 0.0f };  // WE's record length for one piece per pair (points / uvscale)
+    double   along_offset { 0.0 }; // added to every piece's position along the strip
 };
 
 /// Everything the vertex data of one ribbon piece is made of.
@@ -198,19 +234,45 @@ private:
     float* m_next;
 };
 
+/// How far along its record strip vertex `k` of `strip` lies: the start pair, the
+/// subdivision points at smoothstep spacing, the end pair (genericropeparticle.geom).
+double StripFraction(uint32_t k, uint32_t strip) {
+    if (k < 2) return 0.0;
+    if (k + 2 >= strip) return 1.0;
+    const double points = (strip - 4) / 2 + 1;
+    return SmoothStep(static_cast<double>((k - 2) / 2 + 1) / points);
+}
+
+template<bool endpoint_fades>
 void WritePiece(Target& t, const PieceData& piece) {
-    std::array<float, kMaxFloatsPerVertex * 4> quad;
-    for (std::size_t corner = 0; corner < kCorners.size(); ++corner) {
-        GroupWriter vertex(quad.data() + corner * t.floats);
-        vertex.Group(piece.head.at, piece.head.radius);
+    // The largest strip: 4 + 2 * 32 subdivision vertices.
+    constexpr std::size_t kMaxStrip = 68;
+    std::array<float, kMaxFloatsPerVertex * kMaxStrip> record;
+    const uint32_t vertices = t.strip != 0 ? t.strip : static_cast<uint32_t>(kCorners.size());
+    for (uint32_t corner = 0; corner < vertices; ++corner) {
+        GroupWriter vertex(record.data() + corner * t.floats);
+        double radius = piece.head.radius, opacity = piece.head.opacity;
+        if constexpr (endpoint_fades) {
+            // Thin native records have one size and colour. The GS expands them
+            // to the two faded endpoints; each vertex here carries the value of
+            // the place it draws: its quad corner, or the strip vertex it keeps.
+            if (!t.thick) {
+                const double at = t.strip != 0 ? StripFraction(corner, t.strip) : kCorners[corner][1];
+                radius += (piece.tail.radius - radius) * at;
+                opacity += (piece.tail.opacity - opacity) * at;
+            }
+        }
+        vertex.Group(piece.head.at, radius);
         vertex.Group(piece.tail.at, piece.encoded_length);
         vertex.Group(piece.handle_head, piece.along);
         vertex.Group(piece.handle_tail, piece.tail.radius);
         if (t.thick) vertex.Group(piece.tail.tint, piece.tail.opacity);
-        vertex.Group(kCorners[corner][0], kCorners[corner][1], 0.0f, 0.0f);
-        vertex.Group(piece.head.tint, piece.head.opacity);
+        if (t.strip != 0) vertex.Group(static_cast<float>(corner), 0.0f, 0.0f, 0.0f);
+        else vertex.Group(kCorners[corner][0], kCorners[corner][1], 0.0f, 0.0f);
+        vertex.Group(piece.head.tint, opacity);
     }
-    StoreQuad(t, quad.data());
+    if (t.strip != 0) StoreStrip(t, record.data());
+    else StoreQuad(t, record.data());
 }
 
 /// The heading of a strip at station `i`: the difference of the stations on
@@ -223,12 +285,13 @@ Vector3d HeadingAt(const Station* stations, std::size_t count, std::size_t i) {
 
 /// Writes the pieces of one strip: each pair of consecutive stations becomes
 /// `pieces` pieces along a smooth curve through them, spaced by smoothstep.
+template<bool endpoint_fades = false>
 void WriteStrip(Target& t, const Station* stations, std::size_t count, const StripParams& params) {
     if (count < 2) return;
     const uint32_t pieces    = std::max<uint32_t>(params.pieces, 1);
     const double   total     = static_cast<double>(count - 1) * pieces;
-    const float    encoded   = EncodeRopeTrailLength(params.length, params.uv_scale);
-    const bool     smooth_uv = params.smoothing && total > 1.0;
+    // Pieces subdivide each pair, so the length counts pairs and adds no repeats.
+    const float    encoded   = (params.length - 1.0f) * static_cast<float>(pieces) + 1.0f;
 
     for (std::size_t i = 0; i + 1 < count; ++i) {
         const Station& first = stations[i];
@@ -274,9 +337,9 @@ void WriteStrip(Target& t, const Station* stations, std::size_t count, const Str
             piece.handle_head = piece.tail.at - slope_at(s0) * span;
             piece.handle_tail = piece.head.at + slope_at(s1) * span;
             const double index = static_cast<double>(i) * pieces + j;
-            piece.along        = static_cast<float>(smooth_uv ? SmoothStep(index / total) * total : index);
+            piece.along        = static_cast<float>(index + params.along_offset);
             piece.encoded_length = encoded;
-            WritePiece(t, piece);
+            WritePiece<endpoint_fades>(t, piece);
         }
     }
 }
@@ -285,22 +348,57 @@ void GenerateRopes(std::span<const std::unique_ptr<ParticleInstance>> instances,
                    const ParticleRenderScale& scale) {
     thread_local std::vector<Station> strip;
     StripParams params;
-    params.pieces    = std::clamp<uint32_t>(scale.rope_subdivision, 1u, 64u);
+    // The geometry stage subdivides each pair itself; WE writes one record per pair.
+    params.pieces    = t.strip != 0 ? 1u : std::clamp<uint32_t>(scale.rope_subdivision, 1u, 64u);
     params.uv_scale  = RopeUvScaleOrOne(scale.uv_scale);
-    params.smoothing = scale.uv_smoothing && ! scale.uv_scrolling;
 
     for (const auto& instance : instances) {
         if (! instance || instance->IsNoLiveParticle()) continue;
         const auto&    bound = instance->GetBoundedData();
-        const Vector3d anchor { bound.pos.x(), bound.pos.y(), bound.pos.z() };
+        const Vector3d anchor = scale.positions_include_binding ? Vector3d::Zero() : bound.pos.cast<double>();
         strip.clear();
         for (const auto& p : instance->Particles()) {
             if (PM::LifetimeOk(p)) strip.push_back(StationOf(p, anchor));
         }
         if (strip.size() < 2) continue;
-        const double stations = static_cast<double>(strip.size() - 1) * params.pieces + 1.0;
-        params.length         = scale.uv_scrolling ? static_cast<float>(t.capacity) + 1.0f
-                                                   : static_cast<float>(stations);
+        params.length         = EncodeRopeTrailLength(static_cast<float>(strip.size()), params.uv_scale);
+        params.along_offset   = 0.0;
+        // The steady count is rate x lifetime with the rate bounded by the frame-rate cap
+        // while the rope holds fewer (0x1402309B5), as for scrolling.
+        double steady_rate = scale.rope_rate;
+        if (steady_rate * scale.rope_lifetime > static_cast<double>(strip.size()) && scale.target_fps > 0)
+            steady_rate = std::min<double>(scale.target_fps, steady_rate);
+        const double steady = steady_rate * scale.rope_lifetime;
+        if (scale.uv_smoothing && ! scale.uv_scrolling && steady > 0.0 &&
+            static_cast<double>(strip.size()) >= steady - 1.0) {
+            // A rope that holds its steady count is measured against it less one and starts
+            // at its first particle's age over the spacing of births, saturated, less one,
+            // so the texture slides smoothly as the oldest particle ages out
+            // (0x140230A42-0x140230A7C).
+            // Measured against the steady count less one, so the smoothed rope spans
+            // n / (steady - 1) repeats (probe rope-uv-v5: 1.1 against the plain 1.0), and
+            // started by WE's +600 of the strip's first entry, the newest particle's age,
+            // over one birth spacing: the texture slides one point between births.
+            const double spacing = 1.0 / steady_rate;
+            params.length        = EncodeRopeTrailLength(static_cast<float>(steady - 1.0), params.uv_scale);
+            double newest = std::numeric_limits<double>::infinity();
+            for (const auto& p : instance->Particles())
+                if (PM::LifetimeOk(p)) newest = std::min(newest, PM::LifetimePassed(p));
+            params.along_offset  = (std::clamp(newest / spacing, 0.0, 1.0) - 1.0) * params.pieces;
+        }
+        if (scale.uv_scrolling) {
+            // WE measures a scrolling rope against what it holds once steady, rate x
+            // lifetime less one, the rate bounded by the frame-rate cap while it holds
+            // fewer, and moves it on by one for each particle that has died
+            // (0x1402308A0, probe rope-uv-v4). `uvsmoothing` draws as without until
+            // the rope is steady (probe rope-uv-v3).
+            double rate = scale.rope_rate;
+            if (rate * scale.rope_lifetime > static_cast<double>(strip.size()) && scale.target_fps > 0)
+                rate = std::min<double>(scale.target_fps, rate);
+            params.length       = EncodeRopeTrailLength(static_cast<float>(rate * scale.rope_lifetime - 1.0),
+                                                        params.uv_scale);
+            params.along_offset = static_cast<double>(instance->Deaths()) * params.pieces;
+        }
         WriteStrip(t, strip.data(), strip.size(), params);
     }
 }
@@ -309,15 +407,15 @@ void GenerateRopeTrails(std::span<const std::unique_ptr<ParticleInstance>> insta
                         const ParticleRenderScale& scale) {
     thread_local std::vector<Station> strip;
     StripParams params;
-    params.pieces    = std::clamp<uint32_t>(scale.rope_subdivision, 1u, 64u);
+    params.pieces    = t.strip != 0 ? 1u : std::clamp<uint32_t>(scale.rope_subdivision, 1u, 64u);
     params.uv_scale  = RopeUvScaleOrOne(scale.uv_scale);
-    params.smoothing = false;
     const double fraction = std::clamp(static_cast<double>(scale.trail_fraction), 0.0, 1.0);
+    const uint8_t fades = scale.uv_scrolling ? scale.trail_fade_flags : 0;
 
     for (const auto& instance : instances) {
         if (! instance || instance->IsNoLiveParticle()) continue;
         const auto&    bound  = instance->GetBoundedData();
-        const Vector3d anchor { bound.pos.x(), bound.pos.y(), bound.pos.z() };
+        const Vector3d anchor = scale.positions_include_binding ? Vector3d::Zero() : bound.pos.cast<double>();
         const auto     particles = instance->Particles();
         const auto     trails    = instance->Trails();
         for (std::size_t slot = 0; slot < particles.size() && slot < trails.size(); ++slot) {
@@ -329,34 +427,40 @@ void GenerateRopeTrails(std::span<const std::unique_ptr<ParticleInstance>> insta
 
             // The particle as drawn now, then its recorded points newest to oldest.
             strip.clear();
-            const Station head = StationOf(p, anchor);
+            const Station appearance = StationOf(p, anchor);
+            const auto fade = [&](Station& station, uint32_t index) {
+                if (fades == 0) return;
+                const float phase = static_cast<float>(std::clamp(
+                    (static_cast<double>(index) - (1.0 - fraction)) / history.Capacity(), 0.0, 1.0));
+                const float weight = std::sin(phase * 3.141f);
+                if ((fades & 1u) != 0) station.opacity *= weight;
+                if ((fades & 2u) != 0) station.radius *= weight;
+            };
+            Station head = appearance;
+            fade(head, 0);
             strip.push_back(head);
             for (uint32_t age = 0; age < held; ++age) {
-                Station recorded = head;
+                Station recorded = appearance;
                 const auto& where = history.At(age).position;
                 recorded.at       = Vector3d { where.x(), where.y(), where.z() };
+                fade(recorded, age + 1);
                 strip.push_back(recorded);
             }
-            // A full history gives its oldest point up to the newer one as the
-            // period goes by, so the tail shrinks by what the head grew.
-            if (held == history.Capacity() && held >= 2) {
-                Station&       oldest = strip[strip.size() - 1];
-                const Station& newer  = strip[strip.size() - 2];
-                oldest.at += (newer.at - oldest.at) * fraction;
-            }
+            // The oldest point stays where it was recorded (0x1402308A0); the
+            // period fraction moves only the texture coordinate.
 
-            const double pieces     = params.pieces;
-            const double capacity   = static_cast<double>(history.Capacity());
-            const bool   subdivided = params.pieces != 1;
-            const double recorded_count = static_cast<double>(held);
-            double       units;
+            // WE writes the held count times 1 / uvscale (0x1402308A0). A scrolling
+            // trail here is measured against its whole history, which pieces subdivide.
+            const double pieces   = params.pieces;
+            const double capacity = static_cast<double>(history.Capacity());
             if (scale.uv_scrolling) {
-                units = subdivided ? capacity * pieces : capacity;
+                const double units = pieces != 1.0 ? capacity * pieces : capacity;
+                params.length = static_cast<float>(((units - 1.0) / params.uv_scale + 1.0 - 1.0) / pieces + 1.0);
             } else {
-                units = subdivided ? recorded_count * pieces + 1.0 : recorded_count;
+                params.length = EncodeRopeTrailLength(static_cast<float>(held), params.uv_scale);
             }
-            params.length = static_cast<float>(units);
-            WriteStrip(t, strip.data(), strip.size(), params);
+            if (fades != 0) WriteStrip<true>(t, strip.data(), strip.size(), params);
+            else WriteStrip(t, strip.data(), strip.size(), params);
         }
     }
 }
@@ -389,11 +493,21 @@ void WPParticleRawGener::GenGLData(std::span<const std::unique_ptr<ParticleInsta
     target.indices  = &indices;
     target.floats   = expected;
     target.thick    = thick;
+    if (rope && vertices.GetOption(WE_PRENDER_GEOMETRY)) {
+        // A pair's strip: two vertices at each end and two at each subdivision point.
+        target.strip = 2u + 2u * std::clamp<uint32_t>(render_scale.rope_subdivision, 1u, 33u);
+    }
     target.capacity = std::min<uint64_t>(indices.QuadCapacity(), vertices.CapacitySize() / (expected * 4));
+    if (target.strip != 0) {
+        // A strip of 4 + 2s vertices and 2 + 2s triangles fits the s + 1 quads sized for it.
+        const uint64_t quads_per_record = (target.strip - 2) / 2;
+        target.capacity = std::min<uint64_t>(indices.QuadCapacity() / quads_per_record,
+                                             vertices.CapacitySize() / (expected * target.strip));
+    }
 
     if (rope_trail) GenerateRopeTrails(instances, target, render_scale);
     else if (rope) GenerateRopes(instances, target, render_scale);
-    else GenerateSprites(instances, target, specOp);
+    else GenerateSprites(instances, target, specOp, render_scale);
 
     // What did not fit is dropped and said once; the latch clears when the
     // count fits again.
@@ -417,10 +531,16 @@ void WPParticleRawGener::GenGLData(std::span<const std::unique_ptr<ParticleInsta
     }
 
     uint64_t draw = 0;
-    if (! CheckedMulU64(target.quads, 6, draw)) {
+    const uint64_t per_unit = target.strip != 0 ? 3ull * (target.strip - 2) : 6ull;
+    if (! CheckedMulU64(target.quads, per_unit, draw)) {
         indices.SetDrawIndexCount(0);
         return;
     }
-    ExtendIndices(indices, target.quads);
+    if (target.strip != 0) ExtendStripIndices(indices, target.quads, target.strip);
+    else ExtendIndices(indices, target.quads);
     indices.SetDrawIndexCount(static_cast<std::size_t>(draw));
+    // The indices drawn name only the vertices written above, from the first one on; what
+    // lies past them is an earlier frame's and no draw reads it.
+    const uint64_t per_record = target.strip != 0 ? target.strip : 4u;
+    vertices.SetDrawnSize(static_cast<std::size_t>(target.quads * per_record * target.floats));
 }

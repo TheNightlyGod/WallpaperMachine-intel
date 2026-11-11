@@ -406,9 +406,9 @@ final class FirstRunModelTests: PanelTestCase {
       XCTAssertEqual(missingAccount, .invalidAccount)
       XCTAssertEqual(
         model.error,
-        "Enter your Steam account name: the login name, not the profile name. Letters, numbers and underscores only.")
+        "Enter your Steam account name: the login name, not the profile name.")
 
-      for bad in ["anonymous", "Anonymous", "my name", "名前", "a-b"] {
+      for bad in ["anonymous", "Anonymous", "my name", "名前", "-login", "+quit", "@example.com", "a+b", "a;b"] {
         model.signInAccount = bad
         let result = await model.submitSignIn(password: "secret")
         XCTAssertEqual(result, .invalidAccount, bad)
@@ -424,6 +424,26 @@ final class FirstRunModelTests: PanelTestCase {
       XCTAssertTrue(panel.workshop.downloadRequests.isEmpty)
       XCTAssertFalse(model.holdsSecret)
     }
+  }
+
+  /// Steam once accepted email addresses as account names, and those accounts cannot be renamed.
+  func testAnEmailAddressAccountNameIsAccepted() {
+    XCTAssertNil(FirstRunModel.problem(account: "Old.User-1@Example.com", password: "x"))
+    XCTAssertEqual(WorkshopDownloader.normalizedAccount(" Old.User-1@Example.com "), "old.user-1@example.com")
+  }
+
+  /// Steam allows account login names to start with an underscore, and a saved sign-in for one
+  /// must survive across relaunches and updates.
+  func testLeadingUnderscoreAccountNameIsAcceptedAndSavedSessionSurvivesRelaunch() throws {
+    XCTAssertNil(FirstRunModel.problem(account: "_Underscore_User", password: "x"))
+    XCTAssertEqual(WorkshopDownloader.normalizedAccount(" _Underscore_User "), "_underscore_user")
+
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "mwe-underscore-account-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try Data("_underscore_user".utf8).write(to: root.appendingPathComponent("account"))
+    XCTAssertEqual(WorkshopDownloader.readSavedAccount(at: root), "_underscore_user")
   }
 
   func testThePasswordIsNotTrimmed() {

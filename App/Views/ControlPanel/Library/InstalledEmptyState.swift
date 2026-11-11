@@ -18,6 +18,21 @@ struct InstalledEmptyState: View {
           description: "Reading your wallpaper library."
         )
         .textSelectable()
+      case .failed(let message):
+        // An error keeps its symbol whatever the season, and its reason is the service's own words.
+        PanelEmptyState(
+          verbatim: L("Your wallpaper library could not be read"),
+          systemImage: "exclamationmark.triangle", description: message
+        ) {
+          Button {
+            model.refreshLibrary()
+          } label: {
+            Label("Try again", systemImage: "arrow.clockwise")
+          }
+          .buttonStyle(.panelSecondary)
+          .disabled(controller.isBusy(PanelActionCoordinator.key("refresh")))
+        }
+        .textSelectable()
       case .emptyLibrary:
         PanelEmptyState(
           "Your wallpaper library is empty", systemImage: "photo.on.rectangle.angled",
@@ -35,6 +50,7 @@ struct InstalledEmptyState: View {
           }
         }
         .textSelectable()
+        .seasonalArt(.emptyLibrary)
       case .emptyCollection(let name):
         PanelEmptyState(
           "No matching wallpapers", systemImage: "folder",
@@ -53,15 +69,31 @@ struct InstalledEmptyState: View {
             .buttonStyle(.panelCapsule)
         }
         .textSelectable()
+        .seasonalArt(.noResults)
+      case .notInstalled(let id):
+        PanelEmptyState(
+          "Not in your library", systemImage: "arrow.down.circle",
+          description: "Workshop item \(id) is not installed."
+        ) {
+          HStack(spacing: 8) {
+            Button("Clear search") { model.clearSearch() }
+              .buttonStyle(.panelCapsule)
+            Button("Show in Steam Workshop") { controller.workshopBrowser.lookUp(itemID: id) }
+              .buttonStyle(.panelPrimary)
+          }
+        }
+        .textSelectable()
+        .seasonalArt(.noResults)
       case .search(let text):
         PanelEmptyState(
           "No matching wallpapers", systemImage: "magnifyingglass",
-          description: "No wallpaper title or tag contains “\(text)”."
+          description: "No wallpaper matches “\(text)”."
         ) {
           Button("Clear search") { model.clearSearch() }
             .buttonStyle(.panelCapsule)
         }
         .textSelectable()
+        .seasonalArt(.noResults)
       case .filters(let count):
         PanelEmptyState(
           "No matching wallpapers", systemImage: "line.3.horizontal.decrease",
@@ -79,6 +111,7 @@ struct InstalledEmptyState: View {
           }
         }
         .textSelectable()
+        .seasonalArt(.noResults)
       }
     }
     .accessibilityIdentifier("installed-empty")

@@ -5,6 +5,7 @@
 #include "Scene/SceneNode.h"
 #include "Utils/Logging.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <cmath>
 
 namespace wallpaper

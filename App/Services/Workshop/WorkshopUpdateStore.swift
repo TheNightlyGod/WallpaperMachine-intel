@@ -7,7 +7,9 @@ import Observation
 /// not download (imported, or downloaded before installs were recorded) counts from when its
 /// `project.json` was last written, which for an import is when it was copied in, so an import
 /// that was already out of date is not caught. Steam's public details endpoint says when each
-/// item last changed; it needs no sign-in, and only the items' ids are sent.
+/// item last changed; it needs no sign-in, and only the items' ids are sent. An installed
+/// Workshop preset holds its base wallpaper's content too, so a change to that base after the
+/// preset was installed is an update of the preset, and the base's id is asked about with it.
 @MainActor
 @Observable
 final class WorkshopUpdateStore {
@@ -31,7 +33,7 @@ final class WorkshopUpdateStore {
     private static let installedKey = "WallpaperMachine.workshopInstalledAt"
     private static let availableKey = "WallpaperMachine.workshopUpdates"
     private static let lastCheckedKey = "WallpaperMachine.workshopUpdatesCheckedAt"
-    private static let automaticKey = "WallpaperMachine.workshopUpdateChecks"
+    nonisolated static let automaticKey = "WallpaperMachine.workshopUpdateChecks"
 
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let fetch: @Sendable ([String]) async throws -> [WorkshopItem]
@@ -82,11 +84,12 @@ final class WorkshopUpdateStore {
         task = Task { [weak self] in
             do {
                 // Reading each project.json's date is file-system work; it stays off the main actor.
-                let local = await Task.detached(priority: .utility) {
-                    Self.localVersions(ids, recorded: recorded, library: library)
+                let (local, bases) = await Task.detached(priority: .utility) {
+                    (Self.localVersions(ids, recorded: recorded, library: library), Self.presetBases(ids, library: library))
                 }.value
-                let remote = ids.isEmpty ? [] : try await fetch(ids)
-                self?.finish(Self.outdated(remote: remote, local: local), recorded: recorded, revisions: revisions)
+                let asked = ids + Set(bases.values).subtracting(ids).sorted()
+                let remote = asked.isEmpty ? [] : try await fetch(asked)
+                self?.finish(Self.outdated(remote: remote, local: local, bases: bases), recorded: recorded, revisions: revisions)
             } catch {
                 self?.fail(error)
             }
@@ -120,15 +123,36 @@ final class WorkshopUpdateStore {
         persist()
     }
 
-    /// The items whose Workshop version is newer than the one installed.
-    nonisolated static func outdated(remote: [WorkshopItem], local: [String: Date]) -> [String: WorkshopItem] {
+    /// The items whose Workshop version is newer than the one installed, and the presets (by
+    /// `bases`, preset to base) whose base is.
+    nonisolated static func outdated(remote: [WorkshopItem], local: [String: Date],
+                                     bases: [String: String] = [:]) -> [String: WorkshopItem] {
+        let byID = Dictionary(remote.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let newer = { (id: String, installed: Date) -> Bool in
+            guard let changed = byID[id]?.timeUpdated else { return false }
+            return changed > installed.addingTimeInterval(tolerance)
+        }
         var outdated: [String: WorkshopItem] = [:]
-        for item in remote {
-            guard let changed = item.timeUpdated, let installed = local[item.id],
-                  changed > installed.addingTimeInterval(tolerance) else { continue }
-            outdated[item.id] = item
+        for (id, installed) in local {
+            guard let item = byID[id] else { continue }
+            if newer(id, installed) || bases[id].map({ newer($0, installed) }) == true { outdated[id] = item }
         }
         return outdated
+    }
+
+    /// The base each installed preset names in its `project.json` (`dependency`), by the
+    /// preset's id; wallpapers that are not presets are left out.
+    nonisolated static func presetBases(_ ids: [String], library: URL) -> [String: String] {
+        var bases: [String: String] = [:]
+        for id in ids {
+            let manifest = library.appendingPathComponent(id).appendingPathComponent("project.json")
+            guard let data = try? Data(contentsOf: manifest),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let base = WallpaperImportService.workshopID(object["dependency"]), base != id
+            else { continue }
+            bases[id] = base
+        }
+        return bases
     }
 
     /// When each installed item was installed: recorded downloads first, then the date its

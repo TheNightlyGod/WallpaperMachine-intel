@@ -34,7 +34,8 @@ struct PageSearchBar: View {
       let model = controller.library
       return .init(
         text: Binding(get: { model.filter.text }, set: { model.setText($0) }),
-        prompt: L("Search wallpapers"), name: L("Search installed wallpapers"), submit: {})
+        prompt: L("Search wallpapers"), name: L("Search installed wallpapers"),
+        submit: { model.submitSearch() })
     case .pixiv:
       let model = controller.pixivBrowser
       return .init(

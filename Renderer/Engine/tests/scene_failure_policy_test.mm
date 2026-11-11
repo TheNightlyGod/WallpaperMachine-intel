@@ -77,7 +77,7 @@ std::filesystem::path WriteScene(const std::filesystem::path& root, bool with_pr
               "attribute vec2 a_TexCoord;\n"
               "varying vec2 v_TexCoord;\n"
               "void main() {\n"
-              "gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+              "gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
               "v_TexCoord = a_TexCoord;\n"
               "}\n");
     WriteText(root / "shaders/card.frag",
@@ -108,7 +108,7 @@ std::filesystem::path WriteSceneWithEffect(const std::filesystem::path& root,
         "attribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "v_TexCoord = a_TexCoord;\n"
         "}\n";
     const auto pass = [&](const std::string& shader) {
@@ -120,7 +120,7 @@ std::filesystem::path WriteSceneWithEffect(const std::filesystem::path& root,
               "uniform sampler2D g_Texture0;\n"
               "varying vec2 v_TexCoord;\n"
               "void main() {\n"
-              "vec4 c = texture2D(g_Texture0, v_TexCoord);\n" + effect_body + "\n"
+              "vec4 c = texSample2D(g_Texture0, v_TexCoord);\n" + effect_body + "\n"
               "}\n");
     WriteText(root / "materials/effects/tint.json", pass("effects/tint"));
     WriteText(root / "effects/tint/effect.json",
@@ -130,7 +130,7 @@ std::filesystem::path WriteSceneWithEffect(const std::filesystem::path& root,
               "uniform sampler2D g_Texture0;\n"
               "varying vec2 v_TexCoord;\n"
               "void main() {\n"
-              "gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n"
+              "gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
               "}\n");
     WriteText(root / "materials/util/effectpassthrough.json", pass("through"));
     WriteText(root / "layout.json",
@@ -417,12 +417,12 @@ TEST_F(SceneFailurePolicy, AShaderThatDoesNotCompileIsHeld)
     EXPECT_EQ(running.layer().sublayers.count, 1u);
 }
 
-// A shader that cannot be compiled takes its effect out of the parsed scene. The
-// scene is then not the one the author made, and is not drawn without the part:
-// it is held with the shader named, once, and nothing else is drawn. The card
-// under the broken effect compiles and would have drawn, so a presented frame
-// is the partial picture this must not produce.
-TEST_F(SceneFailurePolicy, AnEffectWhoseShaderCannotBeCompiledHoldsTheWholeScene)
+// A shader that cannot be compiled does not take its effect out of the scene, and does not hold
+// it: Wallpaper Engine compiles its `dx11fallback` stage in place of the one that failed and
+// draws the pass dark red with the pass's own state (`sub_1400D5070`; probe T9 in
+// artifacts/we-parity/probes/texshader2). The scene runs, the reason is logged once, and the
+// host sees a real frame rather than the preview.
+TEST_F(SceneFailurePolicy, AnEffectWhoseShaderCannotBeCompiledDrawsTheFallbackShader)
 {
     LogCapture log;
     Running running(
@@ -431,21 +431,19 @@ TEST_F(SceneFailurePolicy, AnEffectWhoseShaderCannotBeCompiledHoldsTheWholeScene
     ASSERT_TRUE(running.WaitForFirstFrame()) << "the host would have waited for ever";
     std::this_thread::sleep_for(500ms);
 
-    ExpectHeld(running, SceneFailureStage::Unsupported, "effects/tint");
     const auto selection = running.wallpaper().sceneBackendSelection();
-    EXPECT_NE(selection.failure_reason.find("could not be translated to Metal"), std::string::npos)
-        << selection.failure_reason;
-    EXPECT_EQ(running.wallpaper().surfaceHealth().stop_reason, SurfaceStopReason::GraphFailed);
-    EXPECT_EQ(running.Presented(), 0u) << "a partial picture was drawn";
-    EXPECT_EQ(running.Completed(), 0u);
-    EXPECT_EQ(running.FirstFrames(), 1) << "the host is told once";
+    EXPECT_FALSE(selection.failed()) << selection.failure_reason;
+    EXPECT_TRUE(selection.created);
+    EXPECT_EQ(LogCapture::Count(kFailureLine), 0) << "the scene is not held";
+    EXPECT_EQ(running.wallpaper().surfaceHealth().stop_reason, SurfaceStopReason::Running);
+    EXPECT_GT(running.Presented(), 0u);
     EXPECT_EQ(running.wallpaper().surfaceHealth().failed_frames, 0u);
-    ASSERT_EQ(running.layer().sublayers.count, 1u) << "the project's preview is what shows";
-    EXPECT_NE(running.layer().sublayers[0].contents, nil);
+    EXPECT_EQ(running.layer().sublayers.count, 0u) << "a real frame, not the project's preview";
 
-    // Nothing keeps saying it once the scene is held.
+    // Said once, naming the shader, and not again per frame.
     std::this_thread::sleep_for(300ms);
-    EXPECT_EQ(LogCapture::Count(kFailureLine), 1) << "the failure is said once, not per frame";
+    EXPECT_EQ(LogCapture::Count("drawn with the fallback shader"), 1);
+    EXPECT_EQ(LogCapture::Count("'effects/tint' could not be translated to Metal"), 1);
 }
 
 // The same scene with an effect whose shader compiles is drawn: the refusal

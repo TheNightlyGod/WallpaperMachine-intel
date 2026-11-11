@@ -37,6 +37,15 @@ final class WorkshopListStateTests: MediaPanelTestCase {
     XCTAssertEqual(empty(.subscriptions, signedIn: true), .noResults(.browseWorkshop))
   }
 
+  func testASignedOutFavoritesListAsksForTheSignInAndAnEmptyOneOffersTheWorkshop() {
+    XCTAssertEqual(empty(.favorites), .signInToSeeFavorites(isSigningIn: false))
+    XCTAssertEqual(empty(.favorites, signingIn: true), .signInToSeeFavorites(isSigningIn: true))
+    XCTAssertEqual(empty(.favorites, error: "Steam asked you to sign in again."), .signInToSeeFavorites(isSigningIn: false))
+    XCTAssertEqual(empty(.favorites, signedIn: true), .noResults(.browseWorkshopForFavorites))
+    XCTAssertEqual(
+      source(.favorites).titleSubtitle(summary: .favorites(count: 7)), "Your favorites · 7 favorites")
+  }
+
   func testLoadingComesBeforeAFailureAndAFailureBeforeAReasonForNothing() {
     XCTAssertEqual(empty(loading: true, error: "x", text: "a"), .loading)
     XCTAssertEqual(empty(error: "Steam is down.", text: "a", filters: 1), .unavailable("Steam is down."))
@@ -57,7 +66,17 @@ final class WorkshopListStateTests: MediaPanelTestCase {
       "the field is hidden for an author, so its text cannot explain an empty page")
     XCTAssertEqual(
       empty(.creator(id: "76561198000000001", name: "A"), text: "aurora", filters: 2),
-      .noResults(.clearFilters(count: 2)))
+      .noResults(.refresh))
+  }
+
+  func testEmptyPersonalListsDoNotBlameFiltersThatDidNotHideAnything() {
+    XCTAssertEqual(
+      empty(.subscriptions, signedIn: true, filters: 2), .noResults(.browseWorkshop))
+    XCTAssertEqual(
+      empty(.favorites, signedIn: true, filters: 2), .noResults(.browseWorkshopForFavorites))
+    XCTAssertEqual(
+      empty(.subscriptions, signedIn: true, total: 336, pages: 12, filters: 2),
+      .noResults(.screened(isCollections: false, nextPage: 2)))
   }
 
   func testAPageScreenedAwayOffersTheNextPageAndTheFilters() {
@@ -95,6 +114,8 @@ final class WorkshopListStateTests: MediaPanelTestCase {
     XCTAssertEqual(summary(.subscriptions, signedIn: true, total: 31), .subscriptions(count: 31))
     XCTAssertEqual(summary(.subscriptions, signedIn: true, loaded: false), .subscriptions(count: nil))
     XCTAssertEqual(summary(.subscriptions, signedIn: false), .results(18_420), "no bar without a session")
+    XCTAssertEqual(summary(.favorites, signedIn: true, total: 7), .favorites(count: 7))
+    XCTAssertEqual(summary(.favorites, signedIn: true, loaded: false), .favorites(count: nil))
   }
 
   // MARK: Header
@@ -112,12 +133,14 @@ final class WorkshopListStateTests: MediaPanelTestCase {
 
   func testEveryTabAndEverySortHasItsOwnNameInThePanelsLanguage() {
     let tabs = WorkshopList.allCases.map(\.panelTitle)
-    XCTAssertEqual(tabs, ["Wallpapers", "Collections", "Your subscriptions"])
+    XCTAssertEqual(tabs, ["Wallpapers", "Collections", "Your subscriptions", "Your favorites"])
     let sorts = WorkshopSort.allCases.map(\.panelTitle)
     XCTAssertEqual(sorts.count, 9)
     XCTAssertEqual(Set(sorts).count, sorts.count, "no two sorts share a label")
     XCTAssertTrue(sorts.allSatisfy { !$0.isEmpty })
     XCTAssertEqual(WorkshopSort.trendingYear.panelTitle, "Most popular this year")
+    let orders = WorkshopFavoritesOrder.allCases.map(\.panelTitle)
+    XCTAssertEqual(orders, ["Date favorited", "Alphabetical", "Date updated", "Date created"])
   }
 
   // MARK: The window's title

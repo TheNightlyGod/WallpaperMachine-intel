@@ -55,29 +55,73 @@ struct LibraryFilter: Equatable, Sendable {
       && !excludedTags.contains { tags.contains($0.lowercased()) }
   }
 
-  /// Whether the search text appears in the title or a tag. The text is not trimmed: a lone space
-  /// narrows to the titles and tags that contain a space.
-  func matchesText(_ row: LibraryRow) -> Bool {
-    guard !text.isEmpty else { return true }
-    let searched = "\(row.title) \(row.tags.joined(separator: " "))"
-    return searched.lowercased().contains(text.lowercased())
+  /// The search text as one pass over the library asks it.
+  private enum Query {
+    /// A Workshop link, or a bare item id that is installed (`WorkshopLink.itemID(in:)`): only
+    /// that wallpaper.
+    case item(String)
+    /// Words, folded (`LibrarySearchText`), and the wallpapers of the collections the text names.
+    case words(String, collections: Set<String>)
+  }
+
+  /// A link names a Workshop item whether or not `rows` hold it. A bare number of six digits or
+  /// more names one only when a wallpaper of `rows` has it for its id; otherwise it is searched
+  /// as words, without the spaces around it, as the artwork id in the description of a work
+  /// saved from pixiv is.
+  private func textQuery(in rows: [LibraryRow], named: Set<String>) -> Query? {
+    guard !text.isEmpty else { return nil }
+    if let id = WorkshopLink.itemID(in: text) {
+      if WorkshopLink.itemID(inLink: text) != nil || rows.contains(where: { $0.id == id }) {
+        return .item(id)
+      }
+      let number = text.trimmingCharacters(in: .whitespacesAndNewlines)
+      return .words(LibrarySearchText.fold(number), collections: named)
+    }
+    return .words(LibrarySearchText.fold(text), collections: named)
+  }
+
+  /// The wallpapers of the collections whose name the search text is, whatever its case,
+  /// accents and the spaces around it, which a search shows beside the wallpapers whose own
+  /// words hold the text. Empty when the text names none, or is a Workshop link.
+  func membersOfCollectionsNamed(in collections: [CollectionRow]) -> Set<String> {
+    let name = LibrarySearchText.fold(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    guard !name.isEmpty, WorkshopLink.itemID(inLink: text) == nil else { return [] }
+    var members = Set<String>()
+    for collection in collections where LibrarySearchText.fold(collection.name) == name {
+      members.formUnion(collection.wallpaperIDs)
+    }
+    return members
+  }
+
+  /// Whether `row` passes `query`. Words are looked for in the title and tags, joined by a space,
+  /// and in the author and description the manifest names; they are not trimmed, so a lone space
+  /// narrows to the wallpapers with a space in them. A link or an installed id is the wallpaper's
+  /// own id, never words, so a description that links another item does not count.
+  private func matches(_ row: LibraryRow, _ query: Query) -> Bool {
+    switch query {
+    case .item(let id): row.id == id
+    case .words(let words, let collections):
+      collections.contains(row.id) || LibrarySearchText.contains(row.searchText, words)
+    }
   }
 
   /// The rows that pass, in the order they came in. The collection comes first, then the text,
-  /// then the tags.
+  /// then the tags. `rows` are the whole library, which a bare id is looked for in.
   ///
   /// - Parameters:
   ///   - favorites: The favorite ids.
   ///   - members: The shown collection's wallpaper ids. Nil shows every wallpaper; a collection
   ///     that no longer exists is the caller's to drop before asking.
-  func apply(to rows: [LibraryRow], favorites: Set<String>, members: Set<String>?)
-    -> [LibraryRow]
-  {
+  ///   - named: `membersOfCollectionsNamed(in:)`'s answer, which the text matches too.
+  func apply(
+    to rows: [LibraryRow], favorites: Set<String>, members: Set<String>?, named: Set<String> = []
+  ) -> [LibraryRow] {
     let needsTags = !requiredTags.isEmpty || !excludedTags.isEmpty
-    guard needsTags || !text.isEmpty || members != nil else { return rows }
+    let query = textQuery(in: rows, named: named)
+    guard needsTags || query != nil || members != nil else { return rows }
     return rows.filter { row in
       if let members, !members.contains(row.id) { return false }
-      guard matchesText(row) else { return false }
+      if let query, !matches(row, query) { return false }
       guard needsTags else { return true }
       return accepts(tags: Self.tags(of: row, isFavorite: favorites.contains(row.id)))
     }

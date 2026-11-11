@@ -23,6 +23,12 @@ struct ResultPager: Equatable {
   var previousPage: Int { max(1, page - 1) }
   var nextPage: Int { min(pages, page + 1) }
 
+  /// What a page field keeps of typed text: its ASCII digits, at most five (no source has a page
+  /// number of more than four).
+  static func sanitizedPageText(_ text: String) -> String {
+    String(text.filter { ("0"..."9").contains($0) }.prefix(5))
+  }
+
   /// `number` brought into the pages the bar offers.
   func clamped(_ number: Int) -> Int { min(pages, max(1, number)) }
 

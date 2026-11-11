@@ -14,11 +14,11 @@ the mode:
 | Mode | Rows | What happens |
 | --- | --- | --- |
 | **Off** | — | The wallpaper changes only when the user changes it. |
-| **Rotate wallpapers** | **Wallpapers** (All wallpapers, Favorites, This display's list, or a local collection), **Order** (In order, Shuffle), **How often** (every 5, 10, 15 or 30 minutes, every hour, every 2, 3, 6 or 12 hours, every day, **Each time the Mac is unlocked**, or **Custom**: any whole number of minutes from 1 to 10,080, one week) | After each interval, or each time the Mac is unlocked, the display moves to the next wallpaper. |
+| **Rotate wallpapers** | **Wallpapers** (All wallpapers, Favorites, This display's list, or a local collection), **Order** (In order, Shuffle), **How often** (every 5, 10, 15 or 30 minutes, every hour, every 2, 3, 6 or 12 hours, every day, **Each time the Mac is unlocked**, or **Custom**: any whole number of minutes from 1 to 10,080, one week), and for a time, **Wait for the video to finish** | After each interval, or each time the Mac is unlocked, the display moves to the next wallpaper. |
 | **Day and night** | **Day wallpaper**, **Day starts at**, **Night wallpaper**, **Night starts at** | The day wallpaper takes over at the day time and the night wallpaper at the night time. |
 
-A new rotation defaults to every 30 minutes, in order; day starts at 07:00 and night at
-19:00. A rotation set to change when the Mac is unlocked has no timer and no next-change
+A new rotation defaults to every 30 minutes, in order, and does not wait for videos; day
+starts at 07:00 and night at 19:00. A rotation set to change when the Mac is unlocked has no timer and no next-change
 date (see [below](#each-time-the-mac-is-unlocked)); choosing a time again brings the timer
 back.
 
@@ -35,18 +35,21 @@ left the library or cannot run on macOS is skipped. In order moves to the one
 after the wallpaper on screen and wraps; Shuffle shows every wallpaper once, in a
 new random order each round, and never picks the one on screen, and a relaunch
 carries on with the round it was in (see [Storage](#storage)). A day that starts
-after its night (say day 22:00, night 06:00) wraps past midnight. Times are local
+after its night (say day 22:00, night 06:00) wraps past midnight. The two times must
+differ: a day that started when the night does would have no length, so choosing the
+other one's time is refused with a message and both times stay as they were. Times are local
 clock times, so a daylight-saving day still switches at the time on the clock.
 
 **Change now** moves a rotating display along at once and starts a fresh
 interval; the row's note says roughly when the next change is due, or, for a rotation that
-waits for the unlock, that it changes then. The menu bar's
+waits for the unlock, that it changes then, or, for a change that waits for a video to
+finish, the latest time it is made ([below](#waiting-for-a-video-to-finish)). The menu bar's
 **Next Wallpaper**, on the display it is shown for, the **Next wallpaper** button on the
 panel's Now Playing bar (for the target display), and a link, Shortcuts action or
 shortcut key asking for the next wallpaper, on the panel's target display unless one is
 named, do the same for a display that rotates, and otherwise take the next wallpaper
 in library order. All of them are asked for, so they also change a display that is
-paused or covered; only the timer's own changes wait (see below). When the playlist has
+paused or covered; only the timer's own changes wait for a pause (see below). When the playlist has
 nothing else to change to (its only wallpaper is already on screen), Change now, the
 Now Playing button and a link, keyboard shortcut or Shortcuts action asking for the next
 wallpaper say so
@@ -62,6 +65,22 @@ plan, like other manual edits. A stale reorder is refused if membership or order
 changed while it was being dragged; it never overwrites a concurrent edit.
 Wallpapers moved to Trash leave every list and every day or night choice.
 
+### Playing from Installed
+
+**Play** at the end of Installed's view chips, and **Play** and **Shuffle** in a
+local collection's context menu in the Filters sidebar, turn the view on show (All
+wallpapers, Favorites or that collection) into the target display's rotation. Installed's
+**Play** keeps the order the target display already uses; the menu in the same capsule names
+and ticks that order and plays in the one chosen (**In order** or **Shuffle**). In the context menu,
+**Play** plays in order and **Shuffle** shuffled. The display changes to its first wallpaper at
+once, keeps its interval or unlock trigger, and a display you emptied is filled again;
+when it already shows the only wallpaper the source has, the rotation is set and the
+wallpaper stays. A source with no wallpaper that can play is refused and nothing
+changes. The buttons are unavailable while the view is empty or the target display
+is a mirror or disabled. While the target display rotates, Now Playing names the
+source and its **Playlist** button shows the order, interval and next change, with
+**Change now**, **Stop** and **Settings…** ([Now Playing](control-panel.md#now-playing)).
+
 ### Collections and saved playlists
 
 Local collections are created and filled from Installed (see
@@ -73,7 +92,8 @@ collections and saved playlists too.
 Each display's Playlist disclosure has **Saved playlist** and **Save as…**.
 Saving keeps a named copy of the mode, source, order, trigger, interval and day/night
 choices; choosing it applies a copy to an enabled independent display. A rotating
-copy on a timer becomes due immediately, but waits while that display cannot play; one
+copy on a timer becomes due immediately, also on a display that is only out of sight,
+but waits while that display is paused; one
 that changes when the Mac is unlocked waits for the next unlock. Manual
 edits detach the display's copy from the saved plan. Renaming a plan preserves its
 identity; deleting it leaves active copies and their deadlines intact. Deleting a
@@ -86,10 +106,31 @@ next-change stores remain the source of active playback state.
 
 ## When a change happens
 
-A change the timer brings only happens while its display is playing and
-presenting. One that falls due while the user paused playback, that display is covered or is not the one in use ([Playback](performance.md#playback)), the screen is locked
-or the displays sleep waits, and happens once when it can play again; missed intervals are not caught up
-one by one. The timer sleeps on the continuous clock, so a change that fell due
+A change the timer brings only happens while wallpapers are playing. One that falls
+due while the user paused playback, a Playback & Power choice, an app
+rule or a Focus paused every wallpaper, the screen is locked or the displays sleep
+waits, and happens once when it can play again; missed intervals are not caught up one by one.
+
+A display that is only out of sight (windows cover it, a full-screen app or a hidden
+Space is in front of it, or it is not the one in use; see
+[Playback](performance.md#playback)) is not waited for: its change happens behind
+the windows, so the desktop already shows the new wallpaper when you come back to it,
+instead of switching in front of you. It changes once while it stays out of sight, so
+a long full-screen session does not load a wallpaper every interval; when it shows
+again, the next change is a whole interval later rather than at once. A saved
+playlist chosen meanwhile still applies at once, and an edited one may change it
+again. Only a successful switch counts as that out-of-sight change: if playback
+pauses before selection, the due change waits until playback can resume, even if
+the display remains covered. A switch selected while covered that succeeds during
+a global pause or lock still counts as the hidden change; resuming behind the
+same windows does not allow another rotation. If no alternative is available or every attempt
+fails, the rotation tries again after its interval. Returning to the desktop
+starts a full interval even when the previous deadline is still in the future.
+Day and night switches at its boundary in the same way. A rotation set to
+change when the Mac is unlocked still waits for the display to show (see
+[below](#each-time-the-mac-is-unlocked)).
+
+The timer sleeps on the continuous clock, so a change that fell due
 while the Mac slept happens on wake. Nothing is polled: `PlaylistScheduler` arms
 one timer for the earliest change and re-evaluates when playback, presentation
 (of every display together or of one display alone), the library, the playlists,
@@ -103,7 +144,9 @@ display, or is running there, the playlist's change (Change now included) gives 
 at once, is not retried, and the rotation tries again one interval later. It does
 not queue up behind your Apply, which would replace the wallpaper you just got. In Day and night, a wallpaper the
 user applies by hand stays until the next half of the day, and choosing a
-different day or night wallpaper applies at once.
+different day or night wallpaper applies at once. A relaunch inside the same half of
+the day (an app update, the library's drive coming back) is not a new period, so the
+wallpaper applied by hand is still left alone (see [Storage](#storage)).
 
 A wallpaper you apply to a rotating display is also left alone for a while: the
 rotation's next change waits at least `min(interval, 5 minutes)` from your choice
@@ -121,7 +164,9 @@ automatic rule's never count as a choice.
 A rotating playlist skips a wallpaper whose application throws an error and tries
 another in the same change, at most five distinct wallpapers. Failed items wait
 15 minutes before becoming candidates again; they do not count as successful
-shuffle picks. A successful choice starts the usual interval. If nothing succeeds,
+shuffle picks, and a shuffle round is over once every wallpaper that can be picked has
+been shown, so one that keeps failing does not hold the round open and turn every later
+pick into a plain random one. A successful choice starts the usual interval. If nothing succeeds,
 the next attempt waits for that interval instead of looping through the library.
 Cancellation, a replaced playlist, a disconnected display, or a newer command for
 that display ends retries. If a failed operation nevertheless changed the reported
@@ -133,6 +178,38 @@ is always available. Cooldowns are per display and last only for this run of the
 app. Day/night still attempts its exact chosen wallpaper once per period; it never
 substitutes an unrelated one. These rules handle errors returned by Apply, not a
 later visual defect in a wallpaper that was accepted successfully.
+
+### Waiting for a video to finish
+
+**Wait for the video to finish** (a rotation on a timer; `DisplayPlaylist.waitsForClipEnd`,
+off by default) keeps a timed change from cutting a clip. When a change falls due while a
+video wallpaper plays on the display, the change waits until that clip reaches the end of
+the pass it is in and starts over, then happens through the display's command slot as usual,
+and the next interval counts from then. Only a plain video (the
+[video player](performance.md#video-playback) or the WebM player) has an end to wait
+for: a scene, a web page or a picture changes on time, and so does a rotation that changes when
+the Mac is unlocked, which has no row for it. The video host tells the scheduler about the
+display's own clip only (`PlaylistScheduler.WatchClipEnd`, wired to
+`NativeVideoWallpaperHost.watchClipEnd`), so a mirror's copy never adds a change, and a second
+report of the same end changes nothing. Nothing is polled.
+
+The wait has a limit, `PlaylistScheduler.clipEndLimit(minutes:)`: as long as the interval, but
+at least 10 minutes and at most an hour. A longer clip, or one that stopped advancing without
+failing, is changed then. A clip that fails ends the wait at once, so a broken clip cannot
+hold the playlist; so does one that leaves the display (another wallpaper or desktop takes its
+place), and the change then waits only if what took its place is a video too. The usual rules
+still come first: nothing waits or changes while wallpapers are paused or the screen is locked,
+and the wait starts again, with a fresh limit, when they play again; a display out of sight
+changes behind the windows without waiting, since nobody sees the clip cut. A wallpaper you
+apply ends the wait and holds the change back for a while, as above; **Change now**, and
+turning the option off, make the change at once.
+
+While the change waits, the **Next change** note (and Now Playing's playlist) says it comes when
+the video finishes, and by what time at the latest (the limit), instead of naming the
+deadline that has passed. The scheduler notes the wait in `PlaylistStore.clipWaits`, run
+state that is never saved; it posts `PlaylistStore.clipWaitsDidChangeNotification`, which only
+the panel follows, so noting a wait never runs the scheduler's evaluation again from inside
+itself.
 
 ### A display you cleared
 
@@ -224,12 +301,24 @@ instead of changing nothing; the menu leaves **Random Wallpaper** out in that ca
 
 `PlaylistStore` keeps every display's playlist in the `WallpaperMachine.playlists`
 default (JSON; missing fields decode with defaults, so a playlist saved before the
-trigger existed rotates on its interval, and an interval outside 1–10,080
-minutes falls back to 30) and each display's next change in
+trigger existed rotates on its interval, one saved before **Wait for the video to finish**
+existed does not wait, and an interval outside 1–10,080 minutes falls back to 30) and each display's next change in
 `WallpaperMachine.playlistNextChange`, so a relaunch neither restarts a long interval
 nor skips a change that fell due while the app was closed. A display whose playlist is
 waiting after the user removed its wallpaper is kept in `WallpaperMachine.playlistHolds`,
 so a relaunch leaves it empty.
+
+The half of the day a Day and night display is settled for (its wallpaper was applied, or
+one chosen by hand stays until the next boundary) is kept in
+`WallpaperMachine.playlistSettledPeriods`, with the two start times and the two wallpapers
+it was settled under. A relaunch picks it up only while the display still has those, so a
+manual choice survives a relaunch inside the period, and a day or night wallpaper or time
+changed just before quitting still applies when the app starts again. It is written only
+when it changes, and it is run state like the hold: it is not part of a backup.
+
+A saved playlist (plan) this build cannot read, one saved by a newer build or damaged, does
+not take the others with it: the readable ones load, and saving, renaming or deleting a plan
+writes the unread one back as it was saved (`PreservedJSON`).
 
 Shuffle's round, the wallpapers a display has shown since the round began, is kept in
 `WallpaperMachine.playlistRounds` for each display that rotates in Shuffle order, so a
@@ -257,9 +346,10 @@ left out of a backup too.
 | Candidates, next pick, day and night | `App/Services/Playlist/PlaylistPlanner.swift` |
 | Persistence and dates | `App/Services/Playlist/PlaylistStore.swift` |
 | Timer and switching | `App/Services/Playlist/PlaylistScheduler.swift`, wired in `AppDelegate.startPlaylistScheduler` |
-| Panel actions | `editPlaylist`, `addToPlaylist`, `removeFromPlaylist`, `reorderPlaylist`, `clearPlaylistFailures`, `skipPlaylist`, `resumePlaylist` in `App/Views/ControlPanel/Model/PanelController+Playlists.swift`; the menus' rules in `Model/PlaylistEdit.swift` |
-| Panel | Settings → Displays in `App/Views/ControlPanel/Settings/Sections/DisplaysPlaylistRows.swift`, with drag and button ordering in `DisplaysOrderEditor.swift` and the page state in `Settings/DisplaysSettingsModel.swift`; the inspector's playlist item and Installed's **Add to playlist** in `Inspector/` and `Library/` |
-| Collections and saved-plan actions | `WallpaperCollectionStore.swift`; `createCollection` … `removeFromCollection` in `Model/PanelController+Collections.swift` and `savePlaylistPlan` … `applyPlaylistPlan` in `Model/PanelController+Playlists.swift`; the sidebar's `Shell/CollectionsSidebarSection.swift` and the Saved playlists group in `Settings/Sections/DisplaysGroups.swift` |
+| The end of a video's pass | `NativeVideoWallpaperHost.watchClipEnd`, and `watchNextLoop` in `NativeVideoPlayer.swift` and `Shared/WebMPlayer.swift` |
+| Panel actions | `editPlaylist`, `playPlaylist`, `addToPlaylist`, `removeFromPlaylist`, `reorderPlaylist`, `clearPlaylistFailures`, `skipPlaylist`, `resumePlaylist` in `App/Views/ControlPanel/Model/PanelController+Playlists.swift`; the menus' rules in `Model/PlaylistEdit.swift` |
+| Panel | Settings → Displays in `App/Views/ControlPanel/Settings/Sections/DisplaysPlaylistRows.swift`, with drag and button ordering in `DisplaysOrderEditor.swift` and the page state in `Settings/DisplaysSettingsModel.swift`; the inspector's playlist item and Installed's **Add to playlist** in `Inspector/` and `Library/`; Installed's Play and its order menu in `Library/InstalledScopeBar.swift`, the collection's Play and Shuffle in `Library/CollectionsFilterGroup.swift`; Now Playing's playlist in `Shell/NowPlayingPlaylist.swift` |
+| Collections and saved-plan actions | `WallpaperCollectionStore.swift`; `createCollection` … `removeFromCollection` in `Model/PanelController+Collections.swift` and `savePlaylistPlan` … `applyPlaylistPlan` in `Model/PanelController+Playlists.swift`; the sidebar's `Library/CollectionsFilterGroup.swift` and the Saved playlists group in `Settings/Sections/DisplaysGroups.swift` |
 
 ## Verification
 
@@ -282,12 +372,25 @@ wait, and a change waiting in the queue leaving it empty, and a relaunch finishi
 the shuffle round it was in without repeating a wallpaper, an unlock changing an unlock
 rotation once and ignoring a double report, waiting for a display that cannot play yet but
 only for the 30-second window, leaving timed rotations, cleared displays and a hand-chosen
-wallpaper alone, and never dating a display) and
+wallpaper alone, and never dating a display, and a rotation that waits for videos: the change
+waiting for the clip and made when it starts over, its limit reached through the scheduler's own
+timer, the wait noted for the panel and cleared, a wallpaper that is not a video
+changing on time, nothing watched with the option off, a pause ending the wait and playing again
+waiting once more, a display out of sight changing without waiting, a hand-chosen wallpaper,
+Change now or turning the option off ending it, and one change per display for one end) and
 `PanelPlaylistActionsTests` and `PanelPlanActionsTests` (the actions' validation, the trigger
-and the held state) with `PanelLibraryActionsTests` (Now Playing's Next wallpaper). `WallpaperPresentationPolicyTests` checks the unlock edge: once per unlock, also
+and the held state, Next change naming the latest time while a change waits for a video, and
+Play: the source, order and kept interval, the change at once, an emptied
+display filled, and a source with nothing that can play refused) with `PanelLibraryActionsTests` (Now Playing's Next wallpaper). `WallpaperPresentationPolicyTests` checks the unlock edge: once per unlock, also
 when the notification was missed, after a wake or a user switch, and never at start or
-stop. `WallpaperBackupTests` checks that a backup carries the trigger and rejects an
-unknown one.
+stop. `WallpaperBackupTests` checks that a backup carries the trigger and the video option and
+rejects an unknown trigger or an option that is not a yes or no. `NativeVideoWallpaperHostTests`
+checks the video host's side: a watch answers once for the display's own clip and never for a
+mirror's, needs that wallpaper playing with an end to wait for, is silent once cancelled, and ends
+when the clip fails or the display moves on; `WebMPlayerTests` checks where a WebM pass ends and
+that its watch is told once at the wrap, and never once cancelled or while held; and the opt-in
+`NativeVideoPlayerMediaTests` check the same with the real looper, including an item rebuilt for
+a colour option.
 `PlaylistStoreTests` also covers Random Wallpaper's round: no repeat of the wallpaper on screen
 and every wallpaper once per round (over many seeds), surviving a relaunch, one round per display
 and pool, separate from the playlist round, kept without a playlist, pruned and capped, and ignored

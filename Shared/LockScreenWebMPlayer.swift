@@ -20,6 +20,7 @@ final class LockScreenWebMPlayer: LockScreenVideoPlaying {
   private let pan: NativeVideoLayout.Pan
   private let viewport: CGSize
   private let backingScale: CGFloat
+  private let borderColor: CGColor?
   private var preparing: CheckedContinuation<Void, Error>?
   private var stopped = false
   private(set) var isPaused = false
@@ -32,16 +33,19 @@ final class LockScreenWebMPlayer: LockScreenVideoPlaying {
 
   init(
     file: WebMFile, mode: NativeVideoScalingMode, factor: Double,
-    pan: NativeVideoLayout.Pan = .centered, viewport: CGSize, backingScale: CGFloat
+    pan: NativeVideoLayout.Pan = .centered, viewport: CGSize, backingScale: CGFloat,
+    options: WallpaperEngineOptions = .identity, lut: VideoLut? = nil, borderColor: CGColor? = nil
   ) {
     self.mode = mode
     self.factor = factor
     self.pan = pan
     self.viewport = viewport
     self.backingScale = backingScale
+    self.borderColor = borderColor
     player = WebMPlayer(file: file, withAudio: false, paused: false)
     player.setScaling(mode, factor: factor, pan: pan)
     player.relayout(bounds: CGRect(origin: .zero, size: viewport), backingScale: backingScale)
+    player.setEngineOptions(options, lut: lut, borderColor: borderColor)
   }
 
   func attach(to root: CALayer) {
@@ -102,7 +106,8 @@ final class LockScreenWebMPlayer: LockScreenVideoPlaying {
     let pixels = CGSize(width: viewport.width * backingScale, height: viewport.height * backingScale)
     guard pixels.width > 0, pixels.height > 0, let image = await player.posterImage() else { return nil }
     return NativeVideoLayout.composeFrame(
-      image, pixelSize: pixels, backingScale: backingScale, mode: mode, factor: factor, pan: pan)
+      image, pixelSize: pixels, backingScale: backingScale, mode: mode, factor: factor, pan: pan,
+      borderColor: borderColor)
   }
 
   func stop() {

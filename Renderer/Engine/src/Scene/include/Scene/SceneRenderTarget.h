@@ -1,16 +1,21 @@
 #pragma once
 #include "SceneTexture.h"
 #include "Core/Literals.hpp"
+#include <array>
 
 namespace wallpaper
 {
 
 struct SceneRenderTarget {
     struct Bind {
+        enum class SizePolicy { Effect, NativeFramebuffer };
         bool        enable { false };
         std::string name {};
         bool        screen { false };
         double      scale { 1.0 };
+        /// Authored effect buffers round to at least four pixels. Native
+        /// framebuffer reductions truncate to at least two (WE 0x1400D2C60).
+        SizePolicy  size_policy { SizePolicy::Effect };
     };
 
     i32           width;
@@ -39,5 +44,11 @@ struct SceneRenderTarget {
     /// frame left there (an effect's history buffer). It owns its image: one
     /// shared with another target would hold that target's pixels instead.
     bool          carriesPreviousFrame { false };
+    /// Kept at the size the scene gave it whatever the internal render scale is (the shadow
+    /// atlas: its tiles are laid out in texels of the shadows quality).
+    bool          unscaled { false };
+    /// What the target is cleared to whenever it is made: an effect buffer's `clear` colour
+    /// (`sub_1401EA500`); transparent black otherwise.
+    std::array<float, 4> initial_clear { 0.0f, 0.0f, 0.0f, 0.0f };
 };
 } // namespace wallpaper

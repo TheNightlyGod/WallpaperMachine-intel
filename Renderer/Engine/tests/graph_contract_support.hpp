@@ -260,18 +260,18 @@ inline void shaderAsset(AssetMap& files, std::string_view name, bool clipping = 
     vertex += "void main(){ vec3 p=a_Position;\n";
     if (skinning)
         vertex +=
-            "#if "
-            "SKINNING\np=(g_Bones[a_BlendIndices.x]*vec4(p,1.0))*a_BlendWeights.x+(g_Bones[a_"
-            "BlendIndices.y]*vec4(p,1.0))*a_BlendWeights.y+(g_Bones[a_BlendIndices.z]*vec4(p,1.0))*"
-            "a_BlendWeights.z+(g_Bones[a_BlendIndices.w]*vec4(p,1.0))*a_BlendWeights.w;\n#endif\n";
+            "#if SKINNING\np=mul(vec4(p,1.0),g_Bones[a_BlendIndices.x])*a_BlendWeights.x+"
+            "mul(vec4(p,1.0),g_Bones[a_BlendIndices.y])*a_BlendWeights.y+"
+            "mul(vec4(p,1.0),g_Bones[a_BlendIndices.z])*a_BlendWeights.z+"
+            "mul(vec4(p,1.0),g_Bones[a_BlendIndices.w])*a_BlendWeights.w;\n#endif\n";
     vertex += "v_ContractUV=a_TexCoord; gl_Position=vec4(p,1.0); }\n";
     std::string fragment = "uniform sampler2D g_Texture0;\nvarying vec2 v_ContractUV;\n";
     if (clipping) fragment += "#if CLIPPINGTARGET\nuniform sampler2D g_Texture8;\n#endif\n";
     if (mask) fragment += "uniform sampler2D g_Texture1;\n";
-    fragment += "void main(){ vec4 c=texture2D(g_Texture0,v_ContractUV);\n";
+    fragment += "void main(){ vec4 c=texSample2D(g_Texture0,v_ContractUV);\n";
     if (clipping)
-        fragment += "#if CLIPPINGTARGET\nc*=texture2D(g_Texture8,v_ContractUV).a;\n#endif\n";
-    if (mask) fragment += "c*=texture2D(g_Texture1,v_ContractUV).a;\n";
+        fragment += "#if CLIPPINGTARGET\nc*=texSample2D(g_Texture8,v_ContractUV).a;\n#endif\n";
+    if (mask) fragment += "c*=texSample2D(g_Texture1,v_ContractUV).a;\n";
     fragment += "gl_FragColor=c; }\n";
     asset(files, "/shaders/" + std::string(name) + ".vert", vertex);
     asset(files, "/shaders/" + std::string(name) + ".frag", fragment);

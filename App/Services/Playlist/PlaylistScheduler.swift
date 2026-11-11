@@ -3,20 +3,37 @@ import Foundation
 /// Changes wallpapers on the displays whose playlist rotates or follows the day.
 ///
 /// One timer waits for the earliest change. A change only happens while wallpapers are
-/// playing and presenting: one that falls due while the user has paused, the screen is locked
-/// or the displays sleep waits, and happens once, when `evaluate()` next finds playback
-/// running. The app delegate calls `evaluate()` when playback or presentation changes, so
-/// nothing is polled. Every switch runs through the display's command slot, the same one the
+/// playing: one that falls due while the user has paused, the screen is locked or the displays
+/// sleep waits, and happens once, when `evaluate()` next finds playback running. A display that
+/// is only out of sight (covered, behind a full-screen app, not the one in use) changes behind
+/// the windows instead, so the new wallpaper is already there when the desktop shows again; it
+/// changes once while it stays out of sight, and showing again starts a whole interval rather
+/// than changing it in front of the user. The app delegate calls `evaluate()` when playback or
+/// presentation changes, so nothing is polled. Every switch runs through the display's command slot, the same one the
 /// panel and the menu bar use, so the latest request for a display wins.
 ///
 /// A rotation set to change each time the Mac is unlocked has no timer. `noteUnlock()` opens a
 /// short window, and every such display changes once in it, as soon as it can play.
+///
+/// A rotation that waits for videos to finish (`DisplayPlaylist.waitsForClipEnd`) does not cut
+/// a clip: a timed change that falls due while one plays on the display waits until the clip
+/// reaches its end and starts over, which the video host reports, so nothing is polled either.
+/// It waits for as long as the display keeps playing that clip, and never longer than
+/// `clipEndLimit(minutes:)`; the store notes the wait (`PlaylistStore.clipWaits`) for the panel.
 @MainActor
 final class PlaylistScheduler {
     /// Runs one switch on `display` through its command slot. `choose` names the wallpaper when
     /// the switch's turn comes, or nil to skip it. Answers the wallpaper applied, or nil when
     /// nothing was: a newer request replaced this one, or there was nothing to choose.
     typealias Activate = @MainActor (_ display: String, _ choose: @MainActor () -> String?) async throws -> String?
+    /// Watches the video `wallpaper` playing on `display` for the end of the pass it is in, and
+    /// calls `ended` once, later, when the clip starts over or stops playing there first (it
+    /// failed, or the display moved on). Answers nil, and never calls `ended`, when the display
+    /// does not play that wallpaper as a video with an end to wait for; otherwise a closure that
+    /// ends the watch without calling it.
+    typealias WatchClipEnd = @MainActor (
+        _ display: String, _ wallpaper: String, _ ended: @escaping @MainActor () -> Void
+    ) -> (@MainActor () -> Void)?
 
     private let store: PlaylistStore
     private let collections: WallpaperCollectionStore
@@ -25,6 +42,8 @@ final class PlaylistScheduler {
     private let favorites: @MainActor () -> Set<String>
     private let current: @MainActor (String) -> String?
     private let isRunning: @MainActor (String) -> Bool
+    private let isUnseen: @MainActor (String) -> Bool
+    private let watchClipEnd: WatchClipEnd
     private let activate: Activate
     private let commandRevision: @MainActor (String) -> UInt64
     private let now: @MainActor () -> Date
@@ -41,8 +60,16 @@ final class PlaylistScheduler {
     private var requestedWhileInFlight = Set<String>()
     /// The day or night period each display was last brought into line with, and the playlist
     /// it was brought into line under: a wallpaper the user applies by hand stays until the next
-    /// period, and choosing a different day or night wallpaper applies at once.
+    /// period, and choosing a different day or night wallpaper applies at once. The store keeps
+    /// the period across launches (`settle`), so a relaunch inside it is not a new period either.
     private var settledPeriods: [String: (period: Date, revision: UInt64)] = [:]
+    /// The displays whose saved period this scheduler has looked up: once each, at the first
+    /// evaluation that asks, when the displays and their playlists are known.
+    private var restoredSettledPeriods = Set<String>()
+    /// The rotating displays that changed while out of sight, with the playlist revision they
+    /// changed under. Such a display does not change again until it shows, and showing again
+    /// counts a whole interval from then. A playlist edited meanwhile applies at once.
+    private var changedUnseen: [String: UInt64] = [:]
     /// The unlock the rotations that wait for one are answering: a number that tells it from the
     /// last, and when its window closes. A display that cannot play yet (covered, re-enumerating
     /// after wake, presentation still settling) is retried by the evaluations the app delegate
@@ -52,6 +79,23 @@ final class PlaylistScheduler {
     /// The unlock each display has been dealt with for, so it changes once per unlock.
     private var handledUnlock: [String: UInt64] = [:]
     private var lastUnlock: Date?
+    /// A timed change that fell due while a video played on the display, waiting for the clip to
+    /// reach its end. It belongs to one deadline, one playlist revision and the wallpaper that was
+    /// playing, and lasts only while the display plays: an evaluation that does not find it still
+    /// waiting ends it, so pausing, covering, a new deadline or an edit each drop it.
+    private struct ClipWait {
+        let serial: UInt64
+        let due: Date
+        let revision: UInt64
+        let wallpaper: String
+        /// When the change is made anyway.
+        let until: Date
+        var cancel: (@MainActor () -> Void)?
+        /// The clip reached its end, or stopped playing: the change can be made.
+        var ended = false
+    }
+    private var clipWaits: [String: ClipWait] = [:]
+    private var clipWaitSerial: UInt64 = 0
     private var random = SystemRandomNumberGenerator()
     /// Two unlocks closer than this are one: the session reports the lock clearing, and the
     /// unlock notification of a screen saver or a lock screen can follow it.
@@ -61,6 +105,15 @@ final class PlaylistScheduler {
     static let failureCooldown: TimeInterval = 15 * 60
     /// A broken library must not monopolize the command queue in one automatic change.
     static let maximumAttempts = 5
+    /// The shortest and the longest a due change waits for a video to finish.
+    static let clipEndLimits: ClosedRange<TimeInterval> = (10 * 60)...(60 * 60)
+
+    /// How long a due change of a rotation every `minutes` waits for the video on screen to
+    /// finish: the interval, within `clipEndLimits`. A clip longer than that, or one that stopped
+    /// advancing without failing, is cut then rather than holding the rotation.
+    static func clipEndLimit(minutes: Int) -> TimeInterval {
+        min(max(seconds(minutes), clipEndLimits.lowerBound), clipEndLimits.upperBound)
+    }
 
     init(
         store: PlaylistStore,
@@ -70,6 +123,9 @@ final class PlaylistScheduler {
         favorites: @escaping @MainActor () -> Set<String>,
         current: @escaping @MainActor (String) -> String?,
         isRunning: @escaping @MainActor (String) -> Bool,
+        // Wallpapers play on the display but it is paused only because nobody can see it there.
+        isUnseen: @escaping @MainActor (String) -> Bool = { _ in false },
+        watchClipEnd: @escaping WatchClipEnd = { _, _, _ in nil },
         activate: @escaping Activate,
         commandRevision: @escaping @MainActor (String) -> UInt64 = { _ in 0 },
         now: (@MainActor () -> Date)? = nil,
@@ -88,6 +144,8 @@ final class PlaylistScheduler {
         self.favorites = favorites
         self.current = current
         self.isRunning = isRunning
+        self.isUnseen = isUnseen
+        self.watchClipEnd = watchClipEnd
         self.activate = activate
         self.commandRevision = commandRevision
         self.now = now ?? { Date() }
@@ -126,6 +184,8 @@ final class PlaylistScheduler {
         unlock = nil
         handledUnlock.removeAll()
         lastUnlock = nil
+        changedUnseen.removeAll()
+        for display in Array(clipWaits.keys) { endClipWait(display) }
     }
 
     /// The Mac was unlocked. Every display whose rotation waits for that changes to its next
@@ -150,7 +210,25 @@ final class PlaylistScheduler {
         let playlist = store.playlist(for: display)
         guard playlist.mode == .dayNight else { return }
         let phase = PlaylistPlanner.phase(at: now(), dayStart: playlist.dayStart, nightStart: playlist.nightStart, calendar: calendar)
-        settledPeriods[display] = (phase.until, store.revisions[display] ?? 0)
+        settle(display, (phase.until, store.revisions[display] ?? 0))
+    }
+
+    /// Notes the period `display` is settled up to, here and in the store, which keeps it for the
+    /// next launch (`PlaylistStore.setSettledPeriod`).
+    private func settle(_ display: String, _ value: (period: Date, revision: UInt64)?) {
+        settledPeriods[display] = value
+        store.setSettledPeriod(value?.period, on: display)
+    }
+
+    /// The period `display` is settled up to. What an earlier launch, or an earlier scheduler over
+    /// the same store, settled under the day and night settings the display still has counts as
+    /// settled under its playlist as it is now.
+    private func settledPeriod(_ display: String) -> (period: Date, revision: UInt64)? {
+        if restoredSettledPeriods.insert(display).inserted, settledPeriods[display] == nil,
+           let period = store.settledPeriod(on: display) {
+            settledPeriods[display] = (period, store.revisions[display] ?? 0)
+        }
+        return settledPeriods[display]
     }
 
     /// The longest a rotating display leaves a wallpaper the user just applied alone, whatever
@@ -164,6 +242,9 @@ final class PlaylistScheduler {
     /// back too, so it does not swap the moment playback resumes. Day and night already keeps a
     /// hand-picked wallpaper until its next boundary, and an Off display has nothing to hold.
     func noteManualChoice(_ display: String) {
+        // The clip a due change waited for is not on screen any more, and the change itself is
+        // held back below.
+        endClipWait(display)
         let playlist = store.playlist(for: display)
         if playlist.mode == .rotate, playlist.trigger == .unlock {
             answerUnlock(display)
@@ -193,6 +274,8 @@ final class PlaylistScheduler {
             handledUnlock.removeAll()
         }
         var earliest: Date?
+        // The displays whose due change still waits for their video after this pass.
+        var waitingForClip = Set<String>()
         for display in displays() {
             let playlist = store.playlist(for: display)
             let running = isRunning(display)
@@ -206,7 +289,7 @@ final class PlaylistScheduler {
                     // Nothing is due while the display waits, so no deadline or timer exists, and
                     // an unlock does not fill it, nor change what is put there before it ends.
                     store.schedule(display, at: nil)
-                    settledPeriods[display] = nil
+                    settle(display, nil)
                     answerUnlock(display)
                     continue
                 }
@@ -214,7 +297,7 @@ final class PlaylistScheduler {
                 if playlist.mode == .dayNight {
                     let until = PlaylistPlanner.phase(
                         at: date, dayStart: playlist.dayStart, nightStart: playlist.nightStart, calendar: calendar).until
-                    settledPeriods[display] = (until, store.revisions[display] ?? 0)
+                    settle(display, (until, store.revisions[display] ?? 0))
                 }
                 store.setHold(nil, on: display)
                 AppLog.info("playlist: display \(display) has a wallpaper again, so its playlist carries on")
@@ -222,9 +305,9 @@ final class PlaylistScheduler {
             switch playlist.mode {
             case .off:
                 store.schedule(display, at: nil)
-                settledPeriods[display] = nil
+                settle(display, nil)
             case .rotate where playlist.trigger == .unlock:
-                settledPeriods[display] = nil
+                settle(display, nil)
                 // No timer: a rotation that waits for the unlock has nothing dated.
                 store.schedule(display, at: nil)
                 if let unlock, handledUnlock[display] != unlock.id, running, !inFlight.contains(display) {
@@ -232,16 +315,35 @@ final class PlaylistScheduler {
                     rotate(display, playlist: playlist, answering: unlock.id)
                 }
             case .rotate:
-                settledPeriods[display] = nil
+                settle(display, nil)
+                let revision = store.revisions[display] ?? 0
+                // Showing again ends the stretch out of sight a change was made in.
+                let changedOutOfSight = (running ? changedUnseen.removeValue(forKey: display) : changedUnseen[display]) == revision
+                let interval = Self.seconds(playlist.interval)
                 guard let due = store.nextChange[display] else {
-                    let next = date.addingTimeInterval(Self.seconds(playlist.interval))
+                    let next = date.addingTimeInterval(interval)
                     store.schedule(display, at: next)
                     earliest = min(earliest ?? next, next)
                     continue
                 }
-                if due > date {
+                if running, changedOutOfSight {
+                    // What the user sees now is new to them: it gets a whole interval.
+                    let next = date.addingTimeInterval(interval)
+                    store.schedule(display, at: next)
+                    earliest = min(earliest ?? next, next)
+                } else if due > date {
                     earliest = min(earliest ?? due, due)
-                } else if running, !inFlight.contains(display) {
+                } else if inFlight.contains(display) {
+                    // The change under way dates the next one.
+                } else if running {
+                    if let until = clipWait(on: display, playlist: playlist, due: due, revision: revision, at: date) {
+                        waitingForClip.insert(display)
+                        earliest = min(earliest ?? until, until)
+                    } else {
+                        rotate(display, playlist: playlist)
+                    }
+                } else if !changedOutOfSight, isUnseen(display) {
+                    AppLog.info("playlist: display \(display) is out of sight, so it changes behind the windows")
                     rotate(display, playlist: playlist)
                 }
             case .dayNight:
@@ -249,13 +351,65 @@ final class PlaylistScheduler {
                     at: date, dayStart: playlist.dayStart, nightStart: playlist.nightStart, calendar: calendar)
                 store.schedule(display, at: until)
                 earliest = min(earliest ?? until, until)
-                let settled = settledPeriods[display]
+                let settled = settledPeriod(display)
                 guard settled?.period != until || settled?.revision != (store.revisions[display] ?? 0) else { continue }
-                guard running, !inFlight.contains(display) else { continue }
+                guard running || isUnseen(display), !inFlight.contains(display) else { continue }
                 follow(display, phase: phase, period: until, playlist: playlist)
             }
         }
+        // A wait this pass did not keep is over: the display stopped playing, is out of sight,
+        // got a new deadline or another playlist, or its change is being made.
+        for display in Array(clipWaits.keys) where !waitingForClip.contains(display) { endClipWait(display) }
         arm(earliest)
+    }
+
+    /// Until when the change due on `display` waits for the video on screen to finish, or nil
+    /// when it is made now: the playlist does not wait for videos, what plays there is not a video
+    /// with an end to wait for, the clip has reached it, or it has been waited for as long as
+    /// `clipEndLimit(minutes:)` allows. Called only while the display plays.
+    private func clipWait(
+        on display: String, playlist: DisplayPlaylist, due: Date, revision: UInt64, at date: Date
+    ) -> Date? {
+        guard playlist.waitsForClipEnd, let shown = current(display) else { return nil }
+        if let wait = clipWaits[display], wait.due == due, wait.revision == revision, wait.wallpaper == shown {
+            if wait.ended { return nil }
+            guard date < wait.until else {
+                AppLog.info("playlist: the video on display \(display) did not finish within "
+                    + "\(Int(Self.clipEndLimit(minutes: playlist.interval) / 60)) min, so it changes now")
+                return nil
+            }
+            return wait.until
+        }
+        endClipWait(display)
+        clipWaitSerial &+= 1
+        let serial = clipWaitSerial
+        guard let cancel = watchClipEnd(display, shown, { [weak self] in self?.clipEnded(on: display, serial: serial) })
+        else { return nil }
+        let until = date.addingTimeInterval(Self.clipEndLimit(minutes: playlist.interval))
+        clipWaits[display] = ClipWait(
+            serial: serial, due: due, revision: revision, wallpaper: shown, until: until, cancel: cancel)
+        // The panel says the change waits for the video instead of naming a deadline that passed.
+        store.setClipWait(until, on: display)
+        AppLog.info("playlist: display \(display) waits for its video to finish before it changes")
+        return until
+    }
+
+    /// The clip a due change waits for reached its end, or stopped playing on the display. The
+    /// change is made at once if the display still plays, through the usual evaluation; a second
+    /// report of the same end changes nothing.
+    private func clipEnded(on display: String, serial: UInt64) {
+        guard var wait = clipWaits[display], wait.serial == serial, !wait.ended else { return }
+        wait.ended = true
+        wait.cancel = nil
+        clipWaits[display] = wait
+        AppLog.info("playlist: the video on display \(display) reached its end or stopped playing, so it changes now")
+        evaluate()
+    }
+
+    private func endClipWait(_ display: String) {
+        guard let wait = clipWaits.removeValue(forKey: display) else { return }
+        wait.cancel?()
+        store.setClipWait(nil, on: display)
     }
 
     /// Whether `skip(_:)` has a playlist wallpaper to change `display` to.
@@ -296,17 +450,20 @@ final class PlaylistScheduler {
     /// nothing for a display that is not waiting.
     func resume(_ display: String) {
         guard store.holds[display] != nil else { return }
-        settledPeriods[display] = nil
+        settle(display, nil)
         store.setHold(nil, on: display)
         AppLog.info("playlist: display \(display) resumed after its wallpaper was removed")
         if store.playlist(for: display).mode == .rotate, skip(display) { return }
         evaluate()
     }
 
-    /// A change the timer brings waits while the display cannot play; a `requested` one does not.
-    /// `answering` names the unlock this change is for, when it is for one.
+    /// A change the timer brings waits while the display cannot play, and is made while it is
+    /// only out of sight; a `requested` one does not wait. `answering` names the unlock this
+    /// change is for, when it is for one: that one waits until the display shows.
     private func rotate(_ display: String, playlist: DisplayPlaylist, requested: Bool = false, answering unlockID: UInt64? = nil) {
         let revision = store.revisions[display] ?? 0
+        // This is the change a wait for the video was holding back, or one asked for instead.
+        endClipWait(display)
         inFlight.insert(display)
         Task {
             var attempted = false
@@ -324,8 +481,11 @@ final class PlaylistScheduler {
                 }
                 if remade {
                     // That change schedules the next interval once it is made.
-                } else if playlist.hasTimer, (attempted || isRunning(display)), (store.revisions[display] ?? 0) == revision,
+                } else if playlist.hasTimer, (attempted || isRunning(display) || isUnseen(display)),
+                          (store.revisions[display] ?? 0) == revision,
                           store.holds[display] == nil {
+                    // An eligible display with no alternative still needs another deadline.
+                    // Otherwise its next attempt would depend on an unrelated notification.
                     store.schedule(display, at: now().addingTimeInterval(Self.seconds(playlist.interval)))
                 } else {
                     evaluate()
@@ -334,13 +494,15 @@ final class PlaylistScheduler {
             var tried = Set<String>()
             for _ in 0..<Self.maximumAttempts {
                 var selected: String?
+                var selectedOutOfSight = false
                 var command: UInt64?
                 var candidates: [String] = []
                 do {
                     let applied = try await activate(display) { [self] in
                         guard !observers.isEmpty, (store.revisions[display] ?? 0) == revision,
                             displays().contains(display),
-                            requested || requestedWhileInFlight.contains(display) || isRunning(display),
+                            requested || requestedWhileInFlight.contains(display) || isRunning(display)
+                                || (unlockID == nil && isUnseen(display)),
                             // The user may have emptied the display while this change waited.
                             store.holds[display] == nil
                         else { return nil }
@@ -350,13 +512,25 @@ final class PlaylistScheduler {
                         selected = PlaylistPlanner.next(
                             after: current(display), in: candidates, order: latest.order,
                             recent: store.recent[display] ?? [], using: &random)
+                        selectedOutOfSight = !isRunning(display) && isUnseen(display)
                         command = commandRevision(display)
                         attempted = attempted || selected != nil
                         return selected
                     }
                     if let applied, (store.revisions[display] ?? 0) == revision {
+                        // Only a completed switch counts as the change made out of sight.
+                        // A global pause during activation makes isUnseen false without
+                        // showing the desktop, so keep the state from selection as well.
+                        if !isRunning(display), selectedOutOfSight || isUnseen(display) {
+                            changedUnseen[display] = revision
+                        }
                         store.clearFailure(applied, on: display)
-                        store.recordPick(applied, on: display, candidates: self.candidates(for: store.playlist(for: display)))
+                        // The round counts the wallpapers it can pick from: one that keeps failing
+                        // is left out while it cools down, or the round would never end and every
+                        // later pick would be a plain random one.
+                        store.recordPick(
+                            applied, on: display,
+                            candidates: self.availableCandidates(for: store.playlist(for: display), on: display))
                         AppLog.info("playlist changed display \(display) to \(applied)")
                     }
                     // A nil result means superseded or ineligible, never an instruction to retry.
@@ -381,7 +555,7 @@ final class PlaylistScheduler {
         let revision = store.revisions[display] ?? 0
         let target = phase == .day ? playlist.dayWallpaperID : playlist.nightWallpaperID
         guard let target, library().contains(target), current(display) != target else {
-            settledPeriods[display] = (period, revision)
+            settle(display, (period, revision))
             return
         }
         inFlight.insert(display)
@@ -391,15 +565,15 @@ final class PlaylistScheduler {
                 inFlight.remove(display)
                 // A day or night switch never answers a rotation someone asked for meanwhile.
                 if requestedWhileInFlight.remove(display) != nil { skip(display) }
-                if (attempted || isRunning(display)), (store.revisions[display] ?? 0) == revision {
-                    settledPeriods[display] = (period, revision)
+                if (attempted || isRunning(display) || isUnseen(display)), (store.revisions[display] ?? 0) == revision {
+                    settle(display, (period, revision))
                 }
                 evaluate()
             }
             do {
                 let applied = try await activate(display) { [self] in
                     guard (store.revisions[display] ?? 0) == revision,
-                        displays().contains(display), isRunning(display), library().contains(target),
+                        displays().contains(display), isRunning(display) || isUnseen(display), library().contains(target),
                         store.holds[display] == nil,
                         PlaylistPlanner.phase(at: now(), dayStart: playlist.dayStart,
                             nightStart: playlist.nightStart, calendar: calendar).until == period

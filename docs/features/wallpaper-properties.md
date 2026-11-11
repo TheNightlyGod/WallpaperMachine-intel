@@ -123,14 +123,16 @@ shows those. Apply changes is unchanged: it reloads the wallpaper from the saved
 
 ## Properties
 
-The inspector's compact **General configuration** section holds mute, volume,
+The inspector's compact **General configuration** section holds **Mute this
+wallpaper** (shown on and locked while [Mute all wallpapers](performance.md#playback)
+is on), volume,
 [Audio response](audio-response.md), and media integration. **Audio and media
-status** expands to show their explanations and delivery status. **Displays**
-follows with per-display playback configuration, open when the wallpaper is on a
-display and collapsed otherwise, then **Collections**.
-**Wallpaper properties** comes last, with the wallpaper's authored controls in their
-original order, so a long property list never pushes the shorter sections out of
-reach. General, display and property disclosures keep their state while the same
+status** expands to show their explanations and delivery status. The presets and
+**Wallpaper properties** follow, with the wallpaper's authored controls in their
+original order. **Displays** comes next with per-display playback configuration,
+open when the wallpaper is on a display and collapsed otherwise, then **Collections**
+and, for a scene or a video, [**Wallpaper Engine options**](#wallpaper-engine-options).
+General, display and property disclosures keep their state while the same
 wallpaper stays selected; another wallpaper starts at the top with its sections at their
 defaults.
 
@@ -151,7 +153,7 @@ label and the choice's value are unchanged. The words are English, and the panel
 translates them whenever the same phrase is already a catalog entry.
 
 A wallpaper may carry its own translations in `general.localization`: a table per
-Wallpaper Engine language code (`en-us`, `zh-chs`, `zh-cht`, `ja-jp`, `ko-kr`) that maps
+Wallpaper Engine language code (`en-us`, `zh-chs`, `zh-cht`, `ja-jp`, `ko-kr`, `pt-br`…) that maps
 the `ui_…` tokens its labels and combo options use to text. A label or combo
 option that is exactly one of those tokens (surrounding spaces ignored) shows the
 text from the app's language, then from `en-us`, and otherwise stays as the author
@@ -217,7 +219,9 @@ scene file alone says what a value switches on or off ([scene
 rendering](scene-rendering.md)). The rules are evaluated when the panel's property
 list is built, never per frame, and the scene resolves its bindings when it loads
 and on a property change. A rule that is always false, such as a bare `false`,
-hides its property for good, as Wallpaper Engine does.
+hides its property for good, as Wallpaper Engine does. A setting bound to a
+property the wallpaper never declares keeps its own authored value, with or
+without a `condition`, until a property document supplies that name.
 
 Audio, scaling mode, position and frame rate take effect immediately. Everything
 else is pending until committed:
@@ -252,6 +256,54 @@ picture chosen for a solid placeholder layer, the user's own or one a preset shi
 is shown as it is: the layer's colour, often the scheme colour, only paints the
 placeholder while no picture fills it.
 
+### Wallpaper Engine options
+
+**Wallpaper Engine options**, the inspector's last card, holds the
+options Wallpaper Engine adds to every scene and video wallpaper itself
+(`wallpaper64.exe` `sub_140104B60`; `artifacts/we-parity/decompiles/H-P0-2.md`,
+`H-P0-3.md`), saved per wallpaper under `engine_options` in its configuration file:
+
+| Row | Control | Default | Notes |
+|---|---|---|---|
+| **Color adjustments** | switch | off | lists the four sliders below |
+| **Brightness**, **Contrast**, **Saturation**, **Hue shift** | slider 0–100 | 50 | listed while **Color adjustments** is on; 50 changes nothing |
+| **Image filter** | menu | **No filter** | the colour lookup tables in the shared assets' `materials/lut` |
+| **Filter strength** | slider 0–100 | 100 | listed while a filter is chosen |
+| **Flip horizontally** | switch | off | mirrors the picture and the pointer |
+| **Mouse parallax** | switch | on | scenes whose camera follows the cursor only |
+| **Playback rate** | slider 10–200 % | 100 | scenes and videos (Wallpaper Engine offers it for both) |
+
+**Mouse parallax** is listed only for a scene whose own file turns the cursor camera
+parallax on (`cameraparallax` true and a mouse influence other than 0); the bridge reads
+that once per version of the scene file (`EngineFacade::read_scene_traits`,
+`engine/scene_traits.rs`) and a scene it cannot read offers no switch. The image filters
+are the `.tex` files directly in `materials/lut` (at most 256, sorted without regard to
+case, `engine/lut_catalog.rs`), read again only when that folder changes. A filter's
+name is its file name in words: a leading `lutx<digits>_` is dropped, underscores become
+spaces and the first letter is capitalised (`lutx32_daisy` reads **Daisy**); it is never
+translated. A saved filter that is no longer installed shows no selection, and the
+scene draws no filter for it.
+
+The rows work like property rows (`PropertyRowView` with the `.engineOption` scope):
+a reset icon, a **Modified** flag, and values staged until **Apply changes** keeps them
+or **Revert** undoes them. The card has its own **Restore all defaults** link, which
+stages every option's default, a value behind an off switch included, and touches
+neither the authored properties, display settings, audio nor presets; **Revert** undoes
+it. The section opens by itself when an option differs from its default. The bridge
+refuses an option the wallpaper does not offer, a switch given anything but on or off,
+a slider value outside its range, and a filter the assets do not hold
+(`edit_engine_option`, `restore_engine_option_default`,
+`restore_all_engine_option_defaults`).
+
+A scene shows an edit live under [the Settings switch](#showing-edits-on-the-desktop)
+and in the preview window, slider drags included (`pending_engine_options` of
+`preview_wallpaper_properties` and `wallpaper_preview`); the renderer changes values,
+flip, rate and mouse parallax in place and loads the scene again only when the colour
+pass or the filter is switched on or off, or another filter is chosen
+([scene rendering](scene-rendering.md#wallpaper-engines-per-wallpaper-options)). A
+video's options are saved now and wait for **Apply changes**. Presets hold only the
+authored properties.
+
 ### Showing edits on the desktop
 
 **Settings → Desktop & Lock Screen → Desktop → Show property edits on the desktop as I
@@ -269,8 +321,9 @@ With the switch on, a slider, a colour, a switch, a choice, **Restore default**,
 a chosen file are each followed by one update once the edits pause for 150 ms
 (`PropertyPreviewScheduler`), so a drag or a preset costs a display one update, and an
 edit that arrives while one is under way queues one more. The update is the
-bridge's `preview_wallpaper_properties(wallpaper_id, show, pending)`: it shows the whole
-pending state on every scene that draws the wallpaper, mirrors included, so a restored
+bridge's `preview_wallpaper_properties(wallpaper_id, show, pending, pending_engine_options)`:
+it shows the whole pending state, the [Wallpaper Engine options](#wallpaper-engine-options)
+included, on every scene that draws the wallpaper, mirrors included, so a restored
 default is back at the authored value. Turning the switch on shows nothing by itself; the
 next edit does.
 
@@ -312,8 +365,9 @@ the saved value.
 - Turning the switch off puts the saved look back on every wallpaper whose displays
   were shown an edit; the edits stay pending in the inspector. A refusal is retried the
   next time the switch is turned off.
-- Only scene wallpapers are shown. A video has no properties, and a Web wallpaper
-  receives its changed properties after **Apply changes**.
+- Only scene wallpapers are shown. A video has no properties and its Wallpaper Engine
+  options wait for **Apply changes**, and a Web wallpaper receives its changed properties
+  after **Apply changes**.
 - A refused update is logged (`properties: …`) and never shown as an alert, so an edit in
   progress is not interrupted; the next edit tries again. Apply and Revert drop the
   update that is waiting, and the edits Apply itself sends for text it was holding start
@@ -327,7 +381,9 @@ the saved value.
 **Wallpaper properties → Save current…** stores a named preset of the currently
 applied authored properties; pending edits must first be applied or reverted.
 Choose a preset and **Apply**, rename or delete it, or export/import its versioned
-JSON document. Import saves a new preset and never applies it automatically. These
+JSON document. Import saves a new preset and never applies it automatically; a pick that
+is not a regular file (an alias, a folder) or is larger than 48 MB is refused with a
+message saying what a preset file has to be. These
 are wallpaper-specific property presets, not the Performance quality tiers.
 
 Application validates every saved property against current types, limits and
@@ -447,10 +503,31 @@ An installed wallpaper's **Compatibility check** reads entry/shared resources an
 for video, asynchronously checks native admission for the selected display: whether
 macOS can open the file, since a clip plays at its own frame rate. Checks are explicit
 and version/configuration-bound.
-Unknown scene shader/graph or Web runtime behavior remains **unknown**; readable
-files and video metadata are not proof of a displayed frame. The same card shows
-the actual running backend when the runtime reports it, and, for a scene Native Metal cannot draw,
-why it is held.
+
+For a scene, **Check compatibility** also reads the whole scene through the renderer, the
+way loading it does (its saved options, the shared resources, the parser and the Metal
+translation of its shaders) but without a display, a GPU or sound, so nothing on screen
+changes. It takes seconds for a large scene and runs only when the button is pressed,
+and only when the shared resources are installed. It answers two rows:
+
+- **Scene shader and graph support** says whether Native Metal would refuse the scene,
+  with the renderer's reason, or that it found nothing it cannot draw. Shader compilation
+  for the GPU and the render graph only happen when the scene is drawn, so a clean read is
+  not a promise.
+- **Files the scene names** lists, by layer, the files the scene asks for and does not
+  have (at most 64 are recorded and the row shows eight). Wallpaper Engine draws what it
+  can, and so does the app: a layer that needs a missing file is drawn without it or not at
+  all, and the scene is still applied.
+
+What Native Metal concluded about a scene, from such a check or from running it, is kept in
+`SceneDrawVerdicts.json` in the app's support folder for the app build and the scene's files
+it was reached with (`project.json` and `scene.pkg` or `scene.json`, by size and date). The
+scene row shows it before any check: drawn, nothing found by a check, or refused with the
+reason. A new app version, a Workshop update or a reinstall makes it unknown again; a
+failure a retry can clear (a frame, the surface) is never kept. Unknown Web runtime
+behavior remains **unknown**; readable files and video metadata are not proof of a
+displayed frame. The same card shows the actual running backend when the runtime reports
+it, and, for a scene Native Metal cannot draw, why it is held.
 When the installed project or its entry file is unavailable and the wallpaper is
 a Workshop item, the card also offers [Reinstall from Workshop…](workshop-downloads.md#reinstall-from-workshop).
 

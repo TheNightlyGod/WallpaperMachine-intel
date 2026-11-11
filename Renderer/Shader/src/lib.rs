@@ -32,6 +32,7 @@ mod nagair;
 #[cfg(feature = "observer-uniform-layout")]
 pub mod observer_uniform_layout;
 pub mod pipeline;
+mod point_geometry;
 pub mod prepare;
 pub mod preprocess;
 pub mod reflect;

@@ -40,7 +40,7 @@ extension PanelController {
     guard let id = store.appSnapshot.selectedWallpaperId else { return nil }
     let displayID = navigation.targetDisplayID
     let display = store.settingsSnapshot.displays.first { $0.displayId == displayID }
-    let displaySupported = display.map { $0.enabled && $0.mode == .standalone } ?? false
+    let displaySupported = display?.isIndependent ?? false
     let installed = store.librarySnapshot.wallpapers.contains { $0.id == id }
     let info = installed ? imagePlacement.generatedImage(wallpaperID: id) : nil
     let custom = imagePlacement.placement(wallpaperID: id, displayID: displayID)
@@ -144,7 +144,7 @@ extension PanelController {
   private func validatePlacementDisplay(_ displayID: String) throws {
     guard
       store.settingsSnapshot.displays.contains(where: {
-        $0.displayId == displayID && $0.enabled && $0.mode == .standalone
+        $0.displayId == displayID && $0.isIndependent
       })
     else { throw InvalidControlValue() }
   }

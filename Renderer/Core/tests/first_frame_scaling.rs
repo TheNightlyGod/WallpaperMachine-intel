@@ -39,7 +39,7 @@ fn write_still_scene(root: &Path) -> String {
     write(
         &root.join("shaders/card.vert"),
         "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n\
-         varying vec2 v_TexCoord;\nvoid main() {\ngl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n\
+         varying vec2 v_TexCoord;\nvoid main() {\ngl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n\
          v_TexCoord = a_TexCoord;\n}\n",
     );
     write(

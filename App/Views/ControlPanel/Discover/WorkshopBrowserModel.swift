@@ -37,6 +37,25 @@ final class WorkshopBrowserModel {
   /// Loads the stills and the animations of the tiles.
   let previews: WorkshopPreviewCoordinator
 
+  /// The selected item's comments, read from Steam's public thread when its inspector shows: whose
+  /// they are, and what is known of them.
+  enum Comments: Equatable {
+    /// No item's comments are held or being read.
+    case idle
+    case loading(itemID: String)
+    case loaded(itemID: String, thread: WorkshopComments)
+    case failed(itemID: String, message: String)
+
+    /// The item these comments belong to; nil when idle.
+    var itemID: String? {
+      switch self {
+      case .idle: nil
+      case .loading(let id), .loaded(let id, _), .failed(let id, _): id
+      }
+    }
+  }
+  private(set) var comments: Comments = .idle
+
   /// How the timers wait; tests give them a clock they fire by hand.
   @ObservationIgnored var sleep: @Sendable (Duration) async throws -> Void = {
     try await Task.sleep(for: $0)
@@ -49,6 +68,10 @@ final class WorkshopBrowserModel {
   @ObservationIgnored private var lastScrollOffset: Double?
   /// The grid's offset was restored from the last window, once.
   @ObservationIgnored private(set) var restoredScroll = false
+  /// Whether this launch has read the signed-in account's subscriptions for the tiles' marks,
+  /// and the sign-in they were read with: another sign-in, even of the same account, reads again.
+  @ObservationIgnored private var subscriptionsRead = false
+  @ObservationIgnored private var subscriptionsSession: SteamWebSession?
 
   init(controller: PanelController) {
     self.controller = controller
@@ -106,12 +129,32 @@ final class WorkshopBrowserModel {
   /// Whether a pause is running before the typed text searches.
   var hasPendingSearch: Bool { pendingSearch != nil }
 
+  /// **Search “…” instead**, beside a search that was sent in English: searches the words as they
+  /// were typed, and keeps doing so for a sort or a filter until the text changes.
+  @discardableResult
+  func searchAsTyped(_ translation: WorkshopSearchTranslation) -> Task<Void, Never> {
+    pendingSearch?.cancel()
+    pendingSearch = nil
+    let original = translation.original
+    return controller.launch(PanelActionCoordinator.key("workshopSearch"), policy: .latestWins) {
+      [controller] in
+      try await controller.searchWorkshopAsTyped(original)
+    }
+  }
+
   func choose(sort new: WorkshopSort) {
     sort = new
     search()
   }
 
   func refresh() { search() }
+
+  /// The favorites list's order, which Steam applies: shows the list again from its first page.
+  func choose(favoritesOrder new: WorkshopFavoritesOrder) {
+    controller.launch(PanelActionCoordinator.key("workshopSearch"), policy: .latestWins) { [controller] in
+      try await controller.sortWorkshopFavorites(new)
+    }
+  }
 
   // MARK: Filters
 
@@ -177,6 +220,22 @@ final class WorkshopBrowserModel {
     scrollToTop()
     controller.launch(PanelActionCoordinator.key("workshopSource")) { [controller] in
       try await controller.openWorkshop(list)
+    }
+  }
+
+  /// Installed's **Show in Steam Workshop**, for a Workshop link or id that is not installed:
+  /// the search field takes the id and the page shows that item on the wallpapers list, as a link
+  /// pasted here does. Any typing still waiting for its pause is superseded.
+  @discardableResult
+  func lookUp(itemID id: String) -> Task<Void, Never> {
+    pendingSearch?.cancel()
+    pendingSearch = nil
+    text = id
+    scrollToTop()
+    return controller.launch(
+      PanelActionCoordinator.key("workshopSearch"), policy: .latestWins
+    ) { [controller] in
+      try await controller.lookUpWorkshopItem(id: id)
     }
   }
 
@@ -303,6 +362,23 @@ final class WorkshopBrowserModel {
 
   // MARK: Leaving and coming back
 
+  /// Reads `item`'s newest comments for its inspector, unless they are held already. A newer
+  /// selection while Steam answers wins.
+  func loadComments(for item: WorkshopItem) async {
+    if case .loaded(item.id, _) = comments { return }
+    comments = .loading(itemID: item.id)
+    do {
+      let thread = try await controller.workshop.comments(for: item)
+      guard comments.itemID == item.id else { return }
+      comments = .loaded(itemID: item.id, thread: thread)
+    } catch is CancellationError {
+      if comments.itemID == item.id { comments = .idle }
+    } catch {
+      guard comments.itemID == item.id else { return }
+      comments = .failed(itemID: item.id, message: error.localizedDescription)
+    }
+  }
+
   /// The page appeared: a Workshop that was never loaded starts its first search, whichever way the
   /// page was reached, and the jump field shows the page on show.
   func pageAppeared() {
@@ -312,6 +388,33 @@ final class WorkshopBrowserModel {
       controller.launch(PanelActionCoordinator.key("navigate"), policy: .latestWins) {
         [controller] in
         try await controller.navigate(.workshop)
+      }
+    }
+    readSubscriptionsOnce()
+  }
+
+  /// Signed in, the tiles and the Installed inspector's menu mark the account's subscriptions;
+  /// they are read once for each sign-in, whichever of the two asks first. The read waits for a
+  /// saved sign-in still being restored; with none, or after a failure, the next visit asks again.
+  func readSubscriptionsOnce() {
+    let session = controller.workshop.steamWebSession
+    if !subscriptionsRead || (session != nil && session != subscriptionsSession) {
+      subscriptionsRead = true
+      subscriptionsSession = session
+      controller.launch(PanelActionCoordinator.key("workshop-subscriptions")) { [controller, weak self] in
+        let read: SteamWebSession?
+        do {
+          read = try await controller.refreshWorkshopSubscriptions()
+        } catch {
+          // Reported in the banner; the next visit tries again.
+          self?.subscriptionsRead = false
+          self?.subscriptionsSession = nil
+          throw error
+        }
+        guard let self else { return }
+        // The sign-in the read used, not whichever is current now: another one reads again.
+        subscriptionsRead = read != nil
+        subscriptionsSession = read
       }
     }
   }

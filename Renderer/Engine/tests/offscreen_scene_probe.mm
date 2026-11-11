@@ -205,9 +205,13 @@ int main() {
             std::ofstream(out / "scene.json") << scene_source;
         WPSceneParser parser;
         audio::SoundManager sound(audio::SoundManager::OutputBackend::Null);
+        // WE_TEST_SCENE_STORAGE: the folder the scripts' localStorage persists in (display-1's
+        // screen file), so a second run can read what the first one saved.
+        const char* storage = std::getenv("WE_TEST_SCENE_STORAGE");
         auto scene = parser.Parse(SceneParseRequest {
             .scene_id = paths.scene_id, .project_path = project,
             .project_properties = &properties, .pkg_version = PackageVersion(paths.pkg_path),
+            .storage_directory = storage != nullptr ? storage : "", .storage_screen_key = "display-1",
         }, scene_source, vfs, sound);
         Check(scene != nullptr, "parse scene");
         milestone("parsed");
@@ -348,6 +352,50 @@ int main() {
             std::cout << "click layer=" << layer_id << " count=" << click_count
                       << " position=" << position.transpose() << std::endl;
         }
+        // WE_TEST_CURSOR_PATH: a scripted cursor, one entry a 1/60 s tick before the captured frames:
+        // "x,y,down;x,y,down;..." in world units, `down` 1 while the left button is held (0 or left
+        // out: up). A press and a release are dispatched where `down` changes, so a script can be
+        // made to drag (cursorDown, cursorMove, cursorUp) the same way every run. The scene clock
+        // moves with each tick (puppet poses and their simulation follow it). With
+        // WE_TEST_CURSOR_TRACE=<layer name> each tick prints that puppet layer's bone world origins.
+        if (const char* path = std::getenv("WE_TEST_CURSOR_PATH")) {
+            const char* trace = std::getenv("WE_TEST_CURSOR_TRACE");
+            scene->runtime->SetCursorEnter(true);
+            bool       held  = false;
+            int        ticks = 0;
+            std::string_view rest(path);
+            while (! rest.empty()) {
+                const auto        end   = rest.find(';');
+                const std::string entry(rest.substr(0, end));
+                rest = end == std::string_view::npos ? std::string_view {} : rest.substr(end + 1);
+                if (entry.empty()) continue;
+                float x = 0.0f, y = 0.0f;
+                int   down = 0;
+                const int read = std::sscanf(entry.c_str(), "%f,%f,%d", &x, &y, &down);
+                Check(read >= 2, "WE_TEST_CURSOR_PATH entries must be \"x,y[,down]\"");
+                const bool now = down != 0;
+                scene->runtime->SetCursorWorldPosition(linalg::Vector3f(x, y, 0.0f));
+                scene->runtime->SetCursorButtons(now ? 1u : 0u, now && ! held ? 1u : 0u, ! now && held ? 1u : 0u);
+                scene->runtime->DispatchCursorFrameEvents(ticks != 0);
+                scene->runtime->Tick(1.0 / 60.0);
+                scene->PassFrameTime(1.0 / 60.0);
+                held = now;
+                ++ticks;
+                Check(ticks <= 36000, "WE_TEST_CURSOR_PATH holds at most 36000 entries");
+                if (trace != nullptr) {
+                    std::cout << "tick " << ticks << " t=" << scene->elapsingTime << " cursor=" << x << ',' << y
+                              << (now ? " down" : " up");
+                    for (int32_t b = 0; b < scene->runtime->PuppetBoneCount(trace); ++b) {
+                        const auto m = scene->runtime->PuppetBoneTransform(
+                            trace, b, SceneRuntimeContext::PuppetBoneSpace::World);
+                        if (m.has_value()) std::cout << " b" << b << '=' << (*m)(0, 3) << ',' << (*m)(1, 3);
+                    }
+                    std::cout << std::endl;
+                }
+            }
+            scene->runtime->SetCursorButtons(0, 0, 0);
+            std::cout << "cursor path ticks=" << ticks << std::endl;
+        }
         if (std::getenv("WE_TEST_DUMP_SOURCE")) {
             std::ofstream nodes(out / "nodes.txt");
             // World placement matters as much as the local transform: an effect
@@ -385,7 +433,7 @@ int main() {
             const auto layout = scene->runtime->NodeTextLayout(name);
             std::cout << name << " font=" << state->resolved_font_path << " kind=" << state->resolved_font_kind
                       << " text=" << state->text << " size=" << layout->card.transpose() << std::endl;
-            const auto image = scene->imageParser->Parse(TextTextureName(name));
+            const auto image = scene->imageParser->Parse(TextAtlasName(name));
             if (image && !image->slots.empty()) {
                 const auto& mip = image->slots[0].mipmaps[0];
                 std::vector<uint8_t> pixels(mip.data.get(), mip.data.get() + mip.size);
@@ -482,6 +530,8 @@ int main() {
                     Check(audio::CurrentAudioSpectrumSnapshot().generation > generation,
                           "synthetic PCM was not analyzed");
                 }
+                scene->targetFps =
+                    static_cast<uint32_t>(std::lround(1.0 / (frame_step > 0.0 ? frame_step : 1.0 / 60.0)));
                 scene->paritileSys->Emitt();
                 scene->runtime->Tick(frame_step > 0.0 ? frame_step : 1.0 / 60.0);
                 // Text layout runs on its own thread and its results are collected

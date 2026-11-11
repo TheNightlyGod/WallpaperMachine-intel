@@ -78,6 +78,31 @@ final class WorkshopUpdateStoreTests: XCTestCase {
         XCTAssertNil(checking.errorMessage)
     }
 
+    /// An installed preset carries its base's content, so a change to the base is an update of
+    /// the preset too: the check asks Steam about the base as well, and offers the preset.
+    func testAChangedBaseIsAnUpdateOfThePresetBuiltOnIt() async throws {
+        try installed("300", writtenAt: clock.addingTimeInterval(-7200))
+        try Data(#"{"title":"Preset","dependency":"400"}"#.utf8)
+            .write(to: root.appendingPathComponent("300/project.json"))
+        try FileManager.default.setAttributes(
+            [.modificationDate: clock.addingTimeInterval(-7200)],
+            ofItemAtPath: root.appendingPathComponent("300/project.json").path)
+        answer = [item("300", updated: clock.addingTimeInterval(-9000)), item("400", updated: clock.addingTimeInterval(-3600))]
+        let store = makeStore()
+        store.check(installed: ["300"], library: root)
+        try await settle(store)
+        XCTAssertEqual(asked, [["300", "400"]], "the base is asked about with the preset")
+        XCTAssertEqual(Set(store.available.keys), ["300"], "the preset is offered; its base is not in the library")
+        XCTAssertEqual(store.available["300"]?.title, "Item 300", "with the preset's own details")
+
+        answer = [item("300", updated: clock.addingTimeInterval(-9000)), item("400", updated: clock.addingTimeInterval(-9000))]
+        asked = []
+        let unchanged = makeStore()
+        unchanged.check(installed: ["300"], library: root)
+        try await settle(unchanged)
+        XCTAssertTrue(unchanged.available.isEmpty, "a base older than the preset's install is no update")
+    }
+
     func testDownloadingAnUpdateMakesItCurrentAndResultsOutliveTheApp() async throws {
         try installed("300", writtenAt: clock.addingTimeInterval(-7200))
         answer = [item("300", updated: clock.addingTimeInterval(-3600))]

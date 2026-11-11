@@ -19,15 +19,29 @@ struct WallpaperCompatibilityCheck: Equatable, Sendable {
   let status: Status
   let title: String
   let detail: String
+  /// The files a scene names and lacks, on the `missingFiles` row only: what a problem report quotes.
+  var missingFiles: [MissingSceneFile] = []
+}
+
+/// A file a scene names that is not installed, and the layer that asked for it ("" for none).
+struct MissingSceneFile: Equatable, Sendable {
+  let layer: String
+  let path: String
 }
 
 /// Metadata-only preflight. Actor isolation keeps filesystem reads off the UI executor;
 /// AVFoundation uses the same asynchronous admission rule as the production host.
 actor WallpaperCompatibilityService {
   typealias Probe = @Sendable (URL) async -> NativeVideoProbeOutcome
+  /// Reads an installed scene without drawing it (`WallpaperBridge.sceneCapability`).
+  typealias SceneProbe = @Sendable (String) async throws -> BridgeSceneCapability
   private let libraryURL: URL
   private let assetsURL: @Sendable () -> URL
   private let probe: Probe
+  /// What Native Metal last concluded about a scene; nil leaves the scene row unknown.
+  private let verdicts: SceneDrawVerdicts?
+  /// Nil checks a scene's files only, and the scene row says what is remembered.
+  private let sceneProbe: SceneProbe?
   private struct CacheKey: Hashable {
     let context: WallpaperCompatibilityContext
     let content: [Stamp]
@@ -48,10 +62,13 @@ actor WallpaperCompatibilityService {
 
   init(libraryURL: URL = ClientPaths.libraryURL,
        assetsURL: @escaping @Sendable () -> URL = { ClientPaths.assetsURL },
-       probe: @escaping Probe = { await WallpaperCompatibilityService.playbackProbe(url: $0) }) {
+       probe: @escaping Probe = { await WallpaperCompatibilityService.playbackProbe(url: $0) },
+       verdicts: SceneDrawVerdicts? = nil, sceneProbe: SceneProbe? = nil) {
     self.libraryURL = libraryURL
     self.assetsURL = assetsURL
     self.probe = probe
+    self.verdicts = verdicts
+    self.sceneProbe = sceneProbe
   }
 
   func check(_ context: WallpaperCompatibilityContext, retry: Bool = false) async
@@ -67,12 +84,10 @@ actor WallpaperCompatibilityService {
            String(localized: "Target display"), context.targetAvailable
            ? String(localized: "Checking this display at \(context.targetFPS) FPS, including its mirror group and global frame-rate cap.")
            : String(localized: "Choose a connected, enabled independent display. A mirror follows its source wallpaper."))
-    append("lockScreen", context.kind == .web || context.kind == .unknown ? .unavailable : .warning,
-           String(localized: "Lock screen"), context.kind == .web
-           ? String(localized: "Web wallpapers are not supported on the lock screen.")
-           : context.kind == .unknown
-             ? String(localized: "This wallpaper type has no supported lock-screen route.")
-             : String(localized: "Video and scene wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification."))
+    append("lockScreen", context.kind == .unknown ? .unavailable : .warning,
+           String(localized: "Lock screen"), context.kind == .unknown
+           ? String(localized: "This wallpaper type has no supported lock-screen route.")
+           : String(localized: "Video, scene and web wallpapers have a lock-screen route. Publishing, resource access and extension playback still require runtime verification."))
     guard Self.validID(context.wallpaperID) else {
       append("project", .unavailable, String(localized: "Installed project"),
              String(localized: "The installed wallpaper identifier is not a safe library path."))
@@ -156,8 +171,23 @@ actor WallpaperCompatibilityService {
                String(localized: "Shared scene resources"), sharedReady
                ? String(localized: "The required baseline shared shaders and material are installed. Authored resources are not fully validated.")
                : String(localized: "Baseline Wallpaper Engine shaders or materials are missing. Install or locate the complete scene assets folder."))
-        append("sceneCapability", .unknown, String(localized: "Scene shader and graph support"),
-               String(localized: "Preflight has no parsed render-graph capability result. Shader, puppet, particle and effect support need runtime evaluation; the live backend, and the reason a scene it cannot draw is held, are shown separately."))
+        // Never cached: what the renderer learns about the scene changes while its files do not.
+        cacheable = false
+        var verdict = await verdicts?.verdict(for: context.wallpaperID)
+        var read: [WallpaperCompatibilityCheck] = []
+        if let sceneProbe, sharedReady, entryReadable || packedScene, context.supported {
+          let probed = await readScene(context.wallpaperID, with: sceneProbe)
+          if let checked = probed.verdict {
+            await verdicts?.record(
+              context.wallpaperID, outcome: checked.outcome, stage: checked.stage, reason: checked.reason)
+            verdict = await verdicts?.verdict(for: context.wallpaperID) ?? checked
+          }
+          read = probed.checks
+        }
+        let capability = Self.sceneCapabilityCheck(verdict)
+        append("sceneCapability", capability.status, String(localized: "Scene shader and graph support"),
+               capability.detail)
+        checks.append(contentsOf: read)
       case .web:
         append("webRuntime", .unknown, String(localized: "Web runtime"),
                String(localized: "The entry file check does not execute scripts or verify media, local dependencies or WebGL. These need runtime evaluation."))
@@ -186,11 +216,70 @@ actor WallpaperCompatibilityService {
     }
   }
 
+  /// The most files a row lists; the rest are counted.
+  static let missingFileLines = 8
+
+  /// Reads the scene through the renderer: the verdict it reached, and a row for the files it
+  /// names and lacks (or for why it could not be read at all).
+  private func readScene(_ wallpaperID: String, with sceneProbe: SceneProbe) async
+    -> (verdict: SceneDrawVerdict?, checks: [WallpaperCompatibilityCheck])
+  {
+    let title = String(localized: "Files the scene names")
+    let capability: BridgeSceneCapability
+    do {
+      capability = try await sceneProbe(wallpaperID)
+    } catch {
+      return (nil, [.init(id: "missingFiles", status: .unknown, title: title,
+                          detail: String(localized: "The renderer could not check this scene: \(error.localizedDescription)"))])
+    }
+    if let readError = capability.readError {
+      return (nil, [.init(id: "missingFiles", status: .unavailable, title: title,
+                          detail: String(localized: "The renderer could not read this scene: \(readError)"))])
+    }
+    let verdict = SceneDrawVerdict(
+      outcome: capability.failureStage == nil ? .passedCheck : .notDrawn, stage: capability.failureStage,
+      reason: capability.failureReason, build: "", content: "", recorded: Date())
+    let missing = capability.missingFiles.map { MissingSceneFile(layer: $0.layer, path: $0.path) }
+    guard !missing.isEmpty else {
+      return (verdict, [.init(id: "missingFiles", status: .ok, title: title,
+                              detail: String(localized: "Every file the scene names is installed."))])
+    }
+    var lines = missing.prefix(Self.missingFileLines).map { file in
+      file.layer.isEmpty ? file.path : String(localized: "Layer “\(file.layer)”: \(file.path)")
+    }
+    if missing.count > Self.missingFileLines {
+      lines.append(String(localized: "and \(missing.count - Self.missingFileLines) more"))
+    }
+    let detail = ([String(localized: "Some files the scene names are not installed. A layer that needs one is drawn without it, or not at all.")]
+      + lines).joined(separator: "\n")
+    return (verdict, [.init(id: "missingFiles", status: .warning, title: title, detail: detail,
+                            missingFiles: missing)])
+  }
+
+  /// The scene row from what Native Metal last concluded about this scene with this build and these
+  /// files. Unknown until the scene has run or been checked.
+  static func sceneCapabilityCheck(_ verdict: SceneDrawVerdict?)
+    -> (status: WallpaperCompatibilityCheck.Status, detail: String)
+  {
+    switch verdict?.outcome {
+    case .drawn:
+      return (.ok, String(localized: "Native Metal has drawn this scene with this version of the app. Options that turn other layers or effects on are not covered."))
+    case .passedCheck:
+      return (.ok, String(localized: "The renderer read the whole scene and found nothing Native Metal cannot draw. Its shaders are compiled, and its render graph built, only when it is drawn."))
+    case .notDrawn:
+      let reason = verdict?.reason.flatMap { $0.isEmpty ? nil : $0 } ?? String(localized: "no reason was given")
+      return (.unavailable, String(localized: "Native Metal cannot draw this scene with this version of the app: \(reason). Applying it shows its preview picture instead."))
+    case nil:
+      return (.unknown, String(localized: "Preflight has no parsed render-graph capability result. Shader, puppet, particle and effect support need runtime evaluation; the live backend, and the reason a scene it cannot draw is held, are shown separately."))
+    }
+  }
+
   /// What the app's players say about the file: AVFoundation for most, the WebM reader for Matroska
-  /// and WebM. Expressed as the admission probe the check already reads.
+  /// and WebM, and AVFoundation on a copy retagged `hvc1` for HEVC tagged `hev1`. Expressed as the
+  /// admission probe the check already reads.
   static func playbackProbe(url: URL) async -> NativeVideoProbeOutcome {
     switch await VideoFormatSupport.inspect(url: url) {
-    case .supported, .supportedWebM:
+    case .supported, .supportedWebM, .playableAfterRetag:
       return .probed(NativeVideoTrackProbe(isPlayable: true, hasVideoTrack: true))
     case let .unsupported(format, reason):
       return .refused(.unsupportedFormat(VideoFormatSupport.message(for: format, reason: reason)))

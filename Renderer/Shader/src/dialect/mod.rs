@@ -55,11 +55,61 @@ pub fn parse_stage(kind: StageKind, text: &str) -> Result<(Module, std::collecti
     Ok((module, taken))
 }
 
+/// What the program's combos decide about the dialect's own types (E-D8).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConvertOptions {
+    /// `BACKBUFFER_MS` is set: `sampler2DBackBuffer` is Wallpaper Engine's `Texture2DMS<float4>`
+    /// and `texSample2DBackBuffer` loads sample 0; otherwise it is an ordinary 2D texture.
+    pub backbuffer_ms: bool,
+    /// The text is this converter's own output, which calls GLSL built-ins: converting it again
+    /// changes nothing (R95). It also keeps the generated GLSL vector types valid.
+    /// An author's stage never sets it, so calls/types Wallpaper Engine refuses
+    /// fail the stage as there (`builtins::WE_REFUSED_GLSL_CALLS`).
+    pub glsl_builtins: bool,
+}
+
 /// Converts one stage's preprocessed text. A stage either converts completely or fails with
 /// diagnostics (E17).
 pub fn convert_stage(kind: StageKind, text: &str) -> Result<Converted, Vec<Diagnostic>> {
+    convert_stage_with(kind, text, ConvertOptions::default())
+}
+
+/// [`convert_stage`] with the options the program's combos decide.
+pub fn convert_stage_with(kind: StageKind, text: &str, options: ConvertOptions) -> Result<Converted, Vec<Diagnostic>> {
     let (module, taken) = parse_stage(kind, text)?;
-    convert_parsed(kind, module, taken, text)
+    convert_parsed(kind, module, taken, text, options)
+}
+
+/// The GLSL type of a dialect sampler type (`sub_1400D5070`): `sampler2DComparison` is a depth
+/// texture with a comparison sampler; `sampler2DBackBuffer` is `Texture2DMS<float4>` under
+/// `BACKBUFFER_MS` and an ordinary 2D texture otherwise.
+fn glsl_sampler_name(name: &str, options: ConvertOptions) -> Option<&'static str> {
+    match name {
+        "sampler2DComparison" => Some("sampler2DShadow"),
+        "sampler2DBackBuffer" => Some(if options.backbuffer_ms { "sampler2DMS" } else { "sampler2D" }),
+        _ => None,
+    }
+}
+
+/// Gives the dialect's own sampler types their GLSL spelling, in globals and parameters alike.
+fn resolve_dialect_samplers(module: &mut Module, options: ConvertOptions) {
+    for item in &mut module.items {
+        match item {
+            ast::Item::Var(d) => {
+                if let Some(name) = glsl_sampler_name(&d.ty.name, options) {
+                    d.ty.name = name.to_string();
+                }
+            }
+            ast::Item::Function(f) => {
+                for p in &mut f.params {
+                    if let Some(name) = glsl_sampler_name(&p.ty.name, options) {
+                        p.ty.name = name.to_string();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Converts a stage that [`parse_stage`] parsed (and that the caller may have adjusted, as the
@@ -67,11 +117,13 @@ pub fn convert_stage(kind: StageKind, text: &str) -> Result<Converted, Vec<Diagn
 /// tree came from; it is only used for the informational diagnostic.
 pub fn convert_parsed(
     kind: StageKind,
-    module: Module,
+    mut module: Module,
     taken: std::collections::HashSet<String>,
     text: &str,
+    options: ConvertOptions,
 ) -> Result<Converted, Vec<Diagnostic>> {
-    let mut module = convert::convert(module, kind, taken)?;
+    resolve_dialect_samplers(&mut module, options);
+    let mut module = convert::convert(module, kind, taken, options)?;
     // The header already declares the default precision; a stage that restates it (as a
     // converted stage does) is not given a second copy.
     module.items.retain(|i| !matches!(i, ast::Item::Precision(p) if p == "precision highp float"));

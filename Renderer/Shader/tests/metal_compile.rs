@@ -82,6 +82,10 @@ fn metal_compile(dir: &Path, items: &[(String, String, String)]) -> Option<Vec<S
 }
 
 fn request(name: &str, vertex: &str, fragment: &str, combos: &[(&str, &str)], textures: Vec<TextureRecord>) -> wm_shader::ValidRequest {
+    unchecked(name, vertex, fragment, combos, textures).validate().unwrap()
+}
+
+fn unchecked(name: &str, vertex: &str, fragment: &str, combos: &[(&str, &str)], textures: Vec<TextureRecord>) -> ShaderRequest {
     ShaderRequest {
         shader_name: name.into(),
         stages: vec![
@@ -92,8 +96,6 @@ fn request(name: &str, vertex: &str, fragment: &str, combos: &[(&str, &str)], te
         textures,
         ..ShaderRequest::default()
     }
-    .validate()
-    .unwrap()
 }
 
 fn texture(slot: u8) -> TextureRecord {
@@ -116,7 +118,7 @@ fn programs() -> Vec<(&'static str, wm_shader::ValidRequest)> {
         ("quad", request("quad", VERTEX, "varying vec2 v_TexCoord; uniform sampler2D g_Texture0; uniform float g_Alpha;\nvoid main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord) * g_Alpha; }", &[], vec![texture(0)])),
         (
             "members",
-            request("members", VERTEX, "varying vec2 v_TexCoord; uniform float pre; uniform vec3 b; uniform mat3 m; uniform vec4 ring[2]; uniform float bands[8]; uniform uint offs[3]; uniform ivec3 iv[2]; uniform mat4x3 bones[2]; uniform bool flag; uniform bvec3 bv; uniform vec2 post;\nvoid main() { gl_FragColor = vec4(pre + b.x + m[1].y + ring[1].x + bands[7] + float(offs[2]) + float(iv[1].z) + bones[1][0].x + (flag ? 1.0 : 0.0) + (bv.y ? 1.0 : 0.0) + post.x); }", &[], vec![]),
+            request("members", VERTEX, "varying vec2 v_TexCoord; uniform float pre; uniform vec3 b; uniform mat3 m; uniform vec4 ring[2]; uniform float bands[8]; uniform uint offs[3]; uniform int3 iv[2]; uniform mat4x3 bones[2]; uniform bool flag; uniform bool3 bv; uniform vec2 post;\nvoid main() { gl_FragColor = CAST4(pre + b.x + m[1].y + ring[1].x + bands[7] + float(offs[2]) + float(iv[1].z) + bones[1][0].x + (flag ? 1.0 : 0.0) + (bv.y ? 1.0 : 0.0) + post.x); }", &[], vec![]),
         ),
         (
             "interface",
@@ -129,12 +131,8 @@ fn programs() -> Vec<(&'static str, wm_shader::ValidRequest)> {
             ),
         ),
         (
-            "inverse",
-            request("inverse", VERTEX, "varying vec2 v_TexCoord; uniform vec4 g_A; uniform mat3 g_M3; uniform mat4 g_M4;\nvoid main() { mat2 m2 = mat2(g_A.x, g_A.y, g_A.z, g_A.w); gl_FragColor = vec4(inverse(m2)[0].x + inverse(g_M3)[1].y + inverse(g_M4)[2].z); }", &[], vec![]),
-        ),
-        (
             "globals",
-            request("globals", VERTEX, "uniform float u_Near; uniform float u_Far;\nfloat depthSpan() { return u_Far - u_Near; }\nconst float RANGE = depthSpan();\nconst float STEP = RANGE / 8.0;\nfloat gain = u_Near * 3.0;\nvoid main() { gl_FragColor = vec4(STEP + gain); }", &[], vec![]),
+            request("globals", VERTEX, "uniform float u_Near; uniform float u_Far;\nfloat depthSpan() { return u_Far - u_Near; }\nconst float RANGE = depthSpan();\nconst float STEP = RANGE / 8.0;\nfloat gain = u_Near * 3.0;\nvoid main() { gl_FragColor = CAST4(STEP + gain); }", &[], vec![]),
         ),
         (
             "planes",
@@ -145,8 +143,20 @@ fn programs() -> Vec<(&'static str, wm_shader::ValidRequest)> {
             }),
         ),
         (
+            "comparison sampling",
+            request("compare", VERTEX, "varying vec2 v_TexCoord; uniform sampler2DComparison g_Texture6;\nvoid main() { float s = texSample2DCompare(g_Texture6, v_TexCoord, 0.5); gl_FragColor = CAST4(s); }", &[], vec![texture(6)]),
+        ),
+        (
+            "texel fetch",
+            request("fetch", VERTEX, "varying vec2 v_TexCoord; uniform sampler2D g_Texture3; uniform vec4 g_Texture3Resolution;\nvoid main() { gl_FragColor = texLoad2D(g_Texture3, v_TexCoord, g_Texture3Resolution.xy); }", &[], vec![texture(3)]),
+        ),
+        (
+            "multisampled back buffer",
+            request("backbuffer", VERTEX, "varying vec2 v_TexCoord; uniform sampler2DBackBuffer g_Texture1; uniform vec2 g_Res;\nvoid main() { gl_FragColor = texSample2DBackBuffer(g_Texture1, v_TexCoord, g_Res); }", &[("BACKBUFFER_MS", "1")], vec![texture(1)]),
+        ),
+        (
             "sampling in a branch",
-            request("branch", VERTEX, "varying vec2 v_TexCoord; uniform sampler2D g_Texture0;\nvoid main() { vec4 c = vec4(0.0); if (v_TexCoord.x > 0.5) { c = texSample2D(g_Texture0, v_TexCoord); } gl_FragColor = c; }", &[], vec![texture(0)]),
+            request("branch", VERTEX, "varying vec2 v_TexCoord; uniform sampler2D g_Texture0;\nvoid main() { vec4 c = CAST4(0.0); if (v_TexCoord.x > 0.5) { c = texSample2D(g_Texture0, v_TexCoord); } gl_FragColor = c; }", &[], vec![texture(0)]),
         ),
     ]
 }
@@ -210,7 +220,7 @@ fn programs_near_the_inter_stage_budget_build_a_render_pipeline_state() {
         request(
             "budget",
             &format!("attribute vec3 a_Position; attribute vec2 a_Coord;\n{declarations}\nvoid main() {{ gl_Position = vec4(a_Position, 1.0);\n{writes} }}"),
-            &format!("{declarations}\nvoid main() {{ vec4 c = vec4(0.0);\n{reads} gl_FragColor = c; }}"),
+            &format!("{declarations}\nvoid main() {{ vec4 c = CAST4(0.0);\n{reads} gl_FragColor = c; }}"),
             &[],
             vec![],
         )
@@ -298,7 +308,7 @@ vec3 ComputePBRLightShadow(vec3 N, vec3 L, vec3 V, vec3 albedo, vec3 lc, float r
 vec3 ComputePBRLightShadowInfinite(vec3 N, vec3 L, vec3 V, vec3 albedo, vec3 lc, vec3 st, vec3 br, float ro, float me, float sh) { return lc * N + L; }
 ",
     );
-    let fragment = "#include \"stubs.h\"\nvarying vec3 v_World;\n#require LightingV1\nvoid main() { gl_FragColor = vec4(PerformLighting_V1(v_World, vec3(1.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 1.0), vec3(0.04), vec3(0.04), 0.5, 0.0), 1.0); }";
+    let fragment = "#include \"stubs.h\"\nvarying vec3 v_World;\n#require LightingV1\nvoid main() { gl_FragColor = vec4(PerformLighting_V1(v_World, CAST3(1.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 1.0), CAST3(0.04), CAST3(0.04), 0.5, 0.0), 1.0); }";
     let vertex = "attribute vec3 a_Position; varying vec3 v_World;\nvoid main() { v_World = a_Position; gl_Position = vec4(a_Position, 1.0); }";
     let lit = request("lit", vertex, fragment, &[("LIGHTING", "1"), ("LIGHTS_POINT", "2"), ("LIGHTS_SPOT", "3"), ("LIGHTS_TUBE", "1"), ("LIGHTS_DIRECTIONAL", "2")], vec![]);
     let program = compile(&lit, &includes).unwrap();
@@ -353,6 +363,91 @@ fn the_msl_of_shipped_programs_compiles_with_the_system_metal_compiler() {
         eprintln!("  {f}");
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
+/// The stock lit image shader with every shadow partition (Appendix C item 6): the generated
+/// `PerformLighting_V1` samples the shadow atlas through comparison sampling, and the text the
+/// system compiler is given compiles.
+#[test]
+fn genericimage4_with_shadow_mapping_compiles_with_the_system_metal_compiler() {
+    let Some(root) = shaders_root() else {
+        eprintln!("skipped: the shipped shader folder is absent");
+        return;
+    };
+    let includes = |path: &str| -> Result<String, wm_shader::include::IncludeError> {
+        std::fs::read_to_string(root.join(path)).map_err(|_| wm_shader::include::IncludeError { path: path.into(), kind: wm_shader::include::IncludeErrorKind::NotFound })
+    };
+    let (Ok(v), Ok(f)) = (std::fs::read_to_string(root.join("genericimage4.vert")), std::fs::read_to_string(root.join("genericimage4.frag"))) else {
+        eprintln!("skipped: genericimage4 is not in the shipped shader folder");
+        return;
+    };
+    let combos = [
+        ("LIGHTING", "1"),
+        ("LIGHTS_POINT", "1"),
+        ("LIGHTS_POINT_SHADOW", "1"),
+        ("LIGHTS_SPOT", "2"),
+        ("LIGHTS_SPOT_SHADOW", "1"),
+        ("LIGHTS_DIRECTIONAL", "1"),
+        ("LIGHTS_DIRECTIONAL_SHADOW", "1"),
+        ("LIGHTS_SHADOW_MAPPING", "1"),
+        ("LIGHTS_SHADOW_MAPPING_QUALITY", "2"),
+        ("REVERSEDEPTH", "1"),
+    ];
+    let textures = (0..13u8).map(texture).collect();
+    let program = compile(&request("genericimage4-shadows", &v, &f, &combos, textures), &includes).unwrap();
+    let msl: String = program.stages.iter().map(|s| s.payload.msl_source.as_str()).collect();
+    assert!(msl.contains("sample_compare"), "the atlas is not sampled by comparison");
+    if !metal_available() {
+        return;
+    }
+    let Some(failures) = metal_compile(&scratch("genericimage4-shadows"), &items("genericimage4-shadows", &program)) else { return };
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The shipped rope program with its geometry stage, lowered for every combination the
+/// particle renderer selects (format, trail kind, scrolling alpha, subdivision, orientation,
+/// fog, lighting, refraction): each translates, and with the compiler opted in, compiles.
+#[test]
+fn shipped_rope_geometry_translates_for_every_renderer_combination() {
+    let Some(root) = shaders_root() else {
+        eprintln!("skipped: the shipped shader folder is absent");
+        return;
+    };
+    let includes = |path: &str| -> Result<String, wm_shader::include::IncludeError> {
+        std::fs::read_to_string(root.join(path)).map_err(|_| wm_shader::include::IncludeError { path: path.into(), kind: wm_shader::include::IncludeErrorKind::NotFound })
+    };
+    let read = |ext: &str| std::fs::read_to_string(root.join(format!("genericropeparticle.{ext}")));
+    let (Ok(v), Ok(g), Ok(f)) = (read("vert"), read("geom"), read("frag")) else {
+        eprintln!("skipped: genericropeparticle is absent");
+        return;
+    };
+    let (mut all, mut failures) = (Vec::new(), Vec::new());
+    for bits in 0u32..(1 << 7) {
+        for subdivision in [0u32, 3, 32] {
+            let bit = |n: u32| if bits & (1 << n) != 0 { "1" } else { "0" };
+            let subdivision_text = subdivision.to_string();
+            let combos = [("GS_ENABLED", "1"), ("THICKFORMAT", bit(0)), ("TRAILRENDERER", bit(1)), ("TRAILSCROLLALPHA", bit(2)),
+                          ("ORIENTATION", bit(3)), ("FOG", bit(4)), ("FOG_DIST", bit(4)), ("FOG_HEIGHT", bit(4)),
+                          ("LIGHTING", bit(5)), ("REFRACT", bit(6)), ("TRAILSUBDIVISION", subdivision_text.as_str())];
+            let mut request = unchecked("genericropeparticle", &v, &f, &combos, (0..3u8).map(texture).collect());
+            request.point_geometry = Some(wm_shader::PointGeometry {
+                source: g.clone(),
+                max_vertices: 4 + 2 * subdivision,
+                output_index_attribute: "a_GeometryVertex".into(),
+            });
+            let label = format!("rope-{bits:02x}-{subdivision}");
+            match compile(&request.validate().unwrap(), &includes) {
+                Ok(program) => all.extend(items(&label, &program)),
+                Err(error) => failures.push(format!("{label}: {error}")),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} of 384 rope programs did not translate:\n{}", failures.len(), failures.join("\n"));
+    if !metal_available() {
+        return;
+    }
+    let Some(refused) = metal_compile(&scratch("rope-geometry"), &all) else { return };
+    assert!(refused.is_empty(), "{}", refused.join("\n"));
 }
 
 fn shaders_root() -> Option<PathBuf> {
@@ -472,4 +567,38 @@ fn collect_fragments(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+
+#[test]
+fn modf_output_conversions_compile_with_the_system_metal_compiler() {
+    if !metal_available() { return; }
+    let fragment = "uniform vec4 g_Input; void main() { int2 whole; bool2 flags; mat2 matrix_whole; vec2 f=modf(g_Input.xy,whole); vec2 b=modf(g_Input.zw,flags); mat2 m=modf(mat2(g_Input.xy,g_Input.zw),matrix_whole); gl_FragColor=vec4(f,float(whole.x)+float(flags.y)+m[0][0]+b.x,1.0); }";
+    let program = compile(&request("modf-outputs", VERTEX, fragment, &[], vec![]), &NoIncludes).unwrap();
+    let Some(failures) = metal_compile(&scratch("modf-outputs"), &items("modf-outputs", &program)) else { return };
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn alpha_sharpening_compiles_with_the_system_metal_compiler() {
+    if !metal_available() { return; }
+    let source = "varying vec2 v_TexCoord; uniform float g_Alpha;\nvoid main() {\nvec4 color = vec4(1.0, 0.0, 0.0, g_Alpha + v_TexCoord.x * 0.1);\ngl_FragColor = color;\ngl_FragColor.a = saturate((gl_FragColor.a - 0.5) / max(fwidth(gl_FragColor.a), 0.0001) + 0.5);\n}";
+    let request = request("alpha-sharpening", VERTEX, source, &[], vec![]);
+    let program = compile(&request, &NoIncludes).expect("alpha sharpening translates");
+    let Some(failures) = metal_compile(&scratch("alpha-sharpening"), &items("alpha-sharpening", &program)) else { return; };
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn resolved_and_multisampled_backbuffers_compile_together_with_system_metal() {
+    if !metal_available() { return; }
+    let source = "varying vec2 v_TexCoord; uniform sampler2DBackBuffer g_Texture0; uniform sampler2DBackBuffer g_Texture1; uniform vec2 g_Res;\nvec4 fetch(sampler2DBackBuffer image, vec2 uv) { return texSample2DBackBuffer(image,uv,g_Res); }\nvoid main() { gl_FragColor=fetch(g_Texture0,v_TexCoord)+fetch(g_Texture1,v_TexCoord); }";
+    let mut resolved = texture(0);
+    resolved.sample_count = Some(1);
+    let mut multisampled = texture(1);
+    multisampled.sample_count = Some(4);
+    let request = request("backbuffer-samples", VERTEX, source, &[("BACKBUFFER_MS", "1")], vec![resolved, multisampled]);
+    let program = compile(&request, &NoIncludes).expect("back-buffer sampling translates");
+    let Some(failures) = metal_compile(&scratch("backbuffer-samples"), &items("backbuffer-samples", &program)) else { return; };
+    assert!(failures.is_empty(), "{failures:?}");
 }

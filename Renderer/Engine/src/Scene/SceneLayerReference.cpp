@@ -97,31 +97,6 @@ void HarvestTextures(const nlohmann::json& node, int32_t consumer_id, const Laye
     }
 }
 
-enum class VisitColor
-{
-    White,
-    Gray,
-    Black,
-};
-
-std::string WalkCycle(int32_t id,
-                      const std::unordered_map<int32_t, std::vector<int32_t>>& edges,
-                      std::unordered_map<int32_t, VisitColor>& color) {
-    color[id] = VisitColor::Gray;
-    const auto found = edges.find(id);
-    if (found != edges.end()) {
-        for (const auto next : found->second) {
-            auto& next_color = color[next];
-            if (next_color == VisitColor::Gray) return std::string(kLayerTextureIllegalCycle);
-            if (next_color == VisitColor::White) {
-                if (auto reason = WalkCycle(next, edges, color); ! reason.empty()) return reason;
-            }
-        }
-    }
-    color[id] = VisitColor::Black;
-    return {};
-}
-
 } // namespace
 
 std::optional<int32_t> ParseImageLayerCompositeId(std::string_view name, LayerCompositeSlot* slot) {
@@ -258,7 +233,6 @@ std::unordered_set<int32_t> CollectReachableLayerIds(const nlohmann::json&   obj
 
 std::string ClassifyLayerTextureReferences(const std::vector<LayerTextureRef>& refs,
                                            const LayerObjectIndex&             index) {
-    std::unordered_map<int32_t, std::vector<int32_t>> edges;
     for (const auto& ref : refs) {
         if (ref.source_id == 0) continue;
         const auto count = index.id_counts.find(ref.source_id);
@@ -266,16 +240,6 @@ std::string ClassifyLayerTextureReferences(const std::vector<LayerTextureRef>& r
             return std::string(kLayerTextureMissingTarget);
         }
         if (count->second > 1) return std::string(kLayerTextureDuplicateId);
-        if (ref.consumer_id != 0 && ref.consumer_id != ref.source_id) {
-            edges[ref.consumer_id].push_back(ref.source_id);
-        }
-    }
-
-    std::unordered_map<int32_t, VisitColor> color;
-    for (const auto& [id, _] : edges) {
-        (void)_;
-        if (color[id] != VisitColor::White) continue;
-        if (auto reason = WalkCycle(id, edges, color); ! reason.empty()) return reason;
     }
     return {};
 }

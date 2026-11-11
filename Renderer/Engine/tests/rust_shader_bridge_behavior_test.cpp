@@ -31,7 +31,7 @@ const char* const kPlainVertex =
 
 const char* const kPlainFragment =
     "void main() {\n"
-    "    gl_FragColor = vec4(1.0);\n"
+    "    gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);\n"
     "}\n";
 
 RustShaderRequest PlainRequest() {
@@ -75,7 +75,7 @@ const char* const kTwoSamplerFragment =
     "uniform sampler2D g_Texture0;\n"
     "uniform sampler2D g_Texture1;\n"
     "void main() {\n"
-    "    gl_FragColor = texture2D(g_Texture0, v_Uv) + texture2D(g_Texture1, v_Uv);\n"
+    "    gl_FragColor = texSample2D(g_Texture0, v_Uv) + texSample2D(g_Texture1, v_Uv);\n"
     "}\n";
 
 const char* const kOneSampledFragment =
@@ -83,7 +83,7 @@ const char* const kOneSampledFragment =
     "uniform sampler2D g_Texture0;\n"
     "uniform sampler2D g_Texture1;\n"
     "void main() {\n"
-    "    gl_FragColor = texture2D(g_Texture0, v_Uv);\n"
+    "    gl_FragColor = texSample2D(g_Texture0, v_Uv);\n"
     "}\n";
 
 // The fragment of the NORMALMAP scenario: the combo only exists while the second
@@ -96,9 +96,9 @@ const char* const kComboGatedFragment =
     "uniform sampler2D g_Texture1; // {\"combo\":\"NORMALMAP\"}\n"
     "#endif\n"
     "void main() {\n"
-    "    vec4 color = texture2D(g_Texture0, v_Uv);\n"
+    "    vec4 color = texSample2D(g_Texture0, v_Uv);\n"
     "#if LIGHTING && NORMALMAP\n"
-    "    color += texture2D(g_Texture1, v_Uv);\n"
+    "    color += texSample2D(g_Texture1, v_Uv);\n"
     "#endif\n"
     "    gl_FragColor = color;\n"
     "}\n";
@@ -107,7 +107,7 @@ const char* const kAnnotatedVertex =
     "attribute vec2 a_Position;\n"
     "varying vec2 v_Uv;\n"
     "void main() {\n"
-    "    v_Uv = a_Position * 0.5 + vec2(0.5);\n"
+    "    v_Uv = a_Position * 0.5 + vec2(0.5, 0.5);\n"
     "    gl_Position = vec4(a_Position, 0.0, 1.0);\n"
     "}\n";
 
@@ -116,7 +116,7 @@ const char* const kAnnotatedFragment =
     "uniform sampler2D g_Texture0; // {\"material\":\"albedo\",\"combo\":\"HAS_TEXTURE\",\"default\":\"materials/default.png\"}\n"
     "uniform float g_Brightness; // {\"material\":\"brightness\",\"default\":1.25}\n"
     "void main() {\n"
-    "    gl_FragColor = texture2D(g_Texture0, v_Uv) * g_Brightness;\n"
+    "    gl_FragColor = texSample2D(g_Texture0, v_Uv) * g_Brightness;\n"
     "}\n";
 
 std::vector<WPShaderUnit> AnnotatedUnits(const std::string& fragment = kAnnotatedFragment) {
@@ -345,6 +345,36 @@ TEST(ShaderBridgeMerge, MalformedMetadataChangesNothing) {
     EXPECT_TRUE(output.shader_info.svs.empty());
     EXPECT_TRUE(output.shader_info.defTexs.empty());
     EXPECT_EQ(output.fragment_preprocessor_info.active_tex_slots, (Set<uint> { 5 }));
+}
+
+TEST(ShaderBridgeMerge, AngleConversionFollowsAliasesAndOldDocumentsDefaultToFalse) {
+    RustShaderOutput output;
+    json metadata = { { "aliases", json::array({
+        { { "material", "angle" }, { "uniform", "g_Angle" }, { "rad2deg", true } },
+        { { "material", "plain" }, { "uniform", "g_Plain" } },
+    }) } };
+    ApplyRustShaderMetadataJson(metadata.dump(), output);
+    EXPECT_EQ(output.shader_info.alias_rad2deg, (Set<std::string> { "angle" }));
+    metadata["aliases"] = json::array({
+        { { "material", "angle" }, { "uniform", "g_Replacement" }, { "rad2deg", true } },
+        { { "material", "angle" }, { "uniform", "g_Last" } },
+    });
+    ApplyRustShaderMetadataJson(metadata.dump(), output);
+    EXPECT_EQ(output.shader_info.alias.at("angle"), "g_Last");
+    EXPECT_TRUE(output.shader_info.alias_rad2deg.empty());
+}
+
+TEST(ShaderBridgeMerge, MalformedAngleConversionDoesNotPartiallyUpdateAliases) {
+    RustShaderOutput output;
+    output.shader_info.alias["keep"] = "g_Keep";
+    output.shader_info.alias_rad2deg.insert("keep");
+    const json broken = { { "aliases", json::array({
+        { { "material", "first" }, { "uniform", "g_First" }, { "rad2deg", true } },
+        { { "material", "broken" }, { "uniform", "g_Broken" }, { "rad2deg", "yes" } },
+    }) } };
+    EXPECT_ANY_THROW(ApplyRustShaderMetadataJson(broken.dump(), output));
+    EXPECT_EQ(output.shader_info.alias, (WPAliasValueDict { { "keep", "g_Keep" } }));
+    EXPECT_EQ(output.shader_info.alias_rad2deg, (Set<std::string> { "keep" }));
 }
 
 TEST(ShaderBridgeMerge, NonJsonTextThrowsAndReflectionAloneOnlyAddsSlots) {
@@ -594,6 +624,26 @@ TEST(ShaderBridgeParser, CompileMergesIntoShaderInfoAndUnits) {
     EXPECT_EQ(run.units[1].preprocess_info.active_tex_slots.count(0), 1u);
     EXPECT_TRUE(run.units[0].preprocess_info.active_tex_slots.empty());
     EXPECT_EQ(run.stages.size(), 2u);
+}
+
+TEST(ShaderBridgeParser, MaterialConversionFlagsSurviveTheParserMerge) {
+    REQUIRE_LINKED_COMPILER();
+    const std::string fragment = R"(
+uniform float g_Angle; // {"material":"angle","conversion":"rad2deg","default":0}
+uniform int g_Count; // {"material":"count","default":1}
+uniform uint g_Bits; // {"material":"bits","default":0}
+uniform float g_Gain; // {"material":"gain","default":1}
+void main() { gl_FragColor = CAST4(g_Angle + float(g_Count) + float(g_Bits) + g_Gain); }
+)";
+    auto request = UncachedPlainRequest();
+    SetFragment(request, fragment);
+    RustShaderOutput compiled;
+    ASSERT_TRUE(CompileRustShaderProgram(request, compiled)) << LastRustShaderError();
+    EXPECT_EQ(compiled.shader_info.alias_rad2deg, (Set<std::string> { "angle" })) << compiled.metadata_json;
+    const auto run = RunAnnotated("parser-conversion-flags", "conversion_flags", {}, fragment);
+    ASSERT_TRUE(run.ok) << run.error;
+    EXPECT_EQ(run.info.alias.at("angle"), "g_Angle");
+    EXPECT_EQ(run.info.alias_rad2deg, (Set<std::string> { "angle" }));
 }
 
 TEST(ShaderBridgeParser, AbsentTextureTurnsTheComboOffButKeepsTheDefaultTexture) {

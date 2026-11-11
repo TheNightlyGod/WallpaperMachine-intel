@@ -1,2 +1,6 @@
+# A pinned stable release: no crate uses a nightly feature, and a pin keeps local
+# builds and CI on one compiler and CI's renderer cache valid until the pin moves.
+# Raise it on purpose, in a change of its own (docs/build.md).
+[toolchain]
 [toolchain]
 channel = "stable"

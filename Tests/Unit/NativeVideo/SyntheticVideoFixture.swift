@@ -27,6 +27,11 @@ enum SyntheticVideoFixture {
         /// Adds an audio track of silence covering the whole clip, for the
         /// cases that are about a clip with sound.
         var withAudio = false
+        /// With `withAudio`, one audio track per entry, each marked enabled or
+        /// not in the container, for a clip with several to choose from.
+        var audioTracksEnabled = [true]
+        /// Writes the audio as the file's first track, so it takes track number 1.
+        var audioTrackFirst = false
         /// How long the audio track lasts, when it should not end with the picture.
         var audioSeconds: Double?
         /// Clockwise quarter-turn multiples written as the track's display
@@ -39,6 +44,9 @@ enum SyntheticVideoFixture {
         /// Paints each frame (the pixel buffer and the frame's index) in place of the default
         /// distinguishable-per-frame fill, for tests that need a particular picture.
         var painter: ((CVPixelBuffer, Int) -> Void)?
+        /// The most frames between key frames, for a clip whose key frames are
+        /// sparse; `nil` leaves the encoder its own choice.
+        var maxKeyFrameInterval: Int?
 
         /// Constant frame rate expressed exactly: `numerator / denominator`
         /// fps. 24 is 24/1, NTSC 30 is 30000/1001.
@@ -107,7 +115,7 @@ enum SyntheticVideoFixture {
         try? FileManager.default.removeItem(at: url)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         defer { if writer.status == .writing { writer.cancelWriting() } }
-        let settings: [String: Any] = [
+        var settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: request.width,
             AVVideoHeightKey: request.height,
@@ -120,6 +128,9 @@ enum SyntheticVideoFixture {
                 kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: false
             ] as [String: Any],
         ]
+        if let interval = request.maxKeyFrameInterval {
+            settings[AVVideoCompressionPropertiesKey] = [AVVideoMaxKeyFrameIntervalKey: interval]
+        }
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         input.expectsMediaDataInRealTime = false
         var matrix = CGAffineTransform.identity
@@ -141,13 +152,19 @@ enum SyntheticVideoFixture {
                 kCVPixelBufferWidthKey as String: request.width,
                 kCVPixelBufferHeightKey as String: request.height,
             ])
-        guard writer.canAdd(input) else { throw FixtureError.noInput }
-        writer.add(input)
-        let audio = request.withAudio ? AVAssetWriterInput(mediaType: .audio, outputSettings: nil) : nil
-        if let audio {
-            audio.expectsMediaDataInRealTime = false
-            guard writer.canAdd(audio) else { throw FixtureError.noInput }
-            writer.add(audio)
+        let audioInputs: [AVAssetWriterInput] = request.withAudio
+            ? request.audioTracksEnabled.map { enabled in
+                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
+                input.marksOutputTrackAsEnabled = enabled
+                input.expectsMediaDataInRealTime = false
+                return input
+            }
+            : []
+        // Tracks are numbered in the order they are added.
+        let inputs = request.audioTrackFirst ? audioInputs + [input] : [input] + audioInputs
+        for each in inputs {
+            guard writer.canAdd(each) else { throw FixtureError.noInput }
+            writer.add(each)
         }
         guard writer.startWriting() else {
             throw FixtureError.writerFailed(writer.error?.localizedDescription ?? "startWriting")
@@ -156,7 +173,7 @@ enum SyntheticVideoFixture {
 
         // All of the audio goes in first and is finished, so the writer never
         // holds the video back waiting for audio to interleave with it.
-        if let audio {
+        for audio in audioInputs {
             let seconds = request.audioSeconds
                 ?? Double(request.frameDurations.reduce(0, +)) / Double(request.timescale)
             let sample = try silence(frames: Int(silenceSampleRate * seconds))

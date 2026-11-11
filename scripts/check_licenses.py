@@ -56,7 +56,7 @@ CARGO_TREE = ("cargo", "tree", "--offline", "--manifest-path", str(CARGO_MANIFES
 # ---------------------------------------------------------------------------
 POLICY = "GPL-3.0-only"
 ALLOWED = frozenset(license.lower() for license in (
-    "MIT", "MIT-0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "0BSD", "Unlicense", "CC0-1.0",
+    "MIT", "MIT-0", "MIT-Modern-Variant", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "0BSD", "Unlicense", "CC0-1.0",
     "BSL-1.0", "Unicode-3.0", "Unicode-DFS-2016", "libpng-2.0", "WTFPL",
     "LicenseRef-PublicDomain",
     "Apache-2.0",  # compatible with GPLv3 (not with GPLv2)
@@ -232,28 +232,32 @@ COMPONENTS = {
     "effolkronium-random": Entry("MIT", "vendored header (random.hpp); its header states MIT"),
     "vog-sha1": Entry("LicenseRef-PublicDomain", "vendored header (sha1.hpp); its header states 100% public domain"),
     "stb_image": Entry("MIT OR Unlicense", "vendored header; public domain or MIT at the user's choice"),
-    "stb_vorbis": Entry("MIT OR Unlicense", "vendored source (stb_vorbis.c 1.22, unchanged), linked as the static archive "
+    "stb_vorbis": Entry("MIT OR Unlicense", "vendored source (stb_vorbis.c 1.22, patched), linked as the static archive "
                         "stb_vorbis; public domain or MIT at the user's choice"),
+    "harfbuzz": Entry("MIT-Modern-Variant", "vendored source (HarfBuzz 15.0.0 amalgamation, unchanged), linked as the "
+                      "static archive harfbuzz; HarfBuzz's 'Old MIT' license"),
+    "msdfgen": Entry("MIT", "vendored source (msdfgen 1.13 core and FreeType importer, unchanged), linked as the "
+                     "static archive msdfgen"),
     "glad": Entry(None, "added to the CMake project but never linked; license not checked", "not-linked"),
     "quickjs-ng": Entry("MIT", "Homebrew dylib"),
     "lz4": Entry("BSD-2-Clause", "Homebrew dylib"),
-    "freetype": Entry("FTL OR GPL-2.0-or-later", "Homebrew dylib; the keg's LICENSE.TXT offers either"),
+    "freetype": Entry("FTL OR GPL-2.0-or-later", "vendored source (FreeType 2.15.0, unchanged), linked as the static "
+                      "archive freetype without HVF or HarfBuzz; its LICENSE.TXT offers either license"),
     "libpng": Entry("libpng-2.0", "Homebrew dylib, a FreeType dependency"),
+    "brotli": Entry("MIT", "Homebrew dylibs (libbrotlidec, libbrotlicommon), a FreeType dependency"),
     "mediaremote-adapter": Entry("BSD-3-Clause", "ThirdParty/mediaremote-adapter, embedded framework"),
     "(apple system)": Entry(None, "Apple system library or framework", "system"),
     "(build tool)": Entry(None, "build-time tool, not part of the product", "tool"),
 }
 # Metadata known to be wrong or too coarse, replacing what Homebrew or Cargo report:
 # name -> (license, reason). A reason is mandatory.
-OVERRIDES = {
-    "freetype": ("FTL OR GPL-2.0-or-later",
-                 "Homebrew reports only FTL; the keg's LICENSE.TXT offers FTL or GPL-2.0-or-later, and the GPL option is used"),
-}
+OVERRIDES = {}
 # Names the inventories find -> the COMPONENTS entry (lowercase keys).
 ALIASES = {
     # cargo:rustc-link-lib=dylib (c++ is Apple's libc++)
-    "c++": "(apple system)", "lz4": "lz4", "freetype": "freetype",
-    "qjs": "quickjs-ng",
+    "c++": "(apple system)", "lz4": "lz4", "qjs": "quickjs-ng",
+    # FreeType's libraries (FreeType itself is the vendored static archive freetype)
+    "freetype": "freetype", "png16": "libpng", "brotlidec": "brotli", "bz2": "(apple system)", "z": "(apple system)",
     # find_package / pkg_check_modules
     "nlohmann_json": "nlohmann-json", "argparse": "argparse",
     "opengl": "(apple system)", "threads": "(apple system)", "pkgconfig": "(build tool)",
@@ -268,7 +272,8 @@ FIRST_PARTY_ARCHIVE = re.compile(r"^((wp|wm)[A-Z]\w*|wescene-renderer)$")
 # A library file's stem -> its component, for libraries whose Homebrew keg cannot be found
 # (an already packaged app, or a machine without Homebrew).
 LIBRARY_STEMS = {
-    "liblz4": "lz4", "libfreetype": "freetype", "libpng16": "libpng",
+    "liblz4": "lz4", "libpng16": "libpng",
+    "libbrotlidec": "brotli", "libbrotlicommon": "brotli",
     "libqjs": "quickjs-ng", "MediaRemoteAdapter": "mediaremote-adapter",
 }
 

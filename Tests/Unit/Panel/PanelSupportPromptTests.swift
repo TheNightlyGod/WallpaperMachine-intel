@@ -97,15 +97,15 @@ final class PanelSupportPromptTests: PanelTestCase {
     }
   }
 
-  /// Star opens the repository and Become a Supporter the pricing page, in Chinese for a Chinese
-  /// interface; either spends the offer.
-  func testChoicesOpenTheRepositoryAndLocalizedPricingThroughTheInjectedOpener() async throws {
+  /// Star opens the repository and Sponsor on Open Collective MMFoundation's Collective, the same
+  /// page in every language; either spends the offer.
+  func testChoicesOpenTheRepositoryAndTheCollectiveThroughTheInjectedOpener() async throws {
     for (choice, language, destination) in [
-      (SupportPromptChoice.star, "en", AppUpdateConfiguration.repositoryURL.absoluteString),
-      (.supporter, "en", "https://www.wallpapermachine.app/pricing/"),
-      (.supporter, "zh-Hans", "https://www.wallpapermachine.app/zh/pricing/"),
-      (.supporter, "zh-Hant", "https://www.wallpapermachine.app/zh/pricing/"),
-      (.supporter, "ja", "https://www.wallpapermachine.app/pricing/"),
+      (SupportPromptChoice.star, "en", "https://github.com/WallpaperMachine/WallpaperMachine"),
+      (.sponsor, "en", "https://opencollective.com/mmfoundation"),
+      (.sponsor, "zh-Hans", "https://opencollective.com/mmfoundation"),
+      (.sponsor, "zh-Hant", "https://opencollective.com/mmfoundation"),
+      (.sponsor, "ja", "https://opencollective.com/mmfoundation"),
     ] {
       try await withPromptPanel { panel, prompt, _ in
         var opened = [URL]()
@@ -160,5 +160,75 @@ final class PanelSupportPromptTests: PanelTestCase {
         XCTAssertFalse(SupportPromptStore(defaults: defaults).isPending)
       }
     }
+  }
+
+  // MARK: The Discord invitation
+
+  /// **Join Discord** opens MMFoundation's invite, the website's redirect and never the invite
+  /// itself, in every interface language, Chinese included, and ends the invitation for good.
+  func testJoinDiscordOpensTheInviteInEveryLanguageAndEndsTheInvitation() async throws {
+    for language in ["en", "zh-Hans", "zh-Hant"] {
+      try await withPromptPanel { panel, prompt, defaults in
+        var opened = [URL]()
+        panel.controller.openSupportURL = { opened.append($0); return true }
+        try panel.controller.appLanguage.set(language)
+        prompt.qualifyForDiscordInvitation()
+        panel.show()
+        XCTAssertEqual(panel.controller.pendingPrompt, .discord, language)
+
+        try await panel.controller.supportPromptChoice(.joinDiscord, for: .discord)
+        XCTAssertEqual(opened.map(\.absoluteString), ["https://mmfoundation.dev/discord"], language)
+        XCTAssertNil(
+          SupportPromptStore(defaults: defaults).pendingPrompt(
+            welcomeSeen: true, telemetryOn: true, now: Date() + 2 * 86_400), "\(language): invited once")
+      }
+    }
+  }
+
+  func testNotNowSpendsTheDiscordInvitationAndOpensNothing() async throws {
+    try await withPromptPanel { panel, prompt, defaults in
+      prompt.qualifyForDiscordInvitation()
+      panel.show()
+      XCTAssertEqual(panel.controller.pendingPrompt, .discord)
+      try await panel.controller.supportPromptChoice(.dismiss, for: .discord)
+      XCTAssertNil(
+        SupportPromptStore(defaults: defaults).pendingPrompt(
+          welcomeSeen: true, telemetryOn: true, now: Date() + 2 * 86_400))
+    }
+  }
+
+  /// **Join Discord** in Settings › About opens the same invite and answers the invitation before it
+  /// comes up; a link the Mac refuses to open answers nothing.
+  func testJoiningFromAboutAnswersTheInvitation() async throws {
+    try pinPanelLanguageToEnglish()
+    try await withPromptPanel { panel, prompt, _ in
+      var allowsOpening = false
+      var opened = [URL]()
+      panel.controller.openSupportURL = { opened.append($0); return allowsOpening }
+      do {
+        try await panel.controller.joinDiscord()
+        XCTFail("The link could not be opened")
+      } catch let error as WallpaperActionError {
+        XCTAssertEqual(error.localizedDescription, "The link could not be opened. Please try again.")
+      }
+      prompt.qualifyForDiscordInvitation()
+      panel.show()
+      XCTAssertEqual(panel.controller.pendingPrompt, .discord, "A failed link joined nothing")
+
+      allowsOpening = true
+      try await panel.controller.joinDiscord()
+      XCTAssertEqual(opened.map(\.absoluteString), Array(repeating: "https://mmfoundation.dev/discord", count: 2))
+      XCTAssertNil(panel.controller.pendingPrompt, "Someone who joined is not invited")
+    }
+  }
+}
+
+extension SupportPromptStore {
+  /// Seven days of use over the last four weeks, with the star already chosen and the performance
+  /// data question answered: the Discord invitation is due today.
+  func qualifyForDiscordInvitation(now: Date = Date()) {
+    recordTelemetryAsked()
+    recordStarChosen()
+    for daysAgo in [28, 24, 20, 16, 12, 8, 4] { recordPanelUse(now: now - Double(daysAgo) * 86_400) }
   }
 }

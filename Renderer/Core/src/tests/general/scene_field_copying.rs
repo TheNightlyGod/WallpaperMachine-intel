@@ -4,7 +4,10 @@
 use crate::{
     DisplayDesc, EngineError,
     media::audio::AudioVolume,
-    project::{ScalingMode, SceneDesc, SceneFraming, SceneTemplate},
+    project::{
+        PostProcessing, QualityLevel, ScalingMode, SceneDesc, SceneFraming, SceneQuality, SceneTemplate,
+        SceneUserOptions,
+    },
 };
 
 const EPSILON: f64 = f64::EPSILON;
@@ -29,6 +32,23 @@ fn busy_scene() -> SceneDesc {
         .property_override_json(r#"{"general":{"brightness":1}}"#)
         .shader_cache_path("/tmp/cache")
         .force_shader_refresh(true)
+        .quality(SceneQuality {
+            msaa: 4,
+            shadows: QualityLevel::High,
+            volumetrics: QualityLevel::Low,
+            reflection: false,
+            post_processing: PostProcessing::Ultra,
+        })
+        .user_options(SceneUserOptions {
+            color_enabled: true,
+            brightness: 60.0,
+            lut: "lutx32_amber".to_owned(),
+            lut_strength: 40.0,
+            flip_horizontal: true,
+            mouse_parallax: false,
+            playback_rate: 150.0,
+            ..SceneUserOptions::default()
+        })
         .build()
         .unwrap()
 }
@@ -151,6 +171,8 @@ fn a_template_copied_from_a_scene_carries_the_options_too() {
     assert_eq!(template.property_override_json, scene.property_override_json);
     assert_eq!(template.shader_cache_path, scene.shader_cache_path);
     assert_eq!(template.force_shader_refresh, scene.force_shader_refresh);
+    assert_eq!(template.quality, scene.quality);
+    assert_eq!(template.user_options, scene.user_options);
 }
 
 #[test]
@@ -168,7 +190,7 @@ fn a_scene_is_the_same_wallpaper_on_another_display_or_while_paused_differently(
 #[test]
 fn changing_any_compared_field_makes_it_a_different_wallpaper() {
     let scene = busy_scene();
-    let changes: [(&str, fn(&mut SceneDesc)); 13] = [
+    let changes: [(&str, fn(&mut SceneDesc)); 16] = [
         ("scene path", |scene| scene.scene_path.push('x')),
         ("assets path", |scene| scene.assets_path.push('x')),
         ("fps", |scene| scene.fps += 1),
@@ -182,6 +204,9 @@ fn changing_any_compared_field_makes_it_a_different_wallpaper() {
         ("override json", |scene| scene.property_override_json = None),
         ("shader cache path", |scene| scene.shader_cache_path = None),
         ("force refresh", |scene| scene.force_shader_refresh = false),
+        ("quality", |scene| scene.quality.reflection = true),
+        ("user option value", |scene| scene.user_options.brightness = 61.0),
+        ("user option flip", |scene| scene.user_options.flip_horizontal = false),
     ];
 
     for (field, change) in changes {
@@ -262,4 +287,44 @@ fn a_scene_builder_does_not_check_the_display_and_orders_its_errors_the_same_way
             other => panic!("expected invalid input {expected:?}, got {other:?}"),
         }
     }
+}
+
+#[test]
+fn a_scene_quality_outside_wallpaper_engines_sample_counts_is_refused() {
+    let scene = SceneDesc::builder(secondary_display(), "/scene/project.json")
+        .quality(SceneQuality { msaa: 3, ..SceneQuality::default() })
+        .build();
+    assert!(matches!(scene, Err(EngineError::InvalidInput(_))));
+    assert_eq!(
+        SceneQuality::from_raw(0, 0, 0, true, 2),
+        Some(SceneQuality {
+            msaa: 0,
+            shadows: QualityLevel::Off,
+            volumetrics: QualityLevel::Off,
+            reflection: true,
+            post_processing: PostProcessing::Enabled,
+        })
+    );
+    assert_eq!(SceneQuality::from_raw(0, 0, 0, true, 1), None, "post-processing has no level 1");
+}
+
+#[test]
+fn user_options_outside_wallpaper_engines_ranges_are_refused_and_the_default_is_the_identity() {
+    assert!(SceneUserOptions::default().is_identity());
+    assert!(SceneUserOptions::default().validate().is_ok());
+    let refused = [
+        SceneUserOptions { brightness: 100.5, ..SceneUserOptions::default() },
+        SceneUserOptions { hue: f32::NAN, ..SceneUserOptions::default() },
+        SceneUserOptions { playback_rate: 9.0, ..SceneUserOptions::default() },
+        SceneUserOptions { lut: "../lut/neutral".to_owned(), ..SceneUserOptions::default() },
+        SceneUserOptions { lut: "..".to_owned(), ..SceneUserOptions::default() },
+    ];
+    for options in refused {
+        let scene = SceneDesc::builder(secondary_display(), "/scene/project.json").user_options(options.clone()).build();
+        assert!(matches!(scene, Err(EngineError::InvalidInput(_))), "{options:?} was accepted");
+    }
+    // A colour switch with every slider at 50, or a filter of no strength, changes nothing.
+    assert!(SceneUserOptions { color_enabled: true, ..SceneUserOptions::default() }.is_identity());
+    assert!(SceneUserOptions { lut: "amber".to_owned(), lut_strength: 0.0, ..SceneUserOptions::default() }.is_identity());
+    assert!(!SceneUserOptions { playback_rate: 150.0, ..SceneUserOptions::default() }.is_identity());
 }

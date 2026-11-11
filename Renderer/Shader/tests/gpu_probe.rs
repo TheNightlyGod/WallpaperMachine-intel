@@ -13,7 +13,7 @@ use naga::back::msl;
 use naga::front::glsl::{Frontend, Options};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use wm_shader::StageKind;
-use wm_shader::dialect::convert_stage;
+use wm_shader::dialect::{ConvertOptions, convert_stage_with};
 
 fn probe_output(script: &str) -> Option<String> {
     if std::env::var_os("WM_SHADER_GPU_PROBES").is_none() {
@@ -108,8 +108,12 @@ fn runner() -> Option<&'static PathBuf> {
 /// with one thread over `data` (the shader's `buffer` block of 64 floats). `None` when the probes
 /// are off or the machine cannot run them.
 fn gpu_run(glsl: &str, inputs: &[f32]) -> Option<Vec<f32>> {
+    gpu_run_with_options(glsl, inputs, ConvertOptions::default())
+}
+
+fn gpu_run_with_options(glsl: &str, inputs: &[f32], conversion: ConvertOptions) -> Option<Vec<f32>> {
     let runner = runner()?;
-    let converted = convert_stage(StageKind::Fragment, glsl).unwrap_or_else(|d| panic!("{d:?}\n{glsl}"));
+    let converted = convert_stage_with(StageKind::Fragment, glsl, conversion).unwrap_or_else(|d| panic!("{d:?}\n{glsl}"));
     let module = Frontend::default()
         .parse(&Options::from(naga::ShaderStage::Compute), &converted.text)
         .unwrap_or_else(|e| panic!("naga parse: {:?}\n{}", e.errors, converted.text));
@@ -157,38 +161,48 @@ fn near(a: f32, b: f32) -> bool {
 }
 
 #[test]
-fn matrix_inverse_helpers_compute_exact_inverses_on_the_gpu() {
-    // Each matrix is multiplied by its inverse; the products are the identity. The input floats keep
-    // the compiler from folding the matrices away.
+fn author_defined_glsl_names_keep_hlsl_argument_conversions_on_the_gpu() {
     let src = format!(
-        "{KERNEL_HEAD}void main() {{
-  mat2 a = mat2(data[0], data[1], data[2], data[3]);
-  mat3 b = mat3(data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11], data[12]);
-  mat4 c = mat4(data[13], data[14], data[15], data[16], data[17], data[18], data[19], data[20],
-                data[21], data[22], data[23], data[24], data[25], data[26], data[27], data[28]);
-  mat2 pa = inverse(a) * a;
-  mat3 pb = inverse(b) * b;
-  mat4 pc = inverse(c) * c;
-  for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) data[29 + i * 2 + j] = pa[i][j];
-  for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) data[33 + i * 3 + j] = pb[i][j];
-  for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) data[42 + i * 4 + j] = pc[i][j];
+        "{KERNEL_HEAD}
+float fract(vec2 x) {{ return x.x + x.y + 7.0; }}
+float inversesqrt(float x) {{ return x * 0.5; }}
+void main() {{
+  data[8] = fract(data[0]);
+  data[9] = inversesqrt(vec3(data[1], data[2], data[3]));
 }}"
     );
-    let inputs: Vec<f32> = [
-        2.0, 1.0, 1.0, 3.0, // mat2
-        2.0, 0.0, 1.0, 1.0, 3.0, 0.0, 0.0, 1.0, 4.0, // mat3
-        4.0, 1.0, 0.5, 0.0, 1.0, 3.0, 0.0, 1.0, 0.5, 0.0, 5.0, 2.0, -1.0, 0.0, 1.0, 2.0, // mat4
-    ]
-    .to_vec();
-    let Some(out) = gpu_run(&src, &inputs) else { return };
-    for (base, n) in [(29usize, 2usize), (33, 3), (42, 4)] {
-        for i in 0..n {
-            for j in 0..n {
-                let want = if i == j { 1.0 } else { 0.0 };
-                let got = out[base + i * n + j];
-                assert!((got - want).abs() < 1e-4, "inverse {n}x{n} times itself at [{i}][{j}]: {got}");
-            }
-        }
+    let Some(out) = gpu_run(&src, &[0.25, 9.0, 4.0, 16.0]) else { return };
+    assert!(near(out[8], 7.5), "the author's fract receives a broadcast argument: {}", out[8]);
+    assert!(near(out[9], 4.5), "the author's inversesqrt receives the first component: {}", out[9]);
+}
+
+#[test]
+fn hlsl_bit_operations_keep_unsigned_results_and_vector_width_on_the_gpu() {
+    // HLSL's uint overloads return uint, including 0xffffffff when no set bit exists.
+    // https://learn.microsoft.com/windows/win32/direct3dhlsl/firstbithigh
+    // https://learn.microsoft.com/windows/win32/direct3dhlsl/firstbitlow
+    let src = format!(
+        "{KERNEL_HEAD}void main() {{
+  uint zero = uint(data[0]);
+  int negative = int(data[1]);
+  data[8] = firstbithigh(zero);
+  data[9] = firstbitlow(zero);
+  data[10] = firstbithigh(negative);
+  data[11] = firstbitlow(negative);
+  uint2 v = uint2(zero, uint(data[2]));
+  data[12] = firstbithigh(v).x;
+  data[13] = firstbithigh(v).y;
+  data[14] = firstbitlow(v).x;
+  data[15] = firstbitlow(v).y;
+  data[16] = countbits(zero) < -1 ? 1.0 : 0.0;
+  data[17] = asuint(data[0]) < -1 ? 1.0 : 0.0;
+}}"
+    );
+    let Some(out) = gpu_run(&src, &[0.0, -2.0, 16.0]) else { return };
+    for (i, want) in [(8, u32::MAX as f32), (9, u32::MAX as f32), (10, 0.0), (11, 1.0),
+                      (12, u32::MAX as f32), (13, 4.0), (14, u32::MAX as f32), (15, 4.0),
+                      (16, 1.0), (17, 1.0)] {
+        assert!(near(out[i], want), "data[{i}] = {}, wanted {want}", out[i]);
     }
 }
 
@@ -286,8 +300,8 @@ void main() {{
   float acc = 0.0;
   for (int k = data[12]; k < 4.0; k++) {{ acc += float(k); }}   // starts at 1: 1 + 2 + 3
   data[25] = acc;
-  ivec3 iv = ivec3(1, 2, 3);
-  vec3 sc = iv * vec3(0.5);                       // integer vector beside a float vector
+  int3 iv = int3(1, 2, 3);
+  vec3 sc = iv * CAST3(0.5);                       // integer vector beside a float vector
   data[26] = sc.x + sc.y + sc.z;                  // 3
   uint u = 7u; int n = 3;
   data[27] = float(u % uint(n));                  // 1
@@ -332,7 +346,7 @@ struct Pair {{ vec2 xy; float k; }};
 vec2 cut(vec4 v, float s) {{ return v * s; }}           // a 4-vector into a vec2 parameter: .xy
 vec3 spread(vec3 c) {{ return c + 1.0; }}               // a scalar argument broadcasts
 int whole(int n) {{ return n * 2; }}                    // a float argument truncates
-float lum(vec3 c) {{ return dot(c, vec3(1.0)); }}        // a scalar function into a vector target
+float lum(vec3 c) {{ return dot(c, CAST3(1.0)); }}        // a scalar function into a vector target
 vec3 widen(float s) {{ return s; }}                     // a scalar returned from a vec3 function
 float first(vec3 a, vec3 b) {{ return a * b; }}         // a vector returned from a float function
 bool nonzero(float f) {{ return f; }}                   // a number returned from a bool function
@@ -353,7 +367,7 @@ void main() {{
   data[22] = nonzero(a) ? 1.0 : 0.0;                    // 1
   vec3 padded = base + vec2(1.0, 2.0);                  // the 2-vector is padded with 0
   data[23] = padded.x + padded.y * 100.0 + padded.z * 10000.0;   // 11 + 2200 + 300000
-  vec3 acc = vec3(1.0);
+  vec3 acc = CAST3(1.0);
   acc *= 2;                                             // int literal into a float vector
   acc += v4;                                            // a wider vector into a vec3
   acc -= (a > 1.0);                                     // a bool into a vector
@@ -370,7 +384,7 @@ void main() {{
   Pair p; p.xy = vec2(5.0, 6.0); p.k = 3.0;
   vec3 pp = p.xy.xyx * p.k;                             // member of a struct
   data[27] = pp.x + pp.y + pp.z;                        // 15 + 18 + 15
-  vec2 m = max(v4 * vec2(2.0), vec2(3.0, 100.0));       // a 4-vector times a 2-vector: first two
+  vec2 m = max(v4 * CAST2(2.0), vec2(3.0, 100.0));       // a 4-vector times a 2-vector: first two
   data[28] = m.x + m.y;                                 // 3 + 100
   float g = (a ? 4 : 5.5);                              // number condition, promoted branches
   data[29] = g;                                         // 4
@@ -469,7 +483,10 @@ void main() {{
         input.extend(t);
         input.extend(range);
         input.extend(matrix);
-        let Some(out) = gpu_run(&src, &input) else { return };
+        // This function was extracted from legalized GLSL, so it keeps generated
+        // constructors. The other probes continue to validate authored syntax.
+        let options = ConvertOptions { glsl_builtins: true, ..Default::default() };
+        let Some(out) = gpu_run_with_options(&src, &input, options) else { return };
         let want = plane_reference(y, c, p, t, range, matrix);
         for i in 0..4 {
             assert!((out[20 + i] - want[i]).abs() <= 1.0 / 255.0, "y {y} c {c:?} p {p:?} t {t:?}: channel {i} is {}, wanted {}", out[20 + i], want[i]);

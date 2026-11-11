@@ -25,6 +25,26 @@ extension PanelController {
     try await run(.immediate) { updater.openReleases() }
   }
 
+  func setUpdateMode(_ mode: AppUpdateMode) async throws {
+    try await run(.immediate) { updater.mode = mode }
+  }
+
+  func postponeUpdate() async throws {
+    try await run(.immediate) { updater.postponeUpdate() }
+  }
+
+  func skipUpdate() async throws {
+    try await run(.immediate) { await updater.skipCurrentVersion() }
+  }
+
+  func dismissRecentUpdate() async throws {
+    try await run(.immediate) { await updater.dismissRecentUpdate() }
+  }
+
+  func retryUpdate() async throws {
+    try await run(.immediate) { _ = await updater.retryUpdate() }
+  }
+
   /// `revealDownloadedUpdate`: the downloaded disk image in Finder.
   func revealDownloadedUpdate() async throws {
     try await run(.immediate) { updater.revealDownloadedUpdate() }

@@ -49,6 +49,12 @@ public:
         bool         startsilent { false };
         PlaybackMode mode { PlaybackMode::OneShot };
         std::optional<uint32_t> random_seed;
+        // Kept for scripts only (we_ss_reg_SoundLayer 0x1401F7090): nothing plays with them.
+        float        attenuation { 0.0f };
+        float        mindistance { 0.0f };
+        bool         muteineditor { false };
+        bool         spatialization { false };
+        std::string  playbackmode_word;
     };
 
     WPSoundStream(const std::vector<std::string>& paths, fs::VFS& vfs, Config config);
@@ -67,6 +73,26 @@ public:
     float Volume() const;
     void  SetMuted(bool muted);
     bool  Muted() const;
+
+    /// A script's `mintime`, `maxtime` and `playbackmode`: Wallpaper Engine's setters only write
+    /// the fields (0x1401F7090), so the next delay or the next file follows them.
+    void         SetMinTime(float seconds);
+    float        MinTime() const;
+    void         SetMaxTime(float seconds);
+    float        MaxTime() const;
+    void         SetPlaybackMode(PlaybackMode mode);
+    PlaybackMode Mode() const;
+    /// The members a script reads and writes and nothing plays with (script thread only).
+    struct ScriptMembers {
+        float       attenuation { 0.0f };
+        float       mindistance { 0.0f };
+        bool        muteineditor { false };
+        bool        spatialization { false };
+        bool        startsilent { false };
+        std::string playbackmode;
+    };
+    ScriptMembers&       Members() { return m_members; }
+    const ScriptMembers& Members() const { return m_members; }
 
 private:
     void        Switch();
@@ -98,6 +124,10 @@ private:
     std::atomic<bool>  m_playing { true };            // plays from construction
     std::atomic<bool>  m_rewind_requested { false };
     std::atomic<bool>  m_finished { false };
+    std::atomic<float>        m_mintime { 0.0f };
+    std::atomic<float>        m_maxtime { 10.0f };
+    std::atomic<PlaybackMode> m_mode { PlaybackMode::OneShot };
+    ScriptMembers             m_members;
 };
 
 class WPSoundParser {

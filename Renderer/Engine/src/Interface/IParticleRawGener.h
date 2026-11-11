@@ -31,21 +31,38 @@ struct ParticleRenderScale {
     /// Texture repeats along the whole rope/trail. The author shader has no
     /// uniform for this; it is encoded in the trail-length the generator writes.
     float uv_scale { 1.0f };
-    /// When set, UV is measured against mesh/history capacity so a growing
-    /// rope unrolls the texture instead of stretching it.
+    /// When set, a rope's texture is measured against the particles it holds once
+    /// steady (`rope_rate` x `rope_lifetime`) and moves on by one for each particle
+    /// that dies, so a growing rope unrolls it instead of stretching it.
     bool uv_scrolling { false };
-    /// When set, V along the strip is eased with smoothstep.
+    /// `uvsmoothing`: until the rope is steady WE draws it as without (probe rope-uv-v3).
     bool uv_smoothing { false };
+    /// A scrolling rope: its file's emission rate and average lifetime (lifetime
+    /// override included), and the scene's frame-rate cap that bounds the rate
+    /// while the rope is still filling (0x1402308A0, probe rope-uv-v4).
+    float    rope_rate { 0.0f };
+    float    rope_lifetime { 0.0f };
+    uint32_t target_fps { 0 };
+    /// World event emitters store the instance origin in each birth position.
+    bool positions_include_binding { false };
+    /// Native rope-trail fade bits, applied by the existing vertex preparation.
+    uint8_t trail_fade_flags { 0 };
 };
 
 inline float RopeUvScaleOrOne(float scale) noexcept {
     return (std::isfinite(scale) && scale > 0.0f) ? scale : 1.0f;
 }
 
-/// Maps authored point-count `length` so the shader's (length-1) span is
-/// `uv_scale` repeats. Identity when uv_scale is 1.
+/// The length a rope or rope-trail record carries for `length` points: WE stores
+/// 1 / uvscale and writes the count times it (0x1402308A0, probe rope-uv-v3).
 inline float EncodeRopeTrailLength(float authored_length, float uv_scale) noexcept {
-    return (authored_length - 1.0f) / RopeUvScaleOrOne(uv_scale) + 1.0f;
+    return authored_length / RopeUvScaleOrOne(uv_scale);
+}
+
+/// A rope trail's `g_RenderVar0.w` for a history of `capacity` points (0x1402366F0):
+/// the capacity less half a point, or the scaled capacity less one while scrolling.
+inline float RopeTrailMaxCount(float capacity, float uv_scale, bool scrolling) noexcept {
+    return scrolling ? (capacity - 1.0f) / RopeUvScaleOrOne(uv_scale) : capacity - 0.5f;
 }
 
 /// One subsystem's "already logged" latches. The generator is shared by every

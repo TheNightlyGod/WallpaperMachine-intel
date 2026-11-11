@@ -117,11 +117,119 @@ final class WallpaperCompatibilityTests: XCTestCase {
     XCTAssertEqual(status(installed, "sceneCapability"), .unknown, "Baseline resources cannot certify author shader/graph support")
   }
 
-  func testWebLockScreenRemainsNotApplicable() async throws {
+  func testASceneRowSaysWhatNativeMetalLastConcludedAboutTheScene() async throws {
+    try install(type: "scene", entry: "scene.json")
+    let library: URL = root
+    let verdicts = SceneDrawVerdicts(
+      file: root.appendingPathComponent("verdicts.json"), library: { library }, build: "1.0 (1)")
+    let service = WallpaperCompatibilityService(libraryURL: root, verdicts: verdicts)
+    func row() async -> WallpaperCompatibilityCheck? {
+      await service.check(context(kind: .scene)).first { $0.id == "sceneCapability" }
+    }
+    let unknown = await row()
+    XCTAssertEqual(unknown?.status, .unknown, "nothing is known before the scene ran or was checked")
+
+    await verdicts.record(
+      "one", outcome: .notDrawn, stage: "unsupported", reason: "the scene uses a light probe")
+    let refused = await row()
+    XCTAssertEqual(refused?.status, .unavailable)
+    XCTAssertTrue(refused?.detail.contains("the scene uses a light probe") == true, refused?.detail ?? "")
+
+    await verdicts.record(reports: [
+      BridgeSceneBackendReport(
+        displayId: 1, displayName: "Main", wallpaperId: "one", wallpaperTitle: "One",
+        backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
+        optimizationApplied: nil, qualityInForce: nil)
+    ])
+    let drawn = await row()
+    XCTAssertEqual(drawn?.status, .ok, "the answer is read again, not cached from the last check")
+  }
+
+  private func installSharedScene() throws -> URL {
+    try install(type: "scene", entry: "scene.json")
+    let assets = root.appendingPathComponent("shared")
+    for marker in ["shaders/genericimage2.vert", "shaders/genericimage2.frag", "materials/util/effectpassthrough.json"] {
+      let path = assets.appendingPathComponent(marker)
+      try FileManager.default.createDirectory(at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+      try Data([1]).write(to: path)
+    }
+    return assets
+  }
+
+  private func capability(
+    stage: String? = nil, reason: String? = nil, readError: String? = nil,
+    missing: [(layer: String, path: String)] = []
+  ) -> BridgeSceneCapability {
+    BridgeSceneCapability(
+      readError: readError, failureStage: stage, failureReason: reason,
+      missingFiles: missing.map { BridgeSceneMissingFile(layer: $0.layer, objectId: 1, path: $0.path) })
+  }
+
+  func testACheckReadsTheSceneAndListsTheFilesItsLayersLack() async throws {
+    let assets = try installSharedScene()
+    let library: URL = root
+    let verdicts = SceneDrawVerdicts(
+      file: root.appendingPathComponent("verdicts.json"), library: { library }, build: "1.0 (1)")
+    let answer = capability(missing: [("Rain", "materials/rain.json"), ("", "effects/glow/effect.json")])
+    let service = WallpaperCompatibilityService(
+      libraryURL: root, assetsURL: { assets }, verdicts: verdicts, sceneProbe: { _ in answer })
+    let checks = await service.check(context(kind: .scene))
+
+    XCTAssertEqual(status(checks, "sceneCapability"), .ok, "nothing in the scene keeps Native Metal from it")
+    let missing = try XCTUnwrap(checks.first { $0.id == "missingFiles" })
+    XCTAssertEqual(missing.status, .warning)
+    XCTAssertTrue(missing.detail.contains("materials/rain.json"), missing.detail)
+    XCTAssertTrue(missing.detail.contains("Rain"), missing.detail)
+    XCTAssertEqual(missing.missingFiles.map(\.path), ["materials/rain.json", "effects/glow/effect.json"])
+    let remembered = await verdicts.verdict(for: "one")
+    XCTAssertEqual(remembered?.outcome, .passedCheck, "the card can say it again without reading the scene")
+  }
+
+  func testASceneNativeMetalWouldRefuseIsUnavailableWithTheRenderersReason() async throws {
+    let assets = try installSharedScene()
+    let service = WallpaperCompatibilityService(
+      libraryURL: root, assetsURL: { assets },
+      sceneProbe: { [answer = capability(stage: "unsupported", reason: "the scene uses a light probe")] _ in answer })
+    let checks = await service.check(context(kind: .scene))
+    let row = try XCTUnwrap(checks.first { $0.id == "sceneCapability" })
+    XCTAssertEqual(row.status, .unavailable)
+    XCTAssertTrue(row.detail.contains("the scene uses a light probe"), row.detail)
+    XCTAssertEqual(status(checks, "missingFiles"), .ok)
+  }
+
+  func testASceneTheRendererCannotReadSaysWhyAndClaimsNothingElse() async throws {
+    let assets = try installSharedScene()
+    let service = WallpaperCompatibilityService(
+      libraryURL: root, assetsURL: { assets },
+      sceneProbe: { [answer = capability(readError: "the scene file is missing or empty")] _ in answer })
+    let checks = await service.check(context(kind: .scene))
+    let row = try XCTUnwrap(checks.first { $0.id == "missingFiles" })
+    XCTAssertEqual(row.status, .unavailable)
+    XCTAssertTrue(row.detail.contains("the scene file is missing or empty"), row.detail)
+    XCTAssertEqual(status(checks, "sceneCapability"), .unknown)
+  }
+
+  func testTheSceneIsNotReadWithoutTheSharedResources() async throws {
+    try install(type: "scene", entry: "scene.json")
+    let empty = root.appendingPathComponent("no-assets")
+    let reads = ProbeRecorder()
+    let service = WallpaperCompatibilityService(
+      libraryURL: root, assetsURL: { empty },
+      sceneProbe: { [answer = capability()] id in
+        _ = await reads.read(URL(fileURLWithPath: id))
+        return answer
+      })
+    let checks = await service.check(context(kind: .scene))
+    XCTAssertNil(checks.first { $0.id == "missingFiles" })
+    let read = await reads.count
+    XCTAssertEqual(read, 0, "a scene cannot load without them, so reading it would say nothing new")
+  }
+
+  func testWebWallpapersHaveALockScreenRoute() async throws {
     try install(type: "web", entry: "index.html")
     let service = WallpaperCompatibilityService(libraryURL: root)
     let checks = await service.check(context(kind: .web))
-    XCTAssertEqual(status(checks, "lockScreen"), .unavailable)
+    XCTAssertEqual(status(checks, "lockScreen"), .warning, "the same route as scenes and videos")
     XCTAssertEqual(status(checks, "webRuntime"), .unknown)
   }
 

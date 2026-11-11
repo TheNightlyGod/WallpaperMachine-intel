@@ -62,11 +62,11 @@ fn the_suffix_is_not_counted_as_a_use_when_the_widths_are_reconciled() {
 fn the_other_interface_qualifiers_tolerate_the_suffix_too() {
     let plain = ok(
         "attribute vec3 a_Position;\nuniform float g_Gain;\nvoid main() { gl_Position = vec4(a_Position * g_Gain, 1.0); }",
-        "void main() { gl_FragColor = vec4(1.0); }",
+        "void main() { gl_FragColor = CAST4(1.0); }",
     );
     let suffixed = ok(
         "attribute vec3 a_Position.xyz;\nuniform float g_Gain.x;\nvoid main() { gl_Position = vec4(a_Position * g_Gain, 1.0); }",
-        "void main() { gl_FragColor = vec4(1.0); }",
+        "void main() { gl_FragColor = CAST4(1.0); }",
     );
     assert_eq!(observable(&suffixed), observable(&plain));
 }
@@ -74,7 +74,7 @@ fn the_other_interface_qualifiers_tolerate_the_suffix_too() {
 #[test]
 fn a_malformed_suffix_fails_with_a_diagnostic_on_that_declaration() {
     for declaration in ["varying vec4 v_Haze.;", "varying vec4 v_Haze.xy = 1.0;", "varying vec4 v_Haze.foo;"] {
-        let fragment = format!("uniform float g_Before;\n{declaration}\nvarying float v_After;\nvoid main() {{ gl_FragColor = vec4(0.0); }}\n");
+        let fragment = format!("uniform float g_Before;\n{declaration}\nvarying float v_After;\nvoid main() {{ gl_FragColor = CAST4(0.0); }}\n");
         let e = err(&haze_vertex(), &fragment);
         assert_eq!(e.category(), ErrorCategory::Legalization, "{declaration}: {e}");
         let ShaderError::Source { failures, .. } = &e else { panic!("{e}") };

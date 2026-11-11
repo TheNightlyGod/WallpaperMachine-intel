@@ -6,7 +6,10 @@ use wallpaper_core::project::ScalingMode;
 
 use crate::{
     api::BridgeError,
-    config::{stored_frame_rate, FramingCfg, MonitorRender, SerializedSelector, WallpaperConfig},
+    config::{
+        EngineOptionId, EngineOptionsCfg, FramingCfg, MonitorRender, SerializedSelector,
+        WallpaperConfig, stored_frame_rate,
+    },
     project::{ProjectModel, PropertyValue, scene_property_override_json},
 };
 
@@ -164,6 +167,7 @@ impl WallpaperOptionsDraft {
             || pending.r#type != saved.r#type
             || pending.media_integration_enabled != saved.media_integration_enabled
             || pending.property_overrides != saved.property_overrides
+            || pending.engine_options != saved.engine_options
             || !PartialEq::eq(&saved.audio, &saved.audio)
             || pending.monitors.len() < saved.monitors.len()
         {
@@ -507,6 +511,34 @@ impl WallpaperOptionsDraft {
         self.saved_config.clone_from(&self.pending_config);
         self.saved_assignment.clone_from(&self.pending_assignment);
         self.saved_config.clone()
+    }
+
+    /// Stages one of Wallpaper Engine's per-wallpaper options, like a property
+    /// edit: Apply keeps it and Revert undoes it.
+    pub fn edit_engine_option(&mut self, option: EngineOptionId, value: &PropertyValue) {
+        self.pending_config.engine_options.set(option, value);
+    }
+
+    pub fn restore_engine_option_default(&mut self, option: EngineOptionId) {
+        self.pending_config.engine_options.restore(option);
+    }
+
+    /// Stages the default of every per-wallpaper option. The authored
+    /// properties, display settings and audio are left alone.
+    pub fn restore_all_engine_option_defaults(&mut self) {
+        self.pending_config.engine_options = EngineOptionsCfg::default();
+    }
+
+    /// This draft with `edits` made to its per-wallpaper options one after
+    /// another, and this draft left as it is: a slider still being dragged
+    /// reaches a preview this way without becoming an edit.
+    #[must_use]
+    pub fn with_engine_edits(&self, edits: &[(EngineOptionId, PropertyValue)]) -> Self {
+        let mut edited = self.clone();
+        for (option, value) in edits {
+            edited.pending_config.engine_options.set(*option, value);
+        }
+        edited
     }
 
     fn check_volume(volume: f32) -> Result<(), BridgeError> {

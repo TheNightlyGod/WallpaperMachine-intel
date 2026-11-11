@@ -10,7 +10,10 @@ struct WallpaperEngineApp {
         if NSClassFromString("XCTestCase") == nil {
             // First, so a second copy never restores a backup over files the first one is using
             // and never overwrites the running copy's session record.
+            let freshInstall = !FileManager.default.fileExists(atPath: ClientPaths.supportURL.path)
+                && (ClientPreferences.defaults.persistentDomain(forName: ClientPreferences.domainName) ?? [:]).isEmpty
             SingleInstance.claim()
+            AppUpdateMode.initialize(in: ClientPreferences.defaults, freshInstall: freshInstall)
             recordSessionStart()
             // Before the backup restore, which writes into the library where it now is.
             StorageMoveService.applyPending()

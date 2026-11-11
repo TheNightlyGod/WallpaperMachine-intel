@@ -6,7 +6,9 @@ import Foundation
 /// Previous, Next, Random Wallpaper and Recently used act on that display. With two or more, each
 /// display gets a submenu with its own commands, so any of them can be changed without opening the panel.
 /// While Workshop downloads run, a line under Control Panel says how many and how far they are,
-/// and opens Discover where the downloads list is.
+/// and opens Discover where the downloads list is. On a Mac with a battery, an On Battery submenu
+/// after Mute Wallpapers holds the battery choice and Pause While Using Other Apps, whichever
+/// layout.
 /// `AppDelegate` gathers the `Input` and turns the entries into `NSMenuItem`s; the update,
 /// error and Exit items stay there.
 enum StatusMenuModel {
@@ -18,6 +20,10 @@ enum StatusMenuModel {
         case playPause
         /// Mutes every wallpaper, or lets them play their own sound again; see `AutomationCommand.toggleMute`.
         case toggleMute
+        /// Settings › Playback & Power › On battery, through the engine as the panel sets it.
+        case batteryMode(BridgeBatteryMode)
+        /// Settings › Playback & Power › When another app is in front, set to this choice.
+        case otherAppInFront(OtherAppInFrontAction)
         case previous(display: String)
         case next(display: String)
         /// A random wallpaper other than the one the display shows; see `AutomationCommand.random`.
@@ -26,6 +32,8 @@ enum StatusMenuModel {
         case remove(display: String)
         case startAgain(wallpaper: String, display: String)
         case openInPanel(display: String)
+        /// Hides Finder's desktop icons, or shows them again; see `FinderDesktopIcons`.
+        case toggleDesktopIcons
         case lockScreen
     }
 
@@ -95,10 +103,36 @@ enum StatusMenuModel {
         var wallpapersMuted: Bool = false
         /// The Workshop downloads in progress; nil when there are none.
         var downloads: DownloadActivity? = nil
+        /// The On Battery submenu (`Battery.offered`); nil leaves it out.
+        var battery: Battery? = nil
         /// The displays a command can act on, in menu order (`orderedDisplays`); empty while
         /// the app starts or quits.
         var displays: [Display]
         var canLockScreen: Bool
+        /// Whether Finder hides its desktop icons, read each time the menu is built; nil leaves the
+        /// item out, as while the app quits.
+        var desktopIconsHidden: Bool? = nil
+    }
+
+    /// What the On Battery submenu shows: the battery choice, and whether "When another app is in
+    /// front" pauses on battery.
+    struct Battery: Equatable {
+        var mode: BridgeBatteryMode
+        var otherAppInFront: OtherAppInFrontAction
+
+        /// The submenu's state where it belongs: on a Mac with an internal battery, as Quick
+        /// Settings offers its On battery module, or wherever one of its two choices is not the
+        /// default, so a choice a restored backup brought can be undone. Nil otherwise.
+        static func offered(
+            hasBattery: Bool, mode: BridgeBatteryMode, otherAppInFront: OtherAppInFrontAction
+        ) -> Battery? {
+            guard hasBattery || mode != .keepRunning || otherAppInFront == .pauseOnBattery else { return nil }
+            return Battery(mode: mode, otherAppInFront: otherAppInFront)
+        }
+
+        /// Ticked only for Pause on battery: a Mute or Pause chosen in Settings, which applies on
+        /// every power source, reads as unticked here, and choosing the item replaces it.
+        var pausesWhileUsingOtherApps: Bool { otherAppInFront == .pauseOnBattery }
     }
 
     /// A display the menu may list, before its order and title are settled.
@@ -128,10 +162,18 @@ enum StatusMenuModel {
         if input.wallpapersMuted || (input.playbackIsCurrent && input.hasActiveWallpapers) {
             actions.append(.command(.toggleMute, title: String(localized: "Mute Wallpapers"), checked: input.wallpapersMuted))
         }
+        // Choices for the whole Mac, offered whatever is playing, like the settings they are.
+        if let battery = input.battery {
+            actions.append(.submenu(title: String(localized: "On Battery"), entries: batteryEntries(battery)))
+        }
         if input.displays.count > 1 {
             actions += input.displays.map { .submenu(title: $0.title, entries: submenu(for: $0)) }
         } else if let display = input.displays.first {
             actions += navigation(for: display)
+        }
+        // Ticked while the icons are hidden, as Mute Wallpapers is while muted.
+        if let hidden = input.desktopIconsHidden {
+            actions.append(.command(.toggleDesktopIcons, title: String(localized: "Hide Desktop Icons"), checked: hidden))
         }
         if input.canLockScreen {
             actions.append(.command(.lockScreen, title: String(localized: "Lock Screen"), checked: false))
@@ -143,12 +185,40 @@ enum StatusMenuModel {
         return entries
     }
 
+    /// The same commands for the Wallpaper menu in the app's menu bar, shown while the panel is
+    /// in front: everything but the lines that open the panel, which is already open, in a
+    /// display's submenu too.
+    static func wallpaperMenuEntries(for input: Input) -> [Entry] {
+        withoutPanelCommands(entries(for: input))
+    }
+
+    /// `entries` without the commands that open the panel, with no separator left at either end
+    /// or doubled, and no submenu left empty.
+    private static func withoutPanelCommands(_ entries: [Entry]) -> [Entry] {
+        var kept: [Entry] = []
+        for entry in entries {
+            switch entry {
+            case .command(.openControlPanel, _, _), .command(.openDownloads, _, _), .command(.openInPanel, _, _):
+                continue
+            case .submenu(let title, let entries):
+                let inner = withoutPanelCommands(entries)
+                if !inner.isEmpty { kept.append(.submenu(title: title, entries: inner)) }
+            case .separator:
+                if let last = kept.last, last != .separator { kept.append(.separator) }
+            case .command:
+                kept.append(entry)
+            }
+        }
+        if kept.last == .separator { kept.removeLast() }
+        return kept
+    }
+
     /// The displays a command can act on: enabled, showing a wallpaper of their own rather
     /// than mirroring another, and connected right now. A row's CoreGraphics id comes from the
     /// `(id - Role)` suffix of its renderer title.
     static func eligibleDisplays(_ rows: [BridgeDisplaySettingsRow], connected: Set<UInt32>) -> [BridgeDisplaySettingsRow] {
         rows.filter { row in
-            guard row.enabled, row.mode == .standalone,
+            guard row.isIndependent,
                   let physicalID = ResolvedDisplayTitles.liveDisplayID(row.displayId, title: row.title)
             else { return false }
             return connected.contains(physicalID)
@@ -182,6 +252,25 @@ enum StatusMenuModel {
     }
 
     // MARK: Building blocks
+
+    /// The On Battery submenu: Keep Running, Reduced Quality and Pause with the current choice
+    /// ticked, then Pause While Using Other Apps, which turns "When another app is in front" to
+    /// Pause on battery, or back to Keep running while it is ticked.
+    private static func batteryEntries(_ battery: Battery) -> [Entry] {
+        let modes: [(BridgeBatteryMode, String)] = [
+            (.keepRunning, String(localized: "Keep Running")),
+            (.reducedQuality, String(localized: "Reduced Quality")),
+            (.pause, String(localized: "Pause")),
+        ]
+        let pauses = battery.pausesWhileUsingOtherApps
+        return modes.map { mode, title in
+            .command(.batteryMode(mode), title: title, checked: mode == battery.mode)
+        } + [
+            .separator,
+            .command(.otherAppInFront(pauses ? .keepRunning : .pauseOnBattery),
+                     title: String(localized: "Pause While Using Other Apps"), checked: pauses),
+        ]
+    }
 
     /// Previous, Next, Random Wallpaper and Recently used for one display; each appears only
     /// when it can act.
@@ -222,5 +311,24 @@ enum StatusMenuModel {
             entries += group
         }
         return entries
+    }
+}
+
+extension StatusMenuModel.Command {
+    /// What the item runs through `AppAutomation`, the path a link or a keyboard shortcut takes
+    /// too; nil for the items that open a window or lock the screen. The menu bar panel's buttons
+    /// carry the same commands, so they act as these items do.
+    var automation: AutomationCommand? {
+        switch self {
+        case .playPause: .togglePlayback
+        case .toggleMute: .toggleMute
+        case .previous(let display): .previous(display: display)
+        case .next(let display): .next(display: display)
+        case .random(let display): .random(display: display, pool: .all)
+        case .apply(let id, let display), .startAgain(let id, let display): .apply(wallpaperID: id, display: display)
+        case .remove(let display): .removeWallpaper(display: display)
+        case .openControlPanel, .openDownloads, .openInPanel, .lockScreen, .toggleDesktopIcons, .batteryMode,
+             .otherAppInFront: nil
+        }
     }
 }

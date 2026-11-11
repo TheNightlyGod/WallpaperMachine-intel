@@ -23,6 +23,8 @@ final class PanelController {
   let store: BridgeStore
   let navigation: ControlPanelNavigation
   let workshop: WorkshopStore
+  /// Puts a Workshop search typed in another language into English before Steam sees it.
+  let searchTranslation: WorkshopSearchTranslator
   let pixiv: PixivStore
   let updater: AppUpdateStore
   /// Library imports, owned by the app so one outlives this panel.
@@ -35,6 +37,8 @@ final class PanelController {
   let automations: WallpaperAutomationStore
   let solarLocationTracker: SolarLocationTracker
   let displayLayouts: WallpaperDisplayLayoutStore
+  /// The clocks and dates on the desktop (Settings › Desktop Widgets).
+  let desktopWidgets: DesktopWidgetStore
   let spaces: WallpaperSpaceMonitor
   /// The condition rules engaged now, as the app's `SystemConditionMonitor` publishes them.
   let systemConditions: SystemConditionState
@@ -82,6 +86,9 @@ final class PanelController {
   @ObservationIgnored var openLoginItemsSettings: @MainActor () -> Void = {
     DesktopActions.current.openLoginItemsSettings()
   }
+  /// The connected displays Settings › Desktop Widgets offers and arranges on; tests pass fixed ones.
+  @ObservationIgnored var desktopWidgetScreens: @MainActor () -> [DesktopWidgetController.Screen] =
+    DesktopWidgetController.systemScreens
 
   // MARK: Controller state
 
@@ -93,6 +100,9 @@ final class PanelController {
   var welcomeSeen: Bool
   /// Whether the user has swept across tiles to select them, or dismissed the tip that teaches it.
   var dragSelectLearned: Bool
+  /// How far View › Zoom In and Zoom Out have zoomed the tile grids, 0 the standard size; saved
+  /// under `PanelPreferences.tileZoomKey` by `setTileZoom`.
+  var tileZoom: Int
   /// Whether the Steam sign-in keeps its session while the download runs; a running download's own
   /// choice wins over this.
   var remembersSession = true
@@ -111,6 +121,8 @@ final class PanelController {
   /// The status read that follows the user's return to the panel while a Login Items note is
   /// showing; one at a time, so repeated focus changes do not stack bridge round trips.
   @ObservationIgnored var loginItemRefresh: Task<Void, Never>?
+  /// Reads the favorites again when the menu bar panel saved them, while the panel is started.
+  @ObservationIgnored private var favoritesObserver: NSObjectProtocol?
   /// `start()` has run and `stop()` has not.
   private(set) var isStarted = false
   /// `stop()` has run: the panel is closing or closed, so an action that needs a window it no
@@ -166,6 +178,8 @@ final class PanelController {
   /// property id. A control keeps showing its value while the edit waits its turn and goes out; the
   /// entry goes when the edit ends, taken or refused, and the row reads the bridge's value again.
   var pendingPropertyValues: [String: [String: BridgePropertyValue]] = [:]
+  /// The same for Wallpaper Engine's per-wallpaper options, by wallpaper then option.
+  var pendingEngineOptionValues: [String: [BridgeEngineOptionId: BridgePropertyValue]] = [:]
   /// Runs `reconcileInspectorContext()` whenever the selection, the target display, the options or
   /// a library refresh changes; started the first time an inspector reads its state.
   @ObservationIgnored var inspectorContextLoop: ObservationLoop?
@@ -205,6 +219,7 @@ final class PanelController {
   @ObservationIgnored lazy var pixivBrowser = PixivBrowserModel(controller: self)
   @ObservationIgnored lazy var settings = SettingsModel(controller: self)
   @ObservationIgnored lazy var displaysSettings = DisplaysSettingsModel(controller: self)
+  @ObservationIgnored lazy var widgetsSettings = DesktopWidgetsSettingsModel(controller: self)
   @ObservationIgnored lazy var welcome = FirstRunModel(controller: self)
   @ObservationIgnored lazy var supportPrompt = SupportPromptPresenter(controller: self)
 
@@ -260,8 +275,10 @@ final class PanelController {
     automations: WallpaperAutomationStore? = nil,
     solarLocationTracker: SolarLocationTracker? = nil,
     displayLayouts: WallpaperDisplayLayoutStore? = nil,
+    desktopWidgets: DesktopWidgetStore? = nil,
     spaces: WallpaperSpaceMonitor? = nil,
-    systemConditions: SystemConditionState? = nil
+    systemConditions: SystemConditionState? = nil,
+    searchTranslation: WorkshopSearchTranslator? = nil
   ) {
     let pixiv = pixiv ?? PixivStore()
     let imports = imports ?? LibraryImportStore()
@@ -283,6 +300,9 @@ final class PanelController {
     self.store = store
     self.navigation = navigation
     self.workshop = workshop
+    self.searchTranslation =
+      searchTranslation
+      ?? WorkshopSearchTranslator(defaults: defaults, appLanguage: { [appLanguage] in appLanguage.effective })
     self.pixiv = pixiv
     self.updater = updater ?? AppUpdateStore(currentVersion: "0.0.0", client: DisabledAppUpdateClient())
     self.imports = imports
@@ -293,6 +313,7 @@ final class PanelController {
     self.automations = automations
     self.solarLocationTracker = solarLocationTracker ?? SolarLocationTracker(store: automations)
     self.displayLayouts = displayLayouts
+    self.desktopWidgets = desktopWidgets ?? DesktopWidgetStore(defaults: defaults)
     self.spaces = spaces
     self.systemConditions = systemConditions
     self.hotKeys = hotKeys
@@ -301,7 +322,15 @@ final class PanelController {
     self.backup = backup ?? WallpaperBackupStore(defaults: defaults)
     self.libraryLocation = libraryLocation ?? StorageLocationStore()
     self.imagePlacement = imagePlacement
-    self.compatibility = compatibility ?? WallpaperCompatibilityStore()
+    self.compatibility =
+      compatibility
+      ?? WallpaperCompatibilityStore(
+        service: WallpaperCompatibilityService(
+          verdicts: store.sceneDrawVerdicts,
+          sceneProbe: { @MainActor [weak store] id in
+            guard let store else { throw CancellationError() }
+            return try await store.bridge.sceneCapability(wallpaperId: id)
+          }))
     self.letterbox = letterbox ?? Self.letterboxStore(for: store)
     self.displayTitles = displayTitles
     self.libraryMetrics = libraryMetrics ?? LibraryMetricsService()
@@ -323,12 +352,14 @@ final class PanelController {
     self.chooseApplication = chooseApplication
     welcomeSeen = PanelPreferences.welcomeSeen(in: defaults)
     dragSelectLearned = PanelPreferences.dragSelectLearned(in: defaults)
+    tileZoom = PanelPreferences.tileZoom(in: defaults)
     favoriteIDs = PanelPreferences.favorites(in: defaults)
     PanelPreferences.removeLegacyKeys(from: defaults)
 
     self.libraryMetrics.onChange = { [weak self] in self?.revisions.bump(.libraryMetrics) }
     self.libraryCovers.onChange = { [weak self] in self?.revisions.bump(.libraryCovers) }
     self.energyUsage.onChange = { [weak self] in self?.revisions.bump(.energy) }
+    self.store.onRenderingSettingAppliedElsewhere = { [weak self] in self?.energyUsage.settingChanged() }
     // What the engine routed to the native player: the report Settings shows as In use now.
     self.energyUsage.nativeVideoPlaying = { [weak self] in
       self?.store.settingsSnapshot.videoBackends.contains { $0.backend == "native" } ?? false
@@ -360,6 +391,7 @@ final class PanelController {
     isStopped = false
     presentation.onBecameKey = { [weak self] in self?.windowDidBecomeKey() }
     presentation.onClose = { [weak self] in self?.stop() }
+    navigation.tileZoomTarget = self
     revisions.start()
     // Discover previews start caching the moment Steam's page arrives, and the following page is
     // fetched behind the one on show, so neither waits for a tile to ask. The pixiv page does the
@@ -369,11 +401,24 @@ final class PanelController {
     pixiv.prefetchesNextPage = true
     pixiv.onThumbnailsAvailable = { [cache = images.pixivThumbnailCache] in cache.warm($0) }
     // Opening the panel looks for SteamCMD once, so Discover and the download dialog know whether
-    // it is installed without a visit to Settings.
-    Task { await workshop.steamCMDSetup.refresh() }
+    // it is installed without a visit to Settings, and brings a managed copy that is due up to
+    // Valve's newest before the first download asks for it.
+    Task {
+      await workshop.steamCMDSetup.refresh()
+      workshop.steamCMDSetup.startUpdateCheck()
+    }
     errors.reconcile()
     errorLoop?.start()
     lifecycleLoop?.start()
+    favoritesObserver = NotificationCenter.default.addObserver(
+      forName: PanelPreferences.favoritesDidChangeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        let saved = PanelPreferences.favorites(in: self.defaults)
+        if saved != self.favoriteIDs { self.favoriteIDs = saved }
+      }
+    }
     refreshVisibilityGatedWork()
   }
 
@@ -383,10 +428,13 @@ final class PanelController {
     guard isStarted else { return }
     isStarted = false
     isStopped = true
+    if navigation.tileZoomTarget === self { navigation.tileZoomTarget = nil }
     importPicker.cancel()
     energyUsage.setActive(false)
     loginItemRefresh?.cancel()
     loginItemRefresh = nil
+    if let favoritesObserver { NotificationCenter.default.removeObserver(favoritesObserver) }
+    favoritesObserver = nil
     displayOptions.cancel()
     letterbox.cancelAll()
     revisions.stop()

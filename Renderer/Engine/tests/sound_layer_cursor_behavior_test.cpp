@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -232,8 +233,8 @@ TEST(SoundLayerScripts, OnePressEdgeIsExactlyOneClick)
     EXPECT_TRUE(stage.Playing("clickSound")) << "one tap reached the script more than once";
     EXPECT_EQ(stage->scriptErrorCount(), 0u);
 
-    // A second press is the second click: the script's own guard now stops the layer.
-    stage.Cursor(0.25f, 0.75f, true, 0, 1, 0);
+    // A second tap is the second click: the script's own guard now stops the layer.
+    stage.Cursor(0.25f, 0.75f, true, 0, 1, 1);
     stage.Frame();
     EXPECT_FALSE(stage.Playing("clickSound"));
     EXPECT_EQ(stage->scriptErrorCount(), 0u);
@@ -260,11 +261,11 @@ TEST(SoundLayerScripts, ALayerBoundSceneScriptIgnoresClicksOutsideItsLayer)
     stage.AddNode("button", kButtonX, kButtonY, kButtonW, kButtonH);
     stage->RegisterSceneScript(source, "button");
 
-    stage.Cursor(kOutsideX, kOutsideY, true, 0, 1, 0);
+    stage.Cursor(kOutsideX, kOutsideY, true, 0, 1, 1);
     EXPECT_TRUE(stage.Frame());
     EXPECT_FALSE(stage.Playing("clickSound"));
 
-    stage.Cursor(kInsideX, kInsideY, true, 0, 1, 0);
+    stage.Cursor(kInsideX, kInsideY, true, 0, 1, 1);
     EXPECT_TRUE(stage.Frame());
     EXPECT_TRUE(stage.Playing("clickSound"));
     EXPECT_EQ(stage->scriptErrorCount(), 0u);
@@ -274,7 +275,7 @@ TEST(SoundLayerScripts, ALayerBoundSceneScriptIgnoresClicksOutsideItsLayer)
     right.AddSound("clickSound");
     right.AddNode("button", kButtonX, kButtonY, kButtonW, kButtonH);
     right->RegisterSceneScript(source, "button");
-    right.Cursor(0.7f, kInsideY, true, 0, 1, 0);
+    right.Cursor(0.7f, kInsideY, true, 0, 1, 1);
     EXPECT_TRUE(right.Frame());
     EXPECT_FALSE(right.Playing("clickSound"));
     EXPECT_EQ(right->scriptErrorCount(), 0u);
@@ -288,11 +289,11 @@ TEST(SoundLayerScripts, APropertyScriptOnALayerIgnoresClicksOutsideIt)
                           VisibilitySetting(kPlayOnClickModule, true));
     EXPECT_EQ(stage->sceneScriptCount(), 1u);
 
-    stage.Cursor(kOutsideX, kOutsideY, true, 0, 1, 0);
+    stage.Cursor(kOutsideX, kOutsideY, true, 0, 1, 1);
     EXPECT_TRUE(stage.Frame());
     EXPECT_FALSE(stage.Playing("clickSound"));
 
-    stage.Cursor(kInsideX, kInsideY, true, 0, 1, 0);
+    stage.Cursor(kInsideX, kInsideY, true, 0, 1, 1);
     EXPECT_TRUE(stage.Frame());
     EXPECT_TRUE(stage.Playing("clickSound"));
     EXPECT_EQ(stage->scriptErrorCount(), 0u);
@@ -331,7 +332,7 @@ TEST(SoundLayerScripts, IdenticalScriptsOnTwoLayersEachTestTheirOwnBox)
         EXPECT_FALSE(stage.Playing("soundA"));
         EXPECT_FALSE(stage.Playing("soundB"));
 
-        stage.Cursor(0.25f, 0.5f, true, 0, 1, 0);
+        stage.Cursor(0.25f, 0.5f, true, 0, 1, 1);
         stage.Frame();
         EXPECT_TRUE(stage.Playing("soundA"));
         EXPECT_FALSE(stage.Playing("soundB"));
@@ -341,7 +342,7 @@ TEST(SoundLayerScripts, IdenticalScriptsOnTwoLayersEachTestTheirOwnBox)
         // (300, 150): inside the second box only.
         Stage stage(400, 300);
         build(stage);
-        stage.Cursor(0.75f, 0.5f, true, 0, 1, 0);
+        stage.Cursor(0.75f, 0.5f, true, 0, 1, 1);
         stage.Frame();
         EXPECT_TRUE(stage.Playing("soundB"));
         EXPECT_FALSE(stage.Playing("soundA"));
@@ -351,7 +352,7 @@ TEST(SoundLayerScripts, IdenticalScriptsOnTwoLayersEachTestTheirOwnBox)
         // (200, 150): between the boxes.
         Stage stage(400, 300);
         build(stage);
-        stage.Cursor(0.5f, 0.5f, true, 0, 1, 0);
+        stage.Cursor(0.5f, 0.5f, true, 0, 1, 1);
         stage.Frame();
         EXPECT_FALSE(stage.Playing("soundA"));
         EXPECT_FALSE(stage.Playing("soundB"));
@@ -464,6 +465,63 @@ TEST(SoundLayerScripts, ALayerThatDidNotTakeThePressHearsNothingOfItsRelease)
     inside.Frame();
     EXPECT_FALSE(inside->NodeVisible("button")) << "the release over the layer counted as an up";
     EXPECT_EQ(inside->scriptErrorCount(), 0u);
+}
+
+// A file of `frames` frames of 1.0, then the end.
+class ToneStream final : public audio::SoundStream {
+public:
+    explicit ToneStream(uint64_t frames) : m_left(frames) {}
+    uint64_t NextPcmData(void* data, uint32_t count) override {
+        const uint64_t n = std::min<uint64_t>(count, m_left);
+        auto*          out = static_cast<float*>(data);
+        for (uint64_t i = 0; i < n; ++i) out[i] = 1.0f;
+        m_left -= n;
+        return n;
+    }
+    void PassDesc(const Desc&) override {}
+
+private:
+    uint64_t m_left;
+};
+
+// `mintime`/`maxtime` are plain fields of the sound layer (we_ss_reg_SoundLayer 0x1401F7090,
+// decompiles/A-7j.md): a script's write decides the silence before the next random file.
+TEST(ScriptSoundLayers, MaxTimeWriteChangesTheNextDelay)
+{
+    Stage stage(400, 200);
+    WPSoundStream::Config config;
+    config.mode = PlaybackMode::Random;
+    config.mintime = 1.0f;
+    config.maxtime = 1.0f;
+    config.random_seed = 7;
+    config.playbackmode_word = "random";
+    auto stream = std::make_shared<WPSoundStream>(
+        std::vector<WPSoundStream::StreamFactory> {
+            [](const audio::SoundStream::Desc&) -> std::shared_ptr<audio::SoundStream> {
+                return std::make_shared<ToneStream>(100);
+            } },
+        config);
+    stream->PassDesc(audio::SoundStream::Desc { .channels = 1, .sampleRate = 1000 });
+    stage->RegisterSoundLayer("bell", stream);
+    stage.AddScriptedNode("bell", 0, 0, 1, 1, { { "value", true }, { "script", R"JS(
+export function init(value) {
+  if (thisLayer.maxtime !== 1 || thisLayer.playbackmode !== 'random' || thisLayer.spatialization !== false) {
+    throw new Error('reads the layer');
+  }
+  thisLayer.mintime = 3;
+  thisLayer.maxtime = 3;
+  thisLayer.attenuation = 0.5;
+  if (thisLayer.maxtime !== 3 || thisLayer.attenuation !== 0.5) throw new Error('reads back');
+  return value;
+}
+)JS" } });
+    stage.Tick();
+    EXPECT_EQ(stage->scriptErrorCount(), 0u);
+    std::vector<float> pcm(5000, 0.0f);
+    stream->NextPcmData(pcm.data(), static_cast<uint32_t>(pcm.size()));
+    std::size_t next = 100;
+    while (next < pcm.size() && pcm[next] == 0.0f) ++next;
+    EXPECT_EQ(next, 3100u) << "three seconds of silence after the first file";
 }
 
 } // namespace

@@ -22,11 +22,15 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         scalingMode: BridgeScalingMode = .fill,
         scalingFactor: Double = 1.0,
         mediaPath: String = "/tmp/does-not-need-to-exist/clip.mp4",
-        framing: BridgeFraming = BridgeFraming(panX: 0.5, panY: 0.5)
+        framing: BridgeFraming = BridgeFraming(panX: 0.5, panY: 0.5),
+        engineOptions: BridgeEngineOptionValues = BridgeSnapshotFixtures.engineOptionValues(),
+        borderColor: BridgeRgb? = nil,
+        audioSource: UInt32? = nil
     ) -> BridgeNativeVideoWallpaper {
         BridgeNativeVideoWallpaper(
             displayId: displayID,
             startupRevision: 0,
+            audioSourceDisplayId: audioSource ?? displayID,
             wallpaperId: id,
             title: "Clip",
             mediaPath: mediaPath,
@@ -36,7 +40,10 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
             volume: volume,
             muted: muted,
             scalingMode: scalingMode,
-            scalingFactor: scalingFactor)
+            scalingFactor: scalingFactor,
+            engineOptions: engineOptions,
+            lutPath: nil,
+            borderColor: borderColor)
     }
 
     /// A clip the injected admission refuses, where a test needs one wallpaper refused and another not.
@@ -107,6 +114,7 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         /// replace the surface while a request is still in flight.
         var poster: CGImage?
         var posterDelay: Duration = .zero
+        var posterRead: (@MainActor () async -> CGImage?)?
         /// Delivered synchronously the moment a callback is installed, which
         /// is what the real player does when it was already holding a failure.
         var failureOnInstall: String?
@@ -160,10 +168,32 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         /// Every health check the host asked this surface for, with its reason.
         private(set) var verifyReasons: [String] = []
         func verifyPlayback(reason: String) { verifyReasons.append(reason) }
+        /// Every option set the host handed this surface, in order.
+        private(set) var engineOptionCalls: [(options: WallpaperEngineOptions, border: CGColor?)] = []
+        func setEngineOptions(_ options: WallpaperEngineOptions, lut: VideoLut?, borderColor: CGColor?) {
+            engineOptionCalls.append((options, borderColor))
+        }
+        /// Whether the clip has an end to wait for, as a still picture or a file still opening has not.
+        var hasLoopEnd = true
+        /// The watch for the clip starting over, while one is set.
+        private(set) var loopWatch: (@MainActor () -> Void)?
+        func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool {
+            guard !isStopped, hasLoopEnd else { return false }
+            loopWatch = handler
+            return true
+        }
+        func cancelLoopWatch() { loopWatch = nil }
+        /// Stands in for the looper starting the clip over: the watch, if any, is told once.
+        func startOver() {
+            let handler = loopWatch
+            loopWatch = nil
+            handler?()
+        }
         func setUserPaused(_ paused: Bool) { userPaused = paused }
         func setPresentationSuspended(_ suspended: Bool) { self.suspended = suspended }
         var isPlaying: Bool { !isStopped && !userPaused && !suspended }
         func posterImage() async -> CGImage? {
+            if let posterRead { return await posterRead() }
             if posterDelay != .zero { try? await Task.sleep(for: posterDelay) }
             return poster
         }
@@ -174,6 +204,7 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         }
         func stop() {
             isStopped = true
+            loopWatch = nil
             recorder.stopped += 1
             recorder.events.append("stop")
         }
@@ -191,6 +222,8 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
     }
 
     private var surfacesMade: [UInt32: FakeSurface] = [:]
+    /// Folders a test made, removed when it ends.
+    private var temporaryFolders: [URL] = []
     private let counters = RuntimeCounters()
     private let sleeper = ManualSleeper()
     /// Gates a test left closed, opened again when it ends so no probe task is
@@ -223,7 +256,12 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         /// need it get the real clock, whose timer is cancelled as each read
         /// returns.
         manualLimits: Bool = false,
-        switchHold: WallpaperSwitchHold? = nil
+        switchHold: WallpaperSwitchHold? = nil,
+        /// Decides after the stubs above run out, in place of `refusal`: the real format check.
+        decide: (@MainActor (URL) async -> NativeVideoRefusal?)? = nil,
+        /// The corrected copies the host asks about. A cache of its own by default, so no test
+        /// touches the app's.
+        derivedVideos: DerivedVideoCache? = nil
     ) -> NativeVideoWallpaperHost {
         recorder.refusalSequence = refusalSequence
         let limits: @Sendable (Duration) async throws -> Void
@@ -252,6 +290,7 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
                 if !recorder.refusalSequence.isEmpty {
                     return recorder.refusalSequence.removeFirst()
                 }
+                if let decide { return await decide(url) }
                 return refusalByPath[url.path] ?? refusal
             },
             makeSurface: { [weak self] url, frame, key, paused in
@@ -273,9 +312,130 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
                 recorder.storageQueries.append(url.path)
                 return storage(url)
             },
-            switchHold: switchHold)
+            switchHold: switchHold,
+            derivedVideos: derivedVideos ?? isolatedDerivedVideos())
         host.onStateChanged = { recorder.states.append($0) }
         return host
+    }
+
+    /// A cache of corrected copies in a folder of this test's own, made only if a copy is.
+    private func isolatedDerivedVideos() -> DerivedVideoCache {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("host-derived-videos-\(UUID().uuidString)", isDirectory: true)
+        temporaryFolders.append(folder)
+        return DerivedVideoCache(folder: { folder })
+    }
+
+    func testAMirrorGroupIsHeardFromOneMemberAndAHiddenSourceHandsItsSoundOn() async throws {
+        screenFrames = [
+            (7, NSRect(x: 0, y: 0, width: 80, height: 60)), (9, NSRect(x: 80, y: 0, width: 80, height: 60)),
+        ]
+        let source = wallpaper(displayID: 7, volume: 0.6)
+        let mirror = wallpaper(displayID: 9, volume: 0.8, audioSource: 7)
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        await host.apply([source, mirror])
+        let heard = try XCTUnwrap(surfacesMade[7])
+        let copy = try XCTUnwrap(surfacesMade[9])
+        XCTAssertFalse(heard.muted, "the source is heard")
+        XCTAssertEqual(heard.volume, 0.6)
+        XCTAssertTrue(copy.muted, "its mirror plays the same clip without a second copy of the sound")
+
+        host.setPresentationSuspended(true, forDisplay: 7)
+        XCTAssertTrue(heard.muted, "a hidden source is not heard")
+        XCTAssertFalse(copy.muted, "the mirror still in sight takes the sound over")
+        XCTAssertEqual(copy.volume, 0.8, "at its own volume")
+
+        host.setPresentationSuspended(false, forDisplay: 7)
+        XCTAssertFalse(heard.muted)
+        XCTAssertTrue(copy.muted, "and gives it back when the source is in sight again")
+
+        host.setPresentationSuspended(true)
+        XCTAssertTrue(heard.muted && copy.muted, "nothing in sight, nothing heard")
+    }
+
+    // MARK: Clip end
+
+    func testAWatchHearsTheDisplaysOwnClipStartOverOnceAndNotItsMirror() async throws {
+        let source = wallpaper(displayID: 7)
+        let mirror = wallpaper(displayID: 9, audioSource: 7)
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        await host.apply([source, mirror])
+        var ended = 0
+        XCTAssertNotNil(host.watchClipEnd(displayID: 7, wallpaperID: "300") { ended += 1 })
+
+        try XCTUnwrap(surfacesMade[9]).startOver()
+        XCTAssertEqual(ended, 0, "the mirror's copy of the clip is not the one waited for")
+        let clip = try XCTUnwrap(surfacesMade[7])
+        clip.startOver()
+        XCTAssertEqual(ended, 1)
+        clip.startOver()
+        XCTAssertEqual(ended, 1, "a watch answers once")
+    }
+
+    func testAWatchNeedsTheWallpaperPlayingThereWithAnEndToWaitFor() async throws {
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        await host.apply([wallpaper(displayID: 7, id: "300")])
+        XCTAssertNil(host.watchClipEnd(displayID: 7, wallpaperID: "301") {}, "another wallpaper plays there")
+        XCTAssertNil(host.watchClipEnd(displayID: 9, wallpaperID: "300") {}, "no clip plays on that display")
+        try XCTUnwrap(surfacesMade[7]).hasLoopEnd = false
+        XCTAssertNil(host.watchClipEnd(displayID: 7, wallpaperID: "300") {}, "a clip with no end to wait for")
+    }
+
+    func testACancelledWatchIsNeverAnswered() async throws {
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        await host.apply([wallpaper(displayID: 7)])
+        var ended = 0
+        let cancel = try XCTUnwrap(host.watchClipEnd(displayID: 7, wallpaperID: "300") { ended += 1 })
+        cancel()
+        let clip = try XCTUnwrap(surfacesMade[7])
+        XCTAssertNil(clip.loopWatch, "the clip is no longer watched")
+        clip.startOver()
+        XCTAssertEqual(ended, 0)
+    }
+
+    func testAWatchEndsWhenItsClipFailsOrTheDisplayMovesOn() async throws {
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        await host.apply([wallpaper(displayID: 7, id: "300", admissionKey: 1)])
+        var failedEnds = 0
+        XCTAssertNotNil(host.watchClipEnd(displayID: 7, wallpaperID: "300") { failedEnds += 1 })
+        try XCTUnwrap(surfacesMade[7]).failPreparation("decoder could not open the track")
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(failedEnds, 1, "a broken clip cannot hold a playlist")
+
+        await host.apply([wallpaper(displayID: 7, id: "301", admissionKey: 2)])
+        var movedEnds = 0
+        XCTAssertNotNil(host.watchClipEnd(displayID: 7, wallpaperID: "301") { movedEnds += 1 })
+        await host.apply([wallpaper(displayID: 7, id: "302", admissionKey: 3)])
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(movedEnds, 1, "the clip waited for left the display")
+    }
+
+    func testIndependentAssignmentsOfTheSameClipAreEachHeard() async throws {
+        screenFrames = [
+            (7, NSRect(x: 0, y: 0, width: 80, height: 60)), (8, NSRect(x: 80, y: 0, width: 80, height: 60)),
+        ]
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        await host.apply([wallpaper(displayID: 7), wallpaper(displayID: 8)])
+        XCTAssertFalse(try XCTUnwrap(surfacesMade[7]).muted)
+        XCTAssertFalse(
+            try XCTUnwrap(surfacesMade[8]).muted, "the same clip chosen for two displays is two wallpapers, not a mirror")
+    }
+
+    func testTheUsersMuteKeepsADisplaySilentUntilLifted() async throws {
+        screenFrames = [(7, NSRect(x: 0, y: 0, width: 80, height: 60))]
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        await host.apply([wallpaper(displayID: 7, muted: true)])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        XCTAssertTrue(surface.muted)
+        await host.apply([wallpaper(displayID: 7)])
+        XCTAssertFalse(surface.muted, "unmuting is heard at once")
     }
 
     func testStartupWaitsForSurfaceReadinessAndAcknowledgesNewRevisions() async throws {
@@ -313,6 +473,154 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
     }
 
     // MARK: Clips kept paused for another desktop
+
+    func testUnvisitedClipIsPreloadedMutedAndPausedWithoutReplacingTheCurrentClip() async throws {
+        let recorder = Recorder()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: recorder)
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300", "301"]])
+        await host.apply([wallpaper(id: "300", admissionKey: 1)])
+        let current = try XCTUnwrap(surfacesMade[7])
+        try await host.preload(wallpaper(id: "301", admissionKey: 2))
+        let prepared = try XCTUnwrap(surfacesMade[7])
+        XCTAssertFalse(prepared === current)
+        XCTAssertTrue(current.isPlaying)
+        XCTAssertFalse(prepared.isPlaying)
+        XCTAssertTrue(prepared.muted)
+        XCTAssertEqual(host.keptWallpapers(on: 7), ["301"])
+        let count = recorder.made.count
+        await host.apply([wallpaper(id: "301", admissionKey: 2)])
+        XCTAssertEqual(recorder.made.count, count)
+        XCTAssertTrue(prepared.isPlaying)
+        XCTAssertFalse(current.isPlaying)
+        host.setKeptWallpapers([:])
+        XCTAssertTrue(current.isStopped)
+        XCTAssertFalse(prepared.isStopped)
+    }
+
+    func testAPromotedPreloadWithoutAFrameIsRestartedOnceThenReportedAsFailed() async throws {
+        let recorder = Recorder()
+        let descriptor = wallpaper(mediaPath: "/tmp/network/promoted.mp4")
+        let host = makeHost(
+            wallpapers: [], recorder: recorder,
+            storage: { $0.path == descriptor.mediaPath ? .networkVolume : .internalVolume },
+            manualLimits: true)
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: [descriptor.wallpaperId]])
+        try await host.preload(descriptor)
+        let surface = try XCTUnwrap(surfacesMade[7])
+        recorder.storageQueries.removeAll()
+
+        await host.apply([descriptor])
+        XCTAssertTrue(surface.isPlaying)
+        XCTAssertEqual(recorder.made.count, 1, "the preloaded player is promoted")
+        guard host.armedFirstFrameWatchCountForTest == 1 else {
+            return XCTFail("a promoted clip without a picture needs a first-frame deadline")
+        }
+        await sleeper.waitUntilPending()
+        XCTAssertEqual(recorder.storageQueries, [descriptor.mediaPath])
+        XCTAssertEqual(sleeper.requested.last, .seconds(90))
+
+        sleeper.fireNext()
+        await sleeper.waitUntilPending()
+        XCTAssertEqual(surface.restartReasons.count, 1)
+        XCTAssertTrue(recorder.rejected.isEmpty)
+        XCTAssertEqual(sleeper.requested.last, .seconds(90))
+
+        sleeper.fireNext()
+        await settle { surface.isStopped }
+        XCTAssertEqual(surface.restartReasons.count, 1)
+        XCTAssertEqual(recorder.rejected.map(\.id), [descriptor.wallpaperId])
+        XCTAssertTrue(host.isEmpty)
+    }
+
+    func testAPromotedPreloadWithAFrameNeedsNoFirstFrameDeadline() async throws {
+        let recorder = Recorder()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: recorder, manualLimits: true)
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300"]])
+        try await host.preload(wallpaper())
+        let surface = try XCTUnwrap(surfacesMade[7])
+
+        await host.apply([wallpaper()])
+        XCTAssertTrue(surface.isPlaying)
+        XCTAssertEqual(recorder.made.count, 1)
+        XCTAssertEqual(recorder.states.last?.phase, .ready)
+        XCTAssertEqual(host.armedFirstFrameWatchCountForTest, 0)
+        XCTAssertTrue(surface.restartReasons.isEmpty)
+    }
+
+    func testAPreloadedClipAnswersAReplicaWithoutResumingOrOpeningAnotherPlayer() async throws {
+        let center = NotificationCenter()
+        let recorder = Recorder()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: recorder, frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300", "301"]])
+        await host.apply([wallpaper(id: "300")])
+        let live = try XCTUnwrap(surfacesMade[7])
+        try await host.preload(wallpaper(id: "301", admissionKey: 2))
+        let kept = try XCTUnwrap(surfacesMade[7])
+        kept.poster = Self.makeImage()
+        let made = recorder.made.count
+        let answered = expectation(description: "paused clip supplies the shared desktop picture")
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: kept.posterLayer,
+                                         queue: .main) { note in
+            XCTAssertEqual(DesktopPosterNotification.context(in: note.userInfo), "space-replica:test")
+            XCTAssertEqual(DesktopPosterFrame(userInfo: note.userInfo)?.width, 2)
+            answered.fulfill()
+        }
+        defer { center.removeObserver(observer) }
+        center.post(name: DesktopPosterNotification.request, object: kept.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "space-replica:test"])
+        await fulfillment(of: [answered], timeout: 2)
+        XCTAssertFalse(kept.isPlaying)
+        XCTAssertTrue(live.isPlaying)
+        XCTAssertEqual(recorder.made.count, made)
+    }
+
+    func testAReleasedKeptClipsLateReplicaFrameIsDiscarded() async throws {
+        let center = NotificationCenter()
+        surfaceReadyAtBirth = true
+        let host = makeHost(wallpapers: [], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300"]])
+        try await host.preload(wallpaper())
+        let kept = try XCTUnwrap(surfacesMade[7])
+        let gate = AsyncGate()
+        openedAtTeardown.append(gate)
+        kept.posterRead = { await gate.wait(); return Self.makeImage() }
+        let answered = expectation(description: "released clip does not publish stale pixels")
+        answered.isInverted = true
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: kept.posterLayer,
+                                         queue: .main) { _ in answered.fulfill() }
+        defer { center.removeObserver(observer) }
+        center.post(name: DesktopPosterNotification.request, object: kept.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "space-replica:removed"])
+        await gate.waitUntilWaiting()
+        host.setKeptWallpapers([:])
+        gate.open()
+        await fulfillment(of: [answered], timeout: 0.1)
+        XCTAssertTrue(kept.isStopped)
+    }
+
+    func testMemoryPressureDiscardsAClipThatIsStillPreparingAndLateReadinessCannotReviveIt() async throws {
+        let host = makeHost(wallpapers: [], recorder: Recorder())
+        defer { host.shutdown() }
+        host.setKeptWallpapers([7: ["300"]])
+        try await host.preload(wallpaper())
+        let surface = try XCTUnwrap(surfacesMade[7])
+        XCTAssertTrue(host.keptWallpapers(on: 7).isEmpty)
+        host.setKeptWallpapers([:])
+        surface.isReadyForDisplay = true
+        surface.onReadyForDisplay?()
+        XCTAssertTrue(surface.isStopped)
+        XCTAssertFalse(host.containsWallpaper("300", on: 7))
+    }
 
     func testAClipTheDisplayKeepsIsPausedWhenItsDesktopIsLeftAndRunsOnWhenItComesBack() async throws {
         let recorder = Recorder()
@@ -427,6 +735,8 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         // otherwise outlive the test.
         openedAtTeardown.forEach { $0.open() }
         sleeper.fireAll()
+        temporaryFolders.forEach { try? FileManager.default.removeItem(at: $0) }
+        temporaryFolders = []
         try await super.tearDown()
     }
 
@@ -680,6 +990,178 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         XCTAssertEqual(recorder.rejected.count, 1, "the second offer restates the same failed state")
         XCTAssertTrue(host.isEmpty)
         host.shutdown()
+    }
+
+    func testAClipWaitingForItsCorrectedCopyLoadsAndOpensWhenTheCopyIsMade() async {
+        // A full copy of an hev1 clip on another drive is made in the background, so no metadata
+        // deadline and no pass waits for it. Meanwhile the display is loading, not failed.
+        let recorder = Recorder()
+        let derived = isolatedDerivedVideos()
+        let offer = wallpaper(admissionKey: 8)
+        let host = makeHost(
+            wallpapers: [offer], refusalSequence: [.awaitingCopy("making the corrected copy", making: true)],
+            recorder: recorder, derivedVideos: derived)
+        host.start()
+        defer { host.shutdown() }
+        counters.startSession(duration: .seconds(60))
+        let passes = PassCounter()
+        host.onSurfacesChanged = { passes.record() }
+
+        await host.apply([offer])
+        await host.apply([offer])
+        XCTAssertTrue(host.isEmpty, "no window before the copy exists")
+        XCTAssertEqual(recorder.states.last?.phase, .loading)
+        XCTAssertEqual(recorder.states.last?.message, "making the corrected copy")
+        XCTAssertTrue(recorder.rejected.isEmpty, "a copy being made is not a failure")
+        XCTAssertEqual(counters.snapshot().total(.nativeVideoRefused), 0)
+        XCTAssertEqual(recorder.admissionProbes.count, 1, "neither retried at once nor read again per offer")
+
+        NotificationCenter.default.post(name: DerivedVideoCache.copiesChanged, object: derived)
+        await passes.wait(for: 3)
+        XCTAssertEqual(host.activeDisplayIDs, [7], "the clip opens once the copy is there")
+        XCTAssertEqual(recorder.admissionProbes.count, 2)
+        XCTAssertEqual(recorder.states.last?.phase, .loading, "and waits for its first picture as usual")
+    }
+
+    func testAClipWhoseCorrectedCopyWentIsAdmittedAgainAndNeverOpenedFromItsFile() async throws {
+        // Clear unused caches, an ejected drive or room made for another copy took the copy while
+        // the verdict that the clip plays was still remembered.
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("host-hev1-\(UUID().uuidString)", isDirectory: true)
+        temporaryFolders.append(folder)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = try Hev1Fixture.write(name: "clip", into: folder)
+        if case .supported = await VideoFormatSupport.inspect(url: url) {
+            throw XCTSkip("this macOS plays hev1 itself, so nothing needs a copy")
+        }
+        let derived = DerivedVideoCache(folder: { folder.appendingPathComponent("DerivedVideos", isDirectory: true) })
+        let recorder = Recorder()
+        let host = makeHost(
+            wallpapers: [], recorder: recorder,
+            decide: { await VideoFormatSupport.refusal(url: $0, derived: derived) }, derivedVideos: derived)
+        defer { host.shutdown() }
+        let offer = wallpaper(admissionKey: 9, mediaPath: url.path)
+
+        await host.apply([offer])
+        XCTAssertEqual(host.activeDisplayIDs, [7])
+        await host.apply([])
+        XCTAssertTrue(host.isEmpty)
+        derived.removeUnused()
+        guard case .gone = derived.playableFile(for: url) else { return XCTFail("the copy was cleared") }
+
+        await host.apply([offer])
+        XCTAssertEqual(host.activeDisplayIDs, [7])
+        XCTAssertEqual(recorder.admissionProbes.count, 2, "the clip is judged again, which makes the copy again")
+        guard case let .copy(lease) = derived.playableFile(for: url) else {
+            return XCTFail("its surface opens on a copy, not on the file")
+        }
+        lease.release()
+    }
+
+    func testAClipWaitingForRoomIsAskedAgainWhenCopiesChangeWithoutBeingReportedAgain() async {
+        // Any copy let go anywhere (a preview, a poster, a window) asks again; an unchanged answer
+        // is neither counted again nor turned into loading and back.
+        let recorder = Recorder()
+        let derived = isolatedDerivedVideos()
+        let offer = wallpaper(admissionKey: 8)
+        let noRoom = NativeVideoRefusal.awaitingCopy("no room for the corrected copy now", making: false)
+        let host = makeHost(
+            wallpapers: [offer], refusalSequence: [noRoom, noRoom, nil], recorder: recorder,
+            derivedVideos: derived)
+        host.start()
+        defer { host.shutdown() }
+        counters.startSession(duration: .seconds(60))
+        let passes = PassCounter()
+        host.onSurfacesChanged = { passes.record() }
+
+        await host.apply([offer])
+        XCTAssertEqual(recorder.states.last?.phase, .failed)
+        XCTAssertEqual(counters.snapshot().total(.nativeVideoRefused), 1)
+        let reported = recorder.states.count
+
+        NotificationCenter.default.post(name: DerivedVideoCache.copiesChanged, object: derived)
+        await passes.wait(for: 2)
+        XCTAssertEqual(recorder.admissionProbes.count, 2, "asked again")
+        XCTAssertEqual(recorder.states.count, reported, "the state stays what it was")
+        XCTAssertEqual(counters.snapshot().total(.nativeVideoRefused), 1, "and is not counted again")
+        XCTAssertTrue(host.isEmpty)
+
+        NotificationCenter.default.post(name: DerivedVideoCache.copiesChanged, object: derived)
+        await passes.wait(for: 3)
+        XCTAssertEqual(host.activeDisplayIDs, [7], "it opens once there is room")
+        XCTAssertEqual(recorder.states.last?.phase, .loading)
+    }
+
+    func testAClipWhoseFullCopyFailedHasFailedForItsRevisionAndIsNotCopiedAgainWhenCopiesChange() async throws {
+        // A read error on the library's drive ends the copy. Copying again whenever copies change
+        // would read the clip again and again; it is tried again under a newer revision only.
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("host-hev1-\(UUID().uuidString)", isDirectory: true)
+        temporaryFolders.append(folder)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = try Hev1Fixture.write(name: "clip", into: folder)
+        if case .supported = await VideoFormatSupport.inspect(url: url) {
+            throw XCTSkip("this macOS plays hev1 itself, so nothing needs a copy")
+        }
+        let copies = CopyAttempts()
+        let derived = DerivedVideoCache(
+            folder: { folder.appendingPathComponent("DerivedVideos", isDirectory: true) },
+            freeSpaceReserve: 1 << 20, clone: { _, _ in EXDEV }, availableCapacity: { _ in 1 << 40 },
+            verify: { _ in try copies.fail() })
+        let recorder = Recorder()
+        let offer = wallpaper(admissionKey: 9, mediaPath: url.path)
+        let host = makeHost(
+            wallpapers: [offer], recorder: recorder,
+            decide: { await VideoFormatSupport.refusal(url: $0, derived: derived) }, derivedVideos: derived)
+        host.start()
+        defer { host.shutdown() }
+        counters.startSession(duration: .seconds(60))
+        let failed = expectation(description: "the copy failed")
+        let failedAgain = expectation(description: "the copy failed again")
+        host.onStateChanged = { state in
+            recorder.states.append(state)
+            guard state.phase == .failed else { return }
+            (recorder.rejected.count == 1 ? failed : failedAgain).fulfill()
+        }
+
+        await host.apply([offer])
+        await fulfillment(of: [failed], timeout: 10)
+        XCTAssertTrue(host.isEmpty)
+        XCTAssertTrue(
+            recorder.states.last?.message?.contains(DriveStoppedAnswering.detail) == true,
+            "the display says why: \(recorder.states.last?.message ?? "nothing")")
+        XCTAssertEqual(counters.snapshot().total(.nativeVideoRefused), 1)
+
+        // Copies change elsewhere: nothing waits now, so nothing is copied again.
+        NotificationCenter.default.post(name: DerivedVideoCache.copiesChanged, object: derived)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(copies.count, 1, "the clip was copied once")
+        XCTAssertEqual(recorder.admissionProbes.count, 1, "and not judged again")
+
+        // A newer revision tries it again.
+        var newer = offer
+        newer.startupRevision = 1
+        recorder.offered = [newer]
+        await host.apply([newer])
+        await fulfillment(of: [failedAgain], timeout: 10)
+        XCTAssertEqual(copies.count, 2)
+        XCTAssertEqual(recorder.admissionProbes.count, 2)
+    }
+
+    /// Counts the full copies checked, each of which fails as a read error would.
+    private final class CopyAttempts: @unchecked Sendable {
+        private let lock = NSLock()
+        private var attempts = 0
+        var count: Int { lock.withLock { attempts } }
+        func fail() throws -> Bool {
+            lock.withLock { attempts += 1 }
+            throw DriveStoppedAnswering()
+        }
+    }
+
+    private struct DriveStoppedAnswering: LocalizedError {
+        static let detail = "the drive stopped answering"
+        var errorDescription: String? { Self.detail }
     }
 
     /// Counts finished reconcile passes and lets a test wait for the nth one
@@ -2432,6 +2914,137 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         host.shutdown()
     }
 
+    func testConcurrentPosterConsumersReceiveTheirOwnContexts() async throws {
+        let center = NotificationCenter()
+        let host = makeHost(wallpapers: [wallpaper()], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        await host.apply([wallpaper()])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        let releaseRead = AsyncGate()
+        openedAtTeardown.append(releaseRead)
+        surface.posterRead = { await releaseRead.wait(); return Self.makeImage() }
+        let answered = expectation(description: "both consumers receive the frame with their own context")
+        answered.expectedFulfillmentCount = 2
+        var contexts: [String] = []
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: surface.posterLayer,
+                                          queue: .main) { note in
+            contexts.append(DesktopPosterNotification.context(in: note.userInfo) ?? "")
+            answered.fulfill()
+        }
+        defer { center.removeObserver(observer) }
+        for context in ["current-space", "switch-hold:next-wallpaper"] {
+            center.post(name: DesktopPosterNotification.request, object: surface.posterLayer,
+                        userInfo: [DesktopPosterNotification.Key.context: context])
+        }
+        await releaseRead.waitUntilWaiting(2)
+        releaseRead.open()
+        await fulfillment(of: [answered], timeout: 2)
+        XCTAssertEqual(Set(contexts), ["current-space", "switch-hold:next-wallpaper"])
+    }
+
+    func testAnOlderPosterAnswerDoesNotForgetANewerEmptyRequest() async throws {
+        let center = NotificationCenter()
+        let host = makeHost(wallpapers: [wallpaper()], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        await host.apply([wallpaper()])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        let releaseOldRead = AsyncGate()
+        openedAtTeardown.append(releaseOldRead)
+        let emptyRead = expectation(description: "the newer request has no frame yet")
+        var reads = 0
+        surface.posterRead = {
+            reads += 1
+            if reads == 1 { await releaseOldRead.wait() }
+            else if reads == 2 { emptyRead.fulfill(); return nil }
+            return Self.makeImage()
+        }
+        let oldAnswer = expectation(description: "the older consumer receives its frame")
+        let currentAnswer = expectation(description: "readiness still answers the newer request")
+        let observer = center.addObserver(forName: DesktopPosterNotification.ready, object: surface.posterLayer,
+                                          queue: .main) { note in
+            switch DesktopPosterNotification.context(in: note.userInfo) {
+            case "switch-hold:previous": oldAnswer.fulfill()
+            case "current-space": currentAnswer.fulfill()
+            default: XCTFail("a poster lost its request context")
+            }
+        }
+        defer { center.removeObserver(observer) }
+        center.post(name: DesktopPosterNotification.request, object: surface.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "switch-hold:previous"])
+        await releaseOldRead.waitUntilWaiting()
+        center.post(name: DesktopPosterNotification.request, object: surface.posterLayer,
+                    userInfo: [DesktopPosterNotification.Key.context: "current-space"])
+        await fulfillment(of: [emptyRead], timeout: 2)
+        releaseOldRead.open()
+        await fulfillment(of: [oldAnswer], timeout: 2)
+        surface.isReadyForDisplay = true
+        surface.onReadyForDisplay?()
+        await fulfillment(of: [currentAnswer], timeout: 2)
+        XCTAssertEqual(reads, 3)
+    }
+
+    func testACoveredVideoUpdatesItsPosterWhenItsFirstReadHadNoFrame() async throws {
+        try await checkPosterAfterPreparation(readyDuringRead: false)
+    }
+
+    func testACoveredVideoUpdatesItsPosterWhenItBecomesReadyDuringAnEmptyRead() async throws {
+        try await checkPosterAfterPreparation(readyDuringRead: true)
+    }
+
+    private func checkPosterAfterPreparation(readyDuringRead: Bool) async throws {
+        let center = NotificationCenter()
+        let host = makeHost(wallpapers: [wallpaper()], recorder: Recorder(), frameCenter: center)
+        host.start()
+        defer { host.shutdown() }
+        // A playlist rotates while another app covers the desktop. Settling will not ask again.
+        host.setPresentationSuspended(true, forDisplay: 7)
+        await host.apply([wallpaper()])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        let layer = try XCTUnwrap(surface.posterLayer)
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("preparing-poster-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let target = DesktopPictureTarget(display: "7", space: "test-space")
+        let workspace = PosterWorkspace(target: target, original: root.appendingPathComponent("original.png"))
+        let original = workspace.picture
+        let sync = try DesktopWallpaperSync(folder: root.appendingPathComponent("posters"), workspace: workspace,
+            surfaces: { [DesktopPosterSurface(layer: layer, display: "7")] }, frameCenter: center,
+            scope: { _ in .desktop(id: "test-space", context: "covered-video") },
+            encode: { $0.pixels }, settleDelays: [])
+        sync.canCapture = { _ in false }
+        sync.start()
+        defer { workspace.didWrite = nil; sync.stop() }
+        let firstRead = expectation(description: "the opening clip has no poster yet")
+        let releaseRead = AsyncGate()
+        openedAtTeardown.append(releaseRead)
+        var reads = 0
+        surface.posterRead = {
+            reads += 1
+            if reads == 1 {
+                firstRead.fulfill()
+                if readyDuringRead { await releaseRead.wait() }
+                return nil
+            }
+            return Self.makeImage()
+        }
+        sync.refresh()
+        await fulfillment(of: [firstRead], timeout: 2)
+        XCTAssertEqual(workspace.picture, original)
+
+        let updated = expectation(description: "the ready clip replaces the previous desktop picture while covered")
+        workspace.didWrite = { updated.fulfill() }
+        surface.isReadyForDisplay = true
+        surface.onReadyForDisplay?()
+        releaseRead.open()
+        await fulfillment(of: [updated], timeout: 2)
+
+        let url = try XCTUnwrap(workspace.picture?.url)
+        XCTAssertEqual(try Data(contentsOf: url), try XCTUnwrap(DesktopPosterFrame.rgba(Self.makeImage())).pixels)
+        XCTAssertFalse(surface.isPlaying, "making the poster must not resume a covered wallpaper")
+        XCTAssertEqual(reads, 2, "one readiness event retries the empty read once")
+    }
+
     func testScreenGeometryUpdatesWithoutRecreatingThePlayingSurface() async throws {
         let recorder = Recorder()
         let host = makeHost(wallpapers: [wallpaper()], recorder: recorder)
@@ -2471,6 +3084,26 @@ final class NativeVideoWallpaperHostTests: XCTestCase {
         XCTAssertEqual(host.surfaceGenerationForTest, generation)
         XCTAssertEqual(recorder.stopped, 0)
         XCTAssertTrue(surface.isPlaying)
+    }
+
+    func testTheEngineOptionsAndSchemeBorderReachTheSurfaceWithoutReopeningIt() async throws {
+        let recorder = Recorder()
+        let plain = wallpaper()
+        let host = makeHost(wallpapers: [plain], recorder: recorder)
+        defer { host.shutdown() }
+        await host.apply([plain])
+        let surface = try XCTUnwrap(surfacesMade[7])
+        XCTAssertEqual(surface.engineOptionCalls.last?.options, .identity)
+        XCTAssertNil(surface.engineOptionCalls.last?.border)
+
+        let options = BridgeSnapshotFixtures.engineOptionValues(flipHorizontal: true, playbackRate: 150)
+        await host.apply([wallpaper(engineOptions: options, borderColor: BridgeRgb(red: 1, green: 0, blue: 0))])
+        XCTAssertTrue(surfacesMade[7] === surface)
+        let last = try XCTUnwrap(surface.engineOptionCalls.last)
+        XCTAssertEqual(last.options.playbackRate, 150)
+        XCTAssertTrue(last.options.flipHorizontal)
+        XCTAssertEqual(last.border?.components?.prefix(3).map { Double($0) }, [1, 0, 0])
+        XCTAssertEqual(recorder.stopped, 0)
     }
 
     func testTheUsersPositionReachesTheSurfaceWithoutReopeningIt() async throws {

@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The bar along the bottom of the window: what the target display is showing, and the previous,
-/// play or pause, next and Recently used buttons.
+/// play or pause, next, playlist and Recently used buttons. While the target display rotates, the
+/// line under the title names what it rotates through and the playlist button is lit.
 ///
 /// The wallpaper's part of the bar is a button: it lights on hover and opens the details, a wider
 /// still with the title, its kind, the display and the playback state, and Show in library.
@@ -9,6 +10,10 @@ import SwiftUI
 /// Play and pause act on every display, so the status reports them even when the target display is
 /// empty and the button works while any display has a wallpaper. Previous and next act on the target
 /// display only. The equalizer moves only while the wallpaper plays and the window is on screen.
+///
+/// While a season is on, the bar is the ground its horizon (`SeasonHorizon`) rises from: the
+/// horizon's ink in either appearance, its contents in the season's dark palette. What it opens over
+/// the window keeps the window's own palette (`panelWindowLook`).
 struct NowPlayingBar: View {
   /// The bar's height, which the pages above it give up.
   static let height: CGFloat = 52
@@ -17,9 +22,27 @@ struct NowPlayingBar: View {
   @Environment(\.panelTheme) private var theme
 
   var body: some View {
+    let ground = theme.season.map { PanelTheme(season: $0, appearance: .dark) }
+    bar
+      .background(ground == nil ? theme.surface.surface.color : SeasonHorizon.ink.color)
+      .overlay(alignment: .top) {
+        if ground == nil {
+          Rectangle().fill(theme.surface.line.color).frame(height: 0.5)
+        }
+      }
+      .environment(\.panelTheme, ground ?? theme)
+      .environment(\.panelWindowTheme, theme)
+      .tint((ground ?? theme).accent.accent.color)
+      .accessibilityElement(children: .contain)
+      .accessibilityLabel(Text(verbatim: controller.nowPlaying.accessibilityLabel))
+      .accessibilityValue(Text(verbatim: controller.nowPlaying.status))
+      .accessibilityIdentifier("now-playing")
+  }
+
+  private var bar: some View {
     let shell = controller.shell
     let state = controller.nowPlaying
-    HStack(spacing: 12) {
+    return HStack(spacing: 12) {
       NowPlayingSummary(state: state)
         .frame(maxWidth: 420, alignment: .leading)
       Spacer(minLength: 8)
@@ -38,21 +61,14 @@ struct NowPlayingBar: View {
           systemImage: "forward.fill", label: L("Next wallpaper"),
           isEnabled: state.canGoNext && !shell.isNextBusy, identifier: "now-playing-next"
         ) { shell.nextWallpaper() }
+        NowPlayingPlaylistButton()
         history(shell)
       }
-      .frame(width: 160)
+      .frame(width: 200)
     }
     .padding(.horizontal, 10)
     .frame(height: Self.height)
     .frame(maxWidth: .infinity)
-    .background(theme.surface.surface.color)
-    .overlay(alignment: .top) {
-      Rectangle().fill(theme.surface.line.color).frame(height: 0.5)
-    }
-    .accessibilityElement(children: .contain)
-    .accessibilityLabel(Text(verbatim: state.accessibilityLabel))
-    .accessibilityValue(Text(verbatim: state.status))
-    .accessibilityIdentifier("now-playing")
   }
 
   /// Recently used: opens the target display's history in a popover above the bar.
@@ -67,7 +83,7 @@ struct NowPlayingBar: View {
     // Upward: the bar is at the bottom of the window, so one below would be pushed back up by the
     // screen edge.
     .popover(isPresented: shell.popover(.history), arrowEdge: .top) {
-      RecentlyUsedPopover()
+      RecentlyUsedPopover().panelPresentationLocale().panelWindowLook()
     }
   }
 }
@@ -120,16 +136,43 @@ private struct NowPlayingSummary: View {
     .accessibilityHint(Text("Details"))
     .accessibilityIdentifier("now-playing-details")
     .popover(isPresented: shell.popover(.nowPlaying), arrowEdge: .top) {
-      NowPlayingDetails()
+      NowPlayingDetails().panelPresentationLocale().panelWindowLook()
     }
   }
 
   /// The target display as the toolbar's menu button names it, which is what the line has room
-  /// for; the details and VoiceOver keep the full title.
+  /// for, and what it rotates through; the details and VoiceOver keep the full title.
   private func displayName(_ state: NowPlayingState) -> String {
     let displays = controller.targetDisplays
     let target = displays.first { $0.id == controller.targetDisplayID }
-    return target?.shortLabel(among: displays) ?? state.displayTitle
+    let name = target?.shortLabel(among: displays) ?? state.displayTitle
+    guard let rotation = NowPlayingRotation(controller: controller) else { return name }
+    return "\(name) · \(rotation.title)"
+  }
+}
+
+extension EnvironmentValues {
+  /// The window's palettes inside a part that wears others (the Now Playing bar in a season), for
+  /// what that part opens over the window. Nil elsewhere.
+  @Entry var panelWindowTheme: PanelTheme?
+}
+
+extension View {
+  /// Gives a popover opened from a part with palettes of its own the window's palettes back.
+  fileprivate func panelWindowLook() -> some View {
+    modifier(PanelWindowLook())
+  }
+}
+
+private struct PanelWindowLook: ViewModifier {
+  @Environment(\.panelWindowTheme) private var window
+
+  func body(content: Content) -> some View {
+    if let window {
+      content.environment(\.panelTheme, window).tint(window.accent.accent.color)
+    } else {
+      content
+    }
   }
 }
 

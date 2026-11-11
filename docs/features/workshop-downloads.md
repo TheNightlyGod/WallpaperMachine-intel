@@ -2,10 +2,13 @@
 
 Workshop browsing and downloading are implemented independently of the Steam
 client. Browsing needs no Steam login and no Steam Web API key; downloading needs
-a login, because Steam enforces that the account owns Wallpaper Engine. The
+a login, because Steam enforces that the account owns Wallpaper Engine. Signed in to
+Steam Community ([subscriptions](#subscriptions)), the Workshop is browsed as that
+account, so the lists match what Steam shows it. The
 bundled Aurora Drift video wallpaper (`Resources/StarterWallpaper`) can be applied
 from Installed without any download. Credentials for a download are entered only
-in the app's own local prompts.
+in the app's own local prompts, or not at all with a [QR-code
+sign-in](#signing-in-with-a-qr-code), which downloads without SteamCMD.
 
 ## Discover
 
@@ -58,6 +61,15 @@ trending window. Steam's public browse page has no "most voted" sort and silentl
 treats unknown `browsesort` values as trending, so none is offered. Wallpaper Engine's
 "mobile compatible" box has no Steam tag behind it, so it is not offered either.
 
+### Removing a downloaded wallpaper
+
+An installed wallpaper's Steam Workshop inspector offers **Move to Trash**. It uses
+Installed's confirmation and removal action: after confirmation, the wallpaper stops
+playing, its library copy moves to the Trash, and its saved library metadata is
+removed. The Workshop page stays open and offers downloading again once the library
+refreshes. Removing the local copy does not unsubscribe from the item on Steam.
+Collections and wallpapers that are not installed do not offer removal.
+
 ### Opening an item from a link or id
 
 Pasting a Workshop item's page link (`steamcommunity.com/sharedfiles/filedetails/?id=…`
@@ -86,6 +98,57 @@ it is an Application wallpaper, which runs Windows programs and is never offered
 (`WorkshopService.lookup`). The panel looks a link up as soon as it is pasted and a bare
 id (six digits or more) when Return or Search is pressed, so typing an id never looks up
 its prefixes; a link typed by hand and ordinary words wait for the usual short pause.
+Installed's search, given a link or id whose item is not installed, offers **Show in
+Steam Workshop**, which opens the wallpapers list with that item and puts its id in the
+search field (`PanelController.lookUpWorkshopItem(id:)`), from whatever list was on show
+([filtering](control-panel.md#filtering)). It is offered only for an id the field looks up
+by itself, six digits or more (`WorkshopLink.isBareItemID(_:)`).
+
+### Searching in another language
+
+Steam matches search words against titles and tags that are mostly English, so a search
+typed in another of the app's languages finds little. With **Settings → General →
+Translate Workshop searches into English** on (the default, stored as
+`WallpaperMachine.translatesWorkshopSearches`, kept by a [backup](backup-restore.md) and
+cleared by Reset all settings), such a search is translated on this Mac with the system's
+Translation framework and Steam is searched with the English words
+(`WorkshopSearchTranslator`). The search field, and a reopened panel, keep what was typed.
+While the words are being translated the page says **Searching Steam Workshop…** and the
+window's subtitle drops its count, as they do while Steam answers. A
+line under the lists says **Searched in English for “…”** with **Search “…” instead**,
+which searches the words as typed; a sort, a filter, another list or a reopened panel
+then keeps them as typed until the text changes (the Workshop store keeps that choice, not
+the panel window). Open on Steam opens the English search. Turning the switch off applies
+from the next search: the one on show keeps its line, whose **Search “…” instead** still
+works, and a list the Workshop opens or reads again by itself (another list, Back, a Steam
+sign-in) is searched as typed.
+
+The language is read on the device (`WorkshopSearchLanguage`): kana makes a search
+Japanese and Hangul Korean; Han characters alone are Japanese only when Apple's language
+recognizer is at least 90% sure, else Chinese, Traditional when ICU's
+Traditional-to-Simplified transform changes them. Mixed text such as "anime 女孩" is read
+by its CJK characters. Portuguese is read only while the app itself is in Portuguese,
+from three letters on and at 90% or more, because short Portuguese and English queries
+(names, a word cut short while typing) look alike. English, links, item ids, text over
+256 characters and anything while the switch is off are sent as typed, and so is a
+search whose translation fails or changes nothing (a name such as "Totoro"). The last 100
+answers are kept in memory for the panel window, so a sort or another page translates
+nothing again.
+
+A search is translated only from a language already downloaded for translation
+(`LanguageAvailability` reports it installed); one that is not downloaded is never asked
+for, because that would put the system's download prompt in the middle of a search. The
+Settings row says which languages are ready and offers the others in a **Download…** menu,
+by their own names; choosing one shows the system's prompt, and nothing downloads
+without it. The row reads the languages only while the switch is on: when it appears, when
+the switch or Reset all settings turns it on, and again when the Language menu changes
+the app's language (Portuguese is listed only while the app is in Portuguese). Downloaded languages are the system's and serve every app. Before macOS 26 a
+translation session exists only inside SwiftUI's `.translationTask`, so the panel's
+`TranslationTaskHost` lends one to `TranslationSessionHost`, which serves every queued job
+for the session's languages before asking for another, and a search no session answers
+within five seconds is sent as typed; from macOS 26 a search between
+downloaded languages uses `TranslationSession(installedSource:target:)` directly, and only a
+download still needs the panel's session.
 
 ### When Steam changes the page's markup
 
@@ -186,7 +249,7 @@ cache.
 ## Collections, authors and subscriptions
 
 A segmented control leading Discover's header chooses what it lists: **Wallpapers**
-(the browse page above), **Collections** or **Your subscriptions**. In the narrowest
+(the browse page above), **Collections**, **Your subscriptions** or **Your favorites**. In the narrowest
 column it becomes one menu; the arrow keys move between the segments, and Space or
 Return chooses one. An author's wallpapers and a
 collection's items are opened from a tile instead: no segment is current, and the
@@ -199,11 +262,14 @@ list that failed.
 
 Only Wallpapers and Collections are searched and sorted by Steam; the others come
 in their own order, so the panel hides the search field and the sort menu for
-them. The filters apply everywhere: Steam applies them to the two lists,
+them; Your favorites has an order menu of its own ([favorites](#favorites)). The filters apply everywhere: Steam applies them to the two lists,
 and `WorkshopService.matching` applies the same rules to the other sources'
 pages, which can therefore show fewer than 30 tiles, or none while Steam's count
 says more exist; such a page says the filters hide everything on it and offers
-the next page. The line above the grid links **Open on Steam** to the Steam page
+the next page, even when filters differ from their defaults. A personal list whose
+unfiltered total is zero offers **Browse Workshop** instead of blaming the sidebar:
+the Filter badge counts changes from defaults, including allowing more age ratings.
+The line above the grid links **Open on Steam** to the Steam page
 listing what is on show (`WorkshopStore.browseURL`).
 The sources are `WorkshopSource` in `App/Services/Workshop/WorkshopSource.swift`.
 
@@ -244,7 +310,11 @@ A Discover tile's details offer **More by this author** when Steam named the
 author's SteamID64. The author's public Workshop page
 (`steamcommunity.com/profiles/<id>/myworkshopfiles/?appid=431960`) lists 30 ids a
 page with the total and the author's name, and the details endpoint fills them
-in. A profile that is private or has nothing to show is simply empty.
+in. A profile that is private or has nothing to show is simply empty. An installed
+Workshop wallpaper's **More actions** menu offers **More by this author** too: the
+library keeps no author, so unless Discover still holds the item, its details are read
+from the public details endpoint first, and Discover then opens on the author's list
+with Back returning to the list it showed.
 
 ### Subscriptions
 
@@ -252,7 +322,9 @@ Steam shows an account's subscriptions only to that account, so **Your
 subscriptions** needs a Steam Community sign-in. This is a different sign-in from
 SteamCMD's (see [Steam sign-in](#steam-sign-in)), and the app never sees the
 password: **Sign in to Steam…** opens Steam's own sign-in page in a window
-(`WebSignInWindowController` with its `.steam` site, the same one pixiv uses) and
+(`WebSignInWindowController` with its `.steam` site, the same one pixiv uses; a page
+that does not load is replaced by its reason and **Retry**, see
+[pixiv](pixiv.md#signing-in-and-r-18-works)) and
 takes the `steamLoginSecure` cookie Steam sets, and with it the
 `steamRefresh_steam` renewal token Steam sets on `login.steampowered.com` when the page
 set one for the same account. The session (`WorkshopStore.steamWebSession`) is kept in
@@ -261,16 +333,24 @@ the login keychain as one generic password (`KeychainSteamWebSessionStore`, serv
 the sign-in survives quitting; **Sign out of Steam**, or Steam ending the session,
 removes it. The cookie is sent only to `steamcommunity.com` over HTTPS (a redirect
 anywhere else goes without it, `WorkshopService.redirected`), to read the subscriptions
-list (the author page with `browsefilter=mysubscriptions`).
+list (the author page with `browsefilter=mysubscriptions`), and with every other
+Steam Community page the Workshop reads: search, collections and authors' pages.
+Steam lists those differently for an account than for an anonymous visitor: age-rated
+items the account's content preferences allow, and what its store region allows, are
+left out for anyone, so signed out a Questionable or Mature search can come back with
+far fewer pages than on Steam. Signing in or out reads the list on show again from
+its first page (`WorkshopStore.signInToSteamWeb`, `signOutOfSteamWeb`); the details endpoint on
+`api.steampowered.com` is still read without a session.
 
 The cookie's own token lasts about a day; the renewal token lasts months. Before a
-subscriptions read, a cookie whose token has run out (its JWT `exp`, read without
+read with the session, a cookie whose token has run out (its JWT `exp`, read without
 checking the signature, within two minutes) is traded for a new one through
 `IAuthenticationService/GenerateAccessTokenForApp` on `api.steampowered.com`
 (`WorkshopService.renew`): the renewal token goes there alone, in a POST body, and the
 request follows no redirect. Concurrent readers wait for one renewal, and the new
 cookie is saved. Steam refusing the token (an empty `response`) ends the session like
-its sign-in page does. A session without a renewal token is used until Steam ends it.
+its sign-in page does; a public list being read then is read anonymously instead of
+failing. A session without a renewal token is used until Steam ends it.
 The SteamCMD sign-in cannot be reused here: SteamCMD keeps its own machine-bound
 client token, which the app does not read.
 
@@ -278,8 +358,12 @@ That page lists rows rather than an author's tiles, so
 `WorkshopService.decodeProfileListing` reads an item's id from either layout: an
 author tile's `data-publishedfileid`, or a subscription row's own id
 (`id="Subscription<id>"`). A page whose paging line counts entries but none can be
-read is reported as unreadable instead of being shown as an empty list. Without a
-session, or when Steam answers with its sign-in page instead, the session is
+read is reported as unreadable instead of being shown as an empty list. So is an
+empty, truncated or unrecognized response: zero entries need an explicit zero count,
+a page beyond the end, or Steam's empty-list message. A failed refresh keeps the
+last loaded tiles, count and subscription marks and offers retry. Without a
+session, or when Steam answers with its sign-in page or an explicitly anonymous
+personal-list page instead, the session is
 forgotten and the grid is emptied, so the panel offers **Sign in to Steam…** and
 says it is separate from SteamCMD's sign-in.
 
@@ -289,10 +373,62 @@ with **Download the ones not in your library** as the list's main action beside
 **Download the ones not in your library** reads every page of subscriptions (at
 most 1,000 pages of 30), drops what is installed, collections and Application
 items, and queues the rest as ordinary downloads, which need SteamCMD's own
-sign-in as any download does. Nothing is subscribed or unsubscribed on Steam. The
+sign-in as any download does. The
 welcome guide's **Import my subscriptions** and its one-time offer to existing users
 ([first run](first-run.md#star-prompt-the-performance-data-question-and-the-subscriptions-offer))
 do the same, signing in first when needed.
+
+Signed in, the Workshop changes the account's subscriptions on Steam too. The inspector
+of an item that is not a collection offers **Subscribe on Steam** or **Unsubscribe on
+Steam**, and so does the **More actions** menu of an installed Workshop wallpaper, so a
+wallpaper tried out first can be subscribed afterwards; that menu item stays disabled
+until Steam has answered a subscriptions read for the account
+(`WorkshopStore.subscriptionsKnown`), since before then a missing mark may be a
+subscription after all (`WorkshopService.setSubscribed`): a POST to
+`steamcommunity.com/sharedfiles/subscribe` or `/unsubscribe` with the item, Wallpaper
+Engine's app id and a `sessionid` CSRF token that the same request also sends as a cookie
+beside `steamLoginSecure`, since Steam only checks that the two match; a fresh random one
+serves. The request follows no redirect with the cookie. Steam's `{"success":1}` is the
+only answer taken as done; another `success`, an answer that cannot be read or a
+connection failure reaches the banner, and Steam's sign-in page or a 401 or 403 ends the
+session. The tiles of what the account subscribes to wear a bookmark mark (VoiceOver:
+**Subscribed on Steam**), from `WorkshopStore.subscribedIDs`: every page of the
+subscriptions is read the first time the Workshop page or an installed Workshop
+wallpaper's inspector appears for each sign-in (after a saved one still being restored) and again right after a sign-in, and a subscribe or
+unsubscribe Steam accepted updates it, also over a read still in flight; signed out it is
+empty. A read that fails leaves the marks as they were, says why in the banner and is tried
+again the next time the Workshop page appears. Downloading stays a separate choice: subscribing does not
+download, and SteamCMD is not involved. This has not been tried against live Steam from
+the development machine, which cannot reach steamcommunity.com; the requests and answers
+are pinned against fixtures (`WorkshopSourceTests`).
+
+### Favorites
+
+**Your favorites** lists the wallpapers the signed-in account marked as favorites on the
+Workshop, read with the same Steam Community session as the subscriptions, so it needs the
+same sign-in and offers the same **Sign in to Steam…** without it. Its page is the account's
+own Workshop page with `browsefilter=myfavorites`, which lays its items out as an author's
+tiles. Steam sorts it: the bar above the grid says who is signed in and how many favorites
+there are, and its order menu offers Steam's four orders, **Date favorited** (Steam's default),
+**Alphabetical**, **Date updated** and **Date created** (`WorkshopFavoritesOrder`, Steam's
+`sortmethod` values `subscriptiondate`, `alpha`, `lastupdated` and `creationorder`, read off
+Steam's own favorites page). Choosing one lists the favorites again from page 1; the order is
+kept for the rest of the app's run. Nothing is favorited or unfavorited on Steam from here, and
+the list offers no bulk download. A signed-in subscriptions page was not available to check its
+sort menu, so Your subscriptions keeps its own order.
+
+### Comments
+
+The inspector of an item that is not a collection and whose author's SteamID is known
+shows its newest ten comments, read-only, from Steam's public comment thread
+(`steamcommunity.com/comment/PublishedFile_Public/render/<author>/<item>/`, no sign-in and
+no cookie), when the inspector shows the item, with how many there are in all and
+**Read all comments on Steam**, which opens the item's page. Each comment is the
+author's name, how long ago it was posted and its text, read as plain text from the
+thread's HTML (`WorkshopService.decodeComments`): markup dropped, `<br>` kept as a line
+break, entities decoded. All of it is Steam's text, shown verbatim. Posting is not
+offered. A thread that cannot be read says so in place of the comments. Like
+subscribing, this was pinned against fixtures, not tried against live Steam.
 
 ## One decision per download
 
@@ -342,10 +478,13 @@ Installed page.
 
 ### Transfer progress
 
-SteamCMD prints byte counters for `app_update` (shared scene resources) but
-nothing while it fetches a Workshop item, so Workshop progress is measured outside
-its output and compared with the `file_size` Steam's Workshop listing gave for the
-item. While Steam reports the item as downloading, the app takes two measures
+SteamCMD prints no byte counters while it fetches a Workshop item or the shared
+scene resources' depot, so progress is measured outside its output: a Workshop
+item against the `file_size` Steam's Workshop listing gave for it, the depot
+against the size SteamCMD's `Downloading depot 431961 (… files, … MB)` line gives.
+That size is the compressed download, about a third of what lands on disk, so the
+depot is measured by the bytes the process has received over the network alone,
+and by the bytes in its folder only when `nettop` is unavailable. While Steam reports the item as downloading, the app takes two measures
 twice a second and shows the smaller: the bytes that have landed under the private
 staging's `steamapps/workshop` tree (allocated blocks, so a sparse file does not
 count), and the bytes the SteamCMD process has received over the network since the
@@ -439,7 +578,9 @@ in. A download can guide you through installing it or locating an existing macOS
 runtime; setup also remains available in **Settings → Library & Steam**. Pending
 download requests continue once their prerequisites are met. In the download
 dialog, installation always shows progress while busy (an unknown total is
-indeterminate rather than 0%), and a failure retains its details and offers **Try
+indeterminate rather than 0%), **Cancel setup** stands in for **Install SteamCMD**
+while setup can still be cancelled (the final step that publishes the installation
+cannot be, and shows the install button disabled instead), and a failure retains its details and offers **Try
 again**, unless the retained copy needs explicit approval first.
 
 Setup downloads Valve's HTTPS `client/steam_cmd_osx` package manifest and installs
@@ -478,9 +619,47 @@ revalidate it, then launch natively. The installation candidate stays quarantine
 and is revalidated before publication.
 
 Downloads and smoke runs use `-inhibitbootstrap`, so a prepared complete runtime
-never self-updates mid-download. Reinstall through setup when a newer version is
-needed. The implementation is `App/Services/Steam/SteamCMDPackages.swift`,
+never self-updates mid-download; the app keeps it current instead (below). The
+implementation is `App/Services/Steam/SteamCMDPackages.swift`,
 `SteamCMDRuntime.swift` and `SteamCMDSetupStore.swift`.
+
+### Keeping SteamCMD current
+
+Steam stops accepting a SteamCMD that falls too far behind Valve's, and a copy run
+with `-inhibitbootstrap` never catches up by itself. In October 2026 Valve shipped
+a new SteamCMD on the 21st, and copies installed earlier stopped finishing the
+sign-in: Steam Guard was approved and SteamCMD still exited (1.6.4). So the app
+compares the managed copy (the one under `SteamCMD/` in app support) with Valve's
+manifest:
+
+- **Before a download or sign-in starts**, at most once a day
+  (`SteamCMDSetupStore.updateCheckInterval`), and when the control panel opens. The
+  request waits while the check runs, as it waits for setup ("Checking SteamCMD…"),
+  and continues by itself afterwards. A manifest whose `version` differs from the
+  one in `package/steam_cmd_osx.manifest` (newer, or one Valve withdrew) is
+  installed with every check of **Install SteamCMD** and replaces the copy only once
+  it has passed them; a candidate macOS holds for approval waits in Settings while
+  downloads go on with the copy already there. The check runs only while no download
+  does. The time of each check is recorded before Valve is asked, so an offline Mac
+  is not asked again on every download, and a manifest that cannot be read leaves
+  the installed copy in use without a message.
+- **After a sign-in that ends for no reason Steam gave**: SteamCMD exited before
+  Steam accepted the sign-in, with no rejected password or code and no failure
+  reason (`WorkshopDownloader.endedBeforeSignInUnexplained`), which is how an
+  outdated copy fails. Once no other job runs, the app looks again without waiting
+  for the day (at most every ten minutes) and, when that installed a different
+  SteamCMD, tries every job that failed this way again, once each; a second failure
+  is shown as usual.
+
+A SteamCMD you located yourself (Homebrew, `~/Steam`) is never replaced: update it
+the way you installed it. **Reinstall…** in Settings still forces a fresh copy.
+
+Valve's releases are also watched from CI: the
+[SteamCMD canary](../../.github/workflows/steamcmd-canary.yml) installs the newest
+SteamCMD every day the way the app does (`scripts/steamcmd_canary.py`, including
+Valve's code signature), signs in anonymously, and opens an issue when Valve
+publishes a version no issue names yet or the sign-in fails, so a release can be
+tried with a real account before the app's daily check brings it to everyone.
 
 ### Proxies
 
@@ -499,6 +678,53 @@ A proxy client in rule mode still decides per host name. Its Steam
 rules decide whether SteamCMD's traffic is proxied; rule sets that send them `DIRECT`
 give the same result as no proxy. Route those domains through the proxy, or use
 global mode while downloading. A TUN ("enhanced") mode applies the same rules.
+In mainland China a direct connection works for sign-in and downloads too (next
+section); only Discover, subscriptions and other `steamcommunity.com` pages need
+the proxy.
+
+### Download region in mainland China
+
+Steam picks a download region (a "cell") at every sign-in from the address it sees.
+For a mainland China address it does not always pick a mainland one: measured from a
+mainland connection with no proxy, one fresh SteamCMD sign-in in three came back
+with Singapore (cell 35) and fetched every chunk from `cache*-sgp1.steamcontent.com`
+across the border. At busy hours that ran at 0.04–0.08 Mbps with hundreds of
+failed chunks and never finished, while Steam's mainland partner CDNs
+(`xz.pphimalayanrt.com`, `dl.steam.clngaa.com`, `st.dl.eccdnx.com`) delivered the
+same 68 MB item in about 3 s. Because a saved sign-in keeps SteamCMD's
+`config.vdf`, one unlucky first sign-in held every later download on the far
+servers.
+
+So on a Mac whose time zone is in mainland China (`Asia/Shanghai`, `Asia/Urumqi` and
+their aliases), every run writes a mainland cell (`CellIDServerOverride` 47,
+Shanghai) into the `config.vdf` of its private SteamCMD home before launch, after
+the saved sign-in is restored, replacing a far region and leaving every other value,
+the cached sign-in included, as it was. A mainland cell Steam already chose is kept.
+Steam narrows the hint to its own nearest mainland cell (observed: 47 became 202,
+Dongguan), serves its mainland CDNs, and asks for the connection-server list with
+that cell, so Hong Kong and Tokyo servers are tried first and sign-in no longer
+falls back to US servers when `api.steampowered.com` stalls. From an address outside
+mainland China Steam ignores a mainland cell and assigns its own (observed: a
+Singapore proxy exit got 35 and Valve's Singapore caches), so a Mac set to a China
+time zone abroad, or one whose proxy carries Steam's traffic, downloads exactly as
+before. Elsewhere the config is not touched. The implementation is
+`App/Services/Steam/SteamCMDDownloadRegion.swift`, called from
+`WorkshopDownloader.run`. Downloads on the [QR sign-in](#signing-in-with-a-qr-code)
+get the same hint without a config: `SteamCMConnection` lists connection servers for
+the mainland cell and puts it in the logon (`cell_id`), and the content servers then
+come from the cell Steam answers with, narrowed or, from abroad, replaced.
+
+Where a site is reachable only through a proxy, a request that goes direct usually
+fails before the site answers: the network resets or drops the TLS handshake, which
+the system reports as "An SSL error has occurred" and its relatives. Such failures
+(`ConnectionInterrupted` in `App/Services/Network/`: a failed TLS handshake, an untrusted
+or rejected certificate, a refused, lost or timed-out connection, an unresolved name)
+are therefore shown as the connection to the failing host having been cut off or
+refused, with the advice to turn on the proxy client's system proxy or TUN mode or to
+route that domain through the proxy. Workshop browsing, item details, collections,
+comments, subscriptions and the Steam session renewal (every `WorkshopService`
+request), pixiv, and the [sign-in windows](#subscriptions) use it. Being offline and every
+other failure keep the system's own description.
 
 ## The download queue
 
@@ -532,6 +758,17 @@ work.
   (`sessionConflictDetected`). A session Steam ends while no sibling is running is
   reported as an ordinary failure with a retry. Settings says when the queue is
   running one at a time.
+- **Order.** Waiting jobs start in the order they were asked for. **Download next** on a
+  waiting row moves that job to the front of the line, ahead of every other waiting job and
+  behind those that run, so it takes the next free slot; it is offered only when another
+  waiting job is ahead of it (`WorkshopDownloadManager.prioritize`). The order is saved with
+  the queue (`queue.json`) and outlives a relaunch.
+- **Retry failed.** Once two or more downloads stopped with a failure or were cancelled, the
+  footer offers **Retry failed (N)**, which tries each again in list order, Steam's and
+  pixiv's alike, exactly as its own **Try again** would: partial content is reused where it
+  is still there (a cancelled download discarded its own), and Steam's are left out while
+  SteamCMD is not ready. The first that cannot start stops the
+  batch and says why. One stopped download has only its own **Try again**.
 - **Dropped connections.** A download whose connection drops after sign-in
   retries itself up to three times before it fails (see [Prompt and retry
   handling](#prompt-and-retry-handling)); it keeps its slot while it waits.
@@ -575,12 +812,20 @@ work.
   dialog seeds the account per request, so switching requests cannot submit
   another one's sign-in. A submitted secret is cleared from the field immediately
   and is not retained by the panel. **Change account** cancels that job and hands
-  the same intent back at the sign-in step.
+  the same intent back at the sign-in step. A job on the QR sign-in does not offer it
+  (`DownloadRow.signsInWithQRCode`): its account is the QR sign-in's, changed by
+  logging out in Settings.
 - **Dialog stages.** The account stage is just the **Steam account name** field,
   the keep-signed-in checkbox and a note that the password and Steam Guard come
   next; a password prompt is the same without the checkbox. Steam Guard stages are
   guide cards: a glyph, a one-line title and numbered steps for whichever method
-  Steam asked for — mobile approval, authenticator code or emailed code. The
+  Steam asked for — mobile approval, authenticator code or emailed code. A code
+  prompt names no method by itself (SteamCMD can ask for a "Steam Guard code" for
+  more than one), so the card follows what Steam printed before it: its email
+  wording gives the emailed-code card, the mobile app or a "Two-factor code"
+  prompt gives the authenticator card, and anything else the general card. Once a
+  code is submitted the card gives way to the waiting state until Steam answers,
+  so it never asks for a code below a field that is gone. The
   mobile-approval steps say to answer **Steam Client** when the Steam app asks
   "Where are you trying to sign in?", because SteamCMD signs in as the client.
   Steam may still require another approval.
@@ -601,7 +846,8 @@ work.
   prerequisite requests use `Downloads/workshop-requests.json` in app support. Quitting pauses active and
   queued downloads after stopping their child processes, and relaunch restores
   them as paused, without starting a login or transfer automatically. Checkpoints
-  contain only `steamapps` and `wallpaper-engine` download content; passwords,
+  (Workshop items only; the shared resources keep none) contain only `steamapps`
+  and `wallpaper-engine` download content; passwords,
   terminal state and private SteamCMD runtime files are never included.
   Checkpoint publication retains recoverable pending and previous directories
   until the new checkpoint is published; resume recovers an interrupted
@@ -646,8 +892,17 @@ installed scene opens this setup instead of asking the renderer for a failure
 itself once the resources arrive. **Locate an installation…** (**Use an existing
 installation** in the dialog) instead points at
 an existing purchased installation. Installation reuses the private SteamCMD login
-and cancellation flow and requests the Windows application with `app_update
-431960 validate`. Only the validated `assets` tree is retained, at
+and cancellation flow and fetches only Wallpaper Engine's Windows content depot
+with `download_depot 431960 431961` (about 360 MB to download). It never runs
+`app_update 431960`: updating the whole app also fetched whatever Steam ties to the
+account, which one report showed as a 49.6 GB download. Steam confirms the depot
+with `Depot download complete : "<folder>"`, a path SteamCMD for macOS prints with
+backslashes after the staging folder; the assets are taken from that folder
+when it lies inside the run's own staging, else from where SteamCMD puts depots
+(`steamapps/content/app_431960/depot_431961` under its staging or Steam home). A
+depot download starts over each time, so the shared resources keep no partial
+data: a paused or failed attempt keeps nothing, and a checkpoint an earlier
+version kept is deleted rather than restored. Only the validated `assets` tree is retained, at
 `~/Library/Application Support/WallpaperMachine/SceneAssets`; the Windows
 executables are removed together with the temporary installation. Steam must
 confirm that the installation completed before assets are published. An empty or
@@ -740,6 +995,111 @@ describe the supported methods, and
 [email-code help](https://help.steampowered.com/en/wizard/HelpWithSteamGuardCode)
 covers delivery delays.
 
+## Signing in with a QR code
+
+Downloads can also run without SteamCMD and without a password. **Sign in with a QR
+code** (in the download dialog's SteamCMD and account stages, and in Settings →
+Library & Steam while no account is signed in) shows a code that the person scans
+with the Steam mobile app (Steam Guard → Scan a QR code) and approves there; the
+app never sees a password or a Steam Guard code. The sign-in uses Steam's own
+authentication service over HTTPS (`IAuthenticationService/BeginAuthSessionViaQR`
+and `PollAuthSessionStatus`, `SteamQRSignIn`), asking for a token issued for the
+Steam client (`platform_type` 1). Steam renews the code while it waits; the
+section shows the newest one, says when the phone has scanned it, and offers
+**Show a new code** once a code expires. Its buttons go through the panel's actions
+(`PanelController.startSteamQRSignIn`, `cancelSteamQRSignIn`), and closing the
+download dialog or the Settings popover stops a code that was not approved, so
+nothing signs in once no code is on screen: an approval already on its way back when
+the code closes is dropped, not saved. A failed code is kept as its reason (expired,
+Steam unreachable, failed) and worded when the section shows it, so the message
+follows the panel's language. The dialog does not offer it for the
+first-run guide's SteamCMD sign-in request, which a QR sign-in would not complete.
+With a SteamCMD sign-in already saved, Settings shows that account and **Log out…**
+instead of the QR button, and downloads keep using SteamCMD without reaching the
+dialog's account stage: switching to a QR sign-in starts with logging out.
+
+The approved refresh token is kept in the login keychain as one generic password
+(`KeychainSteamClientTokenStore`, service `app.wallpapermachine.steam-client`),
+beside the Steam Community sign-in and kept the same way; it is never logged or
+written anywhere else. A launch restores it off the main thread
+(`WorkshopStore.restoreSteamQRSignIn`), and an expired one is removed instead; a
+sign-out, a new sign-in or a QR code started while the keychain answers wins over
+what it read.
+Settings shows the account as signed in, and **Log out…** removes the token as
+well as any saved SteamCMD sign-in. The keychain refuses to delete an item another
+build saved but lets its data change, so such a token is emptied instead, which a
+launch restores as no sign-in; only when the keychain refuses that too does the action
+say it could not log out, with the account still signed in. A token Steam refused at
+logon is removed the same way. Steam lists the Mac (named
+"WallpaperMachine on <Mac name>") under the account's authorized devices, where it
+can be revoked from any other device.
+
+While the QR sign-in exists, every Workshop and shared-resources request skips the
+SteamCMD and account stages (`WorkshopStore.stage(for:)`) and runs through
+`NativeWorkshopDownloader` instead of SteamCMD; a SteamCMD sign-in request
+(`steam-sign-in`) still uses SteamCMD. The prerequisite observer tracks the QR
+sign-in, so a request waiting at those stages starts as soon as it completes, from
+the dialog or from Settings; a QR sign-in also clears the mark of a request the queue
+refused for the account it named (`WorkshopStore.steamQRSignInChanged`), which then
+goes again, and stays refused if the queue refuses it once more. A request refused
+while the QR sign-in exists shows the account stage as **Signed in as …** with
+**Continue** instead of SteamCMD's account form. A partial SteamCMD download kept for the item is
+discarded once the native worker has taken the item in the queue; a native job the
+queue refuses leaves it for SteamCMD. The native worker sits in the same queue,
+behind the same `WorkshopDownloadWorker` protocol, so tiles, rows, pausing,
+cancelling and **Download next** behave as for SteamCMD. It lays an item out
+exactly as SteamCMD does (`<staging>/steamapps/workshop/content/431960/<id>`, in a
+claimed `.WallpaperMachine-workshop-` staging folder on the library's volume), so
+the import, preset bases and update replacement are the same code. Without it,
+nothing changes: SteamCMD, the account form and the password prompts work as above.
+
+Every native job shares one logged-on connection (`SteamNativeSession`), so a batch
+signs in once and Steam's one-session-per-account limit never ends a sibling; the
+connection closes a minute after the last job, and one that dropped is closed before
+another opens. The app's client (`App/Services/Steam/`) logs on to a Steam
+connection manager over WebSocket with the token (`SteamCMConnection`); a listed
+server that does not answer a ping within ten seconds is passed over for the next
+one (up to three). A logon that fails in any way closes its socket, and a request
+that is paused or cancelled stops waiting at once instead of at its 30-second
+timeout. The logon runs in a task of its own that every waiting job shares, so a job
+paused or cancelled while it signs in stops waiting at once and the logon goes on for
+the others; one overtaken by a sign-out, a new sign-in or the idle disconnect closes
+its connection when it answers instead of adopting it. The client asks the
+connection manager for the item's details, then the depot key (first, so that an
+account without Wallpaper Engine learns it before anything is fetched) and the
+manifest request code, and fetches the manifest and chunks from Steam's
+content servers over HTTPS only: a server that lists no HTTPS support is skipped,
+and one that answers after another failed is tried first from then on
+(`SteamContentClient`). An item must belong to Wallpaper Engine (app 431960), since
+a preset's base comes from an author-written file. Before anything is written, the
+manifest's exact size must fit on the library's disk with the same allowance a
+SteamCMD download gets (`WorkshopDownloader.requiredFreeBytes`); otherwise the job
+fails with the same "Not enough free disk space" message. Chunks are fetched six at a time,
+decrypted (AES-256, `SteamDepotCrypto`), unpacked by the Rust bridge
+(`decompress_steam_content`: zstd, LZMA or zip, with their CRC checked) and checked
+against their SHA-1 before they are written; a file path from a manifest that would
+leave the download folder fails the download. The shared scene resources read the
+current public manifest of depot 431961 from the app's product info (PICS) and
+install its `assets` folder like SteamCMD's.
+
+A token Steam refuses at logon (invalid, expired or revoked) is removed from the
+keychain, and the job fails with "Steam no longer accepts this QR sign-in"; the next
+request falls back to SteamCMD unless the person scans a new code. Steam hands a
+depot key only to an account that owns Wallpaper Engine, so a key refused as
+AccessDenied, InsufficientPrivilege or Blocked reports the account as not owning it
+(`NativeWorkshopDownloader.meansNotOwned`); a plain Fail, or a reply without a
+result, proves nothing and reads as the content servers failing. Other failures read as one
+of a few phrases in the person's language: Steam unreachable (no answer at all),
+sign-ins limited (a logon refused for its rate), sign-in failed (any other logon
+refusal), session ended (Steam logged the session off, as when the account signs in
+elsewhere), item not offered (its details refused), content servers failed (a
+manifest code, the product info or another key refusal, or the servers themselves)
+and content did not match, with the technical detail in the log and the failure log
+(`NativeWorkshopDownloader.message(for:)`). Native jobs keep no partial download: a
+paused or interrupted one fetches the item again when it resumes. **Try again**,
+**Retry failed** and a tile's retry ring count the QR sign-in as ready, as they count
+an installed SteamCMD (`PanelController.steamDownloadsReady`).
+
 ## Prompt and retry handling
 
 Password and Steam Guard prompts are read without waiting for a full terminal
@@ -762,7 +1122,10 @@ retry) starts a new private SteamCMD session for the selected wallpaper or asset
 installation and for the account name still in the form. The prior process is
 stopped and its private staging removed first. Supply a password or a fresh code
 when Steam asks: rejected requests are never reused, approval is never bypassed,
-and authentication retries are never automatic. If Steam reports rate limiting,
+and authentication retries are automatic only once, after a sign-in that ended
+for no reason Steam gave brought in a different SteamCMD
+([Keeping SteamCMD current](#keeping-steamcmd-current)); Steam then asks again as
+for any new sign-in. If Steam reports rate limiting,
 wait before retrying. Workshop content-access errors are a separate failure and
 offer no authentication retry.
 
@@ -812,7 +1175,12 @@ the parentheses waits for the rest, and output that ends without a newline is
 judged when the process exits. Unrecognised reasons do not
 establish bad credentials: the app asks to check connectivity and export [a
 diagnostics report](diagnostics.md#diagnostics-report) if retries keep failing.
-Logs include the failure category, never the raw terminal reason or secrets.
+SteamCMD exiting with an error and no reported failure is blamed on the step it
+interrupted: before Steam accepted the sign-in it is a sign-in that did not
+complete (with **Try again** for the sign-in), after it the download, where the
+purchase requirement applies. Logs include the failure category, or for such an
+exit its status, step and whether a Steam Guard code was waiting on Steam, never
+the raw terminal reason or secrets.
 
 Generic Workshop download failures also explain the purchase requirement: buy
 Wallpaper Engine on Steam or sign in with an account that already owns it, then
@@ -842,15 +1210,17 @@ Workshop item needs the part of its listed size not already staged, plus 15% for
 Steam's staging and 64 MiB of margin; whatever a paused or failed attempt kept as
 partial download data is counted from disk, so a retry only needs what is still
 missing. Free space is the figure macOS calls available for important usage,
-which includes space it can reclaim on demand. Shared scene resources have no
-listed size, so they need a fixed 3 GiB less whatever an earlier attempt already
-staged for them (counted from disk like an item's partial data, down to the 64 MiB
-margin): a lower bound meant to block only a clearly full disk, not yet tuned
-against a measured installation. When the disk is short
+which includes space it can reclaim on demand, or the plain free space when that
+is higher (some Macs report 0 for important usage on every volume, which would
+otherwise read as a full disk). Shared scene resources have no
+listed size before SteamCMD starts, so they need a fixed 3 GiB (the content
+depot is about 800 MB on disk): a lower bound meant to block only a clearly full
+disk. Their depot download cannot resume, so nothing staged counts against it. When the disk is short
 the download fails with a message naming what it needs and what is available; its
 partial data is kept and **Try again** checks again. Nothing blocks a download
 whose size Steam does not list, a sign-in-only run, or a disk whose free space
-cannot be read. A preset's base wallpaper (size unknown) is not checked, and
+cannot be read. A preset's base wallpaper is checked before its pass at the size
+Steam lists for it ([Workshop presets](#workshop-presets)), and
 parallel jobs are checked one by one, not added together, so a bulk **Download the
 ones not in your library** or **Update N wallpapers** can report a shortfall on
 some jobs and not on others.
@@ -863,14 +1233,23 @@ id>"` and, under `preset`, values for the base's properties, plus any files thos
 values point at. After the preset arrives,
 `WallpaperImportService.presetBaseToDownload` names the base unless the same
 staging or the library already holds it, and `WorkshopDownloader` fetches it in a
-second SteamCMD pass of the same job, staging and sign-in (status "Downloading the
-wallpaper this preset is based on…"). The importer then assembles one
+second SteamCMD pass of the same job, staging and sign-in. Before that pass the base's
+listing is read from Steam's public details endpoint (`WorkshopDownloader.ItemDetails`):
+the status names it and its size ("Downloading “Title” (120 MB), the wallpaper this preset
+is based on…", or without the size when Steam lists none, and "Downloading the wallpaper
+this preset is based on…" when the listing cannot be read), its progress has that total,
+and the disk is checked for it as for any item, so a base that cannot fit stops before
+SteamCMD is asked for it. Discover marks a preset's tile with a sliders mark (VoiceOver
+reads it as **Preset**). The importer then assembles one
 self-contained wallpaper under the preset's id: the base's content (moved from
 staging, or cloned from the library, which stays unchanged), the preset's files
 over it, and the base's manifest with the preset's title, description, tags,
 rating, preview and Workshop id, `dependency` recorded, and each preset value
 written into the base property of the same name (`null` headings and undeclared
-names are ignored). The renderer reads the preset's files where they land, beside
+names are ignored). A value for a `file` or `directory` property is written too but
+never used: such a property starts empty and only the user's own pick fills it
+([user files](user-files.md#in-the-inspector)), so a preset cannot point a wallpaper at
+a folder of the user's. The renderer reads the preset's files where they land, beside
 the base's `scene.pkg`: a scene mounts its folder under its package, so a property
 naming `files/clip.mp4` finds the clip while packaged files still win. A base
 fetched for a preset is not added to the library. If only the base's pass fails
@@ -879,8 +1258,8 @@ handling](#prompt-and-retry-handling)), the error says the preset downloaded but
 its base (Workshop item N) did not, so nothing was added, and gives Steam's own
 reason; the partial download is kept and Try again picks up from it. A preset of
 a preset, or one naming itself, is rejected without publishing anything. Updating a preset
-reassembles it on the current base; an update of the base alone does not reach
-presets already installed. Importing a preset folder works the same way with the
+reassembles it on the current base, and a change to the base alone is an update of the
+presets built on it ([Updates](#updates)). Importing a preset folder works the same way with the
 base found next to it or in the library.
 
 ## Updates
@@ -893,7 +1272,12 @@ key and no sign-in, up to 100 ids a request) and compares each item's
 downloading it, or, for an item it did not download (an import, or a download
 from before installs were recorded), when its `project.json` was last written. An
 import copies files, so an item that was already out of date when imported is not
-caught. A difference of a minute or less counts as the same version.
+caught. A difference of a minute or less counts as the same version. An installed
+preset carries its base's content, so the base its `project.json` names (`dependency`)
+is asked about with the installed items, and a base changed after the preset was
+installed offers the preset as an update, with the preset's own details; updating it
+fetches the current base again unless the library holds the base as a wallpaper of its
+own, which then has to be updated first.
 
 It checks at most once a day on its own, after the library loads and from the same
 six-hourly loop as app updates, unless **Settings → Library & Steam → Workshop

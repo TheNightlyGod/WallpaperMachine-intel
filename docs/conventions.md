@@ -82,8 +82,9 @@ Adding a new target, source directory, resource or build setting means editing
   prompt) uses `PanelLocale.shared.catalogString(_:)`. A literal must equal its
   catalog key exactly, interpolations included (`"\(count) wallpapers"` with an
   `Int` is the key `%lld wallpapers`), or it renders English; a ternary of two
-  literals is a `String`, not a key. A new string goes into every shipped catalog
-  in the same change; a new language follows [localization.md](localization.md)
+  literals is a `String`, not a key. A new string goes into the catalog of each
+  target that shows it, in every language that catalog ships, in the same change
+  (a string only the app shows stays out of the extension's); a new language follows [localization.md](localization.md)
   and is declared in `AppLanguage.supported`. Translate labels, never identifiers,
   option values, paths or third-party content; write whole phrases with
   placeholders instead of assembling sentences from English fragments. Missing
@@ -116,7 +117,10 @@ How the panel runs (controller, actions, observation, window hosting) is in
   property, a navigation), `.dropDuplicates` otherwise. A new action is an
   `async throws` method in `Model/PanelController+<Group>.swift` that picks its
   disposition with `run(_:slot:...)`; confirmations and file panels go through
-  `controller.dialogs`, never a direct `NSAlert` or `NSOpenPanel`.
+  `controller.dialogs`, never a direct `NSAlert` or `NSOpenPanel`. A row that draws
+  another kind of value like an existing one passes a scope instead of copying the
+  view: `PropertyRowView`'s `Scope` (`.authored` or `.engineOption(id)`) only picks
+  the typed actions and their key.
 - **Typed state only.** What a view shows is a typed computed property or a small
   value type with a `make(...)` factory on the controller or an area model, never a
   dictionary. A getter that reads a store which is not `@Observable` reads its
@@ -228,10 +232,12 @@ The rules that bind every change:
   Fixtures come from the test bundle or a temporary directory; probe output and
   snapshots go to `FileManager.default.temporaryDirectory`. Nothing a test does may
   reach the desktop either: opening an address, revealing in Finder, opening System
-  Settings and hiding the app go through `DesktopActions.current`, which the test
-  bundle's principal class (`Tests/Unit/Support/TestBundle.swift`) replaces with a
-  recorder before any test runs. New code that opens, reveals or hides uses it, never
-  `NSWorkspace.shared` or `NSApp.hide` directly.
+  Settings, hiding the app, and reading or changing Finder's desktop icons (which
+  restarts Finder) go through `DesktopActions.current`, which the test bundle's
+  principal class (`Tests/Unit/Support/TestBundle.swift`) replaces with a recorder
+  before any test runs. New code that opens, reveals or hides, or changes or restarts
+  Finder, uses it, never `NSWorkspace.shared`, `NSApp.hide`, or `CFPreferences` and
+  `kill` on Finder directly.
 - Panel tests build the controller with `PanelTestCase.makeController(...)` or
   `withPanel(...)` (temporary home, `TemporaryDefaults`, English, the welcome guide
   already seen) and call the typed actions. Render tests host a view in an unordered
@@ -249,6 +255,10 @@ The rules that bind every change:
 - Files under `docs/` are `lowercase-hyphenated.md`, with exactly one `#` H1.
   Product feature docs go in `docs/features/`, test documents in `docs/testing/`.
 - Adding or removing a document means updating [README.md](README.md), the index.
+- A relative link must reach its file, and its `#anchor` a heading of that page as GitHub
+  spells it (or an `<a id>`). Renaming a heading means updating the links to it:
+  `scripts/tests/test_doc_links.py` checks every Markdown page outside the archives in the
+  routine gate's Python stage, and `python3 scripts/tests/test_doc_links.py` runs it alone.
 - Ground every statement in the repository: real paths, real flags, real test
   names. Delete a claim you cannot confirm instead of softening it.
 - [testing/verification-log.md](testing/verification-log.md) is newest-entry
@@ -279,9 +289,13 @@ The rules that bind every change:
   `fix`, `perf` and breaking commits arrive with their body, `docs`, `test`,
   `chore`, `ci`, `build`, `style` and `refactor` with their subject only, as internal work to
   leave out. The subject and body are therefore what users end up reading on the
-  release page and in the app's What's new card, so write them for users. Without
+  release page and in the app's update window, so write them for users. Without
   `--ai` the same script lists the commits by type instead. See
   [release.md](release.md#release-notes-and-the-changelog).
+- A commit that resolves an issue says so in its body with one of GitHub's closing
+  keywords, `Closes #76` (or `Fixes #76`, `Resolves #76`): GitHub closes the issue
+  when it reaches `main`, and every changelog bullet built from that commit links the
+  issue as `(closes #76)`. Name only issues of this repository.
 - Pull request titles follow the same format. Squash-merging a PR with several
   commits makes its title the commit subject, so an untyped title such as
   `Discover fixes and new tabs` reaches the release notes without a type. When a squash body lists several
@@ -296,13 +310,21 @@ The rules that bind every change:
     does for you);
   - a bridge-crate interface change and the regenerated `App/Bridge/Generated`;
   - a behavior change and the documentation that describes that behavior;
-  - a new user-facing string and every shipped catalog;
-  - `README.md` and `README.zh-CN.md`;
+  - a new user-facing string and the catalog of each target that shows it, in
+    every language;
+  - `README.md`, `README.zh-CN.md`, `README.pt-BR.md` and `README.ko.md`;
   - a vendored `ThirdParty/` update and `ThirdParty/provenance.json`.
 - History stays linear: catch up with `origin/main` by rebasing unpushed commits
   (`git pull --rebase`), not with a `Merge remote-tracking branch` commit. CI commits
   to `main` on its own (version bumps, the Supporter list), so a local `main`
-  falls behind often. Commits that are already pushed are never rewritten.
+  falls behind often. Commits that are already pushed are never rewritten. The one
+  merge commit on `main` brings a released hotfix branch back
+  (`chore: merge hotfix x.y.z into main`, see
+  [release.md](release.md#hotfix-releases)); a squash or rebase of that branch would
+  release its `release:` line again.
+- An urgent fix that must ship without the rest of `main` goes on a `hotfix/<x.y.z>`
+  branch cut from the newest release tag, not on `main`
+  ([release.md](release.md#hotfix-releases)).
 - Never commit `artifacts/`, `build/`, screenshots, traces, wallpaper payloads,
   Steam session data, credentials, or absolute personal paths.
 

@@ -21,6 +21,14 @@ final class WallpaperEditorState {
     /// edit, so it is not a draft: it does not make the wallpaper dirty or block a preset, and the
     /// edit that ends the drag, a revert, an apply or a switch to another wallpaper drops it.
     @ObservationIgnored private(set) var propertyPreviewValues: [FieldKey: BridgePropertyValue] = [:]
+    /// A Wallpaper Engine option of one wallpaper.
+    struct EngineFieldKey: Hashable {
+        let wallpaperID: String
+        let option: BridgeEngineOptionId
+    }
+    /// The value a Wallpaper Engine option's slider is being dragged to, held like
+    /// `propertyPreviewValues`: shown, never an edit.
+    @ObservationIgnored private(set) var engineOptionPreviewValues: [EngineFieldKey: BridgePropertyValue] = [:]
     var expandedSections: [FieldKey: Bool] = [:]
 
     static func scalingFormat(locale: Locale = .current) -> FloatingPointFormatStyle<Double> {
@@ -66,19 +74,50 @@ final class WallpaperEditorState {
     @discardableResult
     func clearPropertyPreview(_ key: FieldKey) -> Bool { propertyPreviewValues.removeValue(forKey: key) != nil }
 
-    /// Drops every value being dragged for a wallpaper. Returns whether there was one.
+    /// Drops every value being dragged for a wallpaper, its Wallpaper Engine options' included.
+    /// Returns whether there was one.
     @discardableResult
     func clearPropertyPreviews(wallpaperID: String) -> Bool {
-        let before = propertyPreviewValues.count
+        let before = propertyPreviewValues.count + engineOptionPreviewValues.count
         propertyPreviewValues = propertyPreviewValues.filter { $0.key.wallpaperID != wallpaperID }
-        return propertyPreviewValues.count != before
+        engineOptionPreviewValues = engineOptionPreviewValues.filter { $0.key.wallpaperID != wallpaperID }
+        return propertyPreviewValues.count + engineOptionPreviewValues.count != before
     }
 
     /// Drops the values being dragged for every wallpaper but one. Returns the wallpapers that had some.
     func clearPropertyPreviews(except wallpaperID: String) -> Set<String> {
-        let others = Set(propertyPreviewValues.keys.map(\.wallpaperID)).subtracting([wallpaperID])
+        let others = Set(propertyPreviewValues.keys.map(\.wallpaperID))
+            .union(engineOptionPreviewValues.keys.map(\.wallpaperID)).subtracting([wallpaperID])
         propertyPreviewValues = propertyPreviewValues.filter { $0.key.wallpaperID == wallpaperID }
+        engineOptionPreviewValues = engineOptionPreviewValues.filter { $0.key.wallpaperID == wallpaperID }
         return others
+    }
+
+    func setEngineOptionPreview(_ value: BridgePropertyValue, key: EngineFieldKey) {
+        engineOptionPreviewValues[key] = value
+    }
+
+    /// Drops the value being dragged for one Wallpaper Engine option. Returns whether there was one.
+    @discardableResult
+    func clearEngineOptionPreview(_ key: EngineFieldKey) -> Bool {
+        engineOptionPreviewValues.removeValue(forKey: key) != nil
+    }
+
+    /// Drops the values being dragged for every Wallpaper Engine option of a wallpaper. Returns
+    /// whether there was one.
+    @discardableResult
+    func clearEngineOptionPreviews(wallpaperID: String) -> Bool {
+        let before = engineOptionPreviewValues.count
+        engineOptionPreviewValues = engineOptionPreviewValues.filter { $0.key.wallpaperID != wallpaperID }
+        return engineOptionPreviewValues.count != before
+    }
+
+    /// The Wallpaper Engine option values the bridge is told to show on top of the draft, in a
+    /// fixed order.
+    func engineOptionPreviews(wallpaperID: String) -> [BridgeEngineOptionEdit] {
+        engineOptionPreviewValues.filter { $0.key.wallpaperID == wallpaperID }
+            .sorted { "\($0.key.option)" < "\($1.key.option)" }
+            .map { BridgeEngineOptionEdit(option: $0.key.option, value: $0.value) }
     }
 
     /// What the bridge is told to show on top of the wallpaper's draft, in a fixed order.

@@ -9,13 +9,15 @@ final class WallpaperAutomationController {
          focus: FocusFilterState, displays: @escaping @MainActor () -> [String],
          targetDisplay: @escaping @MainActor () -> String, canRun: @escaping @MainActor (String) -> Bool,
          playlistScheduler: PlaylistScheduler, spaceMonitor: WallpaperSpaceMonitor? = nil,
-         onSettled: @escaping @MainActor () -> Void = {}) {
+         onInputsChanged: @escaping @MainActor (Notification.Name) -> Void,
+         onSettled: @escaping @MainActor () -> Void) {
         scheduler = WallpaperAutomationScheduler(store: rules, focus: focus,
             displays: displays, targetDisplay: targetDisplay, canRun: canRun,
             capture: { display in
                 .init(playlist: playlists.playlist(for: display), wallpaperID: bridge.shownWallpaperID(on: display))
             }, queue: { display, operation in
-                try await bridge.commands.run(slot: BridgeStore.activationSlot(displayId: display), origin: .automation, operation)
+                try await bridge.commands.runReporting(
+                    slot: BridgeStore.activationSlot(displayId: display), origin: .automation, operation)
             }, apply: { target, display in
                 try await Self.apply(target, to: display, bridge: bridge, playlists: playlists, collections: collections)
             }, restore: { state, display, preserveWallpaper in
@@ -48,14 +50,14 @@ final class WallpaperAutomationController {
                 return spaceMonitor?.visit(for: physical)
             })
         scheduler.onSettled = { [weak playlistScheduler] in playlistScheduler?.evaluate(); onSettled() }
-        scheduler.onInputsChanged = onSettled
+        scheduler.onInputsChanged = onInputsChanged
         rules.manualChoice = { [weak scheduler = self.scheduler] display in scheduler?.noteManualChoice(display) }
     }
 
     private static func apply(_ target: WallpaperAutomationTarget, to display: String,
                               bridge: BridgeStore, playlists: PlaylistStore, collections: WallpaperCollectionStore) async throws {
         try Task.checkCancellation()
-        guard bridge.settingsSnapshot.displays.contains(where: { $0.displayId == display && $0.enabled && $0.mode == .standalone }) else {
+        guard bridge.settingsSnapshot.displays.contains(where: { $0.displayId == display && $0.isIndependent }) else {
             throw AutomationError(message: String(localized: "The automatic wallpaper target display is unavailable."))
         }
         switch target.kind {

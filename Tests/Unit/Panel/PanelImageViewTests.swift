@@ -53,6 +53,59 @@ final class PanelImageViewTests: XCTestCase {
     window.close()
   }
 
+  /// A source that cannot be loaded draws a mark, so it does not look like one still on its way:
+  /// what the view draws then differs from the bare placeholder of a view with no source.
+  func testASourceThatCannotBeLoadedIsMarked() async throws {
+    let home = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "panel-image-failed-\(UUID().uuidString)", isDirectory: true)
+    let library = home.appendingPathComponent("Library", isDirectory: true)
+    try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let pipeline = PanelImagePipeline(
+      thumbnailCache: WorkshopThumbnailCache(directory: home.appendingPathComponent("steam"), fetcher: PreviewFetcher { _ in Data() }),
+      pixivThumbnailCache: WorkshopThumbnailCache(directory: home.appendingPathComponent("pixiv"), fetcher: PreviewFetcher { _ in Data() }),
+      libraryThumbnailCache: WorkshopThumbnailCache(
+        directory: home.appendingPathComponent("covers"), fetcher: LibraryPreviewFetcher(root: library),
+        keepsAnimation: false),
+      libraryRoot: { library })
+
+    func window(showing source: PanelImageSource?) -> (NSWindow, NSView) {
+      let host = NSHostingView(
+        rootView: PanelImage(source: source, pointSize: 100)
+          .environment(\.panelImages, pipeline)
+          .environment(\.displayScale, 2)
+          .frame(width: 140, height: 140))
+      let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 140, height: 140), styleMask: [.titled], backing: .buffered,
+        defer: true)
+      window.isReleasedWhenClosed = false
+      window.contentView = host
+      host.layoutSubtreeIfNeeded()
+      return (window, host)
+    }
+    func drawing(of view: NSView) throws -> Data {
+      view.layoutSubtreeIfNeeded()
+      let rep = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+      view.cacheDisplay(in: view.bounds, to: rep)
+      return try XCTUnwrap(rep.tiffRepresentation)
+    }
+
+    let (emptyWindow, empty) = window(showing: nil)
+    let (failedWindow, failed) = window(showing: .libraryPreview(file: library.appendingPathComponent("gone/preview.png")))
+    defer {
+      emptyWindow.close()
+      failedWindow.close()
+    }
+    let placeholder = try drawing(of: empty)
+    let deadline = Date().addingTimeInterval(5)
+    var marked = false
+    while !marked, Date() < deadline {
+      try await Task.sleep(for: .milliseconds(20))
+      marked = try drawing(of: failed) != placeholder
+    }
+    XCTAssertTrue(marked, "a failed load is told apart from an image that has not arrived")
+  }
+
   func testScrollingReleasesEvictedImagesAndReloadsThemOnReturn() async throws {
     let home = FileManager.default.temporaryDirectory.appendingPathComponent("panel-image-scroll-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: home) }

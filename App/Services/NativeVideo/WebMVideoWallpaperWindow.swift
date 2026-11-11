@@ -23,6 +23,9 @@ final class WebMVideoWallpaperWindow: NSWindow {
         var pan = NativeVideoLayout.Pan.centered
         var userPaused: Bool
         var suspended = false
+        var options = WallpaperEngineOptions.identity
+        var lut: VideoLut?
+        var borderColor: CGColor?
     }
 
     private let surface: RuntimeSurfaceKey
@@ -101,6 +104,7 @@ final class WebMVideoWallpaperWindow: NSWindow {
         player.setVolume(desired.volume, muted: desired.muted)
         player.setScaling(desired.mode.layoutMode, factor: desired.factor, pan: desired.pan)
         player.setPaused(desired.userPaused || desired.suspended)
+        player.setEngineOptions(desired.options, lut: desired.lut, borderColor: desired.borderColor)
     }
 
     private func report(failure detail: String, settled: Bool) {
@@ -159,6 +163,13 @@ extension WebMVideoWallpaperWindow: NativeVideoSurface {
         player?.setScaling(mode.layoutMode, factor: factor, pan: pan)
     }
 
+    func setEngineOptions(_ options: WallpaperEngineOptions, lut: VideoLut?, borderColor: CGColor?) {
+        desired.options = options
+        desired.lut = lut
+        desired.borderColor = borderColor
+        player?.setEngineOptions(options, lut: lut, borderColor: borderColor)
+    }
+
     func setUserPaused(_ paused: Bool) {
         desired.userPaused = paused
         player?.setPaused(desired.userPaused || desired.suspended)
@@ -186,7 +197,8 @@ extension WebMVideoWallpaperWindow: NativeVideoSurface {
         return NativeVideoWallpaperWindow.fittedPoster(
             image,
             pixelSize: CGSize(width: frame.width * backingScaleFactor, height: frame.height * backingScaleFactor),
-            backingScale: backingScaleFactor, mode: desired.mode, factor: desired.factor, pan: desired.pan)
+            backingScale: backingScaleFactor, mode: desired.mode, factor: desired.factor, pan: desired.pan,
+            borderColor: desired.borderColor)
     }
 
     var onPreparationFailure: (@MainActor (UInt64, String, Bool) -> Void)? {
@@ -224,6 +236,13 @@ extension WebMVideoWallpaperWindow: NativeVideoSurface {
     }
 
     func verifyPlayback(reason: String) { player?.verifyPlayback(reason: reason) }
+
+    /// A file still being opened has no clip playing yet, so nothing to wait for.
+    func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        player?.watchNextLoop(handler) ?? false
+    }
+
+    func cancelLoopWatch() { player?.cancelLoopWatch() }
 
     func present() { orderFrontRegardless() }
 

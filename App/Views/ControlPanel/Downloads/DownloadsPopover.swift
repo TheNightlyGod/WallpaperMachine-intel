@@ -76,17 +76,20 @@ struct DownloadsPopover: View {
         .foregroundStyle(theme.surface.muted.color)
         .frame(maxWidth: .infinity, alignment: .leading)
       DownloadsPopoverActions(
-        completedCount: queue.succeeded.count, canClearFinished: queue.canClearFinished)
+        completedCount: queue.succeeded.count, canClearFinished: queue.canClearFinished,
+        retryableCount: fixedQueue == nil ? controller.retryableDownloads.count : 0)
     }
     .padding(12)
   }
 }
 
-/// The footer's controls: Show or Hide completed, Show download logs, and Clear finished.
+/// The footer's controls: Show or Hide completed, Show download logs, Retry failed and Clear
+/// finished.
 ///
 /// None of them ever wraps or truncates its label. They share one row when it has room, else the
-/// links keep a row and Clear finished takes the next, else each link has a row of its own: the
+/// links keep a row and the buttons take the next, else each link has a row of its own: the
 /// first arrangement that fits the popover's width in the panel's language is the one drawn.
+/// Retry failed appears once two or more downloads can be tried again; one has its own Try again.
 struct DownloadsPopoverActions: View {
   enum Arrangement: CaseIterable {
     case oneRow, linksThenClear, stacked
@@ -95,6 +98,8 @@ struct DownloadsPopoverActions: View {
   /// How many finished downloads there are to show or hide; none offers no toggle.
   let completedCount: Int
   let canClearFinished: Bool
+  /// How many failed or cancelled downloads Retry failed would try again.
+  var retryableCount = 0
   /// One arrangement to draw instead of the first that fits, for a test that measures each.
   var arrangement: Arrangement?
 
@@ -157,18 +162,28 @@ struct DownloadsPopoverActions: View {
     .fixedSize()
   }
 
+  private var offersRetry: Bool { retryableCount > 1 }
+
   @ViewBuilder
   private var clear: some View {
-    if canClearFinished {
-      Button("Clear finished") { controller.downloads.clearFinished() }
-        .buttonStyle(.panelSecondary(size: .compact))
-        .fixedSize()
+    HStack(spacing: 8) {
+      if offersRetry {
+        Button(L("Retry failed (\(retryableCount))")) { controller.downloads.retryFailed() }
+          .buttonStyle(.panelSecondary(size: .compact))
+          .fixedSize()
+          .disabled(controller.isBusy(PanelActionCoordinator.key("retryFailedDownloads")))
+      }
+      if canClearFinished {
+        Button("Clear finished") { controller.downloads.clearFinished() }
+          .buttonStyle(.panelSecondary(size: .compact))
+          .fixedSize()
+      }
     }
   }
 
   @ViewBuilder
   private var clearRow: some View {
-    if canClearFinished {
+    if canClearFinished || offersRetry {
       HStack {
         Spacer(minLength: 0)
         clear
@@ -239,9 +254,7 @@ struct DownloadsPopoverRequestRow: View {
       HStack(spacing: 8) {
         if request.isPaused {
           Button {
-            controller.launch(PanelActionCoordinator.key("downloadResume", id: request.id)) {
-              try await controller.resumeDownload(id: request.id)
-            }
+            model.perform(.resume, forItem: request.id)
           } label: {
             Label("Resume download", systemImage: "play.fill")
           }
@@ -281,7 +294,7 @@ struct DownloadsPopoverJobRow: View {
     let model = controller.downloads
     let running = row.isRunning
     let review = row.isUnresolved
-    let setupReady = controller.steamSetup.isReady
+    let setupReady = controller.steamDownloadsReady
     RowFrame(
       image: row.image, title: row.title, needsAttention: row.needsAuthentication || review
     ) {
@@ -331,7 +344,7 @@ struct DownloadsPopoverJobRow: View {
           Label("Resume download", systemImage: "play.fill")
         }
         .buttonStyle(.panelPrimary(size: .compact))
-        .disabled(controller.isBusy(DownloadsModel.key("resume", row: row)))
+        .disabled(controller.isBusy(DownloadsModel.key(.resume, row: row)))
       } else if review && row.canRetry {
         Button {
           model.retry(row)
@@ -339,12 +352,17 @@ struct DownloadsPopoverJobRow: View {
           Label("Try again", systemImage: "arrow.clockwise")
         }
         .buttonStyle(.panelPrimary(size: .compact))
-        // A Steam retry needs SteamCMD; pixiv's does not.
+        // A Steam retry needs SteamCMD or the QR sign-in; pixiv's needs neither.
         .disabled(row.source == .steam && !setupReady)
       }
       if row.canPause {
         Button("Pause download") { model.pause(row) }
           .buttonStyle(.panelSecondary(size: .compact))
+      }
+      if controller.canPrioritizeDownload(row) {
+        Button("Download next") { model.prioritize(row) }
+          .buttonStyle(.panelSecondary(size: .compact))
+          .disabled(controller.isBusy(PanelActionCoordinator.key("downloadPrioritize", id: row.id)))
       }
       if row.canCancel {
         Group {

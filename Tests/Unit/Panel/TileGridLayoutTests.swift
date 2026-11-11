@@ -24,6 +24,20 @@ final class TileGridLayoutTests: XCTestCase {
     }
   }
 
+  func testZoomStepsChangeThePreferredWidthAndStopAtTheEnds() {
+    XCTAssertEqual(TileGridLayout.preferredWidth(zoom: 0), TileGridLayout.preferredTileWidth)
+    XCTAssertLessThan(TileGridLayout.preferredWidth(zoom: -1), TileGridLayout.preferredWidth(zoom: 0))
+    XCTAssertGreaterThan(TileGridLayout.preferredWidth(zoom: 2), TileGridLayout.preferredWidth(zoom: 1))
+    XCTAssertEqual(TileGridLayout.preferredWidth(zoom: -9), TileGridLayout.zoomWidths.first)
+    XCTAssertEqual(TileGridLayout.preferredWidth(zoom: 9), TileGridLayout.zoomWidths.last)
+    let wide = TileGridLayout.preferredWidth(zoom: 2)
+    XCTAssertLessThan(
+      TileGridLayout.columnCount(forWidth: 1000, spacing: 14, preferredWidth: wide),
+      TileGridLayout.columnCount(forWidth: 1000, spacing: 14), "larger tiles fit fewer columns")
+    XCTAssertEqual(
+      TileGridLayout.columnCount(forWidth: 300, spacing: 14, preferredWidth: wide), 3, "never fewer than three")
+  }
+
   func testAWiderGapFitsFewerTiles() {
     XCTAssertEqual(TileGridLayout.columnCount(forWidth: 1000, spacing: 12), 6)
     XCTAssertEqual(TileGridLayout.columnCount(forWidth: 1000, spacing: 40), 5)

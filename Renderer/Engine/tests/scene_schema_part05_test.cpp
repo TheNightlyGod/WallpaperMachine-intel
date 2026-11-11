@@ -763,7 +763,7 @@ TEST(ClickScripts, OnlyTheHitOneOfThreeSameNamedLayersPlaysItsOwnSound)
     live.Tick(1.0 / 60.0);
     EXPECT_EQ(voices(), silent) << "hovering says nothing";
 
-    rt.SetCursorButtons(0, 1, 0);
+    rt.SetCursorButtons(0, 1, 1);
     EXPECT_TRUE(rt.DispatchCursorFrameEvents(true));
     live.Tick(1.0 / 60.0);
     EXPECT_EQ(voices(), silent) << "the first click counts one, and the voice is for the second";
@@ -771,7 +771,7 @@ TEST(ClickScripts, OnlyTheHitOneOfThreeSameNamedLayersPlaysItsOwnSound)
     rt.SetCursorButtons(0, 0, 0);
     rt.DispatchCursorFrameEvents(true);
     live.Tick(1.0 / 60.0);
-    rt.SetCursorButtons(0, 1, 0);
+    rt.SetCursorButtons(0, 1, 1);
     rt.DispatchCursorFrameEvents(true);
     live.Tick(1.0 / 60.0);
     EXPECT_EQ(voices(), (std::vector<bool> { false, true, false })) << "only the middle layer's own voice plays";

@@ -144,18 +144,21 @@ UserLink ReadUserLink(const nlohmann::json& setting) {
 enum class FollowShape { Whole, Vec3 };
 
 // Makes `value` follow the property its setting names, if any. The condition goes on before the
-// first read. A property the table does not declare yet is followed once a document supplies it.
+// first read. A property the table does not declare yet is followed once a document supplies it;
+// until then the value keeps its own authored value, as Wallpaper Engine shows it: there is no
+// choice to compare a condition with, and another setting's authored value is not this one's.
 void FollowUserProperty(SceneRuntimeContext& context, const nlohmann::json& setting,
                         FollowShape shape, DynamicValue& value) {
     const UserLink link = ReadUserLink(setting);
     if (link.property.empty()) return;
-    DynamicValue* target = context.FollowProperty(link.property, value);
+    const bool    declared = context.FindPropertyValue(link.property) != nullptr;
+    DynamicValue* target   = context.FollowProperty(link.property, value);
     if (target == nullptr) return;
     if (link.condition) value.attachCondition(*link.condition);
     if (shape == FollowShape::Vec3) {
-        value.connectVec3(target);
+        value.connectVec3(target, declared);
     } else {
-        value.connect(target);
+        value.connect(target, declared);
     }
 }
 
@@ -307,9 +310,16 @@ float ScalarAnimation::Evaluate(double seconds) const {
     if (!std::isfinite(seconds) || seconds < 0.0) return initial_value;
 
     const double total   = FrameCount();
-    const bool   looping = mode == ScalarAnimationMode::Loop && total > 0.0;
+    const bool   mirror  = mode == ScalarAnimationMode::Mirror && total > 0.0;
+    const bool   looping = (mode == ScalarAnimationMode::Loop && total > 0.0) || mirror;
     double       frame   = seconds * fps;
-    if (looping) frame = std::fmod(frame, total);
+    if (mirror) {
+        // Forward over the first length of each double length, back over the second.
+        frame = std::fmod(frame, 2.0 * total);
+        if (frame > total) frame = 2.0 * total - frame;
+    } else if (looping) {
+        frame = std::fmod(frame, total);
+    }
     // A time so large that it overflows the frame position has no position in the loop.
     if (std::isnan(frame)) return initial_value;
     if (frame < keyframes.front().frame) return looping ? keyframes.front().value : initial_value;
@@ -340,13 +350,18 @@ namespace
 // distance is measured along the direction of travel — that makes a wrap, an
 // exact landing on the seam and a marker authored at the period the same point.
 // Travelling at least a whole period reports each marker once, never once per
-// lap, so one stalled frame cannot flood the queue.
+// lap, so one stalled frame cannot flood the queue. A mirror is a circle of twice
+// the length, on which a marker sits twice, once on the way out and once on the
+// way back (once only at either end), and `previous` is the position on it.
 void CollectCrossedEvents(const ScalarAnimation& animation, double previous, double travelled,
                           double length, std::vector<ScalarAnimationEvent>& out)
 {
     if (animation.events.empty() || travelled == 0.0 || !std::isfinite(travelled)) return;
 
-    if (animation.mode != ScalarAnimationMode::Loop || !(length > 0.0)) {
+    const bool circular = (animation.mode == ScalarAnimationMode::Loop
+                           || animation.mode == ScalarAnimationMode::Mirror)
+                          && length > 0.0;
+    if (!circular) {
         const double arrival = std::clamp(previous + travelled, 0.0, std::max(0.0, length));
         if (travelled > 0.0) {
             for (const auto& event : animation.events) {
@@ -364,23 +379,32 @@ void CollectCrossedEvents(const ScalarAnimation& animation, double previous, dou
         return;
     }
 
-    const auto wrap = [length](double value) {
-        const double wrapped = std::fmod(value, length);
-        return wrapped < 0.0 ? wrapped + length : wrapped;
+    const bool   mirror = animation.mode == ScalarAnimationMode::Mirror;
+    const double period = mirror ? 2.0 * length : length;
+    const auto wrap = [period](double value) {
+        const double wrapped = std::fmod(value, period);
+        return wrapped < 0.0 ? wrapped + period : wrapped;
     };
     const double start    = wrap(previous);
     const double distance = std::abs(travelled);
     const bool   forward  = travelled > 0.0;
     std::vector<std::pair<double, const ScalarAnimationEvent*>> met;
-    for (const auto& event : animation.events) {
-        if (event.name.empty()) continue;
-        const double delta = wrap(forward ? event.frame - start : start - event.frame);
-        if (distance >= length) {
+    const auto meet = [&](double position, const ScalarAnimationEvent& event) {
+        const double delta = wrap(forward ? position - start : start - position);
+        if (distance >= period) {
             // A full lap returns to the departure frame, so that marker is last.
-            met.emplace_back(delta == 0.0 ? length : delta, &event);
+            met.emplace_back(delta == 0.0 ? period : delta, &event);
         } else if (delta > 0.0 && delta <= distance) {
             met.emplace_back(delta, &event);
         }
+    };
+    for (const auto& event : animation.events) {
+        if (event.name.empty()) continue;
+        // A mirror turns at its ends, so a marker past either is never reached.
+        if (mirror && (event.frame < 0.0 || event.frame > length)) continue;
+        meet(event.frame, event);
+        const double back = period - event.frame;
+        if (mirror && wrap(back) != wrap(event.frame)) meet(back, event);
     }
     std::sort(met.begin(), met.end(), [](const auto& left, const auto& right) {
         return left.first < right.first;
@@ -397,6 +421,18 @@ void ScalarAnimationPlayback::Advance(double seconds)
     const double length = animation.FrameCount();
     const double previous = frame;
     const double next = frame + seconds * animation.fps * rate;
+    if (animation.mode == ScalarAnimationMode::Mirror && length > 0.0) {
+        // The position on a circle of twice the length: out to the end, then back.
+        const double period = 2.0 * length;
+        const double phase  = reversing ? period - frame : frame;
+        const double travel = seconds * animation.fps * rate;
+        double       ahead  = std::fmod(phase + travel, period);
+        if (ahead < 0.0) ahead += period;
+        reversing = ahead > length;
+        frame     = reversing ? period - ahead : ahead;
+        CollectCrossedEvents(animation, phase, travel, length, pending_events);
+        return;
+    }
     if (animation.mode == ScalarAnimationMode::Loop && length > 0.0) {
         frame = std::fmod(next, length);
         if (frame < 0.0) frame += length;
@@ -420,6 +456,7 @@ void ScalarAnimationPlayback::Stop()
 {
     playing = false;
     frame = 0.0;
+    reversing = false;
 }
 
 void ScalarAnimationPlayback::SetFrame(double value)
@@ -774,8 +811,10 @@ std::optional<ScalarAnimation> ResolveScalarAnimation(const nlohmann::json& sett
     curve.fps           = LenientDouble(*options, "fps");
     curve.length_frames = LenientDouble(*options, "length");
     const auto mode = options->find("mode");
-    if (mode != options->end() && mode->is_string() && mode->get_ref<const std::string&>() == "loop") {
-        curve.mode = ScalarAnimationMode::Loop;
+    if (mode != options->end() && mode->is_string()) {
+        const auto& named = mode->get_ref<const std::string&>();
+        if (named == "loop") curve.mode = ScalarAnimationMode::Loop;
+        else if (named == "mirror") curve.mode = ScalarAnimationMode::Mirror;
     }
     const auto name = options->find("name");
     if (name != options->end() && name->is_string()) curve.name = name->get<std::string>();

@@ -178,7 +178,7 @@ pub fn vertex_with(declarations: &str, body: &str) -> String {
 
 /// A fragment stage that declares the given varying lines and runs `body`.
 pub fn fragment_with(declarations: &str, body: &str) -> String {
-    format!("{declarations}\nvoid main() {{\n  vec4 c = vec4(0.0);\n{body}\n  gl_FragColor = c;\n}}\n")
+    format!("{declarations}\nvoid main() {{\n  vec4 c = CAST4(0.0);\n{body}\n  gl_FragColor = c;\n}}\n")
 }
 
 /// `(name, binding)` of every resource declaration of a legalized text, in text order.

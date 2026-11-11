@@ -12,11 +12,15 @@ private final class PolicyProbe {
         WallpaperSurfaceVisibility(displayID: 1, isVisible: true)
     ]
     var sessionLocked = false
-    /// Window-server round trips spent asking for `sessionLocked`.
+    /// False while fast user switching has another session on the screens.
+    var onConsole = true
+    /// Window-server round trips spent asking for `sessionLocked` and `onConsole`.
     var lockReads = 0
     /// Displays whose working area other windows cover.
     var covered: Set<UInt32> = []
     var coveredAction: DesktopCoveredAction = .pause
+    /// Displays whose last Space snapshot is a full-screen app, even if AppKit exposes a preview.
+    var nonDesktop: Set<UInt32> = []
     /// Displays the user is not using, as the policy is told when it asks about the displays it knows.
     var inactive: Set<UInt32> = []
     /// The displays the policy asked about, each time.
@@ -53,12 +57,13 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             lockCenter: lockCenter,
             windowCenter: windowCenter,
             surfaces: { probe.surfaces },
-            isSessionLocked: {
+            sessionState: {
                 probe.lockReads += 1
-                return probe.sessionLocked
+                return .init(locked: probe.sessionLocked, onConsole: probe.onConsole)
             },
             desktopCoveredAction: { probe.coveredAction },
             coveredDisplays: { probe.covered },
+            nonDesktopDisplays: { probe.nonDesktop },
             inactiveDisplays: { known in
                 probe.inactiveQueries.append(known)
                 return probe.inactive
@@ -167,11 +172,79 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
 
         probe.sessionLocked = true
         workspaceCenter.post(name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
-        XCTAssertEqual(probe.applied, [true], "a session switched away from is locked behind the login window")
+        XCTAssertEqual(probe.applied, [true], "a session switched away from behind a locked login window")
 
         probe.sessionLocked = false
         workspaceCenter.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
         XCTAssertEqual(probe.applied, [true, false], "switching back resumes")
+    }
+
+    /// Fast user switching can put another user on the screens without locking this
+    /// session: nothing it draws is seen, so it suspends as a lock does, and resumes as
+    /// soon as it has the screens again. It is not unattended: an automatic update waits.
+    func testASessionSwitchedAwayWithoutALockSuspendsUntilItIsBack() {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        var unlocks = 0
+        policy.onSessionUnlocked = { unlocks += 1 }
+        policy.start()
+        defer { policy.stop() }
+
+        probe.onConsole = false
+        workspaceCenter.post(name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        XCTAssertEqual(probe.applied, [true], "another session has the screens")
+        XCTAssertEqual(policy.globalPresentation, .suspended)
+        XCTAssertFalse(policy.isUnattended, "an automatic update does not restart a switched-away session")
+
+        probe.onConsole = true
+        workspaceCenter.post(name: NSWorkspace.sessionDidBecomeActiveNotification, object: nil)
+        XCTAssertEqual(probe.applied, [true, false], "switching back resumes at once")
+        XCTAssertFalse(policy.isUnattended)
+        XCTAssertEqual(unlocks, 0, "the session was never locked, so no unlock is reported")
+    }
+
+    /// While switched away every evaluation asks again, so a return this process never
+    /// heard about cannot leave the wallpaper suspended; on the console it is not asked.
+    func testAMissedReturnToTheConsoleClearsAtTheNextEvaluation() {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+
+        probe.onConsole = false
+        workspaceCenter.post(name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        probe.onConsole = true
+        policy.evaluate()
+        XCTAssertEqual(probe.applied, [true, false])
+        let reads = probe.lockReads
+        for _ in 0..<20 { policy.evaluate() }
+        XCTAssertEqual(probe.lockReads, reads, "a session on the console is not asked again")
+    }
+
+    /// A session switched away from before the app started is suspended from the start.
+    func testASessionOffTheConsoleAtStartIsSuspendedFromTheStart() {
+        let probe = PolicyProbe()
+        probe.onConsole = false
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.applied, [true])
+    }
+
+    /// The session's dictionary decides; a key missing from it pauses nothing.
+    func testTheSessionDictionaryReadsAMissingKeyAsOnTheConsoleAndUnlocked() {
+        typealias SessionState = WallpaperPresentationAuthority.SessionState
+        XCTAssertEqual(SessionState(dictionary: nil), SessionState(locked: false, onConsole: true))
+        XCTAssertEqual(SessionState(dictionary: [:]), SessionState(locked: false, onConsole: true))
+        XCTAssertEqual(
+            SessionState(dictionary: ["kCGSSessionOnConsoleKey": false]),
+            SessionState(locked: false, onConsole: false))
+        XCTAssertEqual(
+            SessionState(dictionary: ["CGSSessionScreenIsLocked": true, "kCGSSessionOnConsoleKey": true]),
+            SessionState(locked: true, onConsole: true))
+        XCTAssertEqual(
+            SessionState(dictionary: ["kCGSSessionOnConsoleKey": "no"]),
+            SessionState(locked: false, onConsole: true), "a value of another type is not an answer")
     }
 
     /// While the session counts as locked every evaluation asks again, so an unlock this
@@ -304,6 +377,160 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
         XCTAssertTrue(probe.appliedDisplays.isEmpty, "Mission Control passes must never reach the engine")
         XCTAssertFalse(policy.isSuspended)
         XCTAssertTrue(policy.suspendedDisplayIDs.isEmpty)
+    }
+
+    // MARK: - Full-screen Spaces
+
+    func testFullscreenPreviewDoesNotResumeBeforeDesktopArrival() {
+        let probe = PolicyProbe()
+        probe.coveredAction = .keepRunning
+        probe.nonDesktop = [1]
+        probe.setVisible(false)
+        probe.setVisible(true, display: 2)
+        let policy = makePolicy(probe, settle: .zero)
+        var resumes = 0
+        policy.onResumed = { resumes += 1 }
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true])
+
+        // Mission Control can expose the desktop while the full-screen Space is still active.
+        probe.setVisible(true)
+        windowCenter.post(name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true], "A preview must keep the suspended frame")
+        XCTAssertEqual(resumes, 0)
+        XCTAssertEqual(policy.hiddenDisplayIDs, [1])
+        XCTAssertEqual(probe.displayDecisions(for: 2), [], "The other desktop keeps playing")
+
+        // Arrival may produce no further occlusion change: the Space snapshot must release it.
+        probe.nonDesktop = []
+        windowCenter.post(name: WallpaperSpaceMonitor.didChangeNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false])
+        XCTAssertTrue(policy.suspendedDisplayIDs.isEmpty)
+        XCTAssertEqual(resumes, 1)
+    }
+
+    func testCancelledFullscreenSwipeNeverResumes() {
+        let probe = PolicyProbe()
+        probe.nonDesktop = [1]
+        probe.setVisible(false)
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+
+        for _ in 0..<5 {
+            probe.setVisible(true)
+            policy.evaluate()
+            probe.setVisible(false)
+            policy.evaluate()
+        }
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true], "Reversing a swipe never left the full-screen Space")
+    }
+
+    func testDesktopArrivalDoesNotReleaseOtherReasonsToPause() {
+        let probe = PolicyProbe()
+        probe.nonDesktop = [1]
+        probe.setVisible(false)
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+
+        probe.nonDesktop = []
+        windowCenter.post(name: WallpaperSpaceMonitor.didChangeNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true], "A still-occluded desktop stays paused")
+
+        probe.covered = [1]
+        probe.setVisible(true)
+        policy.evaluate()
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true], "A covered working area still pauses")
+
+        probe.covered = []
+        windowCenter.post(name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false])
+    }
+
+    func testFullscreenDisplayIsNotPausedOnlyForPointerInactivity() {
+        let probe = PolicyProbe()
+        probe.setVisible(true, display: 2)
+        probe.nonDesktop = [2]
+        probe.inactive = [2]
+        let policy = makePolicy(probe, settle: .zero)
+        policy.start()
+        defer { policy.stop() }
+
+        XCTAssertEqual(policy.hiddenDisplayIDs, [2])
+        XCTAssertFalse(policy.isSuspendedInPlainSight(displayID: 2), "A full-screen preview owes no first frame")
+        XCTAssertEqual(probe.displayDecisions(for: 1), [])
+    }
+
+    func testSpaceMonitorReleasesThePreviewOnlyWhenTheDesktopBecomesActive() {
+        var topology: [String: WallpaperDisplaySpaces]? = [
+            "1": .init(displayUUID: "built-in", spaces: [.init(id: "a", number: 1)], current: nil),
+            "2": .init(displayUUID: "external", spaces: [.init(id: "b", number: 1)], current: "b"),
+        ]
+        var reads = 0
+        let spaces = WallpaperSpaceMonitor(provider: { reads += 1; return topology },
+            workspaceCenter: workspaceCenter, displayConfiguration: { .init(displays: []) })
+        spaces.start()
+        defer { spaces.stop() }
+        let probe = PolicyProbe()
+        probe.setVisible(false)
+        probe.setVisible(true, display: 2)
+        let policy = WallpaperPresentationPolicy(
+            workspaceCenter: workspaceCenter, lockCenter: lockCenter,
+            surfaces: { probe.surfaces }, sessionState: { .init(locked: false, onConsole: true) },
+            desktopCoveredAction: { .keepRunning }, nonDesktopDisplays: { spaces.nonDesktopDisplayIDs },
+            screenLayout: { [] }, occlusionSettleDelay: .zero,
+            applyGlobal: { _, completion in completion(.success(())) },
+            applyDisplay: { display, suspended, completion in
+                probe.appliedDisplays.append((display, suspended))
+                completion(.success(()))
+            })
+        policy.start()
+        defer { policy.stop() }
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true])
+
+        probe.setVisible(true)
+        topology?["1"]?.current = "a"
+        for _ in 0..<5 {
+            NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        }
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true], "Visibility must not advance the Space snapshot")
+        XCTAssertEqual(reads, 1, "Visibility checks add no window-server reads")
+
+        workspaceCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false], "Arrival resumes without another window event")
+        XCTAssertEqual(probe.displayDecisions(for: 2), [])
+
+        topology?["1"]?.current = nil
+        workspaceCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false, true])
+        topology = nil
+        workspaceCenter.post(name: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false, true, false],
+            "Unavailable topology falls back to AppKit, never leaving a stale full-screen hold")
+    }
+
+    func testFullscreenEntryStillWaitsForOcclusionToSettle() async throws {
+        let probe = PolicyProbe()
+        let policy = makePolicy(probe)
+        policy.start()
+        defer { policy.stop() }
+
+        probe.nonDesktop = [1]
+        windowCenter.post(name: WallpaperSpaceMonitor.didChangeNotification, object: nil)
+        XCTAssertTrue(probe.appliedDisplays.isEmpty)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true])
+
+        probe.nonDesktop = []
+        windowCenter.post(name: WallpaperSpaceMonitor.didChangeNotification, object: nil)
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false])
+        policy.stop()
+        probe.nonDesktop = [1]
+        windowCenter.post(name: WallpaperSpaceMonitor.didChangeNotification, object: nil)
+        try await Task.sleep(for: .milliseconds(80))
+        XCTAssertEqual(probe.displayDecisions(for: 1), [true, false], "Stopping removes the Space observer")
     }
 
     // MARK: - Covered working area
@@ -861,7 +1088,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             lockCenter: lockCenter,
             windowCenter: windowCenter,
             surfaces: { probe.surfaces },
-            isSessionLocked: { probe.sessionLocked },
+            sessionState: { .init(locked: probe.sessionLocked) },
             occlusionSettleDelay: .zero,
             applyGlobal: { _, completion in completion(.success(())) },
             applyDisplay: { display, suspended, completion in
@@ -901,7 +1128,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             lockCenter: lockCenter,
             windowCenter: windowCenter,
             surfaces: { probe.surfaces },
-            isSessionLocked: { probe.sessionLocked },
+            sessionState: { .init(locked: probe.sessionLocked) },
             occlusionSettleDelay: .zero,
             applyGlobal: { _, completion in completion(.success(())) },
             applyDisplay: { _, suspended, completion in
@@ -941,7 +1168,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             lockCenter: lockCenter,
             windowCenter: windowCenter,
             surfaces: { probe.surfaces },
-            isSessionLocked: { probe.sessionLocked },
+            sessionState: { .init(locked: probe.sessionLocked) },
             occlusionSettleDelay: .zero,
             applyGlobal: { _, completion in completion(.success(())) },
             applyDisplay: { _, suspended, completion in
@@ -978,7 +1205,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             lockCenter: lockCenter,
             windowCenter: windowCenter,
             surfaces: { probe.surfaces },
-            isSessionLocked: { probe.sessionLocked },
+            sessionState: { .init(locked: probe.sessionLocked) },
             occlusionSettleDelay: .zero,
             applyGlobal: { _, completion in completion(.success(())) },
             applyDisplay: { _, suspended, completion in
@@ -1022,7 +1249,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             lockCenter: lockCenter,
             windowCenter: windowCenter,
             surfaces: { probe.surfaces },
-            isSessionLocked: { probe.sessionLocked },
+            sessionState: { .init(locked: probe.sessionLocked) },
             occlusionSettleDelay: .zero,
             applyGlobal: { _, completion in completion(.success(())) },
             applyDisplay: { _, suspended, completion in
@@ -1093,7 +1320,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
         var action = DisplaySleepAction.stop
         let policy = WallpaperPresentationPolicy(
             workspaceCenter: workspaceCenter, lockCenter: lockCenter, windowCenter: windowCenter,
-            surfaces: { probe.surfaces }, isSessionLocked: { probe.sessionLocked },
+            surfaces: { probe.surfaces }, sessionState: { .init(locked: probe.sessionLocked) },
             displaySleepAction: { action },
             applyGlobal: { _, completion in completion(.success(())) },
             applyDisplay: { _, _, completion in completion(.success(())) })
@@ -1117,7 +1344,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
         var attempts = 0
         let policy = WallpaperPresentationPolicy(
             workspaceCenter: workspaceCenter, lockCenter: lockCenter, windowCenter: windowCenter,
-            surfaces: { probe.surfaces }, isSessionLocked: { probe.sessionLocked },
+            surfaces: { probe.surfaces }, sessionState: { .init(locked: probe.sessionLocked) },
             applyGlobal: { _, completion in
                 attempts += 1
                 completion(accepting ? .success(()) : .failure(CancellationError()))
@@ -1154,7 +1381,7 @@ final class WallpaperPresentationPolicyTests: XCTestCase {
             var attempts = 0
             let policy = WallpaperPresentationPolicy(
                 workspaceCenter: workspaceCenter, lockCenter: lockCenter, windowCenter: windowCenter,
-                surfaces: { probe.surfaces }, isSessionLocked: { probe.sessionLocked },
+                surfaces: { probe.surfaces }, sessionState: { .init(locked: probe.sessionLocked) },
                 occlusionSettleDelay: settle,
                 applyGlobal: { _, completion in
                     attempts += 1

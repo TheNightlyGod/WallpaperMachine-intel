@@ -90,7 +90,7 @@ the load.
 
 - The logger's own line: process id and level in force.
 - The saved preferences that decide how wallpapers render: render scale, battery mode, frame-rate limit, scene optimisation,
-  on-demand updating and the experimental switches.
+  on-demand updating, MetalFX upscaling and the experimental switches.
 - `environment:` lines from Swift (`DiagnosticEnvironment`): app version and
   build, macOS, hardware model, CPU, core count, memory, GPU, low-power and
   thermal state, languages, locale, time zone, and each display's pixel size,
@@ -175,13 +175,21 @@ anything is torn down. The line is written for a request that arrives while a qu
 already running too, which is how a second Exit or a logout during a user quit shows up:
 
 ```
-quit: reason=logout mode=powerOff frontmost=com.apple.loginwindow panelVisible=false updateInstallPending=false alreadyInProgress=false powerOffNotified=true appleEventReason='rlgo' signal=none
+quit: reason=logout mode=powerOff from=com.apple.loginwindow (pid 412) frontmost=com.apple.loginwindow panelVisible=false updateInstallPending=false alreadyInProgress=false powerOffNotified=true appleEventReason='rlgo' signal=none
 ```
 
 `mode` is how the quit behaves: `powerOff` when the reason is a logout, restart or shutdown or
 macOS announced one (a signal that arrives during a shutdown is still `powerOff`), otherwise
 `interactive`. A power-off quit has shorter deadlines and is never refused; see
 [desktop picture](desktop-picture.md#logout-restart-and-shutdown).
+
+`from` (`QuitRequester`) says who asked: `menu` for the app's own Quit or Exit, the bundle
+identifier (or, for a program without one, its file name) and pid of the process that sent
+the quit Apple event (`com.apple.dock`, `com.apple.loginwindow`, `osascript`, another app;
+`exited` when it is already gone), `self` for an event the app sent itself, and `none` when
+neither applies (a signal, the updater). `frontmost` is not the requester: choosing Exit in
+the menu-bar menu leaves the other app frontmost, so only `from` tells that Exit apart from
+a quit another program sent.
 
 `reason` (`QuitReason`) is the first of these that applies:
 
@@ -191,7 +199,7 @@ macOS announced one (a signal that arrives during a shutdown is still `powerOff`
 | `logout`, `restart`, `shutdown` | the quit Apple event names that kind (`why?`: `rlgo`/`logo`, `rest`/`rrst`, `shut`/`rsdn`), or macOS announced a power-off (`NSWorkspace.willPowerOffNotification`) and the event named none. The announcement cannot say which kind it is, so that case reads `shutdown`; `appleEventReason=none` in the line tells it apart |
 | `update` | the updater has started its installer and is waiting for the app to quit (`AppUpdateStore.isInstallPending`). A Quit chosen while the update is still being prepared is the user's: it cancels the preparation |
 | `unknown` | the event carries a reason code this build does not know |
-| `user` | anything else: the menu, the Dock, another app's plain quit |
+| `user` | anything else: the menu, the Dock, another app's plain quit; `from` names which |
 
 The event's reason is a parameter of the quit event, readable only while that event is being
 handled, so it is read at the top of `applicationShouldTerminate` and nowhere else. A quit
@@ -323,6 +331,7 @@ reveals it in Finder. It is built off the main actor by `DiagnosticsBundle`
 | `logs/<session>/<N>.log` | Newest 5 sessions, newest files first, at most 64 MB in total. A file that would exceed the budget contributes its tail, marked `[truncated: …]` |
 | `lock-screen/extension.log` | The extension's log, if present |
 | `load-journal.json` | The crash-loop guard's journal, [crash-recovery.md](crash-recovery.md): the strikes per wallpaper and the scenes that were opening when the app last stopped. Wallpaper ids, display numbers, times, the build and an opaque session id; no paths. The file exists once a scene has been opened; without it the report notes that it was not present |
+| `steamcmd-failures.txt` | What SteamCMD printed in the last Steam downloads and sign-ins that failed: per run its last 80 lines (each cut at 400 characters), the step it ended in and the message shown, newest last, at most 64 KB (`SteamCMDFailureLog`, kept as `SteamCMDFailures.log` in app support, `0600`). Each line is redacted when it arrives: the account name signed in with becomes `<account>`, email addresses `<email>`, Steam IDs `<steamid>` and runs of 32 or more token characters `<token>`; passwords and Steam Guard codes are never printed, as SteamCMD's terminal does not echo them. Absent until a run fails, and then not noted |
 | `crash-reports/*.ips` | Up to 5 macOS crash reports from the last 14 days whose name starts with `WallpaperMachine` (app and extension) |
 | `diagnostic-reports/*.diag`, `*.spin`, `*.hang` | Up to 5 macOS resource, spin and hang reports from the last 14 days whose name starts with `WallpaperMachine`, newest first across both report folders. See [below](#macos-resource-spin-and-hang-reports) |
 | `environment.txt` | The environment lines above, read at export time, plus the saved render settings with the reasons Reduced quality holds and the frame-rate ceiling in force, the backend and live mode of each running scene (`mode stopped_after_failure` for a scene whose renderer stopped after a failure, apart from `user_paused` and `policy_suspended`; see [scene rendering](scene-rendering.md#a-scene-that-stops-drawing)), the state of each wallpaper window with whether the displays have separate Spaces ([below](#wallpaper-window-state)), and the app's memory footprint at export time ([above](#memory-pressure)) |
@@ -430,7 +439,8 @@ state table above and ends the audit at the first look where every window is
 The audit says nothing, and repairs nothing, when no window is expected to show:
 
 - the presentation policy has paused or unloaded the wallpaper (display sleep,
-  session lock, an app rule, or other-app audio set to pause);
+  session lock, an app rule, another app in front or other-app audio set to
+  pause);
 - for `notOnActiveSpace` and `offScreenInWindowServer`, the window's display is
   in a full-screen app's Space, which the Space monitor reports as having no
   current desktop. Where the Space topology cannot be read, the fault is
@@ -517,6 +527,18 @@ Advanced), then pick the page from the **Develop** menu's submenu for this Mac.
 - While it is on, anything that can use this Mac's Safari can read the page's
   JavaScript context, including data the page keeps in `localStorage`. Turn it off
   when the debugging is done.
+
+Without the inspector, the log already holds what a desktop or preview page reports
+about itself: what it writes with `console.error` (a `warn` line) and `console.warn` (an
+`info` line), its uncaught errors and unhandled promise rejections, and the images,
+scripts, media and stylesheets that failed to load, as
+`web wallpaper <folder>: page <error|warning|uncaught|rejection|resource>: <text>` in the
+page's load. The host script sends at most eight a second and drops a repeat of the last
+one; the host puts each on one line, cuts it to 300 characters and logs at most 40 per
+document (`WebWallpaperPageDiagnostics`), so a page that throws on every frame cannot
+fill the log. The project folder's own URL is cut from the text. The text is the page's
+own, and a diagnostics report redacts it like every other line. The screen saver does
+not log its page's messages.
 
 ## Verification
 

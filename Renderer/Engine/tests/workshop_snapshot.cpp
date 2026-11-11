@@ -466,6 +466,7 @@ json puppetRow(const std::string& path, wallpaper::fs::VFS& vfs) {
     const auto& puppet   = mdl.puppet;
     row["bones"] = ok && puppet ? puppet->bones.size() : size_t { 0 };
     row["anims"] = ok && puppet ? puppet->anims.size() : size_t { 0 };
+    row["ik_targets"] = ok && puppet ? puppet->ik_targets.size() : size_t { 0 };
     if (! ok || ! puppet) return row;
 
     json tree = json::array();
@@ -500,6 +501,7 @@ json puppetRow(const std::string& path, wallpaper::fs::VFS& vfs) {
             { "name", anim.name },
             { "mode", static_cast<int>(anim.mode) },
             { "bone_track_count", anim.bone_tracks.size() },
+            { "target_track_count", anim.target_tracks.size() },
             { "total_bone_frames", frames },
         };
         if (withPoses) {

@@ -30,6 +30,7 @@ fn texture(slot: u8, present: bool) -> TextureRecord {
         format: TextureFormat::Unknown,
         components: TextureComponents::default(),
         video_planes: VideoPlanes::None,
+        sample_count: None,
     }
 }
 

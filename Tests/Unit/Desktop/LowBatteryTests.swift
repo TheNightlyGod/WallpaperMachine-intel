@@ -66,7 +66,8 @@ final class LowBatteryTests: XCTestCase {
         var onAC = onBattery
         onAC["Power Source State"] = "AC Power"
         onAC["Is Charging"] = true
-        XCTAssertEqual(BatteryReading(description: onAC), BatteryReading(percent: 17, isDischarging: false))
+        XCTAssertEqual(
+            BatteryReading(description: onAC), BatteryReading(percent: 17, isDischarging: false, isCharging: true))
 
         var inMilliampHours = onBattery
         inMilliampHours["Current Capacity"] = 1_250

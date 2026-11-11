@@ -11,17 +11,23 @@ CLAUDE.md -> AGENTS.md              Claude entry point; relative symlink, same r
 CHANGELOG.md                       published versions, newest first; written by scripts/release_notes.py
 CODE_OF_CONDUCT.md                 conduct expected in the project's spaces and how it is enforced
 CONTRIBUTING.md                    contributor working agreement
+crowdin.yml                        Crowdin project config: the three string catalogs as multilingual sources; no credentials (docs/localization.md#crowdin)
 LICENSE                            GNU GPL version 3 text; the license of this repository's source
-LICENSING.md                       GPL-3.0-only policy, Supporter model, component licenses and distribution blockers
-README.md                          product overview after the website, build quickstart, FAQ, sponsor list (written by scripts/update_sponsors.py), documentation index
-README.zh-CN.md                    README.md in 简体中文; change both together (same sponsor list block)
+LICENSING.md                       GPL-3.0-only license, Priority Support, component licenses and notices
+README.md                          product overview after the website, build quickstart, FAQ, Priority Support member list (written by scripts/update_sponsors.py), documentation index
+README.zh-CN.md                    README.md in 简体中文; change it with README.md (same member list block)
+README.pt-BR.md                    README.md in Português; change it with README.md (same member list block)
+README.ko.md                       README.md in 한국어; change it with README.md (same member list block)
 SECURITY.md                        private vulnerability reporting, supported versions and scope
-SPONSORS.md                        Supporter pricing, benefits and other ways to help; follows the website's pricing page
+SPONSORS.md                        sponsoring on Open Collective, Priority Support and other ways to help; follows the website's pricing page
 project.yml                        XcodeGen spec: the only source of truth for targets/settings/versions
 WallpaperMachine.xcodeproj/        generated from project.yml by xcodegen; committed, never hand-edited
 App/                               WallpaperMachine application target sources only
   WallpaperEngineApp.swift         @main AppKit entry point; no scene/UI logic
-  AppDelegate.swift                lifecycle, menu bar, window and shutdown ordering
+  AppDelegate.swift                lifecycle, window and shutdown ordering
+  AppDelegate+Menus.swift          status item, application menu and their actions
+  AppDelegate+DesktopPosters.swift desktop poster sync, the desktop-picture switch, Spaces posters and pins
+  AppDelegate+StatusPanel.swift    what a click on the status item opens, and the menu bar panel's input and commands
   Bridge/                          WallpaperPreviewBridge.h (scene C API for previews)
                                    and Generated/ (uniffi output; not hand-edited)
   Logging/                         AppLog.swift (the only Swift logging entry point) and its router
@@ -29,32 +35,48 @@ App/                               WallpaperMachine application target sources o
     Appearance/                    AppTheme.swift: theme preference model and store
     Automation/                    keyboard shortcuts, App Intents, links, weekday/solar/appearance selection rules,
                                    temporary Focus choices with restoration, and the menu bar menu's layout
-                                   (StatusMenuModel: flat for one display, a submenu per display for more)
+                                   (StatusMenuModel: flat for one display, a submenu per display for more),
+                                   the menu bar panel's (StatusPanelModel, its quick-switcher draw) and what a
+                                   click on the icon opens (StatusItemClick)
     Desktop/                       multi-display copy/swap and recovery, desktop picture APIs, original-wallpaper ledger,
                                    scoped poster sync, read-only Space topology, presentation policy, playback rules,
-                                   system conditions, display refresh and the screen shape of a display id
+                                   system conditions, display refresh and the screen shape of a display id,
+                                   Finder's desktop icons (FinderDesktopIcons), the notch strip (NotchMaskController)
+                                   and the clocks and dates on the desktop (DesktopWidget*)
     Diagnostics/                   runtime diagnostics session, diagnostics report, session ledger, counter sampling, energy readout,
                                    memory-pressure log and per-wallpaper energy ratings
-    GitHub/                        GitHub release client, update models, update store, installer, what's-new records
+    GitHub/                        GitHub release client, update models, update store, installer, what's-new records,
+                                   and the update checks, prompt and window (AppUpdateCoordinator)
     Library/                       ClientPaths (owns the app-support layout), import/deletion, still-image wallpapers,
-                                   collections, presets, history, compatibility checks, the video black-bar check, backup and restore
+                                   collections, presets, history, compatibility checks, the video black-bar check, backup and restore,
+                                   the search's text folding (LibrarySearchText),
+                                   the panel's persisted choices (PanelPreferences, TileZoom), the playback preflight
+                                   and the drive of a library moved to another disk (StorageVolumeMonitor)
     Lifecycle/                     why the app is quitting (QuitReason, the power-off notice), how long each quit stage takes
                                    (QuitTimings), the deadline each stage gets (QuitSupervisor, QuitMode, the exit fuse)
                                    and SIGTERM/SIGHUP as a quit (TerminationSignalRelay);
                                    ProcessSignals makes a broken pipe a write error;
                                    the one-copy-per-library lock and the second launch's hand-over
                                    (InstanceLock, SingleInstance)
-    Localization/                  AppLanguage.swift: shipped-language registry and the language preference store
+    Keychain/                      KeychainGenericPassword: the login-keychain item the pixiv and Steam sign-ins are kept in
+    Localization/                  AppLanguage.swift: shipped-language registry and the language preference store;
+                                   on-device translation (OnDeviceTranslating, SystemTranslation, TranslationSessionHost)
     LockScreen/                    lock-screen selection overrides, extension registration and configuration publishing
     NativeVideo/                   native video backend: the AVFoundation player and the WebM player's window, the
-                                   host, and the format check Apply uses (the admission rule, the layout rules
-                                   and the WebM player itself are in Shared/)
+                                   host, the format check Apply uses (the admission rule, the layout rules
+                                   and the WebM player itself are in Shared/), and the hev1 retag with its
+                                   cache of corrected copies (HevcSampleEntryRetag, DerivedVideoCache)
+    Network/                       ConnectionInterrupted: a connection the network cut off or refused (TLS handshake,
+                                   reset, refused, timed out, unresolved name), explained as a proxy routing problem
+                                   for pixiv, the Workshop and the sign-in windows
     Pixiv/                         pixiv browsing, sign-in session, downloads and still-wallpaper packaging
     Playlist/                      per-display playlists: model, planner, store and the scheduler that switches wallpapers
     Preview/                       isolated live preview inputs, lifecycle, WebKit and scene/video surfaces
-    Steam/                         SteamCMD runtime discovery and setup state
+    Steam/                         SteamCMD runtime discovery and setup state; the app's own Steam client for
+                                   QR-code sign-ins (QR sign-in, connection manager, depot content)
     Support/                       the one-time prompts: support after a downloaded wallpaper is applied,
-                                   the later star request and the performance data question
+                                   the later star request, the performance data question, the
+                                   subscriptions offer and the Discord invitation
     SystemMedia/                   shared now-playing session (MediaRemote, Music/Spotify
                                    AppleScript fallback) and artwork for Web and Scene media integration
     Telemetry/                     Send performance data: report schema, frame windows, local spool, upload;
@@ -63,18 +85,22 @@ App/                               WallpaperMachine application target sources o
                                    owns the app's copies under <support>/UserAssets/ and the derived,
                                    regenerable <project>/.mwe-user-assets/ bridge a page can read
     WebWallpaper/                  WKWebView host windows and page protocol for web wallpapers
-    Workshop/                      Workshop query model and sources, browse store, downloader and queue
+    Workshop/                      Workshop query model and sources, browse store, downloader and queue,
+                                   searches typed in another language sent in English (WorkshopSearchTranslator,
+                                   WorkshopSearchLanguage)
   ViewModels/                      BridgeStore and editor draft state; observable, no view code
   Views/ControlPanel/              the SwiftUI control panel: root view, navigation types, window factory and
                                    reopen state, and the AppKit sign-in, preview and what's-new windows
     Model/                         PanelController, its typed actions and derived state (PanelController+<Group>.swift),
                                    presentation, store revisions, error banner, action coordinator, dialogs, links
-    Shell/                         root view, tabs, detail column (router, toolbar, banners, Filters sidebar, inspector), Now Playing bar
+    Shell/                         root view, tabs, detail column (router, toolbar, banners, Filters sidebar, inspector), Now Playing bar,
+                                   the .translationTask that lends translation sessions (TranslationTaskHost)
     Library/ Inspector/            the Installed page and the installed wallpaper's inspector
     Discover/ Downloads/           the Steam Workshop page and its inspector; the downloads button, list and dialog
     Pixiv/                         the pixiv page, its inspector and toolbar pill
-    Settings/                      Settings infrastructure (rows, groups, search) and the eleven sections
+    Settings/                      Settings infrastructure (rows, groups, search) and the twelve sections
     Welcome/                       the first-run guide and the support prompt
+    MenuBar/                       the menu bar panel: its popover, controller and view
     Components/ Theme/             shared views; accent and surface palettes
     Localization/ Images/          PanelLocale and L(); the image pipeline and animated preview
   Resources/                       Info.plist, string catalogs, Assets.xcassets (tray icon, Dock icon image sets),
@@ -88,7 +114,9 @@ Shared/                            contracts compiled into both targets: lock-sc
                                    opening (WebMPlayer, WebMOpening), the recovery budget, and the lock-screen
                                    video planner and player
 Resources/StarterWallpaper/        bundled sample wallpaper (Aurora.mp4, preview.jpg, project.json)
-Resources/ReleaseBanners/          bundled release banners, x.y.z.jpg and x.y.z.zh-Hans.jpg (or .png), shown by What's New and the release page
+Resources/ReleaseBanners/          release banners, x.y.z.jpg, x.y.z.zh-Hans.jpg and x.y.z.ko.jpg (or .png), shown in CHANGELOG.md and on the release page
+Resources/ReleaseNotes/            developer's notes, x.y.z.md, x.y.z.zh-Hans.md and x.y.z.ko.md, printed as written in a version's notes
+Resources/Seasonal/                source pictures of seasonal looks that scripts/brand.py composes (halloween-night.jpg)
 Tests/Unit/<Domain>/               WallpaperMachineTests, one folder per App/Services domain plus Panel for
                                    Views/ControlPanel; hosted in the app binary
 Tests/UI/                          WallpaperMachineUITests; desktop-driving XCUITest suite
@@ -100,8 +128,12 @@ scripts/                           developer command line; Python only
   lib/                             shared helpers (glyphs.py status markers, paths.py repo paths,
                                    xcode.py quiet runner: full tool output to artifacts/, failures on screen,
                                    dmg.py drag-to-install disk image, bundle_contract.py signed entitlements and
-                                   Info.plist keys of the built app, wordmark.py logo outlines for brand.py)
+                                   Info.plist keys of the built app, notary.py Apple notarization and stapling,
+                                   wordmark.py logo outlines for brand.py,
+                                   localization.py the language registry and string-format rules the catalog
+                                   test and crowdin_sync.py share)
   tests/                           unit tests for the scripts, run by scripts/test.py
+Packaging/WallpaperMachine.entitlements  the host app's hardened-runtime entitlements; scripts/package.py signs them in
 Packaging/dmg/                     disk-image window background (background.png, @2x); generated by scripts/brand.py --dmg
 Renderer/                          the renderer, this project's code: the Rust workspace and the C++ scene engine with
                                    the static libraries its CMake includes; .gitignore keeps cargo's target/ out
@@ -145,18 +177,20 @@ ThirdParty/                        vendored third-party code only, each item und
   miniaudio/                       miniaudio 0.11.21 (public domain or MIT-0); the engine's audio output device
   naga/                            naga 29.0.3 (MIT OR Apache-2.0, used under MIT), patched so codespan-reporting is
                                    optional (PATCHES.md lists the differences); a path dependency of Renderer/Cargo.toml
-  stb_image/                       stb_image 2.26 (public domain or MIT); the engine's image decoder
-  stb_vorbis/                      stb_vorbis 1.22 (public domain or MIT, unchanged); the Ogg Vorbis decoder
+  stb_image/                       stb_image 2.30 (public domain or MIT, patched: PATCHES.md); the engine's image decoder
+  stb_vorbis/                      stb_vorbis 1.22 (public domain or MIT, patched: PATCHES.md); the Ogg Vorbis decoder
   received-licenses/               the GPLv2 texts the imported renderer and scene engine arrived under (a record; that
                                    code is only in Git history)
 artifacts/                         Git-ignored: all test and verification evidence
 build/                             Git-ignored: Xcode derived data and built products only
-.github/FUNDING.yml                the repository's Sponsor button; links the website's pricing page
+.github/FUNDING.yml                the repository's Sponsor button; links MMFoundation's Open Collective
 .github/ISSUE_TEMPLATE/            issue forms (bug report, feature request) and the chooser's links (config.yml);
                                    blank issues stay on for the prefilled link of app versions up to 1.6.0
 .github/pull_request_template.md   the pull-request description outline and checklist
-.github/workflows/                 CI: build.yml, release.yml, version.yml, warm-caches.yml, supporters.yml,
-                                   codeql.yml, claude.yml and claude-code-review.yml
+.github/workflows/                 CI: build.yml, release.yml, version.yml, rehearsal.yml, warm-caches.yml, supporters.yml,
+                                   crowdin.yml (catalog sync with Crowdin), checks.yml, codeql.yml, claude.yml,
+                                   claude-code-review.yml and steamcmd-canary.yml (daily check of Valve's newest
+                                   SteamCMD, scripts/steamcmd_canary.py)
 .github/actions/prepare-build/     composite action: Xcode, Homebrew packages and the build caches
 ```
 

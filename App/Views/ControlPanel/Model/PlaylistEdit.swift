@@ -10,6 +10,8 @@ enum PlaylistEdit: Equatable, Sendable {
   case collection(id: String)
   case order(PlaylistOrder)
   case interval(IntervalChoice)
+  /// Whether a timed change waits for the video on screen to finish.
+  case waitsForClipEnd(Bool)
   /// An installed wallpaper that can play, or nil to leave the day as it is.
   case dayWallpaper(String?)
   case nightWallpaper(String?)

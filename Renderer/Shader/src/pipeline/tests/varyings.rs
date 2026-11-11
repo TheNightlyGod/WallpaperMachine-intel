@@ -58,7 +58,7 @@ fn locations_follow_the_fragment_declaration_order_in_both_stages() {
 fn an_array_between_two_scalars_takes_a_location_per_element() {
     let decls = "varying float v_A;\nvarying vec2 v_Taps[3];\nvarying float v_B;";
     let writes = "  v_A = 1.0;\n  v_Taps[0] = a_Coord;\n  v_Taps[1] = a_Coord;\n  v_Taps[2] = a_Coord;\n  v_B = 2.0;";
-    let p = ok(&vert(decls, writes), &frag(decls, "  c = vec4(v_A + v_B + v_Taps[2].x);"));
+    let p = ok(&vert(decls, writes), &frag(decls, "  c = CAST4(v_A + v_B + v_Taps[2].x);"));
     let f = legalized(&p, StageKind::Fragment);
     assert_eq!((declared_location(&f, "v_A"), declared_location(&f, "v_Taps"), declared_location(&f, "v_B")), (Some(0), Some(1), Some(4)));
     let (vertex_outputs, fragment_inputs) = interface_of(&p);
@@ -74,7 +74,7 @@ fn macro_sized_arrays_follow_the_combo() {
     for taps in [2u32, 3, 6] {
         let decls = "varying vec2 v_Taps[TAPS];\nvarying float v_After;";
         let writes = "  for (int i = 0; i < TAPS; i++) { v_Taps[i] = a_Coord; }\n  v_After = 1.0;";
-        let p = Req::new(&vert(decls, writes), &frag(decls, "  c = vec4(v_After);")).combo("TAPS", &taps.to_string()).ok();
+        let p = Req::new(&vert(decls, writes), &frag(decls, "  c = CAST4(v_After);")).combo("TAPS", &taps.to_string()).ok();
         let f = legalized(&p, StageKind::Fragment);
         assert_eq!(declared_location(&f, "v_Taps"), Some(0), "TAPS={taps}");
         assert_eq!(declared_location(&f, "v_After"), Some(taps), "TAPS={taps}");
@@ -87,7 +87,7 @@ fn macro_sized_arrays_follow_the_combo() {
 fn a_macro_redefined_between_declarations_gives_each_its_own_size() {
     let both = |tail: &str| format!("#define N 3\nvarying vec2 a[N];\n#undef N\n#define N 5\nvarying vec2 b[N];\nvarying vec2 c_;\n{tail}");
     let writes = "  for (int i = 0; i < 3; i++) { a[i] = a_Coord; }\n  for (int i = 0; i < 5; i++) { b[i] = a_Coord; }\n  c_ = a_Coord;";
-    let p = ok(&vert(&both(""), writes), &frag(&both(""), "  c = vec4(a[2].x + b[4].x + c_.x);"));
+    let p = ok(&vert(&both(""), writes), &frag(&both(""), "  c = CAST4(a[2].x + b[4].x + c_.x);"));
     let f = legalized(&p, StageKind::Fragment);
     assert_eq!((declared_location(&f, "a"), declared_location(&f, "b"), declared_location(&f, "c_")), (Some(0), Some(3), Some(8)));
     assert!(f.contains("a[3]") && f.contains("b[5]"), "{f}");
@@ -124,7 +124,7 @@ fn every_rejected_bound_form_fails_naming_the_text_before_locations_exist() {
     ];
     for (before, bound, after) in cases {
         let decls = format!("{before}varying vec2 v_Bad[{bound}];\n{after}");
-        let e = err(&vert(&decls, "  gl_Position = vec4(0.0);"), &frag(&decls, "  c = vec4(0.0);"));
+        let e = err(&vert(&decls, "  gl_Position = CAST4(0.0);"), &frag(&decls, "  c = CAST4(0.0);"));
         let text = e.to_string();
         assert!(text.contains(bound) && text.contains("bound"), "{bound}: {text}");
         assert!(matches!(e.category(), ErrorCategory::Legalization | ErrorCategory::InvalidRequest), "{bound}: {e}");
@@ -163,7 +163,7 @@ fn a_narrow_producer_that_the_vertex_stage_uses_beyond_the_prefix_is_refused() {
     for body in [
         "  v_Warp.zw = a_Coord;",             // writes components that would be discarded
         "  v_Warp.xy = a_Coord;\n  gl_Position = v_Warp;", // reads its own output as a whole
-        "  v_Warp = vec4(a_Coord, 0.0, 1.0);\n  v_Warp += vec4(1.0);", // compound assignment
+        "  v_Warp = vec4(a_Coord, 0.0, 1.0);\n  v_Warp += CAST4(1.0);", // compound assignment
     ] {
         let e = pair("varying vec4 v_Warp;", body, "varying vec2 v_Warp;", "  c = vec4(v_Warp, 0.0, 1.0);").unwrap_err();
         let text = cross_stage(&e).message.clone();
@@ -179,7 +179,7 @@ fn a_narrow_consumer_takes_the_vertexs_type() {
     let p = pair("varying vec2 v_Flow;", "  v_Flow = a_Coord;", "varying vec3 v_Flow;", "  c = vec4(v_Flow.xy, 0.0, 1.0);").unwrap();
     agreed(&p, "v_Flow", "vec2", 0);
     // Reading the component the producer lacks, or the whole variable, is a mismatch.
-    for read in ["  c = vec4(v_Flow.z);", "  c = vec4(v_Flow, 1.0);"] {
+    for read in ["  c = CAST4(v_Flow.z);", "  c = vec4(v_Flow, 1.0);"] {
         let e = pair("varying vec2 v_Flow;", "  v_Flow = a_Coord;", "varying vec3 v_Flow;", read).unwrap_err();
         let text = cross_stage(&e).message.clone();
         assert!(text.contains("v_Flow") && text.contains("vec2") && text.contains("vec3"), "{read}: {text}");
@@ -202,17 +202,17 @@ fn a_widened_consumer_keeps_the_producers_width_in_every_combo() {
 
 #[test]
 fn an_array_pair_that_differs_in_width_is_a_mismatch() {
-    let e = pair("varying vec4 v_Arr[2];", "  v_Arr[0] = vec4(1.0);\n  v_Arr[1] = vec4(1.0);", "varying vec2 v_Arr[2];", "  c = vec4(v_Arr[0], v_Arr[1]);").unwrap_err();
+    let e = pair("varying vec4 v_Arr[2];", "  v_Arr[0] = CAST4(1.0);\n  v_Arr[1] = CAST4(1.0);", "varying vec2 v_Arr[2];", "  c = vec4(v_Arr[0], v_Arr[1]);").unwrap_err();
     assert!(cross_stage(&e).message.contains("v_Arr"));
 }
 
 #[test]
 fn different_non_vector_types_are_a_mismatch_and_equal_spellings_agree() {
-    let e = pair("varying ivec2 v_Id;", "  v_Id = ivec2(1);", "varying vec2 v_Id;", "  c = vec4(v_Id, 0.0, 1.0);").unwrap_err();
+    let e = pair("varying int2 v_Id;", "  v_Id = int2(1,1);", "varying vec2 v_Id;", "  c = vec4(v_Id, 0.0, 1.0);").unwrap_err();
     let text = cross_stage(&e).message.clone();
-    assert!(text.contains("v_Id") && text.contains("ivec2") && text.contains("vec2"), "{text}");
+    assert!(text.contains("v_Id") && text.contains("int2") && text.contains("vec2"), "{text}");
     // `float1` and `float` are the same type.
-    let p = pair("varying float1 v_S;", "  v_S = 1.0;", "varying float v_S;", "  c = vec4(v_S);").unwrap();
+    let p = pair("varying float1 v_S;", "  v_S = 1.0;", "varying float v_S;", "  c = CAST4(v_S);").unwrap();
     agreed(&p, "v_S", "float", 0);
 }
 
@@ -291,9 +291,9 @@ fn a_fragment_only_varying_becomes_a_zero_initialised_vertex_output() {
         ("varying float v_Only;", "float", "v_Only = 0.0;"),
         ("varying vec2 v_Only;", "vec2", "v_Only = vec2(0.0);"),
         ("varying vec4 v_Only;", "vec4", "v_Only = vec4(0.0);"),
-        ("flat varying ivec3 v_Only;", "ivec3", "v_Only = ivec3(0);"),
+        ("flat varying int3 v_Only;", "ivec3", "v_Only = ivec3(0);"),
     ] {
-        let p = ok(&vert("", ""), &frag(decl, "  c = vec4(float(v_Only.x));").replace("v_Only.x", if ty == "float" { "v_Only" } else { "v_Only.x" }));
+        let p = ok(&vert("", ""), &frag(decl, "  c = CAST4(float(v_Only.x));").replace("v_Only.x", if ty == "float" { "v_Only" } else { "v_Only.x" }));
         let v = legalized(&p, StageKind::Vertex);
         assert_eq!(declared_type(&v, "v_Only").as_deref(), Some(ty), "{v}");
         assert!(main_body_start(&v).trim_start().starts_with(zero), "{ty}: the zero comes first:\n{v}");
@@ -324,7 +324,7 @@ fn a_generated_name_never_collides_with_the_vertex_stage() {
     let vertex = "attribute vec3 a_Position;
 attribute vec2 x;
 uniform vec4 u_Name;
-vec2 g_Local = vec2(1.0);
+vec2 g_Local = CAST2(1.0);
 float _we_out_x = 1.0;
 float v_Func() { return u_Name.x + g_Local.x + _we_out_x; }
 void main() { gl_Position = vec4(a_Position, v_Func() + x.x); }
@@ -354,7 +354,7 @@ void main() { gl_FragColor = vec4(x + u_Name + g_Local + _we_out_x, v_Func, 1.0)
 fn a_vertex_only_varying_stays_and_the_fragment_never_mentions_it() {
     let p = ok(
         &vert("varying vec4 v_Spare;
-varying vec2 v_Tex;", "  v_Spare = vec4(1.0);
+varying vec2 v_Tex;", "  v_Spare = CAST4(1.0);
   v_Tex = a_Coord;"),
         &frag("varying vec2 v_Tex;", "  c = vec4(v_Tex, 0.0, 1.0);"),
     );
@@ -382,7 +382,7 @@ fn a_position_alias_and_a_redeclared_builtin_take_no_location() {
 fn matched_narrowed_widened_synthesized_and_vertex_only_varyings_share_numbers_in_the_text() {
     let vertex = vert(
         "varying vec2 v_Matched;\nvarying vec4 v_Narrowed;\nvarying vec4 v_Widened;\nvarying vec4 v_VertexOnly;",
-        "  v_Matched = a_Coord;\n  v_Narrowed.xy = a_Coord;\n  v_Widened = vec4(a_Coord, a_Coord);\n  v_VertexOnly = vec4(1.0);",
+        "  v_Matched = a_Coord;\n  v_Narrowed.xy = a_Coord;\n  v_Widened = vec4(a_Coord, a_Coord);\n  v_VertexOnly = CAST4(1.0);",
     );
     let fragment = frag(
         "varying vec2 v_Matched;\nvarying vec2 v_Narrowed;\nvarying vec2 v_Widened;\nvarying vec3 v_Synthesized;",
@@ -438,7 +438,7 @@ fn no_two_varyings_of_a_generated_program_share_a_location() {
         for &i in &order {
             let (name, w, array, in_v, in_f) = &vars[i];
             let suffix = array.map(|n| format!("[{n}]")).unwrap_or_default();
-            let zero = |w: usize| if w == 1 { "0.0".to_string() } else { format!("{}(0.0)", ty(w)) };
+            let zero = |w: usize| if w == 1 { "0.0".to_string() } else { format!("CAST{w}(0.0)") };
             if *in_v {
                 vd.push_str(&format!("varying {} {name}{suffix};\n", ty(*w)));
                 match array {
@@ -452,7 +452,7 @@ fn no_two_varyings_of_a_generated_program_share_a_location() {
                     Some(_) => format!("{name}[1]"),
                     None => name.clone(),
                 };
-                fb.push_str(&format!("  c += vec4({}{});\n", read, if *w == 1 { "" } else { ".x" }));
+                fb.push_str(&format!("  c += CAST4({}{});\n", read, if *w == 1 { "" } else { ".x" }));
             }
         }
         let p = Req::new(&vert(&vd, &vb), &frag(&fd, &fb)).ok();

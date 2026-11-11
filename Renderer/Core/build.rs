@@ -17,8 +17,11 @@ const WATCHED_VARIABLES: [&str; 4] = [
 ];
 
 /// Static archives, each listed before the archives it depends on.
-const STATIC_ARCHIVES: [&str; 15] = [
+const STATIC_ARCHIVES: [&str; 18] = [
     "wescene-renderer",
+    "harfbuzz",
+    "msdfgen",
+    "freetype",
     "wpAudio",
     "wmSound",
     "stb_vorbis",
@@ -35,9 +38,10 @@ const STATIC_ARCHIVES: [&str; 15] = [
     "wmSurface",
 ];
 
-const SHARED_LIBRARIES: [&str; 4] = ["c++", "lz4", "freetype", "qjs"];
+/// The last four are FreeType's: Homebrew's libpng and Brotli decoder, and macOS's bzip2 and zlib.
+const SHARED_LIBRARIES: [&str; 7] = ["c++", "lz4", "qjs", "png16", "brotlidec", "bz2", "z"];
 
-const FRAMEWORKS: [&str; 12] = [
+const FRAMEWORKS: [&str; 13] = [
     "Accelerate",
     "AppKit",
     "AudioToolbox",
@@ -47,13 +51,14 @@ const FRAMEWORKS: [&str; 12] = [
     "Foundation",
     "IOSurface",
     "Metal",
+    "MetalFX",
     "OpenGL",
     "QuartzCore",
     "VideoToolbox",
 ];
 
 /// Folders of the CMake build tree (relative to it) that hold the archives above.
-const ARCHIVE_FOLDERS: [&str; 15] = [
+const ARCHIVE_FOLDERS: [&str; 16] = [
     "src",
     "src/Audio",
     "src/Looper",
@@ -65,6 +70,7 @@ const ARCHIVE_FOLDERS: [&str; 15] = [
     "src/Scene/MetalRender",
     "src/Utils",
     "Dependencies",
+    "Dependencies/freetype",
     "Renderer/Sound",
     "Renderer/Media",
     "Renderer/Media/Apple",

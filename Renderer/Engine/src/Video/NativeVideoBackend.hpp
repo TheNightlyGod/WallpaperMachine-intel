@@ -38,6 +38,7 @@ public:
     void discardFrame() override;
     bool seek(double wrapped_seconds, uint64_t loop_index, std::string* error) override;
     [[nodiscard]] uint64_t loopIndex() const override;
+    void skipDisposableBefore(double absolute_seconds) override;
     void cancel() override;
     void close() override;
 

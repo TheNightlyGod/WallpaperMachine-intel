@@ -34,6 +34,7 @@ fn report(display_id: u32, handle: u64) -> SceneRuntimeReport {
         video_path: SceneVideoPath::None,
         optimization_applied: Some(true),
         surface: None,
+        quality_in_force: None,
     }
 }
 

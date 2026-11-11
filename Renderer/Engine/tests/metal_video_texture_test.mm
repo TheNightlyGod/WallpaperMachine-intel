@@ -8,10 +8,12 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "Image.hpp"
 #include "Interface/IImageParser.h"
@@ -296,10 +298,10 @@ protected:
 
     /// One whole renderer frame: import, then let the GPU finish so the test
     /// can read what was written.
-    bool RunFrame(std::string* error)
+    bool RunFrame(std::string* error, bool* imported = nullptr)
     {
         id<MTLCommandBuffer> command = [queue commandBuffer];
-        const bool           ok      = textures->beginFrame(scene, command, error);
+        const bool           ok      = textures->beginFrame(scene, command, error, imported);
         [command commit];
         [command waitUntilCompleted];
         return ok;
@@ -546,6 +548,67 @@ TEST_F(MetalVideoTexture, AGenerationIsConvertedOnlyOnce)
     EXPECT_EQ(textures->importsForTests(), 1u);
 }
 
+TEST_F(MetalVideoTexture, AFrameSaysWhetherItTookAVideoFrameAndEveryImportIsNumberedAnew)
+{
+    // What the renderer's reuse and present skip stand on: a frame that took
+    // nothing says so, and the number its consumers fold changes with every
+    // import -- a new generation, the same one for a changed demand, a frame
+    // whose planes are sampled directly -- and with nothing else.
+    auto source = std::make_shared<FakeVideoSource>(16, 16);
+    std::string error;
+    ASSERT_TRUE(textures->prepareForTests("video", source, &error)) << error;
+    EXPECT_EQ(textures->importSerial("video"), 0u) << "nothing has been imported yet";
+    EXPECT_EQ(textures->importSerial("not-a-video"), 0u);
+
+    source->produce(128, 128, 128);
+    bool imported = false;
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported);
+    const auto first = textures->importSerial("video");
+    EXPECT_NE(first, 0u);
+
+    // The same generation again: nothing taken, nothing encoded, same number.
+    const auto conversions = textures->conversionsEncodedForTests();
+    imported = true;
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_FALSE(imported) << "an unchanged generation was reported as a new frame";
+    EXPECT_EQ(textures->importSerial("video"), first);
+    EXPECT_EQ(textures->conversionsEncodedForTests(), conversions);
+
+    // A paused source keeps its frame although the decoder has a newer one.
+    textures->setPaused(true);
+    source->produce(64, 100, 200);
+    imported = true;
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_FALSE(imported);
+    EXPECT_EQ(textures->importSerial("video"), first);
+
+    textures->setPaused(false);
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported) << "the newer generation was taken without saying so";
+    const auto second = textures->importSerial("video");
+    EXPECT_NE(second, first);
+
+    // The same generation imported again for a demand that changed is a new
+    // input as well: its consumers now sample planes instead of an image.
+    textures->setDemand({ { "video", metal::VideoConsumerDemand { true, false } } });
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported);
+    EXPECT_EQ(textures->path("video"), metal::VideoFramePath::Nv12Direct);
+    const auto direct = textures->importSerial("video");
+    EXPECT_NE(direct, second);
+    EXPECT_NE(direct, first);
+
+    // On the direct path nothing is converted, and a new generation is still
+    // taken and still numbered anew.
+    source->produce(30, 90, 150);
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_TRUE(imported);
+    EXPECT_NE(textures->importSerial("video"), direct);
+    ASSERT_TRUE(RunFrame(&error, &imported)) << error;
+    EXPECT_FALSE(imported);
+}
+
 TEST_F(MetalVideoTexture, PausedPlaybackKeepsTheLastTexture)
 {
     auto source = std::make_shared<FakeVideoSource>(16, 16);
@@ -609,7 +672,7 @@ TEST_F(MetalVideoTexture, SurvivesReleaseWhileAFrameIsInFlight)
     }];
     [command commit];
 
-    // The frame's pixel buffer, plane wrappers and destination belong to the
+    // The frame's pixel buffer, plane textures and destination belong to the
     // command buffer now, so tearing the renderer down cannot free them.
     textures->release();
     textures.reset();
@@ -617,6 +680,69 @@ TEST_F(MetalVideoTexture, SurvivesReleaseWhileAFrameIsInFlight)
     [command waitUntilCompleted];
     EXPECT_TRUE(completed);
     EXPECT_NE(command.status, MTLCommandBufferStatusError);
+}
+
+TEST_F(MetalVideoTexture, ImportedFramesHoldDeviceMemoryOnlyWhileTheyAreInUse)
+{
+    // Every frame on a surface of its own, as a decoder's pool hands them out
+    // faster than they come back. What the device keeps for imported frames is
+    // bounded by the frames still sampled or in flight, never by how many were
+    // imported: a picture that has been drawn and replaced holds nothing. One
+    // import path per decoder output, each plane mapping its own surface.
+    constexpr uint32_t kSide    = 1024;
+    constexpr int      kWarmup  = 4;
+    constexpr int      kImports = 48;
+    for (const OSType format : { kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                                 kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
+                                 kCVPixelFormatType_32BGRA }) {
+        SCOPED_TRACE(format);
+        auto video = std::make_unique<metal::MetalVideoTextures>();
+        video->configure(device);
+        auto source = std::make_shared<FakeVideoSource>(kSide, kSide, format);
+        const bool ten_bit = format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange;
+        const auto produce = [&] {
+            if (ten_bit) source->produceTenBit(512, 512, 512, {});
+            else source->produce(90, 120, 160);
+        };
+        produce();
+        std::string error;
+        ASSERT_TRUE(video->prepareForTests("video", source, &error)) << error;
+
+        const auto frame = [&] {
+            source->resize(kSide, kSide, format);
+            produce();
+            id<MTLCommandBuffer> command = [queue commandBuffer];
+            const bool ok = video->beginFrame(scene, command, &error);
+            [command commit];
+            [command waitUntilCompleted];
+            return ok;
+        };
+        // Destinations and pipelines are the steady state's, not the imports'.
+        for (int i = 0; i < kWarmup; ++i) ASSERT_TRUE(frame()) << error;
+        const uint64_t imports_before = video->importsForTests();
+        const auto     baseline       = static_cast<int64_t>(device.currentAllocatedSize);
+        for (int i = 0; i < kImports; ++i) ASSERT_TRUE(frame()) << error;
+        ASSERT_EQ(video->importsForTests() - imports_before, static_cast<uint64_t>(kImports));
+
+        // Completion handlers, which drop what a command buffer read, run on a
+        // thread of Metal's; give the last one a moment.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        int64_t    grown    = 0;
+        IOSurfaceRef surface = CVPixelBufferGetIOSurface(
+            static_cast<CVPixelBufferRef>(source->currentFrame().pixel_buffer));
+        ASSERT_NE(surface, nullptr);
+        const auto frame_bytes = static_cast<int64_t>(IOSurfaceGetAllocSize(surface));
+        // Two planes may each account for the whole surface; the current frame
+        // and one completing are what may still be held.
+        const int64_t bound = 2 * 2 * frame_bytes;
+        do {
+            grown = static_cast<int64_t>(device.currentAllocatedSize) - baseline;
+            if (grown <= bound) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        } while (std::chrono::steady_clock::now() < deadline);
+        EXPECT_LE(grown, bound) << kImports << " imports of " << frame_bytes << "-byte frames grew the device's "
+                                << "allocations by " << grown << " bytes";
+    }
 }
 
 TEST_F(MetalVideoTexture, OwnsTheKeysItPreparedUntilItIsReleased)

@@ -119,7 +119,10 @@ whose stored copy is now the only one; the preset attachments retained under
 `PresetAssets` are never candidates either. A missing manifest is distinct from an
 unreadable, damaged, foreign or unsupported manifest; the latter blocks purging or
 replacing that wallpaper's files, is logged and skipped, and the purge continues
-with the others.
+with the others. The same button removes the playable copies of `hev1` videos that nothing is
+playing or reading now ([performance](performance.md#hevc-tagged-hev1)); a clip whose copy it
+removed gets a new one the next time it opens. A clone shares its blocks with the clip, so only
+full copies add to the amount it reports.
 
 ## Lock screen and screen saver
 
@@ -157,8 +160,13 @@ was never imported is noted as used in place from its original path, and moving 
 deleting it there breaks the wallpaper. A pick that resolves in neither place gets a
 visible alert and *Reselect…* in place of *Choose…*.
 
-Both persist through `setPropertyPath`; *Clear* sends `nil` and the engine writes the
-property's own default back. A choice the app cannot honour (a wallpaper folder that
+Both persist through `setPropertyPath`; *Clear* sends `nil` and the property is empty
+again. A `file` or `directory` property has no default but empty: the path a
+`project.json` names for one (an author's, or a [Workshop preset's](workshop-downloads.md#workshop-presets))
+is read as nothing, so no folder of the user's is imported, watched or handed to a page
+until the user picks it here (`ProjectProperty::default_value` in
+`Renderer/Bridge/src/project/manifest.rs`). Picking the very path the project named is
+an ordinary pick. A choice the app cannot honour (a wallpaper folder that
 is missing or read-only, so nothing can be staged inside it) is reported beside that
 control rather than in the window-wide banner, and the path is not sent. `texture` and
 `scenetexture` properties are a separate kind: they keep the scene texture picker and

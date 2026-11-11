@@ -138,7 +138,7 @@ inline void animationRecord(Bytes& b, int id, const std::string& name, float fps
     }
     b.u32(0);                          // no translation track
     b.u8(0);                           // no blend curves
-    b.u8(0);                           // no timed events
+    b.u8(0);                           // no morph channels
     for (int i = 0; i < 6; ++i) b.f32(0.0f); // bounding box
     b.u8(0);                           // no scalar curves
     b.u32(0);                          // no events

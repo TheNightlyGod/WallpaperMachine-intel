@@ -1,4 +1,5 @@
 #include "support/gpu_scene.hpp"
+#include <atomic>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -84,6 +85,7 @@ struct GpuScene::Impl {
     float    pointer_x { 0.5f };
     float    pointer_y { 0.5f };
     bool     cursor_was_in_window { false };
+    std::shared_ptr<std::atomic<bool>> display_changed {std::make_shared<std::atomic<bool>>(false)};
     uint64_t frames { 0 };
     int      compiles { 0 };
     bool     released { false };
@@ -153,11 +155,13 @@ bool GpuScene::Impl::Load()
     }
 
     SceneParseRequest request;
+    request.quality = options.quality;
     request.scene_id                    = resolved.scene_source.scene_id;
     request.project_path                = project_file;
     request.project_properties          = &merged;
     request.authored_project_properties = &authored;
     request.pkg_version                 = options.package_version;
+    request.user_options                = options.user_options;
 
     Random::seed(options.seed);
     WPSceneParser parser;
@@ -171,8 +175,8 @@ bool GpuScene::Impl::Load()
                                                              static_cast<float>(options.height)));
     }
     scene->vfs = std::move(vfs);
-    if (!scene->shader_compile_error.empty()) {
-        return Fail("a shader of the scene did not compile: " + scene->shader_compile_error);
+    if (!scene->shader_fallbacks.empty()) {
+        return Fail("a shader of the scene did not compile: " + scene->shader_fallbacks.front());
     }
     return true;
 }
@@ -200,6 +204,10 @@ bool GpuScene::Impl::OpenRenderer()
     info.width                = static_cast<uint16_t>(options.width);
     info.height               = static_cast<uint16_t>(options.height);
     info.display_scale_factor = options.backing_scale;
+    info.display_characteristics = options.display_characteristics;
+    info.display_hdr_output_allowed = options.display_hdr_output_allowed;
+    info.display_id = options.display_id;
+    info.redraw_callback = [flag=display_changed] { flag->store(true); };
     auto box                  = poster;
     info.wants_poster         = [box] {
         std::lock_guard<std::mutex> guard(box->mutex);
@@ -228,7 +236,7 @@ bool GpuScene::Impl::OpenRenderer()
 bool GpuScene::Impl::CompileGraph()
 {
     // Targets are allocated once, at the size they will keep.
-    scene->render_scale = 1.0;
+    scene->render_scale = options.render_scale;
     scene->resolution   = CurrentSceneResolution();
     auto next           = sceneToRenderGraph(*scene);
     if (next == nullptr) return Fail("the scene produced no render graph");
@@ -247,6 +255,7 @@ bool GpuScene::Impl::CompileGraph()
 // One frame, in the order the host's frame handler runs it.
 bool GpuScene::Impl::StepOne()
 {
+    if (display_changed->exchange(false) && render && scene) render->RefreshDisplayOutput(*scene);
     Scene&      current = *scene;
     auto* const updater = current.shaderValueUpdater.get();
     auto* const runtime = current.runtime.get();
@@ -275,6 +284,7 @@ bool GpuScene::Impl::StepOne()
         runtime->SetCursorButtons(0, 0, 0);
         cursor_was_in_window = runtime->DispatchCursorFrameEvents(cursor_was_in_window);
     }
+    if (step > 0.0) current.targetFps = static_cast<uint32_t>(std::lround(1.0 / step));
     if (current.paritileSys != nullptr) current.paritileSys->Emitt();
     if (runtime != nullptr) {
         runtime->Tick(step);

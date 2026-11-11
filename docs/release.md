@@ -1,9 +1,11 @@
 # Versioning and releases
 
 Version numbers, the pipeline that publishes a build, the notes it writes, and what
-the in-app updater expects of a release. Build mechanics live in [build.md](build.md). To cut
+the in-app updater and the [Homebrew cask](#homebrew) expect of a release. Build mechanics
+live in [build.md](build.md). To cut
 a release, follow the [checklist](#checklist-for-a-release); when one fails, see
-[Recovering a failed release](#recovering-a-failed-release).
+[Recovering a failed release](#recovering-a-failed-release); for an urgent fix that
+must not wait for what `main` holds, see [Hotfix releases](#hotfix-releases).
 
 ## Source of truth
 
@@ -61,65 +63,91 @@ omitted nothing is written, which makes it safe to inspect a planned bump.
 ## Release notes and the changelog
 
 A version's notes are written once, when it is cut, into its
-[`CHANGELOG.md`](../CHANGELOG.md) section. The app bundles that file. The
-release page uses only the English notes from the current section; the app keeps
-all translations. [`scripts/release_notes.py`](../scripts/release_notes.py)
-does both halves; GitHub's auto-generated notes are not used. Once a version's
-tag exists, its section is not extended: the tag's build already bundled it, so
-a change that lands later belongs in the next release's notes.
+[`CHANGELOG.md`](../CHANGELOG.md) section. The update manifest carries the newest
+sections, in every language, to the app's update window
+([below](#what-the-in-app-updater-expects)); the release page uses only the English
+notes from the current section. [`scripts/release_notes.py`](../scripts/release_notes.py)
+does both halves; GitHub's auto-generated notes are not used. Once a version's tag
+exists, its section is not extended: the tag's release already published it, so a
+change that lands later belongs in the next release's notes.
 
-From 1.5.7, a bundled changelog section has three languages, in this order, and
-nothing else at `###`; each language may open with its banner line. Earlier
-sections keep their original English and Simplified Chinese notes unchanged:
+The layout is conventional-changelog's, the one standard-version writes: a heading
+that links the version to its comparison with the previous one and gives the release
+date, then category headings, and bullets that end with their issue and commit
+links. From 1.5.7 a section has three languages, in this order, and nothing else at
+`###`; each language may open with its banner line. Earlier sections keep their
+original English and Simplified Chinese notes:
 
 ```markdown
+## [1.6.2](https://github.com/WallpaperMachine/WallpaperMachine/compare/v1.6.1...v1.6.2) (2026-10-24)
+
 ### English
 
-![WallpaperMachine 1.5.7](Resources/ReleaseBanners/1.5.7.jpg)
+![WallpaperMachine 1.6.2](Resources/ReleaseBanners/1.6.2.jpg)
 
 One or two sentences on what the release means, omitted when the lists say it.
 
-#### New
+#### Bug Fixes
 
-- One change, one line
+- Long names on narrow tiles now shrink to fit (closes [#76](https://github.com/WallpaperMachine/WallpaperMachine/issues/76)) ([bb75725](https://github.com/WallpaperMachine/WallpaperMachine/commit/bb75725338d4ab37a649973457c0357900b93355))
 
 ### 简体中文
 
-![WallpaperMachine 1.5.7](Resources/ReleaseBanners/1.5.7.zh-Hans.jpg)
+![WallpaperMachine 1.6.2](Resources/ReleaseBanners/1.6.2.zh-Hans.jpg)
 
 同样的一两句。
 
-#### 新增
+#### 问题修复
 
-- 同一变更的简体中文
+- 较窄磁贴上的长名称现在会缩小以完整显示 (closes [#76](https://github.com/WallpaperMachine/WallpaperMachine/issues/76)) ([bb75725](https://github.com/WallpaperMachine/WallpaperMachine/commit/bb75725338d4ab37a649973457c0357900b93355))
 
 ### 한국어
 
-![WallpaperMachine 1.5.7](Resources/ReleaseBanners/1.5.7.ko.jpg)
+![WallpaperMachine 1.6.2](Resources/ReleaseBanners/1.6.2.ko.jpg)
 
 같은 내용을 한두 문장으로 요약합니다.
 
-#### 새로운 기능
+#### 버그 수정
 
-- 같은 변경 사항을 한국어로 설명합니다
-
-**Full changelog**: https://github.com/owner/repo/compare/v1.5.6...v1.5.7
+- 좁은 타일의 긴 이름이 이제 줄어들어 전체가 표시됩니다 (closes [#76](https://github.com/WallpaperMachine/WallpaperMachine/issues/76)) ([bb75725](https://github.com/WallpaperMachine/WallpaperMachine/commit/bb75725338d4ab37a649973457c0357900b93355))
 ```
 
-Category headings inside a language are `####`. The compare link follows all
-blocks; the app ignores it. The headings are:
+The heading is `## [x.y.z](<compare link>) (YYYY-MM-DD)`; a first release, with no
+earlier tag, links `https://github.com/<repository>/commits/vx.y.z`. Sections no
+longer end in a `**Full changelog**` line: the heading carries that link. The
+sections written before this layout were converted with their own compare links,
+older `bobbyhuang-dev` addresses included. The script still reads the older
+`## x.y.z — YYYY-MM-DD` heading, but always writes the linked one.
+
+Category headings inside a language are `####`, in this order:
 
 | Section | `####` English | `####` 简体中文 | `####` 한국어 |
 |---|---|---|---|
 | highlights | Highlights | 亮点 | 주요 변경 사항 |
-| breaking | Breaking changes | 不兼容变更 | 호환되지 않는 변경 사항 |
-| new | New | 新增 | 새로운 기능 |
-| improved | Improved | 改进 | 개선 사항 |
-| fixed | Fixed | 修复 | 수정됨 |
+| breaking | Breaking Changes | 不兼容变更 | 호환되지 않는 변경 사항 |
+| new | Features | 新功能 | 새로운 기능 |
+| improved | Improvements | 改进 | 개선 사항 |
+| fixed | Bug Fixes | 问题修复 | 버그 수정 |
+| performance (listings and older sections only) | Performance Improvements | 性能改进 | 성능 개선 |
+| other (listings and older sections only) | Other Changes | 其他变更 | 기타 변경 사항 |
 
 Highlights appear only in feature releases: the three to five changes that define the
 release, which the other sections still list. A feature release is `x.y.0`, or a patch
 whose notes start below `x.y` because it replaces an `x.y.0` that was never published.
+
+Every bullet ends with the same links in all three languages, written by the script
+from the commits the bullet describes, never by the model:
+` (closes [#N](https://github.com/<repository>/issues/N), closes [#M](…))` when those
+commits close issues, then ` ([abc1234](https://github.com/<repository>/commit/<full sha>))`,
+several commits comma-separated inside one pair of parentheses. The link text is the
+7-character short hash, and the word `closes` stays English in every language: it is
+GitHub's keyword. Closing references come from the full messages of the bullet's
+commits: GitHub's keywords, case-insensitive (`close`, `closes`, `closed`, `fix`,
+`fixes`, `fixed`, `resolve`, `resolves`, `resolved`), followed by `#N`. References to
+other repositories are ignored, and numbers are deduplicated and sorted ascending.
+That is why a commit names the issue it resolves with `Closes #N`
+([conventions](conventions.md#commits-and-pull-requests)). Model-written bullets from
+before this layout have no recorded commits and carry no links.
 
 ### Release banners
 
@@ -133,9 +161,8 @@ is written, the script opens each language block with its image line:
 - `CHANGELOG.md` on GitHub shows the images from their repository paths.
 - The release page shows the English one from the version's tag on
   `raw.githubusercontent.com`, at the top of the English notes.
-- The app bundles the folder; the What's New window shows the banner of the version
-  it announces above its header, in the selected translation, not those of skipped
-  versions.
+- The app bundles neither the folder nor `CHANGELOG.md`; what its update window shows
+  of a section is in [The update window](features/updates.md#the-update-window).
 
 Publishing refuses a banner line that names another version's file, and a banner
 line is not translated prose: a language block holding only a picture is missing its
@@ -143,6 +170,20 @@ translation.
 Banners are drawn for the product, not taken from Workshop wallpapers: their art
 belongs to their authors. Sections whose tag exists keep the banner they shipped
 with, so a banner never goes back into an older release.
+
+### Developer's notes
+
+A release can also carry a note from the developer, printed word for word: commit
+`Resources/ReleaseNotes/x.y.z.md` (English), `x.y.z.zh-Hans.md` (Simplified Chinese)
+and `x.y.z.ko.md` (Korean) before the commit with the `release:` line. Each language
+block then puts it under its own heading (**A note from the developer**, **开发者的话**,
+**개발자의 말**) after the summary and before the categories, so it reaches
+`CHANGELOG.md`, the release page (English) and the app's update window. The model never
+sees it and cannot rewrite it. The note is all three files or none, each in its own
+script, and only plain paragraphs separated by blank lines: a heading, list, picture or
+the boundary marker stops the run before the model is asked, because each would change
+how the section is read. Like a banner, it belongs to the version it names and is never
+added to a section whose tag exists.
 
 ### Written by the release-notes model
 
@@ -157,6 +198,7 @@ The release pipeline always passes `--ai`.
 | `RELEASE_NOTES_API_KEY` | none; required | Key for the gateway. A secret: it lives in the environment of one command or in the repository secret of the same name, never in a file. |
 | `RELEASE_NOTES_API_BASE` | `https://sub2api.moraxcheng.me` | Anthropic Messages API gateway; a base that already ends in `/v1` is accepted |
 | `RELEASE_NOTES_MODEL` | `claude-opus-5-5` | The model that writes the notes |
+| `RELEASE_NOTES_GITHUB_TOKEN` | none | Lets the script ask GitHub which account wrote a commit, for the [thanks line](#thanking-contributors); CI passes the job's `github.token` |
 
 The model reads every non-merge commit in the range, newest first, except CI's own
 `chore: bump version to x.y.z`. `docs`, `test`, `chore`, `ci`, `build`, `style` and `refactor`
@@ -173,7 +215,8 @@ source of the notes: write them for the reader
 The instructions also carry the project's rules on claims, because CI commits the
 notes without review: no energy, battery or power-saving claims, nothing called
 fully supported or fully compatible, and opt-in features (direct video plane sampling,
-on-demand scene idle, the animated lock screen) keep their optional, experimental
+on-demand scene idle, drawing only the visible part of cropped scenes, the animated lock
+screen) keep their optional, experimental
 or off-by-default qualifier in every language; Native Metal is the default
 renderer and native video is the default video player, and neither is ever called
 optional. The model groups many commits about
@@ -185,13 +228,20 @@ and ko catalogs' words (`Settings` / `设置` / `설정`); the prompt lists thos
 so renaming a tab or a Settings section changes the list in
 `scripts/release_notes.py` in the same commit.
 
+The prompt lists each commit as `* <short hash> <subject>`, so the model can cite it.
 The model answers with JSON. `summary` is `{"english", "chinese", "korean"}`. Each of
-`highlights`, `breaking`, `new`, `improved` and `fixed` is a list of the same
-three-language object, one per change, so translations cannot drift in length.
-The script renders that shape — `### English`, then `### 简体中文`, then
-`### 한국어`, categories at `####`, then the compare link — and stops the run on
-a reply that is not that JSON, omits a language, carries other fields or an HTML
-comment (the boundary marker below), or was cut off at the output-token limit.
+`highlights`, `breaking`, `new`, `improved` and `fixed` is a list of
+`{"english", "chinese", "korean", "commits"}` objects, one per change, so
+translations cannot drift in length; `commits` is a required, non-empty list of the
+short hashes of the commits the bullet describes. The summary names no commits. The
+script resolves every hash to a commit of the range and stops the run on one that is
+not a list, is empty, holds something other than a hash, or names a commit outside
+the range (the bump commit included) or more than one commit. It renders that shape —
+`### English`, then `### 简体中文`, then `### 한국어`, categories at `####`, each
+bullet followed by its [issue and commit links](#release-notes-and-the-changelog) —
+and stops the run on a reply that is not that JSON, omits a language, carries other
+fields or an HTML comment (the boundary marker below), or was cut off at the
+output-token limit. The compare link belongs to the section heading.
 A Chinese string must contain Chinese characters; a Korean string must contain
 Hangul; neither may copy the English or another translation. An English string
 must contain Latin text. Whitespace is collapsed and list or heading markers are
@@ -204,18 +254,48 @@ for 120 seconds, or a reply still running after 600, stops the run: the Version
 job holds its branch lock while it waits. Nothing is retried; a failed run is
 re-run.
 
+#### Thanking contributors
+
+Each language block of a new section ends with one line, written by the script and
+not the model, thanking the outside contributors whose commits are in the range:
+`Thanks to [@login](https://github.com/login) for contributing to this release.`,
+`感谢 [@login](…) 为本版本做出的贡献。` and `이번 릴리스에 기여해 주신 [@login](…) 님께
+감사드립니다.`, the same logins in the same order (oldest first contribution first)
+in all three. Every commit of the range counts, internal ones included, except CI's
+bump commit.
+
+A contributor is a GitHub login. A commit's author has one when the address is
+GitHub's noreply form (`<id>+login@users.noreply.github.com`); for any other address,
+with `RELEASE_NOTES_GITHUB_TOKEN` set, the script asks GitHub's commit API once per
+address (`GET /repos/<repo>/commits/<sha>`) and takes the author account GitHub links
+it to. A `Co-authored-by` trailer counts only with a noreply address. Nobody is
+credited by name or address alone: an address GitHub links to no account, a commit
+it does not know yet (404/422) and every address in a run without the token are
+left out, so a maintainer's new address is never thanked. Any other API failure
+stops the run. `MAINTAINERS` in `scripts/release_notes.py` (`bobbyhuang-dev`,
+`fzlzjerry` and the `t3code` agent account) and every bot (`[bot]` logins, GitHub's
+`Bot` type) are never thanked; add a new maintainer there. AI co-authors such as
+`noreply@anthropic.com` have no login and drop out on their own. The commit listing
+(no `--ai`) ends with the English line too; `--rebuild-changelog` adds none to the
+sections it lists, and a recorded section is never changed, so a version whose tag
+exists keeps the notes it was published with.
+
 ### Listed from the commits
 
 Without `--ai` the commits are listed in English, read through the
-`type(scope): subject` convention in [conventions.md](conventions.md). It is
-offline and free, and it is a developer preview for inspecting a range and for
-tests. It is not published: `--release-body` and `--changelog --apply` refuse
-notes without the required ordered language blocks: `### English`, then
-`### 简体中文`, then `### 한국어` for versions 1.5.7 and later. Older bilingual
-sections remain valid.
+`type(scope): subject` convention in [conventions.md](conventions.md), as one
+`### English` block with the same heading, `####` category names and link suffix
+as the model's notes: `- **scope** — Subject (closes [#N](…)) ([abc1234](…))`. A
+subject that repeats an earlier one collapses into one bullet that links every
+commit behind it. It is offline and free, and it is a developer preview for
+inspecting a range and for tests. It is not published: `--release-body` and
+`--changelog --apply` refuse notes without the required ordered language blocks:
+`### English`, then `### 简体中文`, then `### 한국어` for versions 1.5.7 and later.
+Older bilingual sections remain valid.
 
-Publication validates the whole bundled history, not just the current release.
-Each `##` heading must be the `x.y.z` token `AppReleaseHistory` accepts
+Publication validates the whole changelog history, not just the current release.
+Each `##` heading must be `## [x.y.z](<link>) (YYYY-MM-DD)` (or the older
+`## x.y.z — YYYY-MM-DD`) with the version token `AppReleaseHistory` accepts
 (optional `v`/`V`, three 64-bit integer components, no leading zeros), and each
 section needs actual prose in every required language and matching bullet counts
 (headings and compare links do not count as translated content). An explicitly
@@ -230,12 +310,12 @@ would introduce an English-only section; translate missing history before applyi
 
 | Commit type | Section |
 |---|---|
-| `feat` | **New** |
-| `fix` | **Fixed** |
-| `perf` | **Performance** |
-| `!` suffix or a `BREAKING CHANGE:` trailer | **Breaking changes** |
+| `feat` | **Features** |
+| `fix` | **Bug Fixes** |
+| `perf` | **Performance Improvements** |
+| `!` suffix or a `BREAKING CHANGE:` trailer | **Breaking Changes** |
 | `docs`, `test`, `chore`, `ci`, `build`, `style`, `refactor` | counted in one closing line |
-| anything else, including non-conventional subjects | **Other changes** |
+| anything else, including non-conventional subjects | **Other Changes** |
 
 Nothing is dropped silently: a subject the convention does not recognise is
 listed rather than hidden, and the only commit removed outright is CI's own
@@ -245,7 +325,7 @@ word boundary; the linked commit still carries every word.
 ### Commands
 
 ```sh
-python3 scripts/release_notes.py                               # English listing, not for publish
+python3 scripts/release_notes.py                               # English listing with its heading, not for publish
 python3 scripts/release_notes.py --ai --tag v1.5.7 --to HEAD   # three languages, before the tag exists
 python3 scripts/release_notes.py --tag v1.5.7 --release-body --ai --output notes.md
 python3 scripts/release_notes.py --ai --changelog --apply      # write one translated section
@@ -253,23 +333,28 @@ python3 scripts/release_notes.py --rebuild-changelog --apply   # a section for e
 ```
 
 A local `--ai` run needs `RELEASE_NOTES_API_KEY` exported for that command only.
+To see the thanks line for contributors without a noreply address, pass
+`RELEASE_NOTES_GITHUB_TOKEN="$(gh auth token)"` the same way.
 `--previous` overrides the tag the range starts after; by default it is the
 newest released version below the target that the range's end descends from, so a
 gap in the numbering resolves correctly.
 
 `--release-body` is the English-only GitHub release page. It reuses the version's
-translated `CHANGELOG.md` section without calling the model again, keeps only the
-English prose and the **Full changelog** link, then adds
+translated `CHANGELOG.md` section without calling the model again and keeps only the
+English block, in the same category names and with each bullet's issue and commit
+links. It then adds `**Full changelog**: <compare link>`, the link the section heading
+carries (for an older heading, the comparison with the previous tag), then
 `<!-- release-notes-end -->` and the install, checksum and requirement footer
 (with a `Built from` line when `--built-from` is given). Raw commit messages are
-not appended; the **Full changelog** link leads to the commit history. A
+not appended; the **Full changelog** link leads to the commits of the comparison. A
 hand-pushed tag with no section is written once, by the model when `--ai` is
 set, into the working-tree `CHANGELOG.md` before anything is built. English-only
 or malformed source history fails the run instead of being published.
 
 The marker is a contract: the updater shows everything above it and nothing
-below. The What's New window reads the bundled changelog, not that footer; how the
-app announces an update is in [After an update](features/updates.md#after-an-update).
+below, and About skips the **Full changelog** line. The update window reads the
+manifest's `changelog` field, not that body, and falls back to the body only when the
+field is missing; see [The update window](features/updates.md#the-update-window).
 
 Writing a section is idempotent — rerunning replaces the section for that
 version instead of duplicating it. `--rebuild-changelog` writes a section for every
@@ -279,25 +364,155 @@ English, and that listing is not a publishable section. It never calls the model
 and refuses `--ai`. `CHANGELOG.md` is written with `--apply`, and also when
 `--release-body` has to generate the current section. With `--changelog`, nothing
 is generated unless `--apply` or `--output` is given, so that dry run never calls
-the model; a plain `--ai` run prints the model's notes and does make the request.
-`scripts/tests/test_release_notes.py` covers classification, rendering, the
-changelog, range resolution against a throwaway repository, the model path
-against a fake gateway and the publish path, and runs as part of
+the model; a plain `--ai` run prints the model's section, heading included, and does
+make the request. `scripts/tests/test_release_notes.py` covers classification,
+closing references, rendering and links, the changelog headings, range resolution
+against a throwaway repository, the model path and its commit citations against a
+fake gateway, who is thanked (noreply logins, GitHub's commit record against a fake
+API, maintainers and bots left out) and the thanks line in every language, the publish path and the committed `CHANGELOG.md` itself;
+`scripts/tests/test_update_manifest.py` covers the manifest. Both run as part of
 `python3 scripts/test.py`.
+
+## Hotfix releases
+
+An urgent fix (a broken sign-in, a crash on launch) ships on its own, not together
+with the features `main` has gathered since the last release. A release that carries
+both waits for both to be checked, and if it breaks something nobody can tell, or
+pull back, one without the other: 1.6.4 shipped the SteamCMD sign-in fix with the
+whole of #100. A hotfix release holds the fix and nothing else, so it can be checked
+in minutes, its notes say only what it fixes, and `main` goes on as before.
+
+A hotfix branched from 1.8.2 or older builds with that tag's `build.yml` and
+`scripts/package.py`: it is signed with the project certificate from the
+`SIGNING_CERTIFICATE_P12` and `SIGNING_CERTIFICATE_PASSWORD` secrets and is not
+notarized ([build.md](build.md#release-signing)). Keep those two secrets until a
+Developer ID release has shipped.
+
+1. Branch from the newest release tag, named after it:
+
+   ```sh
+   git fetch --tags
+   git switch -c hotfix/1.6.5 v1.6.5
+   ```
+
+   GitHub runs the workflow files of the branch that is pushed, so a tag older than this
+   process (1.6.5 and earlier) needs them on the branch first. Take them from `main` now,
+   and commit them on their own, without a `release:` line, once the gate in step 2 has
+   passed with the fix, before the fix's commit:
+
+   ```sh
+   git checkout origin/main -- .github/workflows/version.yml .github/workflows/checks.yml \
+     scripts/bump_version.py scripts/tests/test_bump_version.py
+   # after the gate:
+   git commit -m "ci(release): bring the hotfix release workflow to this branch" -- \
+     .github/workflows/version.yml .github/workflows/checks.yml \
+     scripts/bump_version.py scripts/tests/test_bump_version.py
+   ```
+
+   The merge back into `main` meets the same files there and changes nothing.
+
+2. Make the fix there, with its test, not on `main`; run the gate
+   (`python3 scripts/test.py`) as for any change. Pull requests into `hotfix/**` get the
+   same Checks as those into `main`.
+3. Push the branch with `release: patch` in the fix's commit message, or merge a pull
+   request into the branch with that line, or run
+   `gh workflow run version.yml --ref hotfix/1.6.5 -f spec=patch`. Version bumps the
+   patch number, writes the CHANGELOG.md section from the commits since the tag the
+   branch was cut from (only the fix), commits, tags and pushes to the hotfix branch,
+   and calls Build exactly as for `main`. Build and `publish_release.py` do not care
+   which branch a tag is on.
+4. Version's bump job then merges the tag into `main` with a merge commit
+   (`chore: merge hotfix x.y.z into main`), which brings the fix, the version and the
+   CHANGELOG.md section there. Main's next release continues from the hotfix's number,
+   and its notes start at the hotfix's tag, which is now an ancestor, so the fix is not
+   listed twice. When the merge conflicts, or `main` moved while it pushed, the job
+   opens an issue "Merge hotfix x.y.z into main" with the commands, and fails; do that
+   merge before `main` releases again.
+
+`scripts/bump_version.py` holds a hotfix branch to this: only a patch of the version
+the branch carries, which must be the newest `vx.y.z` tag. It also refuses a release
+from `main` while the newest tag is not merged into it. A minor or major spec, a branch
+cut from an older release, or a version another release already took fails the bump
+before anything is written, so a hotfix always becomes Latest and never takes a
+number `main` will want. To fix an older line instead, release from `main`.
+
+Merge a hotfix branch into `main` only with a merge commit, never a squash or a
+rebase: those copy the fix's `release:` line into a new commit on `main`, and its push
+would release again. A plain merge is safe: Version skips the `release:` lines of
+pushed commits that a version tag already contains. This is the one merge commit the
+[commit rules](conventions.md#commits-and-pull-requests) allow on `main`. Delete the
+hotfix branch once the merge is on `main`.
+
+Make the fix on the hotfix branch. A fix that already landed on `main` can be
+cherry-picked without committing (`git cherry-pick --no-commit <commit>`, then commit it
+after the gate, ending the message with `(cherry picked from commit <commit>)`): the
+merge back then meets the same change
+on both sides and goes through, but the commit on `main` is not part of the hotfix tag,
+so `main`'s next notes may describe the fix again. Read that section before its release.
+
+Nothing in the repository blocks this today: as of 2026-10-29 it has no rulesets and no
+branch protection (`gh api repos/WallpaperMachine/WallpaperMachine/rules/branches/main`
+and `.../rules/branches/hotfix%2Fx.y.z` both return `[]`), and every workflow declares
+the write permissions it needs. Protection added later must let GitHub Actions push to
+`main` (bumps and the hotfix merge) and to `hotfix/**` (the hotfix's bump commit and tag),
+or the release stops after its notes are written.
+
+### Emergency patch release for someone else (agents)
+
+When the developer asks for an emergency, urgent or hotfix patch release, that request
+is the release the [agent rules](../AGENTS.md) require before a `release:` line is
+written. Do this, in order:
+
+1. **Find the base.** `git fetch --tags origin` and take the newest tag,
+   `git tag --list 'v*' --sort=-v:refname | head -1`. Check that `main` has unreleased
+   commits since it (`git log --oneline <tag>..origin/main`); if it has none, a hotfix
+   branch gains nothing, so release from `main` the usual way instead and say so.
+2. **Find the fix.** Cut `hotfix/<base version>` from that tag
+   (`git switch -c hotfix/1.6.5 v1.6.5`); when the tag predates the hotfix workflow, take
+   its files from `main` as [step 1 above](#hotfix-releases) shows and commit them after
+   the gate. Then make the fix with its test, or apply the commit the developer names with
+   `git cherry-pick --no-commit <commit>`, never on `main`. Keep only what the
+   emergency needs: anything else waits for `main`'s next release.
+3. **Verify** as for any change: the routine gate `python3 scripts/test.py`, plus
+   `scripts/check_rust.py` or `scripts/check_renderer.py` when the fix touches them.
+   No push on a failed or missing verdict.
+4. **Commit** with a user-facing `fix(scope): …` subject and body (they become the notes),
+   `Closes #n` for the issue, and a standalone `release: patch` line. A developer's
+   note, if asked for, is committed first ([Developer's notes](#developers-notes)).
+   `python3 scripts/bump_version.py --spec patch --branch hotfix/<base>` is a dry run
+   of the version the push will cut.
+5. **Confirm, then push.** Pushing publishes a release to every user. Show the
+   developer the commits on the branch (`git log --oneline <tag>..HEAD`), the version
+   it becomes and the verification result, and push only after they agree:
+   `git push -u origin hotfix/<base>`.
+6. **Follow it through.** Watch the Version run for the branch
+   (`gh run list --workflow version.yml --branch hotfix/<base>`), its merge step and its
+   Build. Then check the release as the [checklist](#checklist-for-a-release)
+   says (Latest, image, manifest, notes), and that
+   `chore: merge hotfix x.y.z into main` is on `origin/main`; when the merge step
+   opened an issue instead, resolve that merge before anything else is released.
+   Offer to delete the remote hotfix branch once the merge is on `main`.
+
+A failure along the way follows [Recovering a failed release](#recovering-a-failed-release),
+on the hotfix branch rather than `main`.
 
 ## Workflows
 
-Version, Build, Release, Warm caches and Supporters are the release workflows in
-`.github/workflows/`; Supporters shares only `main` with the others.
+Version, Build, Release, Rehearsal, Warm caches and Supporters are the release workflows
+in `.github/workflows/`; Supporters shares only `main` with the others.
 `claude.yml` and `claude-code-review.yml` are pull-request automation, described
-in [CONTRIBUTING.md](../CONTRIBUTING.md#automated-review). `codeql.yml` is code
-scanning, described [below](#codeql-codeqlyml).
+in [CONTRIBUTING.md](../CONTRIBUTING.md#automated-review). `checks.yml` runs
+`python3 scripts/test.py --python-only` on Linux for every pull request into `main` or a
+`hotfix/**` branch and every push to them, the fast check a pull request waits for. `codeql.yml` is code scanning,
+described [below](#codeql-codeqlyml).
 
 Version, Build and Release grant `contents: write`; Build's publish job also needs
-`id-token: write` and `attestations: write` for its provenance attestation, and
-both callers pass those through, together with the repository's secrets (`secrets:
-inherit`). Warm caches only reads. Supporters writes only `README.md` and
-`README.zh-CN.md`, with `contents: write`, and reads Version's runs with
+`id-token: write` and `attestations: write` for its provenance attestation, and its
+build job `actions: read` to find the app icon among the run's jobs and artifacts. All
+three callers (Version, Release, Rehearsal) pass those through, together with the
+repository's secrets (`secrets: inherit`); Rehearsal must grant what the skipped publish
+job declares. Warm caches only reads. Supporters writes only `README.md`,
+`README.zh-CN.md`, `README.pt-BR.md` and `README.ko.md`, with `contents: write`, and reads Version's runs with
 `actions: read`. The macOS setup Build and Warm caches share lives in one
 composite action,
 [`.github/actions/prepare-build`](../.github/actions/prepare-build/action.yml).
@@ -309,12 +524,13 @@ repository `origin` points at.
 | Secret | Read by |
 |---|---|
 | `RELEASE_NOTES_API_KEY` | Version for every bump; Build only for a tag without a `CHANGELOG.md` section |
-| `SIGNING_CERTIFICATE_P12`, `SIGNING_CERTIFICATE_PASSWORD` | Build's `build` job, which fails when either is missing ([build.md](build.md#release-signing)) |
+| `DEVELOPER_ID_CERTIFICATE_P12`, `DEVELOPER_ID_CERTIFICATE_PASSWORD`, `NOTARY_API_KEY`, `NOTARY_API_KEY_ID`, `NOTARY_API_ISSUER` | Build's `build` job, which fails when any is missing ([build.md](build.md#release-signing)) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | `claude.yml` and `claude-code-review.yml` |
 
 ### Version (`version.yml`)
 
-Runs on every push to `main`, and on demand from **Actions -> Version -> Run
+Runs on every push to `main` or to a `hotfix/**` branch
+([Hotfix releases](#hotfix-releases)), and on demand from **Actions -> Version -> Run
 workflow** with a `spec` input. On an `ubuntu-latest` runner it:
 
 1. checks out with full history;
@@ -331,17 +547,27 @@ workflow** with a `spec` input. On an `ubuntu-latest` runner it:
    `WallpaperMachine.xcodeproj/project.pbxproj` and `CHANGELOG.md` as
    `chore: bump version to x.y.z`, tags `vx.y.z`, and pushes branch and tag
    atomically as `github-actions[bot]`;
-5. calls the Build workflow directly for the tag it just pushed.
+5. for a `hotfix/**` branch, merges that tag into `main` in the same job, or opens an
+   issue when it cannot, without holding the release back
+   ([Hotfix releases](#hotfix-releases));
+6. calls the Build workflow directly for the tag it just pushed.
 
-Step 5 is not redundant. **A tag pushed with `GITHUB_TOKEN` never starts another
+Step 6 is not redundant. **A tag pushed with `GITHUB_TOKEN` never starts another
 workflow**, so the tag-triggered Release workflow would never fire for a
 CI-produced tag; without the direct call, a bumped version would be tagged but
 never published.
 
-The bump job holds a `version-<ref>` concurrency group only while the bump commit
-is produced. A workflow-wide group would keep the lock through the macOS build,
-and because GitHub retains only the newest pending run, a queued `release:` push
-could be replaced by a later ordinary push and silently lost.
+The bump job holds one `version-release` concurrency group, shared by `main` and every
+hotfix branch, only while the version is chosen, committed and tagged and a hotfix is
+merged into `main`. A workflow-wide group would keep the lock through the macOS build.
+Runs queue (`queue: max`) instead of replacing the pending one, so a queued `release:`
+push is never lost behind a later ordinary push, and `main` cannot release between a
+hotfix's tag and its merge. When that merge needs a person (a conflict), the lock ends
+with the job, but `bump_version.py` refuses a release from any branch that does not
+contain the newest tag, so `main` releases again only once the hotfix is merged. A merge
+whose push lost a race with another push to `main` (the Supporter list) is retried. A queued run checks out the branch as it is when the lock is
+free, not the commit that was pushed, so its push is never rejected as out of date; the
+release spec still comes from its own push.
 
 The workflow needs permission to push to `main`: `contents: write`, and branch
 protection must allow GitHub Actions.
@@ -350,10 +576,14 @@ protection must allow GitHub Actions.
 
 `workflow_call` only, with a required `tag` input. It is the single place a
 publishable artifact is produced, called by Version for CI-produced tags and by
-Release for hand-pushed ones. It runs three jobs. `app-icon` compiles the app icon
-on a `macos-26` runner. `build` then runs on `macos-15` (the oldest runner that
-carries Xcode 26, whose Homebrew bottles set the published app's minimum macOS),
-with a 150-minute timeout. `publish` runs on `ubuntu-latest` once it succeeds.
+Release for hand-pushed ones; [Rehearsal](#rehearsal-rehearsalyml) calls it with
+`rehearsal: true` and a `ref`. It runs three jobs. `app-icon` ("App icon (macOS 26)")
+compiles the app icon on a `macos-26` runner. `build` ("Build, sign and notarize
+(macOS 15)") starts at the same time on `macos-15` (the oldest runner that carries
+Xcode 26, whose Homebrew bottles set the published app's minimum macOS), with a
+150-minute timeout, and takes the icon only once the app is compiled, so the icon job,
+about a minute, is never what a release waits for. `publish` ("Publish the release")
+runs on `ubuntu-latest` once `build` succeeds.
 
 The test gate is not part of a release. Every change passes `python3 scripts/test.py`
 before it is committed, and on hosted VMs the gate failed 1.5.0 through 1.5.4 only on
@@ -369,42 +599,61 @@ artifact.
 
 **`build`**
 
-1. checks out the tag with full history, which the notes need;
+1. checks out the tag with full history, which the notes need (a rehearsal checks out
+   its `ref` and applies the rehearsed version with `scripts/bump_version.py --spec
+   <version> --apply`, as the bump commit would);
 2. writes the release body with `scripts/release_notes.py --release-body --ai
    --built-from "$(git rev-parse HEAD)"` before anything is built. The current
    section must already have every required language and is reused without
    calling the model; a hand-pushed tag with no section gets one written once into
-   the working-tree `CHANGELOG.md`, so the app bundles all translations. Missing
-   translations or malformed source history fail here, in seconds,
-   rather than after the macOS build;
-3. runs `prepare-build` (below) and downloads the `app-icon-<tag>` artifact;
-4. runs `python3 scripts/build.py --configuration Release --app-icon DIR`, which
-   leaves `AppIcon.icon` out of the Xcode build, puts the compiled icon and catalog
-   into the bundle with their Info.plist keys and re-signs it;
-5. imports the project signing certificate from the two signing secrets into a
-   temporary keychain ([build.md](build.md#release-signing)), then runs
+   the working-tree `CHANGELOG.md`. A copy of that `CHANGELOG.md` goes to `publish`
+   with the notes, so the update manifest carries every translation of the new
+   section. Missing translations or malformed source history fail here, in seconds,
+   rather than after the macOS build. A rehearsal writes no notes;
+3. imports the Developer ID certificate and the notary API key from the signing
+   secrets into a temporary keychain ([build.md](build.md#release-signing)), also
+   before anything is built: a missing secret, a certificate that does not import
+   (1.9.0's failure, which then came after the whole build) or a key Apple refuses
+   fails in about a minute. Xcode signs ad hoc, so the identity changes nothing there;
+4. runs `prepare-build` (below), restoring both caches and reusing the renderer build
+   for every source unchanged since it (`reuse-renderer-build`);
+5. runs `python3 scripts/build.py --configuration Release --no-app-icon`, which
+   leaves `AppIcon.icon` out of the Xcode build;
+6. waits until `app-icon` has uploaded `app-icon-<tag>`, which it normally has, looking
+   the artifact up by name so a re-run of only this job finds an earlier attempt's,
+   and fails if that job ended without one; downloads it and runs
+   `python3 scripts/build.py --configuration Release --install-app-icon DIR`, which
+   puts the compiled icon and catalog into the bundle with their Info.plist keys and
+   re-signs it;
+7. runs
    `python3 scripts/package.py --configuration Release --require-deployment-target
-   --sign-identity "WallpaperMachine Code Signing"`, which fails if a bundled
-   library needs a newer macOS than the deployment target. It also generates
+   --sign-identity "Developer ID Application" --notarize "WallpaperMachine Notary"
+   --notary-keychain <that keychain>`, which fails if a bundled library needs a newer
+   macOS than the deployment target, and signs with the hardened runtime, notarizes
+   and staples the app and then the disk image; a submission Apple refuses fails the
+   job with Apple's log. Each submission waits up to 50 minutes, and one Apple has not
+   finished by then fails the job with its id (a new team's first submissions take
+   hours: [build.md](build.md#release-signing)). It also generates
    `THIRD-PARTY-NOTICES.txt` into the bundle; a component whose license text
    cannot be found is named in the log and marked in the file, and
    `--require-notices` (not yet passed here: see
    [../LICENSING.md](../LICENSING.md#notice-payload)) would fail on it.
    Packaging proves the
    disk image, not the build tree: it mounts the image read-only and requires
-   `app.wallpapermachine` at the bundle's version, a passing
+   `app.wallpapermachine` at the bundle's version, its stapled ticket, a passing
    `codesign --verify --deep --strict`, the signed entitlements and Info.plist
    keys the lock screen extension and the permission prompts need ([bundle
    contract](build.md#bundle-contract)), the `Applications` link and the window
    layout, then writes the `.sha256` sidecar
    ([build.md](build.md#packaging-and-installing));
-6. matches the image to the tag: it must be named
+8. matches the image to the tag: it must be named
    `WallpaperMachine-<tag without v>-arm64.dmg`, and its checksum is echoed into the
    job summary;
-7. hands the image, its sidecar and the notes to `publish` as the
-   `release-<tag>` artifact.
+9. hands the image, its sidecar, the notes and that `CHANGELOG.md` to `publish` as
+   the `release-<tag>` artifact (a rehearsal keeps its image three days as
+   `rehearsal-<tag>`, and skips `publish`).
 
-Step 6 is the guard that the bump actually reached the build:
+Step 8 is the guard that the bump actually reached the build:
 `scripts/package.py` names the image from the bundle's
 `CFBundleShortVersionString`, so a mismatch means the published tag and the
 built version disagree and the job fails instead of publishing the wrong binary.
@@ -419,31 +668,67 @@ summary.
 2. attests build provenance for the image with
    `actions/attest-build-provenance`;
 3. writes the update manifest `WallpaperMachine-update.json` from the tag, the
-   notes and the image with `scripts/update_manifest.py`
-   ([below](#what-the-in-app-updater-expects));
+   notes, the image and the build job's `CHANGELOG.md` with
+   `scripts/update_manifest.py --changelog` ([below](#what-the-in-app-updater-expects));
+   `publish`'s own checkout of the tag lacks a section generated for a hand-pushed tag;
 4. publishes the image, its sidecar and the manifest with
    `scripts/publish_release.py`.
 
 **`prepare-build` and the caches.** The composite action selects the newest
-non-beta `/Applications/Xcode_26*.app`, `brew install --quiet`s the
+non-beta `/Applications/Xcode_26*.app`, downloads that Xcode's Metal Toolchain when
+`xcrun metal` cannot run (the runner images do not always carry it, and the extension
+compiles a Core Image kernel), `brew install --quiet`s the
 XcodeGen/CMake/renderer package set with `ccache`, and restores two
 `actions/cache` entries. Every key carries the runner's macOS (`<os>` below is
 `macos-15` or `macos-26`), because bottles and compiled objects
 differ between releases; `build` and the Test workflow therefore keep separate entries.
 
-| Cache | Path | Key | What a hit saves |
-|---|---|---|---|
-| C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | recompiling the scene engine. A checkout gives every file a new mtime, so CMake rebuilds the whole engine even from a restored build tree; ccache hashes content and returns the previous objects. Test's three jobs share a run's key, so only `renderer`, which compiles the engine and its C++ tests, saves it; `rust` and `native` pass `save-object-cache: "false"` and only restore it |
-| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `Renderer/target` | `renderer-ccache-<os>-<hash of Cargo.lock, rust-toolchain.toml, provenance.json>`, restored by prefix | crate downloads, and Rust compilation while the nightly toolchain is unchanged |
+| Cache | Path | Key | Saved by | What a hit saves |
+|---|---|---|---|---|
+| C++ objects | `~/.ccache` | `ccache-<os>-<run>`, restored by the `ccache-<os>-` prefix | `save-object-cache` (default on): Warm caches and Test's `renderer` job. Test's three jobs share a run's key, so `rust` and `native` pass `"false"`; so do CodeQL, which runs on every push and saved 147 MB each time, and Build, whose release would wait for the upload | compiling a C++ file the build tree has to rebuild: ccache hashes content and returns the previous object |
+| Renderer | `~/.cargo/registry`, `~/.cargo/git`, `Renderer/target` | `renderer-ccache-<os>-<hash of rust-toolchain.toml>-<hash of Cargo.lock, provenance.json>-<run>`, restored by the prefix without the run, then by the toolchain prefix alone | `save-renderer-cache` (default off): Warm caches, daily | crate downloads, and, with `reuse-renderer-build`, every Rust crate and C++ file unchanged since the restored build |
 
 The `CMAKE_<LANG>_COMPILER_LAUNCHER=ccache` variables only take effect on a build
 tree's first CMake configure, so change the renderer key's prefix whenever the
 launcher setup changes: no tree configured the old way may be restored. Each
 macOS job prints `ccache --show-stats` at the end; hits against misses there is
-the evidence the cache worked. The toolchain is an unpinned `nightly`
-(`Renderer/rust-toolchain.toml`), and a new nightly invalidates every
-compiled crate, so the Rust half of the renderer build is only reused between
-builds on the same nightly.
+the evidence the cache worked. The toolchain is a pinned stable release
+(`Renderer/rust-toolchain.toml`); raising the pin changes the renderer key's
+toolchain hash, so the next build compiles every crate once and starts a new entry.
+
+Only runs on `main` save either cache, and only the callers that opt in; every other
+ref (pull requests, branches, hand-pushed tags) restores and never saves. An entry saved
+under another ref is readable by that ref alone, and those entries pushed the repository
+past GitHub's 10 GB cache limit, which evicts the `main` entries releases need; on
+2026-11-04 CodeQL's per-push C++ object caches did the same (10.5 GB in 108 entries,
+most of them CodeQL's). A release only restores: [Warm caches](#warm-caches-warm-cachesyml)
+writes the entries it reads, once a day, so they are at most a day behind `main`.
+
+**Reusing the renderer build.** A checkout gives every file the current time, and cargo
+and CMake decide what to rebuild by comparing times, so a restored `Renderer/target`
+looked older than all its sources: every release recompiled the four workspace crates
+(vendored naga, `wm-shader`, `wallpaper-core`, `wallpaper-bridge`), reran the core
+crate's build script and recompiled the C++ engine through ccache (214 compiler calls,
+54 misses, for 1.9.1), 3m30s of the macOS 15 runner although the cache held them
+built. With `reuse-renderer-build: "true"`, `prepare-build` runs
+`python3 scripts/source_times.py restore` and then `record` after the cache restore.
+`record` writes `Renderer/target/source-times.json`, which travels with the build in
+the cache: the blob id of every tracked file under `Renderer/` and `ThirdParty/`, the
+entries of every directory there, and the toolchain (the `rustc`, Apple clang, SDK,
+CMake and Homebrew library versions, the cargo manifests and the compiler flags in the
+environment). `restore` gives every file whose blob id is unchanged, and every directory
+whose entries are unchanged, a time older than any build output, but only when the
+toolchain is the recorded one; changed, added and removed files keep the checkout's time.
+Cargo and CMake then rebuild exactly what changed: a release whose renderer sources are
+unchanged rebuilds only `wallpaper-bridge`, which `GIT_SHORT_COMMIT` stamps with the new
+revision (about half the old time), and one C++ file changed compiles that one file.
+Removing or adding a file changes its directory's entries, so a build script watching the
+directory (and CMake's `file(GLOB)`) runs again. The record vouches for the whole target
+directory only while every job that keeps it builds the same thing, `scripts/build.py`'s
+renderer stage (`cargo build --workspace --release`): Build, Warm caches and CodeQL pass
+the input. Every other job (Test's, which also build test profiles) runs
+`source_times.py forget`, so a cache it saved would never be trusted. The first run
+after a change of toolchain, or without a record, rebuilds everything once, as before.
 
 **What the attestation does and does not say.** Its SLSA predicate is built from
 the run's OIDC claims: `resolvedDependencies[0]` is `git+<repo>@<claims.ref>` with
@@ -483,8 +768,8 @@ use the release workflow for the shared lock. The script's docstring and
 The test gate on hosted runners, run by hand from **Actions -> Test -> Run
 workflow** on the branch or tag chosen under "Use workflow from" (`--ref` below). It
 does not tag, build the Release app or publish, and no release waits for it
-([why](#build-buildyml)). It has no input naming another ref to test: its jobs save
-caches under the ref the run starts from, and a run started from `main` that built
+([why](#build-buildyml)). It has no input naming another ref to test: only a run started from `main` saves
+caches (other refs restore without saving), and a run started from `main` that built
 another ref's code would let that code write the caches every release restores. Its
 three jobs run in parallel on `macos-26` runners, each after `prepare-build` and
 `python3 scripts/build.py --renderer-only` for the renderer and the generated bridge,
@@ -516,45 +801,61 @@ days.
 
 ### Warm caches (`warm-caches.yml`)
 
-GitHub evicts a cache entry nobody has read for seven days. Twice a week (and on
-demand from **Actions -> Warm caches -> Run workflow**) this runs `prepare-build`
-and `python3 scripts/build.py --renderer-only` on `main`, once on `macos-15` and
-once on `macos-26`, which reads every entry Build and Test use and saves a fresh C++
-object cache for each, so a release or a Test run after a quiet week still starts warm. Caches saved on
-`main` are readable from every ref, including the tags Release builds. It
-publishes nothing.
+Every day at 03:17 UTC (and on demand from **Actions -> Warm caches -> Run workflow**)
+this runs `prepare-build` with `save-renderer-cache` and `reuse-renderer-build` and
+then `python3 scripts/build.py --renderer-only` on `main`, once on `macos-15` and once
+on `macos-26`, and saves a new renderer build and C++ object cache for each. They are
+the entries a release restores (Build saves none, so a release never waits for an
+upload), so its renderer build is at most a day behind `main` and it rebuilds only
+what changed since. Reading every entry also keeps GitHub from evicting one nobody
+read for seven days. Caches saved on `main` are readable from every ref, including
+the tags Release builds. It publishes nothing. After a change to the caches or to
+`scripts/source_times.py` reaches `main`, run it once by hand, so the next release
+does not rebuild the renderer from an entry without a record.
 
 ### Supporters (`supporters.yml`)
 
-Keeps the [README's Supporter list](../README.md#thank-you-to-every-supporter), and
-the same list in its translation `README.zh-CN.md`, in step with the website's
-[sponsor wall](https://www.wallpapermachine.app/#sponsors). Every hour (and on
+Keeps the [README's Supporter list](../README.md#thank-you-to-every-priority-support-member)
+of Priority Support members, and the same list in its translations `README.zh-CN.md`,
+`README.pt-BR.md` and `README.ko.md`, in step with the website's
+[thank-you wall](https://www.wallpapermachine.app/#sponsors). Every hour (and on
 demand from **Actions -> Supporters -> Run workflow**) it runs
 `python3 scripts/update_sponsors.py` on `main`, which reads the wall's JSON from
 `https://www.wallpapermachine.app/api/sponsors` and rewrites the block between the
-`supporters:start` and `supporters:end` markers in both files; the script's
+`supporters:start` and `supporters:end` markers in all four files; the script's
 docstring describes the block, and edits between the markers are overwritten.
-When the block changed it commits both READMEs as
+When the block changed it commits the four READMEs as
 `docs(readme): update the Supporter list` and pushes to `main`, starting again from
 the new `main` if that moved. It skips the hour while a Version run is queued or
 running, because Version's push of its bump commit does not retry. A wall that
-can't be read, or a README without its block, fails the run and leaves both READMEs
+can't be read, or a README without its block, fails the run and leaves the READMEs
 as they were.
 
 ### CodeQL (`codeql.yml`)
 
-Code scanning on every push to `main`, every pull request into it, weekly, and on
-demand. It replaces GitHub's default setup, which can only autobuild Swift and
+Code scanning on every push to `main`, weekly, and on demand. Pull requests do not
+run it: the Swift job's full traced app build takes about half an hour, and its
+findings were mostly false positives, so new alerts surface after the merge instead.
+It replaces GitHub's default setup, which can only autobuild Swift and
 fails at the extension's link because the renderer library and the Homebrew
 libraries do not exist yet. Actions, Python and Rust are analyzed without a build
-on Linux. Swift runs on `macos-26`: `prepare-build` and
+on Linux. Swift runs on `macos-26`: `prepare-build` (restoring the caches without
+saving the C++ object cache, and reusing the renderer build) and
 `python3 scripts/build.py --renderer-only` first, untraced, then CodeQL traces
 `scripts/build.py --swift-only` with the `--xcode-setting` overrides CodeQL's own
 Swift autobuild uses (no signing, no compilation cache, no integrated driver), so
-the extractor sees every Swift compile. C/C++ (only vendored third-party code is
+the extractor sees every Swift compile. The traced build also leaves out the `.metal`
+sources (`EXCLUDED_SOURCE_FILE_NAMES=*.metal`): under CodeQL's tracer Xcode 26 cannot
+find the Metal Toolchain that `prepare-build` installed
+([github/codeql-action#3978](https://github.com/github/codeql-action/issues/3978)), and
+they hold no Swift. C/C++ (only vendored third-party code is
 visible to it), Ruby (the repository has none) and JavaScript/TypeScript (none since
 the SwiftUI control panel; CodeQL fails a language with no code) are deliberately not
 analyzed.
+The renderer's Rust test sources (`tests/` directories, `tests.rs` and `*_tests`
+modules under `Renderer/`) are excluded through `paths-ignore`: their fixture values
+in panic messages read as cleartext logging, and those alerts kept returning after
+being dismissed whenever a test file moved. Keep new Rust tests under those names.
 Removing a language from the matrix does not remove its configuration: **Security ->
 Code scanning -> Tool status** keeps showing that language's last scan, failed or
 not, because nothing uploads to its category again. In the same change, delete it
@@ -562,6 +863,29 @@ there (the configuration's **⋯ -> Delete configuration**) once no alert in it 
 keeping.
 Default setup must stay off under **Settings -> Code security -> CodeQL
 analysis**; while it is on, GitHub rejects this workflow's results.
+
+### Rehearsal (`rehearsal.yml`)
+
+A release is tagged before it is built, and a tag is never taken back
+([Recovering a failed release](#recovering-a-failed-release)), so a build or packaging
+failure burns the version: 1.7.0 (a bundled library packaging could not relocate) and
+1.9.0 (the Developer ID certificate's import) were each replaced by the next patch,
+with the changelog and banners moved by hand. Rehearsal runs the release path without
+a version to lose. Dispatched on any branch (**Actions -> Rehearsal -> Run workflow**,
+or `gh workflow run rehearsal.yml --ref <branch> -f spec=patch`), its `plan` job turns
+the `spec` input into the version a release of that branch would get, with
+`scripts/bump_version.py --spec` and nothing written, and calls Build with
+`rehearsal: true`, the branch's commit as `ref` and that version as `tag`. Build then
+runs its usual jobs, runners, caches and signing secrets: it applies the version to the
+checkout as the bump commit would, imports the certificate and the notary key, builds,
+adds the icon, signs, notarizes and staples the app and the image, and verifies the
+mounted image. It writes no notes and skips `publish`, and keeps the disk image for three
+days as the run's `rehearsal-<tag>` artifact, to try before releasing. A newer rehearsal
+of the same branch cancels a running one.
+
+Rehearse before landing a change to the release path (the workflows, `prepare-build`,
+`scripts/build.py`, `scripts/package.py` and `scripts/lib/`, `project.yml`'s bundle or
+signing settings, the Homebrew libraries), and before a release that must not slip.
 
 ### Release (`release.yml`)
 
@@ -577,16 +901,26 @@ the build; it is not rewritten.
 
 **Settings → About** installs updates from the repository's latest GitHub Release.
 What the app does with one (when it checks, how it avoids the API quota, download,
-verification, replacing the running app, the What's New window) is in
+verification, replacing the running app, the update window) is in
 [updates](features/updates.md). This section is the publish-side contract: what a
 release has to carry for that to work.
 
 The update manifest, `WallpaperMachine-update.json`, is an asset of every release.
 `scripts/update_manifest.py` writes it in Build's `publish` job from the tag, the
-notes file that becomes the release body and the image bytes, and
+notes file that becomes the release body, `CHANGELOG.md` and the image bytes, and
 `scripts/publish_release.py` attaches it. It is the release object in the REST
 API's shape: `tag_name`, `html_url`, `prerelease`, `body` and one asset with
-`name`, `browser_download_url`, `size` and a `sha256:` `digest`. The app reads it
+`name`, `browser_download_url`, `size` and a `sha256:` `digest`, plus one field the
+API does not have. `changelog` (written with `--changelog CHANGELOG.md`) is a string
+holding the newest 20 `## ` version sections of `CHANGELOG.md` verbatim, every
+language included, from the first `## ` heading on, without the file's preamble.
+The script refuses a changelog with no section for the tag. When an update is
+available, the app's update window shows from it each version newer than the
+installed one, in the app's language, and falls back to the release body when the
+field is missing, as in manifests from before it existed
+([The update window](features/updates.md#the-update-window)). The app no longer
+bundles `CHANGELOG.md` or `Resources/ReleaseBanners`. Updates and their results are
+passive entries in the control panel and menu bar; no window opens automatically. The app reads the manifest
 from `https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest/download/WallpaperMachine-update.json`,
 which github.com redirects to the file on the release marked Latest. A draft never
 resolves, and `publish_release.py` makes the release public only after the image,
@@ -594,6 +928,23 @@ sidecar and manifest are uploaded. The name is
 `AppUpdateConfiguration.manifestName`; renaming it changes both sides at once. The
 script refuses a tag that is not `vx.y.z`, a repository that is not `owner/name`
 and an image not named as below.
+
+New manifests additionally carry `bundle_identifier`, `minimum_system_version` and
+`architectures`. Packaging reads these from the verified signed app inside the DMG
+and writes `WallpaperMachine-<version>-arm64.dmg.metadata.json`, binding them to the
+image name, version, size and SHA-256. Build transfers this internal file to the
+publish job; `update_manifest.py --metadata <file>` verifies the binding before
+writing the manifest. The metadata sidecar is not a public release asset. CI requires
+it; the optional CLI flag remains available for testing legacy manifests. Older
+clients ignore these additive fields. New clients reject known incompatibility before
+downloading and also verify the actual signed application's target version, macOS
+minimum and architecture before installing, including when reading a legacy manifest.
+
+Before any GitHub mutation, `publish_release.py` verifies exactly the DMG, SHA-256
+sidecar and manifest, including the notes body and compatibility fields. After uploading,
+it checks the draft's asset names, lengths and any GitHub-supplied digests before
+promoting it. Missing or mismatched assets leave the release a draft. The existing
+publish lock, immutable live releases and final Latest comparison are unchanged.
 
 What a release must satisfy:
 
@@ -609,19 +960,53 @@ What a release must satisfy:
 - the manifest's asset carries a `sha256:` digest of the image and a
   `browser_download_url` on github.com, both derived by `update_manifest.py`; the
   app refuses an image it cannot verify;
-- releases are signed with the project certificate
-  ([build.md](build.md#release-signing)), so the replacement keeps the designated
-  requirement and macOS keeps the app's privacy permissions;
+- releases are signed with the project's Developer ID and notarized
+  ([build.md](build.md#release-signing)): the updater installs only a copy that meets
+  `AppUpdateConfiguration.signingRequirement` (the Developer ID, or the project
+  certificate that signed 1.0.2 through 1.8.2; copies older than 1.8.0 accept only the
+  latter), and keeping the designated requirement is what lets macOS keep the app's
+  privacy permissions;
 - the release body is the English notes above `<!-- release-notes-end -->`
   ([Release notes and the changelog](#release-notes-and-the-changelog)); the app
-  shows what is above the marker as **What's new** in About and ignores the rest.
+  uses it as a fallback when localized changelog sections are unavailable and
+  ignores the footer after the marker;
+- the manifest's `changelog` starts with the new version's section in the
+  [layout above](#release-notes-and-the-changelog), so an install several versions
+  behind sees every change it is about to receive.
 
 Renaming the image, publishing a prerelease, or attaching only a zip silently
 breaks automatic updates; `Tests/Unit/GitHub/AppUpdateTests.swift` pins this
 behavior, including the exact published image name and an install from a real disk
 image.
 
+## Homebrew
+
+The `wallpapermachine` cask lives in Homebrew's repository, not here
+([`Casks/w/wallpapermachine.rb`](https://github.com/Homebrew/homebrew-cask/blob/HEAD/Casks/w/wallpapermachine.rb)).
+It installs the release's own disk image, the `v<x.y.z>` release's
+`WallpaperMachine-<x.y.z>-arm64.dmg`, and pins it by SHA-256: renaming the image or
+changing the tag format breaks Homebrew installs as well as updates, and replacing a
+published image, even with a rebuild of the same version, makes `brew install` of that
+version fail its checksum. Homebrew finds a new version through the release marked
+Latest (`livecheck` with `github_latest`) and its autobump opens the version bump
+itself, so a release needs no step for it; until that bump merges, `brew install` gets
+the previous version, which then updates itself. The cask declares `auto_updates`, so
+`brew upgrade` leaves an installed copy to the in-app updater
+([updates](features/updates.md#installing)). Changing what the cask states takes a pull
+request to that repository: the minimum macOS (`depends_on macos: :sequoia`), the
+bundle identifier `app.wallpapermachine` it quits before uninstalling, or the app-data
+folders its `zap` stanza moves to the Trash, which include
+`~/Library/Application Support/WallpaperMachine` and so the wallpaper library unless it
+was [moved](features/library-location.md).
+
 ## Recovering a failed release
+
+A failure the tag's code did not cause (Apple's notary or ticket service, a runner, a
+secret replaced since) is retried with **Re-run failed jobs** in the same run: only
+`build` and `publish` run again, and they publish the same version. A failure that needs
+a change to the code costs the version, as below; a
+[rehearsal](#rehearsal-rehearsalyml) of the branch before releasing it finds that kind
+without taking one.
 
 A tag the Version workflow pushed stays when its Build run fails; only Build's
 `publish` job makes a release public. If a tag was created but its release never
@@ -642,36 +1027,47 @@ use the preceding tag. When the unpublished tag was a feature release, its notes
 below that minor version, so the patch gets highlights too; commit copies of its
 banners under the patch's number (`x.y.1.jpg`, `x.y.1.zh-Hans.jpg`,
 `x.y.1.ko.jpg`) before running the
-workflow, since a section names only its own version's banner. Once the patch is cut,
-remove the sections of the unpublished versions it replaces, and their banners, from
-`CHANGELOG.md`: its notes already cover them, and a section left there is shown again in
-What's New. The app it builds still carries them, so remove them before cutting it when
-possible.
+workflow, since a section names only its own version's banner. Remove the sections
+of the unpublished versions the patch replaces, and their banners, from
+`CHANGELOG.md`: its notes already cover them, and a section left there is shown again
+in the update window of every install that updates across it. Remove them before the
+patch is cut, in or before the push with the `release:` line: the patch's manifest
+carries `CHANGELOG.md` as it is at the patch's tag, and that copy is not rewritten.
 
 ## Checklist for a release
 
-1. Land the change on `main` with a `release:` spec line, or run the Version
-   workflow with a spec.
+1. When the release includes a change to the release path (the workflows,
+   `prepare-build`, `scripts/build.py`, `scripts/package.py`, `scripts/lib/`, signing,
+   bundled libraries), [rehearse](#rehearsal-rehearsalyml) it first and wait for a
+   green run. Then land the change on `main` with a `release:` spec line, or run the
+   Version workflow with a spec. An urgent fix goes on a `hotfix/<x.y.z>` branch from the
+   newest tag instead ([Hotfix releases](#hotfix-releases)); afterwards also confirm
+   `chore: merge hotfix x.y.z into main` reached `main`, or that its issue is handled.
 2. Confirm the Version run committed `chore: bump version to x.y.z` with the new
-   `CHANGELOG.md` section and pushed `vx.y.z`. Read the section: it is `### English`
-   then `### 简体中文`, then `### 한국어`, and the model wrote all three. The app
-   bundles all translations; the GitHub release page shows only the English notes.
+   `CHANGELOG.md` section and pushed `vx.y.z`. Read the section: its heading is
+   `## [x.y.z](<compare link>) (YYYY-MM-DD)`, then `### English`, `### 简体中文` and
+   `### 한국어`, the model wrote all three, and each bullet links the commits it
+   describes and any issue they close. The update window shows all translations;
+   the GitHub release page shows only the English notes.
 3. Confirm the called Build run verified the mounted
    image, and published `WallpaperMachine-x.y.z-x86_64.dmg` with its `.sha256`
    sidecar, `WallpaperMachine-update.json` and a provenance attestation. The
-   manifest's `digest` must equal the sidecar's checksum:
+   manifest's `digest` must equal the sidecar's checksum, and its `changelog` must
+   start with the new version's heading:
    `curl -sL https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest/download/WallpaperMachine-update.json`.
 4. Read the release body on the page: it should contain only the English notes
    from the current `CHANGELOG.md` section, followed by the install footer,
-   without Chinese or Korean sections or a raw commit list. The **Full changelog** link
-   opens the commit history; the `Built from` line must match
+   with its issue and commit links, without Chinese or Korean sections or a raw
+   commit list. The **Full changelog** link opens the comparison with the previous
+   version; the `Built from` line must match
    `git rev-parse vx.y.z^{commit}`.
 5. Confirm Latest points at the highest published version. Re-running Build for a
    tag that is already published fails by design; if a published release is
    genuinely wrong, delete it deliberately rather than re-running.
 6. Open the published image on a Mac: the window shows the app beside
    Applications over the background, the drag installs it, and the first launch
-   goes through System Settings → Privacy & Security. Then run the manual smoke
+   opens without **Open Anyway** (`spctl --assess -vv` on the installed app says
+   `source=Notarized Developer ID`). Then run the manual smoke
    pass in [testing/manual-smoke.md](testing/manual-smoke.md) against that copy
    and record it with `python3 scripts/log_verification.py` (see
    [conventions](conventions.md#documentation)).
@@ -679,11 +1075,9 @@ possible.
 CI publishes the disk image although the questions in
 [../LICENSING.md](../LICENSING.md) remain unresolved; the licensing gate that
 once failed Build was removed for 1.0.0 by maintainer decision. That file also
-records the intended Supporter model (a free Developer ID signed and notarized
-download, and a one-time Supporter purchase for a sponsor place and priority
-support, under the GPL with corresponding source alongside). Neither Developer
-ID signing nor notarization is part of this pipeline: `scripts/package.py`
-signs with a self-signed certificate that only keeps the designated requirement
-stable ([build.md](build.md#release-signing)), a provenance attestation records
-who built an artifact rather than who vouches for it, and neither is license
-clearance.
+describes the distribution (a free signed download beside the paid Priority
+Support service, under the GPL with corresponding source alongside). The image is
+signed with the project's Developer ID and notarized
+([build.md](build.md#release-signing)); notarization is Apple's malware check and a
+provenance attestation records who built an artifact rather than who vouches for it,
+and neither is license clearance.

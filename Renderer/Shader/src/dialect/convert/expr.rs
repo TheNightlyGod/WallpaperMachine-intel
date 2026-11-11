@@ -151,6 +151,11 @@ impl Converter {
                     let zero = Expr::number(k.zero(), span.clone());
                     T::new(Expr::binary(Operator::Eq, t.e, zero).paren(), BOOL)
                 }
+                // An operand whose type was not worked out: `!bool(x)`, HLSL's "is zero".
+                Ty::Unknown => {
+                    let operand = Expr::ctor("bool", vec![t.e], span.clone());
+                    T::new(Expr::new(ExprKind::Unary(op, Box::new(operand)), span), BOOL)
+                }
                 _ => T::new(Expr::new(ExprKind::Unary(op, Box::new(t.e)), span), BOOL),
             };
         }
@@ -225,6 +230,11 @@ impl Converter {
         }
         // Matrices: linear algebra types, no conversion (R82).
         if lt.ty.is_matrix() || rt.ty.is_matrix() {
+            if !self.options.glsl_builtins && op == Operator::Mul
+                && ((lt.ty.is_matrix() && rt.ty.vec_width().is_some())
+                    || (rt.ty.is_matrix() && lt.ty.vec_width().is_some())) {
+                self.error(&span, "Wallpaper Engine requires `mul` for matrix/vector multiplication".to_string());
+            }
             let ty = if op == Operator::Mul {
                 product_type(&lt.ty, &rt.ty)
             } else if lt.ty == rt.ty || (lt.ty.is_matrix() && rt.ty.is_scalar()) {

@@ -199,6 +199,19 @@ class NoticeTests(unittest.TestCase):
             notice = self.find(self.build([component]), "miniaudio")
         self.assertTrue(notice.found)
 
+    def test_the_statically_linked_text_libraries_carry_their_repository_license(self):
+        # FreeType, HarfBuzz and msdfgen are vendored under ThirdParty/ and linked into the
+        # renderer; their notices come from the LICENSE files there.
+        for name in ("harfbuzz", "msdfgen"):
+            write(self.root / "ThirdParty" / name, {"LICENSE": MIT})
+            with mock.patch.dict(notices.VENDORED_FILES, {name: [self.root / "ThirdParty" / name / "LICENSE"]}):
+                self.assertIn(name, notices.VENDORED_FILES)
+                component = check_licenses.Component(name, "vendored", "inventory", "", check_licenses.COMPONENTS[name].license, "map")
+                self.assertTrue(self.find(self.build([component]), name).found, name)
+        # The real table points at the files the repository carries.
+        for name in ("freetype", "harfbuzz", "msdfgen"):
+            self.assertTrue(all(file.is_file() for file in notices.VENDORED_FILES[name]), name)
+
     def test_first_party_system_and_unlinked_entries_are_not_noticed(self):
         components = [check_licenses.Component("wp-engine", "first-party", "inventory", license="GPL-3.0-only"),
                       check_licenses.Component("(apple system)", "system", "inventory"),

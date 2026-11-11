@@ -19,18 +19,25 @@ use super::error::LegalizeError;
 /// The prefix the converter gives a stage input the shader writes to (R77).
 pub(crate) const WRITTEN_INPUT_PREFIX: &str = "_we_in_";
 
+/// What a split texture is: its object type, the sampler type beside it and the combined type
+/// a call joins them into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TexKind {
+pub enum TexKind {
     D2,
     D3,
+    /// A depth texture sampled with a comparison (`sampler2DComparison`, E-D8).
+    Shadow,
+    /// A multisampled texture (`sampler2DBackBuffer` under `BACKBUFFER_MS`, E-D8).
+    D2Ms,
 }
 
 impl TexKind {
     /// The GLSL type of the texture object.
     pub fn object_type(self) -> &'static str {
         match self {
-            TexKind::D2 => "texture2D",
+            TexKind::D2 | TexKind::Shadow => "texture2D",
             TexKind::D3 => "texture3D",
+            TexKind::D2Ms => "texture2DMS",
         }
     }
 
@@ -39,6 +46,16 @@ impl TexKind {
         match self {
             TexKind::D2 => "sampler2D",
             TexKind::D3 => "sampler3D",
+            TexKind::Shadow => "sampler2DShadow",
+            TexKind::D2Ms => "sampler2DMS",
+        }
+    }
+
+    /// The GLSL type of the sampler declared beside the object.
+    pub fn sampler_type(self) -> &'static str {
+        match self {
+            TexKind::Shadow => "samplerShadow",
+            _ => "sampler",
         }
     }
 }
@@ -304,6 +321,9 @@ fn classify(out: &mut StageDecls, index: usize, d: &VarDecl) -> Result<(), Legal
                 // naga reads no combined sampler of any kind; the 3D texture is split like the
                 // 2D one so that the colour-correction pass can be translated (C1 R105d).
                 "sampler3D" => Some(TexKind::D3),
+                // The dialect's `sampler2DComparison` and the multisampled back buffer (E-D8).
+                "sampler2DShadow" => Some(TexKind::Shadow),
+                "sampler2DMS" => Some(TexKind::D2Ms),
                 _ => None,
             };
             match tex {

@@ -73,6 +73,9 @@ public:
     // from the pass `from` to the pass `to` (a pass does not reach itself).
     bool mustPrecede(NodeID from, NodeID to) const;
 
+    /// Retain an authored execution boundary even when unrelated targets could batch.
+    void orderBefore(NodeID before, NodeID after);
+
     void ToGraphviz(std::string_view path) const { m_dg.ToGraphviz(path); }
 
     // Calls cb(builder, pass) with a builder working on the pass `id`; false (and no

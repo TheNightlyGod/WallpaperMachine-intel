@@ -29,6 +29,10 @@ struct ScriptSceneOptions {
     double time_step { 1.0 / 60.0 };
     /// The user's saved property values, as the host passes them on load.
     Json saved_properties { Json::object() };
+    /// Where the scripts' localStorage lives (empty = memory only), as the host sets it.
+    std::string storage_directory;
+    std::string storage_screen_key { "display-1" };
+    bool        storage_read_only { false };
 };
 
 class ScriptScene {
@@ -64,9 +68,10 @@ public:
     // ---- effects -----------------------------------------------------------------------
     /// The `visible` flag of every effect of every effect chain, in chain order.
     [[nodiscard]] std::vector<bool> EffectVisibility();
-    /// The lanes of shader constant `uniform` in the first pass of effect `effect` of the first
+    /// The lanes of shader constant `uniform` in `pass` of effect `effect` of the first
     /// chain that has one; empty when there is none.
-    [[nodiscard]] std::vector<float> EffectConstant(std::size_t effect, const std::string& uniform);
+    [[nodiscard]] std::vector<float> EffectConstant(std::size_t effect, const std::string& uniform,
+                                                    std::size_t pass = 0);
 
 private:
     struct Impl;

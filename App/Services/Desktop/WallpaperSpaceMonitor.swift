@@ -28,7 +28,7 @@ struct WallpaperSpaceVisit: Equatable, Sendable {
 /// Read-only Space topology and persistent visit identities for automatic selection.
 @MainActor
 final class WallpaperSpaceMonitor {
-    static let visitsKey = "WallpaperMachine.spaceVisits"
+    nonisolated static let visitsKey = "WallpaperMachine.spaceVisits"
     static let didChangeNotification = Notification.Name("WallpaperMachine.desktopSpacesChanged")
     static let shared = WallpaperSpaceMonitor(defaults: ClientPreferences.defaults,
         provider: { SystemWallpaperSpaceSource.shared?.read() },
@@ -47,6 +47,13 @@ final class WallpaperSpaceMonitor {
     private var visits: [String: Visit]
     private(set) var displays: [String: WallpaperDisplaySpaces] = [:]
     private(set) var available = false
+
+    /// Known full-screen (non-desktop) Spaces, from the last event-driven topology read.
+    /// Missing topology contributes no hold: occlusion remains the fallback.
+    var nonDesktopDisplayIDs: Set<UInt32> {
+        guard available else { return [] }
+        return Set(displays.compactMap { id, spaces in spaces.current == nil ? UInt32(id) : nil })
+    }
 
     init(defaults: UserDefaults? = nil, provider: @escaping Provider = { nil },
          workspaceCenter: NotificationCenter? = nil, displayCenter: NotificationCenter? = nil,
@@ -131,6 +138,13 @@ final class WallpaperSpaceMonitor {
         ResolvedDisplayTitles.liveDisplayID(id, title: title).map(String.init)
     }
 
+    /// macOS names the primary desktop with an empty UUID string; `"default"` is its
+    /// non-empty identity in `WallpaperDesktopSpace` and saved Space choices.
+    nonisolated static let defaultDesktopID = "default"
+    nonisolated static func desktopID(for spaceUUID: String) -> String {
+        spaceUUID.isEmpty ? defaultDesktopID : spaceUUID
+    }
+
     /// Decode UUIDs, never ordinal desktop numbers. A fullscreen current Space is a valid
     /// topology with no active desktop choice. Malformed or ambiguous groups fail closed.
     nonisolated static func decode(groups: [[String: Any]], displays: [String: String]) -> [String: WallpaperDisplaySpaces]? {
@@ -156,9 +170,16 @@ final class WallpaperSpaceMonitor {
             var decoded: [(id: String?, number: UInt64?, type: UInt64)] = []
             for space in raw {
                 guard let type = number(space["type"]) else { return nil }
-                let id = string(space["uuid"])
+                let id: String?
+                if type == 0 {
+                    guard let rawUUID = space["uuid"] as? String else { return nil }
+                    guard let value = rawUUID.isEmpty ? defaultDesktopID : string(rawUUID) else { return nil }
+                    id = value
+                } else {
+                    id = string(space["uuid"])
+                }
                 let identifier = number(space["ManagedSpaceID"] ?? space["id64"])
-                guard (type != 0 || id != nil), id != nil || identifier != nil else { return nil }
+                guard id != nil || identifier != nil else { return nil }
                 decoded.append((id, identifier, type))
             }
             let uuids = decoded.compactMap(\.id)
@@ -166,8 +187,9 @@ final class WallpaperSpaceMonitor {
             let currentUUID = string(current["uuid"])
             let currentNumber = number(current["ManagedSpaceID"] ?? current["id64"])
             let active = decoded.filter { item in
-                if let currentUUID, let id = item.id { return id == currentUUID }
-                return currentNumber != nil && item.number == currentNumber
+                if let currentUUID { return item.id == currentUUID }
+                if let currentNumber { return item.number == currentNumber }
+                return (current["uuid"] as? String)?.isEmpty == true && item.type == 0 && item.id == defaultDesktopID
             }
             guard active.count == 1 else { return nil }
             let desktops = decoded.filter { $0.type == 0 }.enumerated().map {

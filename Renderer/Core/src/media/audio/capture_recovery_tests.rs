@@ -1,16 +1,23 @@
 // Device-free recovery regressions: real controllers and session ownership,
 // with only native setup/teardown replaced at the lifecycle boundary.
+use std::time::{Duration, Instant};
+
 use super::*;
 use crate::{
-    media::audio::{AudioCaptureController, AudioResponseEngine, RestartOutcome},
+    media::audio::{
+        AudioCaptureController, AudioResponseEngine, RestartOutcome, TAP_STALL_REBUILD_LIMIT,
+        TapStallCheck,
+    },
     project::SceneHandle,
 };
 
 struct Control {
     opens: usize,
     permission: bool,
+    permission_requests: usize,
     fail_setup: bool,
     report_native_running: bool,
+    output_running: bool,
 }
 
 struct RecoveryBackend {
@@ -27,8 +34,10 @@ impl RecoveryBackend {
             control: Arc::new(Mutex::new(Control {
                 opens: 0,
                 permission: true,
+                permission_requests: 0,
                 fail_setup: false,
                 report_native_running: false,
+                output_running: true,
             })),
         }
     }
@@ -55,7 +64,9 @@ impl AudioCaptureBackend for RecoveryBackend {
     }
 
     fn request_permission(&mut self) -> Result<bool, AudioCaptureError> {
-        self.control.lock().unwrap().permission = true;
+        let mut control = self.control.lock().unwrap();
+        control.permission = true;
+        control.permission_requests += 1;
         Ok(true)
     }
 
@@ -99,6 +110,14 @@ impl AudioCaptureBackend for RecoveryBackend {
 
     fn has_pending_cleanup(&self) -> bool {
         self.capture.has_pending_cleanup()
+    }
+
+    fn io_callback_count(&self) -> Option<u64> {
+        self.capture.io_callback_count()
+    }
+
+    fn output_device_is_running(&self) -> bool {
+        self.control.lock().unwrap().output_running
     }
 }
 
@@ -445,4 +464,191 @@ fn both_controller_drops_attempt_pending_cleanup_without_unbounded_retry() {
         // deliberately retained by failed Drop after both owners are gone.
         drop(unsafe { Box::from_raw(callback) });
     }
+}
+
+// Stall watch: the real controller and the real I/O callback, with the clock
+// injected as one `Instant` per check, the way the capture worker runs it once
+// a second.
+
+/// A controller whose scene wants capture and whose tap is running.
+fn watched_controller() -> AudioCaptureController<RecoveryBackend> {
+    let mut controller = AudioCaptureController::new(Arc::new(Consumer), RecoveryBackend::new());
+    assert!(!controller.watches_tap_stall(), "no tap runs, so nothing is checked");
+    controller
+        .set_scene_capturing(SceneHandle::new(21), true)
+        .unwrap();
+    assert!(controller.watches_tap_stall());
+    controller
+}
+
+/// Core Audio calling the running tap once with a buffer of zeros, as it does
+/// while nothing plays.
+fn call_back_with_silence(controller: &AudioCaptureController<RecoveryBackend>) {
+    let callback = controller
+        .backend()
+        .capture
+        .state
+        .as_ref()
+        .expect("a tap runs")
+        .callback;
+    let mut samples = [0.0_f32; 2 * 64];
+    let mut list = AudioBufferList {
+        mNumberBuffers: 1,
+        mBuffers: [AudioBuffer {
+            mNumberChannels: 2,
+            mDataByteSize: mem::size_of_val(&samples) as u32,
+            mData: samples.as_mut_ptr().cast(),
+        }],
+    };
+    let list = NonNull::from(&mut list);
+    let mut timestamp: AudioTimeStamp = unsafe { mem::zeroed() };
+    let timestamp = NonNull::from(&mut timestamp);
+    let status = unsafe {
+        io_callback(20, timestamp, list, timestamp, list, timestamp, callback.cast())
+    };
+    assert_eq!(status, 0);
+}
+
+/// One check of the capture worker at `now`: a stalled tap is rebuilt.
+fn check(controller: &mut AudioCaptureController<RecoveryBackend>, now: Instant) -> TapStallCheck {
+    let found = controller.check_tap_stall(now);
+    if found == TapStallCheck::Stalled {
+        assert_eq!(controller.restart_capture().unwrap(), RestartOutcome::Restarted);
+    }
+    found
+}
+
+fn at(base: Instant, seconds: u64) -> Instant {
+    base + Duration::from_secs(seconds)
+}
+
+fn permission_requests(controller: &AudioCaptureController<RecoveryBackend>) -> usize {
+    controller.backend().control.lock().unwrap().permission_requests
+}
+
+#[test]
+fn a_tap_that_stops_calling_back_is_rebuilt_once_after_three_seconds() {
+    let mut controller = watched_controller();
+    let requests = permission_requests(&controller);
+    let base = Instant::now();
+    call_back_with_silence(&controller);
+    for second in 0..3 {
+        assert_eq!(check(&mut controller, at(base, second)), TapStallCheck::Healthy);
+    }
+    assert_eq!(controller.backend().opens(), 1, "under 3 s without callbacks is no stall");
+
+    assert_eq!(check(&mut controller, at(base, 3)), TapStallCheck::Stalled);
+    assert_eq!(controller.backend().opens(), 2, "the silent tap is replaced");
+    controller.backend().assert_healthy();
+
+    let mut found = Vec::new();
+    for second in 4..30 {
+        call_back_with_silence(&controller);
+        found.push(check(&mut controller, at(base, second)));
+    }
+    assert_eq!(found[0], TapStallCheck::Recovered, "the new tap's first callback is reported");
+    assert!(found[1..].iter().all(|&check| check == TapStallCheck::Healthy));
+    assert_eq!(controller.backend().opens(), 2, "a tap that calls back is left alone");
+    assert_eq!(
+        permission_requests(&controller),
+        requests,
+        "a rebuild never asks for permission again"
+    );
+}
+
+#[test]
+fn silence_an_idle_output_or_suspension_never_rebuild_the_tap() {
+    let mut controller = watched_controller();
+    let base = Instant::now();
+    for second in 0..30 {
+        call_back_with_silence(&controller);
+        assert_eq!(check(&mut controller, at(base, second)), TapStallCheck::Healthy);
+    }
+
+    // Nothing plays and the output device stops: no callback is expected.
+    controller.backend().control.lock().unwrap().output_running = false;
+    for second in 30..60 {
+        assert_eq!(check(&mut controller, at(base, second)), TapStallCheck::Healthy);
+    }
+    assert_eq!(controller.backend().opens(), 1);
+
+    // The device runs again: only three seconds of it running without a
+    // callback stall, counted from the first check that finds it running.
+    controller.backend().control.lock().unwrap().output_running = true;
+    for second in 60..63 {
+        assert_eq!(check(&mut controller, at(base, second)), TapStallCheck::Healthy);
+    }
+    assert_eq!(check(&mut controller, at(base, 63)), TapStallCheck::Stalled);
+    assert_eq!(controller.backend().opens(), 2);
+
+    // A paused display suspends capture: nothing is checked or rebuilt.
+    controller.set_demand(true, false).unwrap();
+    assert!(!controller.watches_tap_stall());
+    for second in 64..80 {
+        assert_eq!(check(&mut controller, at(base, second)), TapStallCheck::Idle);
+    }
+    assert_eq!(controller.backend().opens(), 2);
+
+    // Resuming starts a fresh tap with a fresh wait.
+    controller.set_demand(false, false).unwrap();
+    assert!(controller.watches_tap_stall());
+    for second in 80..83 {
+        assert_eq!(check(&mut controller, at(base, second)), TapStallCheck::Healthy);
+    }
+    controller
+        .set_scene_capturing(SceneHandle::new(21), false)
+        .unwrap();
+    assert!(!controller.watches_tap_stall(), "the watch ends with the last consumer");
+    assert_eq!(check(&mut controller, at(base, 90)), TapStallCheck::Idle);
+    assert_eq!(
+        controller.backend().opens(),
+        3,
+        "the first tap, the one stall rebuild and the resume"
+    );
+}
+
+#[test]
+fn stall_rebuilds_stop_after_three_a_minute_until_a_demand_change() {
+    let mut controller = watched_controller();
+    let base = Instant::now();
+    // Every tap on this device stays silent while the device runs.
+    let (mut stalls, mut gave_up) = (0, 0);
+    for second in 0..60 {
+        match check(&mut controller, at(base, second)) {
+            TapStallCheck::Stalled => stalls += 1,
+            TapStallCheck::GaveUp => gave_up += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(stalls, TAP_STALL_REBUILD_LIMIT);
+    assert_eq!(gave_up, 1, "giving up is reported once");
+    assert_eq!(controller.backend().opens(), 1 + TAP_STALL_REBUILD_LIMIT);
+    assert!(!controller.watches_tap_stall(), "a watch that gave up schedules no check");
+    controller.backend().assert_healthy();
+
+    // A web page asking for audio is a demand change: the budget starts over.
+    controller.set_demand(false, true).unwrap();
+    assert!(controller.watches_tap_stall());
+    assert_eq!(check(&mut controller, at(base, 60)), TapStallCheck::Stalled);
+    assert_eq!(controller.backend().opens(), 2 + TAP_STALL_REBUILD_LIMIT);
+}
+
+#[test]
+fn the_rebuild_limit_counts_only_the_last_minute() {
+    let mut controller = watched_controller();
+    let base = Instant::now();
+    // The tap goes quiet for three seconds out of every 25.
+    let mut stalls = 0;
+    for second in 0..200 {
+        if second % 25 < 22 {
+            call_back_with_silence(&controller);
+        }
+        match check(&mut controller, at(base, second)) {
+            TapStallCheck::Stalled => stalls += 1,
+            TapStallCheck::GaveUp => panic!("three stalls are never within a minute here"),
+            _ => {}
+        }
+    }
+    assert_eq!(stalls, 8);
+    assert!(controller.watches_tap_stall());
 }

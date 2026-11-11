@@ -181,12 +181,12 @@ enum NativeVideoLayout {
         CGRect(x: rect.minX, y: viewportHeight - rect.maxY, width: rect.width, height: rect.height)
     }
 
-    /// `image` drawn on black where the live layer puts the picture: a bitmap of the display in
+    /// `image` drawn over the same border as the live layer: a bitmap of the display in
     /// device pixels, for a poster or the frame behind a layer. `nil` for a size no display has.
     /// The layout measures from the top edge and a bitmap context from the bottom.
     static func composeFrame(
         _ image: CGImage, pixelSize: CGSize, backingScale: CGFloat, mode: NativeVideoScalingMode,
-        factor: Double, pan: Pan = .centered
+        factor: Double, pan: Pan = .centered, borderColor: CGColor? = nil
     ) -> CGImage? {
         guard pixelSize.width.isFinite, pixelSize.height.isFinite,
               pixelSize.width > 0, pixelSize.height > 0,
@@ -198,8 +198,8 @@ enum NativeVideoLayout {
                   bytesPerRow: width * 4, space: space,
                   bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.noneSkipLast.rawValue)
         else { return nil }
-        // Whatever the picture does not cover is black, as the window is.
-        context.setFillColor(CGColor(colorSpace: space, components: [0, 0, 0, 1]) ?? .black)
+        let showsBorder = mode != .fill && mode != .stretch
+        context.setFillColor((showsBorder ? borderColor : nil) ?? CGColor(gray: 0, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         // The context is the display in device pixels, so the layout is asked
         // for the same display expressed in points.

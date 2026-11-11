@@ -30,6 +30,8 @@ use crate::{
     project::{SceneDesc, SceneDescSliceExt, SceneHandle},
 };
 
+mod space_preloading;
+
 #[derive(kameo::Actor)]
 pub struct EngineActor {
     #[allow(dead_code)]
@@ -289,7 +291,19 @@ impl EngineActor {
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn destroy_window_for(&mut self, selector: DisplaySelector) -> Result<(), EngineError> {
-        self.update_display_state(|model| model.destroy_window(&selector).map(|_| ()))
+        let key = DisplayKey::from_selector(&selector)?;
+        let result = self.update_display_state(|model| model.destroy_window(&selector).map(|_| ()));
+        // Explicit destruction releases the slot's desktop windows as well. A host
+        // reconcile only retires its active scene and must leave these intact.
+        let mut first_error = result.err();
+        if let Some(index) = self.state.record_index(&key) {
+            for mut parked in std::mem::take(&mut self.state.display_records[index].parked) {
+                if let Err(error) = parked.runtime.close() {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     #[allow(clippy::needless_pass_by_value)]
@@ -496,6 +510,19 @@ impl EngineActor {
             .preview_property_override_json(expected_scene_path, flat_json)
     }
 
+    /// Shows per-wallpaper options while an edit is under way; nothing about the
+    /// scene's stored state changes.
+    pub fn preview_user_options(
+        &mut self,
+        handle: SceneHandle,
+        expected_scene_path: &str,
+        options: &crate::project::SceneUserOptions,
+    ) -> Result<PropertyPreview, EngineError> {
+        self.state
+            .scene_mut(handle)?
+            .preview_user_options(expected_scene_path, options)
+    }
+
     pub fn update_display_state(
         &mut self,
         update: impl FnOnce(&mut DisplayStateModel) -> Result<(), EngineError>,
@@ -523,16 +550,17 @@ impl EngineActor {
         retired.and(opened)
     }
 
-    /// Closes the scene of every slot that no longer should have one, and
-    /// every scene it keeps parked. The slot remembers the live scene's state
-    /// and keeps its handle reservation.
+    /// Retires scenes from slots now owned by a host wallpaper. A desktop's parking
+    /// plan still owns its prepared scenes when the current wallpaper is a video or
+    /// page; absence from the scene reconcile is not a request to release that plan.
     fn retire_scenes_not_needed(
         &mut self,
         mut close: impl FnMut(&mut SceneRuntime) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         let model = self.display_model();
         let mut first_error = None;
-        for record in &mut self.state.display_records {
+        for index in 0..self.state.display_records.len() {
+            let record = &self.state.display_records[index];
             match Self::slot_scene_desc(&model, record) {
                 Ok(Some(_)) => continue,
                 Ok(None) => {}
@@ -542,14 +570,32 @@ impl EngineActor {
                     continue;
                 }
             }
+            let keep = record.runtime.as_ref().is_some_and(|runtime| {
+                record.model.live_display.as_ref().is_some_and(|display| {
+                    display == &runtime.desc.display
+                        || (display.display_id == runtime.display_id()
+                            && display.has_same_render_surface(&runtime.desc.display))
+                }) && self.state.may_park(runtime.display_id(), &runtime.desc.scene_path)
+                    && runtime.has_presented()
+            });
+            let record = &mut self.state.display_records[index];
             record.store_runtime_snapshot();
             record.model.runtime_open = false;
-            let parked = std::mem::take(&mut record.parked).into_iter().map(|parked| parked.runtime);
-            for mut runtime in record.runtime.take().into_iter().chain(parked) {
+            if keep {
+                let key = record.model.key.clone();
+                let handle = record.handle.take();
+                let runtime = record.runtime.take();
+                self.state.sync_handle_reservation(key, None);
+                if let Some(runtime) = runtime {
+                    self.park_or_close(index, handle, runtime);
+                }
+            } else if let Some(mut runtime) = record.runtime.take() {
                 if let Err(error) = close(&mut runtime) {
                     first_error.get_or_insert(error);
                 }
             }
+            // release_parked_not_kept handles removals, disconnects and geometry changes,
+            // including slots that have no live scene while a native host owns the desktop.
         }
         first_error.map_or(Ok(()), Err)
     }
@@ -1489,6 +1535,20 @@ impl Message<messages::SetParkedScenes> for EngineActor {
     }
 }
 
+impl Message<messages::PreloadScene> for EngineActor {
+    type Reply = Result<(), EngineError>;
+    async fn handle(&mut self, msg: messages::PreloadScene, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.with_snapshot_update(|actor| actor.preload_scene(msg.desc, msg.render_scale))
+    }
+}
+
+impl Message<messages::FinishScenePreload> for EngineActor {
+    type Reply = Result<(), EngineError>;
+    async fn handle(&mut self, msg: messages::FinishScenePreload, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.with_snapshot_update(|actor| actor.finish_scene_preload(msg.handle, msg.expired))
+    }
+}
+
 impl Message<messages::RendererCounters> for EngineActor {
     type Reply = Result<Vec<RendererSurfaceCounters>, EngineError>;
 
@@ -1664,6 +1724,18 @@ impl Message<messages::ResetPropertyOverride> for EngineActor {
     }
 }
 
+impl Message<messages::PreviewUserOptions> for EngineActor {
+    type Reply = Result<PropertyPreview, EngineError>;
+
+    async fn handle(
+        &mut self,
+        msg: messages::PreviewUserOptions,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.preview_user_options(msg.handle, &msg.expected_scene_path, &msg.options)
+    }
+}
+
 impl Message<messages::PreviewPropertyOverride> for EngineActor {
     type Reply = Result<PropertyPreview, EngineError>;
 
@@ -1709,7 +1781,7 @@ impl Message<messages::NativeAudioRequirementChanged> for EngineActor {
         msg: messages::NativeAudioRequirementChanged,
         _ctx: &mut Context<Self, Self::Reply>,
     ) {
-        let changed = self.state.scene_mut(msg.handle).is_ok_and(|runtime| {
+        let changed = self.state.scene_for_audio_report_mut(msg.handle).is_some_and(|runtime| {
             runtime.apply_audio_requirement(&msg.renderer_instance, msg.requires_audio)
         });
         if changed {

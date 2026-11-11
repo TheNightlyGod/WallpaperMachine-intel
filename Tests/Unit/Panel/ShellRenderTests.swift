@@ -170,7 +170,12 @@ final class ShellRenderTests: PanelTestCase {
       host.pageScrollView?.documentView.map { $0.frame.width > width - 1 } ?? false
     }
     let scrollView = try XCTUnwrap(host.pageScrollView)
-    let fits = try XCTUnwrap(scrollView.documentView).frame.height + (tall - scrollView.frame.height)
+    let document = try XCTUnwrap(scrollView.documentView)
+    // A collection may expand its document frame to fill a tall viewport. The layout's natural
+    // content height is the threshold we need to cross, not that temporary expanded frame.
+    let contentHeight = (document as? NSCollectionView)?.collectionViewLayout?.collectionViewContentSize.height
+      ?? document.frame.height
+    let fits = contentHeight + (tall - scrollView.frame.height)
     var barShown: Set<Bool> = []
     for height in stride(from: max(560.0, fits - 40), through: fits + 10, by: 2) {
       host.layout(at: NSSize(width: width, height: height))

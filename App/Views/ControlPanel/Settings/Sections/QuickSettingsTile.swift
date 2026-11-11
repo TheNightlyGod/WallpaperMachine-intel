@@ -40,7 +40,8 @@ struct QuickTile: Identifiable, Equatable {
         isExperimental: false),
       QuickTile(
         key: .wallpapersMuted, symbol: muted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-        isOn: muted, isEnabled: true, note: nil, isExperimental: false),
+        isOn: muted, isEnabled: true, note: muteAllNote(for: controller, isOn: muted),
+        isExperimental: false),
       QuickTile(
         key: .lockScreenEnabled, symbol: "lock.fill", isOn: isOn(.lockScreenEnabled),
         isEnabled: controller.isSwitchEnabled(.lockScreenEnabled), note: lock.tileNote,
@@ -86,6 +87,15 @@ struct QuickTile: Identifiable, Equatable {
     return QuickTile(
       key: .desktopWallpapers, symbol: "rectangle.3.group", isOn: isOn, isEnabled: enabled, note: note,
       isExperimental: false)
+  }
+
+  /// Mute All, while off, names the wallpapers muted on their own in the inspector, so a wallpaper
+  /// that stays silent with Mute All off is not a surprise. On, every wallpaper is silent anyway.
+  @MainActor
+  private static func muteAllNote(for controller: PanelController, isOn: Bool) -> String? {
+    let count = controller.playbackSettings.mutedWallpaperCount
+    guard !isOn, count > 0 else { return nil }
+    return "\(L("Off")) · \(L("\(count) muted separately"))"
   }
 
   /// The state itself: the note when there is one, else On or Off.

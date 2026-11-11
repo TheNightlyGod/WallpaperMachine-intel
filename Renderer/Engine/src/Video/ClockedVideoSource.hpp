@@ -95,6 +95,11 @@ private:
     [[nodiscard]] double presentationSlackSeconds() const;
     [[nodiscard]] double latestBufferedAbsoluteLocked() const;
     void requestSeekLocked(double absolute_seconds);
+    /// How far the clock may stand before the frame shown, and run past the frames buffered,
+    /// before it asks for a seek.
+    [[nodiscard]] double backwardSlackSecondsLocked() const;
+    [[nodiscard]] double forwardSlackSecondsLocked() const;
+    void seekBackLocked(double desired_absolute_seconds);
     [[nodiscard]] double secondsSinceSeekRequestedLocked() const;
     [[nodiscard]] bool seekInFlightCoversLocked(double desired_absolute_seconds, double backward_slack,
                                                 double forward_slack) const;
@@ -141,6 +146,9 @@ private:
     std::deque<DecodedFrameSlot>     m_pending_frames;
     DecodedFrameSlot                 m_display_frame {};
     bool                             m_display_frame_ready { false };
+    /// The frame on display is from before a backward seek and is shown only until that seek
+    /// delivers, whose first frame then replaces it at once, due or not.
+    bool                             m_display_frame_stale { false };
     SeekLedger                       m_seek;
     bool                             m_running { false };
     bool                             m_stop_requested { false };

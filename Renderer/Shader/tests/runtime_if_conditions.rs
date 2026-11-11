@@ -82,7 +82,7 @@ fn nesting_inside_a_false_condition_is_skipped_and_an_inactive_one_is_not_read()
     assert_eq!(kept(&out), ["OUTER"]);
     // Inside a region that is already inactive the condition is never evaluated.
     let program = program_ok(
-        "varying vec2 v_TexCoord;\n#if 0\n#if g_A.x < g_A.y\n#endif\n#endif\nvoid main() { gl_FragColor = vec4(1.0); }",
+        "varying vec2 v_TexCoord;\n#if 0\n#if g_A.x < g_A.y\n#endif\n#endif\nvoid main() { gl_FragColor = CAST4(1.0); }",
     );
     assert!(program.diagnostics.iter().all(|d| d.pass != Some(Pass::Preprocess)), "{:?}", program.diagnostics);
 }
@@ -135,6 +135,6 @@ fn many_run_time_conditions_are_all_false_but_recorded_only_up_to_a_bound() {
 
 #[test]
 fn a_program_with_only_valid_conditions_has_no_preprocess_diagnostic() {
-    let p = program_ok("varying vec2 v_TexCoord;\n#if 1\n#define K 1.0\n#endif\nvoid main() { gl_FragColor = vec4(K); }");
+    let p = program_ok("varying vec2 v_TexCoord;\n#if 1\n#define K 1.0\n#endif\nvoid main() { gl_FragColor = CAST4(K); }");
     assert!(p.diagnostics.iter().all(|d| d.pass != Some(Pass::Preprocess)), "{:?}", p.diagnostics);
 }

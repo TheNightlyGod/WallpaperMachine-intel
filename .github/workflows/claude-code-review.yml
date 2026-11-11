@@ -1,12 +1,13 @@
 name: Claude Code Review
 
 # Only fzlzjerry (account id 100508620), whose Claude account the
-# CLAUDE_CODE_OAUTH_TOKEN belongs to, wakes a review: by opening or pushing to a
-# same-repo PR, or by adding the `claude-review` label to any PR. Fork PRs get
-# no secrets or OIDC on `pull_request`, so they need the label:
-# `pull_request_target` runs with this repo's secrets, and the labeler (not the
-# fork author) passes the action's write-access check. Events from anyone else,
-# re-runs included, skip the job; a label someone else added stays on the PR.
+# CLAUDE_CODE_OAUTH_TOKEN belongs to, and bobbyhuang-dev (263530928) wake a
+# review: by opening or pushing to a same-repo PR, or by adding the
+# `claude-review` label to any PR. Fork PRs get no secrets or OIDC on
+# `pull_request`, so they need the label: `pull_request_target` runs with this
+# repo's secrets, and the labeler (not the fork author) passes the action's
+# write-access check. Events from anyone else, re-runs included, skip the job;
+# a label someone else added stays on the PR.
 # Claude only gets the inline-comment tool, so nothing from the PR is executed.
 # Never add a checkout of the PR head here. See the action's docs/security.md.
 on:
@@ -18,7 +19,7 @@ on:
 jobs:
   claude-review:
     if: |
-      github.actor_id == '100508620' && github.triggering_actor == github.actor && (
+      (github.actor_id == '100508620' || github.actor_id == '263530928') && github.triggering_actor == github.actor && (
         (github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository) ||
         (github.event_name == 'pull_request_target' &&
@@ -44,6 +45,10 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The Claude app's token exchange rejects the OIDC token of a `pull_request_target`
+          # run (401 Invalid OIDC token), so a labelled review posts with the workflow's own
+          # token instead. Empty on `pull_request`, which keeps the Claude app token.
+          github_token: ${{ github.event_name == 'pull_request_target' && github.token || '' }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'

@@ -37,7 +37,7 @@ const char* const kFragment =
     "in vec2 v_TexCoord;\n"
     "uniform sampler2D g_Texture0;\n"
     "void main() {\n"
-    "    gl_FragColor = texture(g_Texture0, v_TexCoord);\n"
+    "    gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
     "}\n";
 
 const char* const kAnnotatedFragment =
@@ -45,7 +45,7 @@ const char* const kAnnotatedFragment =
     "uniform sampler2D g_Texture0; // {\"material\":\"albedo\",\"combo\":\"HAS_TEXTURE\",\"default\":\"materials/default.png\"}\n"
     "uniform float g_Brightness; // {\"material\":\"brightness\",\"default\":1.25}\n"
     "void main() {\n"
-    "    gl_FragColor = texture(g_Texture0, v_TexCoord) * g_Brightness;\n"
+    "    gl_FragColor = texSample2D(g_Texture0, v_TexCoord) * g_Brightness;\n"
     "}\n";
 
 struct Job {

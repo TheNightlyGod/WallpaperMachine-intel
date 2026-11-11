@@ -41,6 +41,11 @@ struct PerformanceSettingsSection: View {
     note:
       "Renders at a lower resolution and scales the result to fill the same area. Size and position on screen don’t change.",
     keywords: ["Not applicable to the wallpapers currently running", "100% (native)"])
+  static let metalFXUpscaling = SettingsItem(
+    id: "performance.metalfx-upscaling", section: .performance, group: quality,
+    title: "MetalFX upscaling",
+    note:
+      "Below 100%, scenes are brought back to full size with Apple’s MetalFX upscaler instead of being stretched. Hard edges can look slightly sharper, but every frame needs extra GPU work, which can raise energy use noticeably. Web and video wallpapers aren’t affected.")
   /// What the engine uses now where it differs from the saved Frame rate limit and render scale,
   /// and which condition lowers them.
   static let renderScaleEffective = SettingsItem(
@@ -52,6 +57,31 @@ struct PerformanceSettingsSection: View {
     note:
       "Display resolution draws a 2D scene at the size it covers on your display, as Wallpaper Engine does, which keeps it sharp on a high-resolution screen. Canvas size draws it at the size its author made it and stretches the result, which uses the least GPU and memory. Internal render scale applies on top. Perspective scenes and videos aren’t affected.",
     keywords: ["Display resolution", "Canvas size"])
+
+  // Scene quality: Wallpaper Engine's own settings (defaults are its first-run Medium preset).
+  static let msaa = SettingsItem(
+    id: "performance.msaa", section: .performance, group: quality, title: "Antialiasing (MSAA)",
+    note:
+      "Smooths the edges of 3D models; scenes without one are not affected. Changing it loads running scenes again.",
+    keywords: ["Off"])
+  static let shadows = SettingsItem(
+    id: "performance.shadows", section: .performance, group: quality, title: "Shadows",
+    note: "Detail of the shadows lit 3D scenes cast. Changing it loads running scenes again.",
+    keywords: ["Off", "Low", "Medium", "High", "Ultra"])
+  static let volumetrics = SettingsItem(
+    id: "performance.volumetrics", section: .performance, group: quality, title: "Volumetrics",
+    note: "Light shafts and fog volumes in 3D scenes. Changing it loads running scenes again.",
+    keywords: ["Off", "Low", "Medium", "High", "Ultra"])
+  static let reflections = SettingsItem(
+    id: "performance.reflections", section: .performance, group: quality, title: "Reflections",
+    note:
+      "Lets reflective materials show the scene around them. Changing it loads running scenes again.")
+  static let postProcessing = SettingsItem(
+    id: "performance.post-processing", section: .performance, group: quality,
+    title: "Post-processing",
+    note:
+      "How much of a scene’s bloom and HDR is drawn; HDR needs Ultra or Display HDR. Changing it loads running scenes again.",
+    keywords: ["Disabled", "Enabled", "Ultra", "Display HDR"])
 
   // Advanced
   static let advanced = SettingsItem(
@@ -90,6 +120,10 @@ struct PerformanceSettingsSection: View {
   static let sceneInForce = SettingsItem(
     id: "performance.scene-in-force", section: .performance, group: scene,
     inside: sceneDiagnostics, title: "In force now")
+  static let sceneQualityInForce = SettingsItem(
+    id: "performance.scene-quality-in-force", section: .performance, group: scene,
+    inside: sceneDiagnostics, title: "Quality in force",
+    keywords: ["No scene wallpaper is running."])
   static let sceneUpdating = SettingsItem(
     id: "performance.scene-updating", section: .performance, group: scene,
     inside: sceneDiagnostics, title: "Updating now", keywords: ["Retry"])
@@ -103,12 +137,19 @@ struct PerformanceSettingsSection: View {
     note:
       "Experimental. In scenes drawn by Native Metal, lets a layer’s shader read video frames directly instead of converting them to a color image every frame. Only works with 8-bit NV12 video and shaders that support it; everything else converts as before. Live diagnostics under Scene wallpapers shows which path each scene uses."
   )
+  static let displayFraming = SettingsItem(
+    id: "performance.display-framing", section: .performance, group: experimental,
+    inside: advanced, title: "Draw only the visible part of cropped scenes",
+    note:
+      "Experimental. When your display crops part of a 2D scene because their shapes differ, draws only the part you see instead of the whole scene. This saves some GPU work and memory, most when much of the scene is cropped. Applies only with 2D scene resolution set to Display resolution, the wallpaper set to Fill or Original size, and MetalFX not upscaling the scene. A few pixels can look very slightly different, mostly along fine lines and at the edges of the screen. Turn it off if something looks wrong."
+  )
 
   static let items = [
-    energyUse, energyMethod, preset, frameRateLimit, renderScale, renderScaleEffective,
-    sceneResolution, advanced, videoDiagnostics, videoInUse, sceneOptimization, sceneOnDemand,
-    sceneDiagnostics, sceneDrawnBy, sceneInForce, sceneUpdating, sceneCompatibility,
-    videoPlaneSampling,
+    energyUse, energyMethod, preset, frameRateLimit, renderScale, metalFXUpscaling, renderScaleEffective,
+    sceneResolution, msaa, shadows, volumetrics, reflections, postProcessing, advanced,
+    videoDiagnostics, videoInUse, sceneOptimization, sceneOnDemand,
+    sceneDiagnostics, sceneDrawnBy, sceneInForce, sceneQualityInForce, sceneUpdating, sceneCompatibility,
+    videoPlaneSampling, displayFraming,
   ]
 
   /// The live rows this page leaves out while they have nothing to say, by the values its body
@@ -161,6 +202,7 @@ struct PerformanceSettingsSection: View {
             }, isEnabled: performance.canChangeRenderScale
           ) { try await controller.setRenderScale(Double($0)) }
         }
+        SettingsRow(Self.metalFXUpscaling) { SettingsSwitchControl(key: .metalFXUpscaling) }
         if let effective = performance.quality.effectiveNowText {
           SettingsRow(Self.renderScaleEffective) {
             SettingsStatusText(text: effective) {
@@ -181,6 +223,33 @@ struct PerformanceSettingsSection: View {
               SettingsMenuOption(value: $0, title: $0.title)
             }
           ) { try await controller.setSceneResolution($0) }
+        }
+        SettingsRow(Self.msaa) {
+          SettingsMenuControl(
+            key: "sceneMSAA", saved: performance.sceneQuality.msaa,
+            options: BridgeMsaa.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
+          ) { try await controller.setSceneMSAA($0) }
+        }
+        SettingsRow(Self.shadows) {
+          SettingsMenuControl(
+            key: "sceneShadows", saved: performance.sceneQuality.shadows,
+            options: BridgeQualityLevel.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
+          ) { try await controller.setSceneShadows($0) }
+        }
+        SettingsRow(Self.volumetrics) {
+          SettingsMenuControl(
+            key: "sceneVolumetrics", saved: performance.sceneQuality.volumetrics,
+            options: BridgeQualityLevel.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
+          ) { try await controller.setSceneVolumetrics($0) }
+        }
+        SettingsRow(Self.reflections) { SettingsSwitchControl(key: .sceneReflections) }
+        SettingsRow(Self.postProcessing) {
+          SettingsMenuControl(
+            key: "scenePostProcessing", saved: performance.sceneQuality.postProcessing,
+            options: BridgePostProcessing.allCases.map {
+              SettingsMenuOption(value: $0, title: $0.title)
+            }
+          ) { try await controller.setScenePostProcessing($0) }
         }
       }
       SettingsGroupDisclosure(Self.advanced) {
@@ -218,6 +287,11 @@ struct PerformanceSettingsSection: View {
         if let text = performance.optimization.text {
           SettingsRow(Self.sceneInForce, stacked: true) { Text(verbatim: text).font(.system(size: 12.5)) }
         }
+        SettingsRow(Self.sceneQualityInForce, stacked: true) {
+          report(
+            performance.sceneQualityInForce.map(\.line),
+            empty: "No scene wallpaper is running.")
+        }
         SettingsRow(Self.sceneUpdating, stacked: true) { updating(performance.sceneUpdates) }
       }
       SettingsDisclosure(Self.sceneCompatibility) {
@@ -237,6 +311,9 @@ struct PerformanceSettingsSection: View {
     SettingsGroup(Self.experimental, in: .performance) {
       SettingsRow(Self.videoPlaneSampling) {
         SettingsSwitchControl(key: .sceneVideoPlaneSampling)
+      }
+      SettingsRow(Self.displayFraming) {
+        SettingsSwitchControl(key: .sceneDisplayFraming)
       }
     }
   }

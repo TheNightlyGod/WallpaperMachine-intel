@@ -85,6 +85,13 @@ final class SupportPromptPresenter {
   /// interrupted, and nothing holds it back.
   var wantsPresentation: Bool {
     guard !isDismissed else { return false }
+    // A choice that changes a setting takes its turn in the command queue, which reads as a
+    // switch in progress: the sheet that made it stays up until the choice is applied or refused.
+    if hasBeenShown, isChoosing {
+      var gate = gate
+      gate.switchIsInProgress = false
+      return gate.allowsPresentation
+    }
     return (hasBeenShown || controller.supportPromptPending) && canPresent
   }
 
@@ -97,8 +104,9 @@ final class SupportPromptPresenter {
     controller.supportPromptShown(prompt)
   }
 
-  /// **Star on GitHub**, **Become a Supporter** and **Send performance data**. A link that cannot be
-  /// opened keeps the prompt open with the reason, so the other row, a retry and **Not now** all
+  /// **Star on GitHub**, **Sponsor on Open Collective**, **Join Discord**, **Send performance data** and the
+  /// battery question's three choices. A link that cannot be opened, or a setting the engine
+  /// refuses, keeps the prompt open with the reason, so the other rows, a retry and **Not now** all
   /// remain.
   func choose(_ choice: SupportPromptChoice) async {
     guard !isDismissed, !isChoosing, let prompt else { return }

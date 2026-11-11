@@ -103,6 +103,8 @@ std::string MdlTwoMeshes();
 /// As `MdlTwoMeshes` at version 23, with the first mesh carrying a mask-material extension
 /// (`mat/head_mask.json`).
 std::string MdlMaskedHead();
+/// As MdlMaskedHead, with a second mask on the head drawn from the piece the first clips.
+std::string MdlNestedMaskedHead();
 /// One mesh and two bones (`root`, `head` whose parent is `root`) plus one attachment named
 /// `hat_anchor` whose matrix is the identity translated by (4, 5, 6).
 std::string MdlWithAttachment();
@@ -133,6 +135,8 @@ struct PuppetOptions {
     bool eyes_render_target { false };
     /// Use the masked model (`MdlMaskedHead`) plus the mask material and its shader pair.
     bool masked { false };
+    /// With `masked`: use `MdlNestedMaskedHead`, whose second mask is nested in the first.
+    bool nested_masks { false };
     /// Use the skeleton-less `MdlMeshOnly` model.
     bool mesh_only { false };
 };
@@ -189,6 +193,9 @@ struct ParseOptions {
     bool          live { false };
     /// Package version stamp passed in the request (0 = unknown).
     std::uint16_t pkg_version { 0 };
+    /// Scene quality passed in the request. Fixtures parse at Ultra post-processing so an
+    /// HDR scene keeps its HDR pipeline (the app's default level, Enabled, draws LDR bloom).
+    wallpaper::SceneQuality quality { .post_processing = static_cast<int>(wallpaper::PostProcessing::Ultra) };
 };
 
 /// Mounts a file set and parses scene documents through it, headless. One rig holds one

@@ -14,11 +14,15 @@ set(METAL_RENDER_SOURCES
     ScenePassDescription.cpp)
 
 if(APPLE)
+  find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
   list(APPEND METAL_RENDER_SOURCES
     MetalRender.mm
+    MetalDisplayOutput.mm
     MetalBackdrop.mm
+    MetalImageLevels.mm
     MetalPosterCapture.mm
     MetalSharedImages.mm
+    MetalUpscaler.mm
     MetalVideoTextures.mm)
 endif()
 
@@ -60,9 +64,11 @@ if(APPLE)
     "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
   target_link_libraries(${LIB_NAME} PUBLIC
     ${METAL_FRAMEWORK}
+    ${METAL_FX_FRAMEWORK}
     ${QUARTZ_CORE_FRAMEWORK}
     ${CORE_VIDEO_FRAMEWORK}
-    ${FOUNDATION_FRAMEWORK})
+    ${FOUNDATION_FRAMEWORK}
+    ${APPKIT_FRAMEWORK})
 endif()
 
 set_property(TARGET ${LIB_NAME} PROPERTY POSITION_INDEPENDENT_CODE ON)

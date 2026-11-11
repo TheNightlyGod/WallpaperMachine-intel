@@ -152,7 +152,7 @@ std::string RejectNodes(const Scene& scene, const SceneNode* node)
 }
 
 /// Shader-translation rejection, checked only after the structural ones.
-std::string RejectShaders(const Scene& scene, const SceneNode* node, bool& saw_any_attempt,
+std::string RejectShaders(const Scene& scene, const SceneNode* node, bool& saw_any_shader, bool& saw_any_attempt,
                           const SceneMesh* resolved_geometry = nullptr)
 {
     if (node == nullptr) return {};
@@ -164,6 +164,7 @@ std::string RejectShaders(const Scene& scene, const SceneNode* node, bool& saw_a
             if (slot == nullptr) continue;
             const auto* shader = slot->customShader.shader.get();
             if (shader == nullptr) continue;
+            saw_any_shader = true;
             const auto* program = shader->metal_program.get();
             if (program == nullptr) continue;
             saw_any_attempt = true;
@@ -241,12 +242,12 @@ std::string RejectShaders(const Scene& scene, const SceneNode* node, bool& saw_a
     }
 
     for (auto* effect_node : EffectNodes(scene, node)) {
-        auto reason = RejectShaders(scene, effect_node, saw_any_attempt,
+        auto reason = RejectShaders(scene, effect_node, saw_any_shader, saw_any_attempt,
                                     ResolvedEffectGeometry(scene, node, effect_node));
         if (! reason.empty()) return reason;
     }
     for (const auto& child : node->GetChildren()) {
-        auto reason = RejectShaders(scene, child.get(), saw_any_attempt);
+        auto reason = RejectShaders(scene, child.get(), saw_any_shader, saw_any_attempt);
         if (! reason.empty()) return reason;
     }
     return {};
@@ -292,30 +293,30 @@ std::string SceneMetalStructuralRejection(const Scene& scene)
 
 SceneBackendSelection EvaluateMetalSupport(const Scene& scene)
 {
-    // First: the cause. A shader that did not compile took its layer or effect
-    // out of the scene, and whatever else looks wrong about the rest follows
-    // from that.
-    if (! scene.shader_compile_error.empty()) return NativeRefusal(scene.shader_compile_error);
+    // A shader that did not compile is not a refusal: its pass draws Wallpaper Engine's
+    // fallback shader (`Scene::shader_fallbacks`).
     if (! scene.layer_texture_error.empty()) return NativeRefusal(scene.layer_texture_error);
     if (auto reason = SceneMetalStructuralRejection(scene); ! reason.empty()) {
         return NativeRefusal(std::move(reason));
     }
 
-    bool saw_any_attempt = false;
-    if (auto reason = RejectShaders(scene, scene.sceneGraph.get(), saw_any_attempt);
+    bool saw_any_shader = false, saw_any_attempt = false;
+    if (auto reason = RejectShaders(scene, scene.sceneGraph.get(), saw_any_shader, saw_any_attempt);
         ! reason.empty()) {
         return NativeRefusal(std::move(reason));
     }
     for (auto* node : PostProcessNodes(scene)) {
-        if (auto reason = RejectShaders(scene, node, saw_any_attempt); ! reason.empty()) {
+        if (auto reason = RejectShaders(scene, node, saw_any_shader, saw_any_attempt); ! reason.empty()) {
             return NativeRefusal(std::move(reason));
         }
     }
 
-    // No shader carries a translation at all. That is not the author's fault
+    // No existing shader carries a translation at all. That is not the author's fault
     // and must not be reported as one: it means the parser did not run the
     // Metal translation for this scene.
-    if (! saw_any_attempt) {
+    // An initially empty scene can create its first geometry from a script's
+    // init callback. There is no untranslated shader to refuse in that case.
+    if (saw_any_shader && ! saw_any_attempt) {
         return NativeRefusal("the wallpaper was parsed without the Metal translation of its shaders");
     }
 
@@ -393,10 +394,10 @@ std::string MetalGraphRejection(const Scene& scene, const rg::RenderGraph& graph
         steps.push_back(std::move(step));
     }
 
-    // Targets the parser builds are single-sample, and a depth buffer is only ever
-    // an attachment of the scene's own target, never a texture a pass reads
-    // (`ParserBuildsOnlyTargetsTheDrawPathCanAllocate` pins both), so no target is
-    // refused for its shape here.
+    // Scene colors have single-sample read views; the scene output may also own
+    // MS color/depth attachments. The shadow atlas is a separate sampled depth
+    // target. The allocation path checks those shapes, so this graph check does
+    // not reject the parser's supported targets.
     for (std::size_t i = 0; i < steps.size(); ++i) {
         for (const auto& read : steps[i].reads) {
             // The graph breaks a read-while-write by copying the target first,

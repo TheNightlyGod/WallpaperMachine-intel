@@ -24,6 +24,11 @@ pub struct WallpaperConfig {
     pub media_integration_enabled: bool,
     pub monitors: Vec<MonitorRender>,
     pub property_overrides: BTreeMap<String, Value>,
+    /// Wallpaper Engine's per-wallpaper options (its injected `wec_*`, `wcc_*`,
+    /// `alignmentfliph`, `cameraparallax` and `rate` properties). Not written
+    /// while every option is at its default.
+    #[serde(skip_serializing_if = "EngineOptionsCfg::is_default")]
+    pub engine_options: EngineOptionsCfg,
 }
 
 impl Default for WallpaperConfig {
@@ -36,6 +41,7 @@ impl Default for WallpaperConfig {
             media_integration_enabled: MEDIA_INTEGRATION_DEFAULT,
             monitors: Vec::new(),
             property_overrides: BTreeMap::new(),
+            engine_options: EngineOptionsCfg::default(),
         }
     }
 }
@@ -291,5 +297,231 @@ impl FramingCfg {
             pan_x: framing.pan_x,
             pan_y: framing.pan_y,
         }
+    }
+}
+
+/// Wallpaper Engine's per-wallpaper options as saved under `"engine_options"`.
+///
+/// The ranges and defaults are the ones `wallpaper64.exe` `sub_140104B60` gives
+/// the properties it injects (`artifacts/we-parity/decompiles/H-P0-2.md`): the
+/// four colour sliders 0 to 100 around 50, the image filter's strength 0 to 100
+/// (100 by default), and the playback rate 10 to 200 percent, which Wallpaper
+/// Engine offers for scenes as well as videos.
+///
+/// Reading is tolerant per field, like [`FramingCfg`]: a value of the wrong
+/// type or a number that is not finite reads as that field's default, a number
+/// outside its range is held to it, an image filter that is not a plain file
+/// name reads as none, and keys this build does not know are ignored.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct EngineOptionsCfg {
+    pub color_enabled: bool,
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+    pub hue_shift: f64,
+    /// A file stem under the shared assets' `materials/lut`; empty for none.
+    pub image_filter: String,
+    pub filter_strength: f64,
+    pub flip_horizontal: bool,
+    pub mouse_parallax: bool,
+    pub playback_rate: f64,
+}
+
+impl Default for EngineOptionsCfg {
+    fn default() -> Self {
+        Self {
+            color_enabled: false,
+            brightness: 50.0,
+            contrast: 50.0,
+            saturation: 50.0,
+            hue_shift: 50.0,
+            image_filter: String::new(),
+            filter_strength: 100.0,
+            flip_horizontal: false,
+            mouse_parallax: true,
+            playback_rate: 100.0,
+        }
+    }
+}
+
+/// One of Wallpaper Engine's per-wallpaper options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EngineOptionId {
+    ColorEnabled,
+    Brightness,
+    Contrast,
+    Saturation,
+    HueShift,
+    ImageFilter,
+    FilterStrength,
+    FlipHorizontal,
+    MouseParallax,
+    PlaybackRate,
+}
+
+impl EngineOptionId {
+    /// Every option, in the order an editor lists them.
+    pub const ALL: [Self; 10] = [
+        Self::ColorEnabled,
+        Self::Brightness,
+        Self::Contrast,
+        Self::Saturation,
+        Self::HueShift,
+        Self::ImageFilter,
+        Self::FilterStrength,
+        Self::FlipHorizontal,
+        Self::MouseParallax,
+        Self::PlaybackRate,
+    ];
+
+    /// The inclusive range of a slider option; `None` for a switch or the
+    /// image filter.
+    #[must_use]
+    pub fn range(self) -> Option<(f64, f64)> {
+        match self {
+            Self::Brightness | Self::Contrast | Self::Saturation | Self::HueShift | Self::FilterStrength => {
+                Some((0.0, 100.0))
+            }
+            Self::PlaybackRate => Some((10.0, 200.0)),
+            Self::ColorEnabled | Self::ImageFilter | Self::FlipHorizontal | Self::MouseParallax => None,
+        }
+    }
+
+    /// Whether the option is a switch.
+    #[must_use]
+    pub fn is_switch(self) -> bool {
+        matches!(self, Self::ColorEnabled | Self::FlipHorizontal | Self::MouseParallax)
+    }
+}
+
+/// Whether `name` can be an image filter: a plain file stem of 1 to 64 of
+/// `[A-Za-z0-9._-]`, never `.` or `..`, so it can only name a file directly in
+/// `materials/lut`.
+#[must_use]
+pub fn is_image_filter_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+impl EngineOptionsCfg {
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The value of one option.
+    #[must_use]
+    pub fn get(&self, option: EngineOptionId) -> PropertyValue {
+        match option {
+            EngineOptionId::ColorEnabled => PropertyValue::Bool(self.color_enabled),
+            EngineOptionId::Brightness => PropertyValue::Number(self.brightness),
+            EngineOptionId::Contrast => PropertyValue::Number(self.contrast),
+            EngineOptionId::Saturation => PropertyValue::Number(self.saturation),
+            EngineOptionId::HueShift => PropertyValue::Number(self.hue_shift),
+            EngineOptionId::ImageFilter => PropertyValue::String(self.image_filter.clone()),
+            EngineOptionId::FilterStrength => PropertyValue::Number(self.filter_strength),
+            EngineOptionId::FlipHorizontal => PropertyValue::Bool(self.flip_horizontal),
+            EngineOptionId::MouseParallax => PropertyValue::Bool(self.mouse_parallax),
+            EngineOptionId::PlaybackRate => PropertyValue::Number(self.playback_rate),
+        }
+    }
+
+    /// Sets one option. A value of the wrong kind for the option is ignored and
+    /// a number is held to the option's range; callers check edits first, so
+    /// this only keeps the saved file inside what the reader accepts.
+    pub fn set(&mut self, option: EngineOptionId, value: &PropertyValue) {
+        match (option, value) {
+            (EngineOptionId::ColorEnabled, PropertyValue::Bool(on)) => self.color_enabled = *on,
+            (EngineOptionId::FlipHorizontal, PropertyValue::Bool(on)) => self.flip_horizontal = *on,
+            (EngineOptionId::MouseParallax, PropertyValue::Bool(on)) => self.mouse_parallax = *on,
+            (EngineOptionId::ImageFilter, PropertyValue::String(name)) => {
+                self.image_filter = if is_image_filter_name(name) { name.clone() } else { String::new() };
+            }
+            (option, PropertyValue::Number(number)) => {
+                let Some((min, max)) = option.range() else { return };
+                if !number.is_finite() {
+                    return;
+                }
+                let number = number.clamp(min, max);
+                match option {
+                    EngineOptionId::Brightness => self.brightness = number,
+                    EngineOptionId::Contrast => self.contrast = number,
+                    EngineOptionId::Saturation => self.saturation = number,
+                    EngineOptionId::HueShift => self.hue_shift = number,
+                    EngineOptionId::FilterStrength => self.filter_strength = number,
+                    EngineOptionId::PlaybackRate => self.playback_rate = number,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Puts one option back at its default.
+    pub fn restore(&mut self, option: EngineOptionId) {
+        self.set(option, &Self::default().get(option));
+    }
+
+    /// The options as the scene renderer takes them.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn to_scene(&self) -> wallpaper_core::project::SceneUserOptions {
+        wallpaper_core::project::SceneUserOptions {
+            color_enabled: self.color_enabled,
+            brightness: self.brightness as f32,
+            contrast: self.contrast as f32,
+            saturation: self.saturation as f32,
+            hue: self.hue_shift as f32,
+            lut: self.image_filter.clone(),
+            lut_strength: self.filter_strength as f32,
+            flip_horizontal: self.flip_horizontal,
+            mouse_parallax: self.mouse_parallax,
+            playback_rate: self.playback_rate as f32,
+        }
+    }
+
+    fn from_json(value: &Value) -> Self {
+        let mut options = Self::default();
+        let Some(map) = value.as_object() else {
+            return options;
+        };
+        let keys = [
+            ("color_enabled", EngineOptionId::ColorEnabled),
+            ("brightness", EngineOptionId::Brightness),
+            ("contrast", EngineOptionId::Contrast),
+            ("saturation", EngineOptionId::Saturation),
+            ("hue_shift", EngineOptionId::HueShift),
+            ("image_filter", EngineOptionId::ImageFilter),
+            ("filter_strength", EngineOptionId::FilterStrength),
+            ("flip_horizontal", EngineOptionId::FlipHorizontal),
+            ("mouse_parallax", EngineOptionId::MouseParallax),
+            ("playback_rate", EngineOptionId::PlaybackRate),
+        ];
+        for (key, option) in keys {
+            let read = match map.get(key) {
+                Some(Value::Bool(on)) if option.is_switch() => PropertyValue::Bool(*on),
+                Some(Value::String(name)) if option == EngineOptionId::ImageFilter => {
+                    PropertyValue::String(name.clone())
+                }
+                Some(Value::Number(number)) if option.range().is_some() => match number.as_f64() {
+                    Some(number) => PropertyValue::Number(number),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            options.set(option, &read);
+        }
+        options
+    }
+}
+
+impl<'de> Deserialize<'de> for EngineOptionsCfg {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from_json(&Value::deserialize(deserializer)?))
     }
 }

@@ -78,12 +78,13 @@ final class WorkshopSearchTriggerTests: XCTestCase {
 
   func testTheTabsMoveFocusWithTheArrowsHomeAndEndAndNeverChooseOne() {
     let all = WorkshopList.allCases
-    XCTAssertEqual(all, [.browse, .collections, .subscriptions])
+    XCTAssertEqual(all, [.browse, .collections, .subscriptions, .favorites])
     XCTAssertEqual(WorkshopSourceTabs.destination(from: .browse, key: .rightArrow), .collections)
-    XCTAssertEqual(WorkshopSourceTabs.destination(from: .subscriptions, key: .rightArrow), .browse, "wraps")
-    XCTAssertEqual(WorkshopSourceTabs.destination(from: .browse, key: .leftArrow), .subscriptions, "wraps")
+    XCTAssertEqual(WorkshopSourceTabs.destination(from: .subscriptions, key: .rightArrow), .favorites)
+    XCTAssertEqual(WorkshopSourceTabs.destination(from: .favorites, key: .rightArrow), .browse, "wraps")
+    XCTAssertEqual(WorkshopSourceTabs.destination(from: .browse, key: .leftArrow), .favorites, "wraps")
     XCTAssertEqual(WorkshopSourceTabs.destination(from: .collections, key: .home), .browse)
-    XCTAssertEqual(WorkshopSourceTabs.destination(from: .collections, key: .end), .subscriptions)
+    XCTAssertEqual(WorkshopSourceTabs.destination(from: .collections, key: .end), .favorites)
     XCTAssertNil(WorkshopSourceTabs.destination(from: .collections, key: .upArrow))
   }
 }

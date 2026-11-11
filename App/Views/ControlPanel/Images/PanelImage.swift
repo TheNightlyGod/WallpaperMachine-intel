@@ -39,6 +39,8 @@ struct PanelImage: View {
   // A reference keeps old SwiftUI view snapshots from retaining a previous decoded image.
   @Observable fileprivate final class ImageState {
     var loaded: (request: Request, image: DecodedPanelImage)?
+    /// The request whose load failed, so the view can say there is no picture to show.
+    var failed: Request?
     var isActive = true
   }
 
@@ -52,6 +54,13 @@ struct PanelImage: View {
     return images?.cachedImage(for: request.source, maxPixelSize: request.pixels)
   }
 
+  /// The load of what the view shows now failed: a missing or unreadable file, a download that
+  /// did not arrive. Without a mark it would look like an image that is still on its way.
+  private var hasFailed: Bool {
+    guard state.isActive, let request else { return false }
+    return state.failed == request
+  }
+
   var body: some View {
     Color.primary.opacity(0.06)
       .overlay {
@@ -59,6 +68,11 @@ struct PanelImage: View {
           Image(decorative: image.cgImage, scale: 1)
             .resizable()
             .aspectRatio(contentMode: contentMode)
+        } else if hasFailed {
+          Image(systemName: "photo")
+            .font(.system(size: 18, weight: .regular))
+            .foregroundStyle(.tertiary)
+            .accessibilityHidden(true)
         }
       }
       .clipped()
@@ -70,6 +84,7 @@ struct PanelImage: View {
       .onDisappear {
         state.isActive = false
         state.loaded = nil
+        state.failed = nil
       }
   }
 
@@ -77,13 +92,20 @@ struct PanelImage: View {
     guard !Task.isCancelled else { return }
     guard let request, let images else {
       state.loaded = nil
+      state.failed = nil
       return
     }
     if state.loaded?.request == request { return }
     state.loaded = nil
-    guard let image = try? await images.image(for: request.source, maxPixelSize: request.pixels)
-    else { return }
-    guard !Task.isCancelled else { return }
-    state.loaded = (request, image)
+    state.failed = nil
+    do {
+      let image = try await images.image(for: request.source, maxPixelSize: request.pixels)
+      guard !Task.isCancelled else { return }
+      state.loaded = (request, image)
+    } catch {
+      // A load that was cancelled (the view left, the source changed) did not fail.
+      guard !Task.isCancelled, !(error is CancellationError) else { return }
+      state.failed = request
+    }
   }
 }

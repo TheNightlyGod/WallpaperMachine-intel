@@ -49,7 +49,19 @@ Automation permission. The app declares `NSAppleEventsUsageDescription`; without
 macOS refuses every Apple Event before the Automation prompt can appear. If the
 fallback player exits or neither player reports a readable track, the title, cover,
 playback, timeline and transport target are withdrawn together; late artwork from
-the previous subscription is ignored, and a recovered player is read afresh.
+the previous subscription is ignored, and a recovered player is read afresh. The
+fallback asks once a second while Music or Spotify is running. When neither is
+running it keeps no timer and does not repeatedly enumerate applications. Workspace
+launch/exit notifications refresh the supported-player list immediately, restore the
+same polling cadence on launch, and retire pending queries and covers on exit. Other
+applications' notifications do not trigger player queries. The last consumer leaving
+removes both the timer and the workspace observers; callbacks from that subscription
+cannot restart work after a later subscription begins.
+`NSAppleScriptNowPlayingRunner` compiles each script (a
+player's state query, Music's cover query, a transport command) once on its private
+serial queue and runs the compiled script again, rather than parsing it and loading
+the player's scripting terminology on every question. A script that fails to compile
+is compiled again next time.
 
 **Stream rules.** The stream runs only while a host has consumers. Complete JSON
 snapshots are decoded with an 8 MiB pending-input bound, artwork is downscaled to
@@ -61,6 +73,20 @@ provider skips base64 decoding and the `MediaArtwork` lookup for a repeated
 `artworkData` string, but every complete message still updates properties, playback
 and timeline; failed input is never cached, and the cache is released when the last
 consumer leaves or the stream fails.
+
+A missed track-change notification can otherwise leave the first song displayed
+forever. When a finite playing timeline is more than two seconds past its reported
+end, the provider uses its existing timeline tick to request one complete `get`
+snapshot from the same bundled adapter. Normal playback still uses notifications;
+there is no additional periodic metadata poll. An unchanged, malformed or failed
+snapshot gets at most one retry, at least five seconds later. Repeated stale stream
+messages do not reset that budget. A new item, or a reported timeline restart before
+the end, permits recovery at its next boundary. Paused sessions, unknown durations
+and subscriptions without consumers do no recovery work. New stream messages and
+subscription changes invalidate outstanding snapshots, so an old query cannot
+restore the previous song. The short-lived reader is limited to 8 MiB and three
+seconds; cancellation or timeout terminates and reaps it without disturbing the
+long-lived stream. A successful empty snapshot withdraws the old song and cover.
 
 **The setting starts a source; presenting keeps it running.**
 `WallpaperBridge.systemMediaSceneHandles()` names the applied desktop Scenes that
@@ -101,19 +127,12 @@ Color arrays are exposed as `Vec3` (`.x` / `.y` / `.z`). Artwork is uploaded as 
 before `mediaThumbnailChanged` so `$mediaThumbnail` is valid when the script reads
 it.
 
-**Idle state.** Every scene starts as a desktop with no player, with or without the
-setting. On its first tick, after its scripts have started and before the first frame,
-the runtime tells them `mediaPropertiesChanged` with an empty track (the same object
-the app sends with the setting on and nothing playing) and `mediaPlaybackChanged` with
-`PLAYBACK_STOPPED`. Wallpaper Engine's media widgets are authored visible and hide on
-`PLAYBACK_STOPPED`, so without this users with the setting off saw
-their covers and mascots on screen all the time. The idle state reveals nothing about
-what is playing, so it does not wait for consent: what a player really reports is
-still dropped while the setting is off. It is said once, and only for an event type no
-real event had said before that tick (the replay of the current state to a scene that
-has just attached, with the setting on, wins); a real event afterwards replaces it
-like any other. No timeline or thumbnail event is sent, as for a web page with no
-player.
+**No player.** A scene hears a media event only when a player reports one, as in
+Wallpaper Engine, which dispatches media events only as its media integration queues
+them (`sub_140171440`). With the setting off, or with no player running, no event
+arrives at all, and a widget keeps the state its `init` left it in: 3662790108's time
+readout shows "0:00 / 0:00", and a widget authored visible that hides itself on
+`PLAYBACK_STOPPED` stays visible until a player says it stopped.
 
 **Covers.** A new cover is pixels, not a new scene: `PublishSystemMediaArtwork`
 replaces the image behind `$mediaThumbnail` and moves the outgoing one to

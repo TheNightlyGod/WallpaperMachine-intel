@@ -5,6 +5,7 @@
 #include "Media/Apple/VtFrameDecoder.hpp"
 #include "Media/ByteSource.hpp"
 #include "Media/DisplayMatrix.hpp"
+#include "Media/DisposableSample.hpp"
 #include "Media/IsoBmff/IsoBmffReader.hpp"
 #include "Media/Matroska/MatroskaReader.hpp"
 #include "Media/SampleOrder.hpp"
@@ -224,6 +225,8 @@ public:
 
     [[nodiscard]] uint64_t loopIndex() const { return m_pump.loopIndex(); }
 
+    void skipDisposableBefore(double absolute_seconds) { m_late_before = absolute_seconds; }
+
     void cancel()
     {
         m_cancelled.store(true);
@@ -250,14 +253,19 @@ private:
         DecodeStatus ReadPacket(std::string* error) override
         {
             if (m_owner.m_cancelled.load()) return DecodeStatus::Again;
-            if (m_owner.m_cursor >= m_owner.m_samples->size()) return DecodeStatus::EndOfStream;
-            media::Error read_error;
-            if (!m_owner.readSample(m_owner.m_cursor, &m_owner.m_packet, &read_error)) {
-                SetError(error, "failed to read a video sample: " + media::Describe(read_error));
-                return DecodeStatus::Error;
+            while (m_owner.m_cursor < m_owner.m_samples->size()) {
+                media::Error read_error;
+                if (!m_owner.readSample(m_owner.m_cursor, &m_owner.m_packet, &read_error)) {
+                    SetError(error, "failed to read a video sample: " + media::Describe(read_error));
+                    return DecodeStatus::Error;
+                }
+                const std::size_t index = m_owner.m_cursor++;
+                // Never decoded, never missed: nothing refers to it and its time has passed.
+                if (m_owner.lateAndDisposable(index)) continue;
+                m_owner.m_held_index = index;
+                return DecodeStatus::Ok;
             }
-            m_owner.m_held_index = m_owner.m_cursor++;
-            return DecodeStatus::Ok;
+            return DecodeStatus::EndOfStream;
         }
 
         DecodeStatus SendPacket(std::string* error) override
@@ -425,6 +433,26 @@ private:
                                  "the container is not MP4, QuickTime, WebM or Matroska");
     }
 
+    /// Whether the sample at `index`, just read into `m_packet`, is shown entirely
+    /// before the time `skipDisposableBefore` gave and is a picture nothing refers to.
+    /// Lateness is asked first, so a source that keeps up never reads a header.
+    bool lateAndDisposable(std::size_t index)
+    {
+        const media::Sample& sample = (*m_samples)[index];
+        const double         pass   = m_stream_info.duration_seconds > 0.0
+                                          ? static_cast<double>(m_pump.loopIndex()) * m_stream_info.duration_seconds
+                                          : 0.0;
+        const double ends = pass + static_cast<double>(sample.pts + std::max<std::int64_t>(sample.duration, 0)) /
+                                       m_timescale;
+        if (!(ends <= m_late_before)) return false;
+        if (m_disposable.size() != m_samples->size()) m_disposable.assign(m_samples->size(), kUnread);
+        if (m_disposable[index] == kUnread) {
+            m_disposable[index] = media::IsDisposableSample(*m_info, m_packet.data(), m_packet.size()) ? kDisposable
+                                                                                                    : kReferenced;
+        }
+        return m_disposable[index] == kDisposable;
+    }
+
     bool readSample(std::size_t index, std::vector<std::uint8_t>* out, media::Error* error) const
     {
         return m_iso ? m_iso->readSample(index, out, error) : m_mkv->readSample(index, out, error);
@@ -456,6 +484,11 @@ private:
     bool                                 m_draining { false };
     media::apple::DecodedFrame           m_frame;
     std::int64_t                         m_drop_before_pts { std::numeric_limits<std::int64_t>::min() };
+    /// What `skipDisposableBefore` gave: frames shown entirely before it are late.
+    double                               m_late_before { -std::numeric_limits<double>::infinity() };
+    /// Per sample, read on first need: whether nothing refers to it.
+    static constexpr std::int8_t         kUnread { -1 }, kReferenced { 0 }, kDisposable { 1 };
+    std::vector<std::int8_t>             m_disposable;
 
     /// Declared last so everything they borrow is initialized first.
     DecodeSource                         m_decode_source;
@@ -496,6 +529,11 @@ bool NativeVideoBackend::seek(double wrapped_seconds, uint64_t loop_index, std::
 }
 
 uint64_t NativeVideoBackend::loopIndex() const { return m_impl->loopIndex(); }
+
+void NativeVideoBackend::skipDisposableBefore(double absolute_seconds)
+{
+    m_impl->skipDisposableBefore(absolute_seconds);
+}
 
 void NativeVideoBackend::cancel() { m_impl->cancel(); }
 

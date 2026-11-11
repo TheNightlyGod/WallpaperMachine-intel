@@ -73,13 +73,49 @@ When the storage root or its marker is missing at launch, the app starts without
 its library rather than filling a new, empty one on this Mac: `ClientPaths`
 still names the chosen folder, `ClientPaths.prepare` throws
 `StorageUnavailableError`, a pending backup restore waits, and the window says
-**Wallpaper Library Unavailable** with the path. Connecting the drive and reopening
-the app is all it takes. **Use This Mac Instead…** (confirmed) forgets the drive
-and quits; the next launch keeps the library in the app-support folder again and
-nothing on the drive is deleted.
+**Wallpaper Library Unavailable** with the path and that the library opens once the
+drive is connected. Connecting the drive is all it takes: once it mounts with the
+library's marker on it, the library opens in place with every service a launch starts
+over it, the staging a crashed download or import left beside it is swept as at a
+launch, and an open window shows the panel instead. A drive that finished mounting
+after the launch looked for it, but before `StorageVolumeMonitor` started listening, is
+found by one look once the launch is over, since its mount is not announced again. A
+backup restore that waits is applied only before anything opens the library, so with
+one pending the window stays and the app has to be reopened, which applies it.
+Reopening always works too. **Use This Mac Instead…** (confirmed) forgets the drive and quits;
+the next launch keeps the library in the app-support folder again and nothing on the
+drive is deleted.
 
-A drive ejected while the app runs is not watched for: what the app then reads from
-it fails as if the files were deleted. Reconnect the drive and reopen the app.
+While the app runs, `StorageVolumeMonitor` follows the drive of a library kept on
+another disk than the startup disk; for a library on this Mac it observes nothing.
+It reads the workspace's mount notifications and ignores every volume but the one the
+library is on, without reading anything for them:
+
+- **Ejected** (`willUnmountNotification`) or **unplugged** (`didUnmountNotification`):
+  every wallpaper lives in the one library on that drive, so all of them stop, as with
+  a **Stop (free memory)** rule ([performance](performance.md)): the monitor is one
+  more rule action for `WallpaperPresentationPolicy`. Scene runtimes, web pages, video
+  players and the wallpapers kept for other desktops close with the files they hold
+  open, so the eject can go ahead, and an open preview window closes. Each display
+  keeps its assignment, playlists and rules wait as they do while wallpapers are
+  stopped, and the desktop shows its desktop picture
+  ([desktop picture](desktop-picture.md)). A warning row in the panel's banner
+  names the library's folder until the wallpapers play again. The stop starts when
+  macOS announces the eject and finishes a moment later, so a video wallpaper can
+  still hold its file when the first attempt is made: ejecting again within 20
+  seconds then works.
+- **An eject that did not happen**: when another app keeps the drive busy, or the
+  eject is cancelled, nothing more is announced; 20 seconds after the announcement,
+  if the library is still there, its wallpapers play again. Ejecting again within the
+  20 seconds counts them from that attempt; once they have passed the wallpapers are
+  playing again, so the next eject meets the same race as the first.
+- **Connected again** (`didMountNotification`) with this library's marker: the
+  library is rescanned first, then the stop is lifted and each display loads what it
+  was assigned. Another drive mounted under the same name, or one with another
+  library's marker, changes nothing.
+
+A drive renamed while the library is on it is not followed to its new name: the
+library is then missing at the next launch, as above.
 
 ## Backups
 
@@ -103,5 +139,11 @@ different drive at launch, refused folders, cancelling, a copy cut short, a laun
 that stopped after the commit), `StorageCopierTests`, `StorageLocationTests`,
 `DownloaderStorageTests` (SteamCMD's home beside the sign-in, content on the
 library's disk), `WallpaperBackupTests.testMovedLibraryIsBackedUpFromAndRestoredToWhereItIsKept`
-and the move actions in `PanelStorageActionsTests`. No test uses a real external
-drive: a fake `StorageVolumeInspecting` stands in for another disk.
+and the move actions and the drive's banner row in `PanelStorageActionsTests`.
+`StorageVolumeMonitorTests` cover the drive while the app runs: an eject stops the
+wallpapers through the real presentation policy and connecting the drive plays them
+after a rescan, an unplug, an eject that did not happen, other volumes and a drive
+with another library change what they should, a library missing at launch opens once
+its drive is connected, and a pending backup restore keeps waiting. No test uses a
+real external drive: a fake `StorageVolumeInspecting` stands in for another disk, and
+the monitor's drive is a folder its notifications name.

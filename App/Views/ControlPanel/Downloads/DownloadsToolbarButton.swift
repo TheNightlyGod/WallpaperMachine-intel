@@ -49,7 +49,7 @@ struct DownloadsToolbarButton: View {
     .accessibilityLabel(Text(verbatim: queue.buttonLabel))
     .accessibilityIdentifier("downloads-button")
     .popover(isPresented: $model.isQueuePopoverOpen, arrowEdge: .bottom) {
-      DownloadsPopover()
+      DownloadsPopover().panelPresentationLocale()
     }
   }
 }

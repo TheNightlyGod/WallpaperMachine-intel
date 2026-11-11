@@ -39,8 +39,11 @@ SceneVertexArray::SceneVertexArray(SceneVertexArray&& o) noexcept
       m_stride(std::exchange(o.m_stride, 0)),
       m_capacity(std::exchange(o.m_capacity, 0)),
       m_size(std::exchange(o.m_size, 0)),
+      m_drawn(std::exchange(o.m_drawn, 0)),
+      m_drawn_known(std::exchange(o.m_drawn_known, false)),
       m_data(std::move(o.m_data)),
       m_options(std::move(o.m_options)),
+      m_aliases(std::move(o.m_aliases)),
       m_id(std::exchange(o.m_id, 0)) {
     o.m_attrs.clear();
     o.m_options.clear();
@@ -52,8 +55,11 @@ SceneVertexArray& SceneVertexArray::operator=(SceneVertexArray&& o) noexcept {
     m_stride   = std::exchange(o.m_stride, 0);
     m_capacity = std::exchange(o.m_capacity, 0);
     m_size     = std::exchange(o.m_size, 0);
+    m_drawn       = std::exchange(o.m_drawn, 0);
+    m_drawn_known = std::exchange(o.m_drawn_known, false);
     m_data     = std::move(o.m_data); // frees what this array held
     m_options  = std::move(o.m_options);
+    m_aliases  = std::move(o.m_aliases);
     m_id       = std::exchange(o.m_id, 0);
     o.m_attrs.clear();
     o.m_options.clear();
@@ -72,6 +78,7 @@ bool SceneVertexArray::AddVertex(const float* data) {
         next += RealAttributeSize(attr);
     }
     m_size += m_stride;
+    m_drawn_known = false;
     return true;
 }
 
@@ -97,6 +104,7 @@ bool SceneVertexArray::SetVertex(std::string_view name, std::span<const float> d
                     m_data.get() + vertex * m_stride + word);
     }
     m_size = std::max(m_size, count * m_stride);
+    m_drawn_known = false;
     return true;
 }
 
@@ -109,6 +117,7 @@ bool SceneVertexArray::SetVertexs(usize index, std::span<const float> data) noex
     }
     std::copy(data.begin(), data.end(), m_data.get() + start);
     m_size = std::max(m_size, end);
+    m_drawn_known = false;
     return true;
 }
 
@@ -120,7 +129,19 @@ SceneVertexArray::GetAttrOffsetMap() const {
         map.insert_or_assign(attr.name, SceneVertexAttributeOffset { attr, words * sizeof(float) });
         words += RealAttributeSize(attr);
     }
+    for (const auto& [alias, target] : m_aliases) {
+        if (map.find(alias) != map.end()) continue;
+        const auto found = map.find(target);
+        if (found == map.end()) continue;
+        SceneVertexAttributeOffset entry = found->second;
+        entry.attr.name                  = alias;
+        map.insert_or_assign(alias, entry);
+    }
     return map;
+}
+
+void SceneVertexArray::AddAlias(std::string alias, std::string target) {
+    m_aliases.emplace_back(std::move(alias), std::move(target));
 }
 
 bool SceneVertexArray::GetOption(std::string_view name) const {

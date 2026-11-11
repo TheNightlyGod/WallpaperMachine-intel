@@ -67,9 +67,21 @@ local under `artifacts/`, and do not commit them.
 - CPU hot spots and memory growth: Instruments Time Profiler and Allocations.
 - GPU/CPU scheduling and final Metal execution: Instruments Metal System Trace
   and Xcode Metal debugger. Correlate findings with renderer logs; Metal capture
-  does not directly explain the shader translation behavior.
+  does not directly explain the shader translation behavior. With
+  `WALLPAPER_MACHINE_GPU_LABELS=1` (off by default) Native Metal names every command
+  buffer and encoder after the pass, target and layer it draws, so the trace attributes
+  GPU time per pass; `split` also times draws that share a render pass apart. The
+  recipe, label format and caveats are in
+  [GPU time per pass](testing/renderer.md#gpu-time-per-pass).
 - Power and energy claims: the procedure and comparison rules in
   [testing/power-benchmark.md](testing/power-benchmark.md).
+
+When inspecting native reference code, verify consequential floating-point constants
+against instruction data references and the original executable bytes. The installed
+headless Hex-Rays path has rendered an actual `0.5f` (`00 00 00 3f`) as `0.395f` in
+pseudocode even with matching executable/database input hashes and unmodified bytes.
+Keep the byte-level check with the task's evidence; a decimal literal in pseudocode
+alone is insufficient for a physics, projection or threshold rule.
 
 Debug and Release instances share the app bundle identifier. During desktop
 tests, target the PID of the exact executable under test and quit only that

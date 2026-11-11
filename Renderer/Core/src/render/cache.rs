@@ -22,6 +22,7 @@ pub struct ShaderCacheInputs {
     scene_pkg_path: PathBuf,
     unpacked_source: Option<(PathBuf, PathBuf)>,
     property_override_json: Option<String>,
+    scene_quality_key: Option<String>,
     force_refresh: bool,
 }
 
@@ -38,6 +39,7 @@ impl ShaderCacheInputs {
             scene_pkg_path: None,
             unpacked_source: None,
             property_override_json: None,
+            scene_quality_key: None,
             force_refresh: false,
         }
     }
@@ -57,6 +59,7 @@ pub struct ShaderCacheInputsBuilder {
     scene_pkg_path: Option<PathBuf>,
     unpacked_source: Option<(PathBuf, PathBuf)>,
     property_override_json: Option<String>,
+    scene_quality_key: Option<String>,
     force_refresh: bool,
 }
 
@@ -83,6 +86,14 @@ impl ShaderCacheInputsBuilder {
     #[must_use]
     pub fn property_override_json(mut self, json: Option<impl Into<String>>) -> Self {
         self.property_override_json = json.map(Into::into);
+        self
+    }
+
+    /// The scene quality the shaders are built for; another quality compiles
+    /// other combos, so it must not reuse this cache.
+    #[must_use]
+    pub fn scene_quality_key(mut self, key: impl Into<String>) -> Self {
+        self.scene_quality_key = Some(key.into());
         self
     }
 
@@ -123,6 +134,7 @@ impl ShaderCacheInputsBuilder {
             scene_pkg_path,
             unpacked_source: self.unpacked_source,
             property_override_json: self.property_override_json,
+            scene_quality_key: self.scene_quality_key,
             force_refresh: self.force_refresh,
         })
     }
@@ -156,11 +168,14 @@ impl ShaderCacheDecision {
         let inputs = inputs.as_ref();
         let scene_cache_path = inputs.cache_root.join(&inputs.scene_id);
 
-        let wanted = json!({
+        let mut wanted = json!({
             "project_mtime": modified_timestamp(&inputs.project_json_path, "project.json")?,
             "source": source_fingerprint(inputs)?,
             "property_override_json": inputs.property_override_json,
         });
+        if let Some(key) = &inputs.scene_quality_key {
+            wanted["scene_quality"] = json!(key);
+        }
         let manifest_path = scene_cache_path.join(MANIFEST_FILE);
 
         let up_to_date = !inputs.force_refresh

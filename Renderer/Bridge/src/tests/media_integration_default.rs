@@ -293,7 +293,7 @@ async fn previews_and_the_lock_screen_do_not_take_the_media_choice() {
         assert_eq!(lock.len(), 1);
         let preview = fixture
             .bridge
-            .wallpaper_preview(NOCTURNE.into(), "primary".into(), Vec::new())
+            .wallpaper_preview(NOCTURNE.into(), "primary".into(), Vec::new(), Vec::new())
             .await
             .expect("preview");
         exports.push((lock, preview));

@@ -6,3 +6,14 @@ enum LibraryScope: Hashable {
   case favorites
   case collection(String)
 }
+
+extension LibraryScope {
+  /// The playlist source that rotates through the same wallpapers: what Play hands the display.
+  var playlistSource: PlaylistSourceChoice {
+    switch self {
+    case .all: .all
+    case .favorites: .favorites
+    case .collection(let id): .collection(id: id)
+    }
+  }
+}

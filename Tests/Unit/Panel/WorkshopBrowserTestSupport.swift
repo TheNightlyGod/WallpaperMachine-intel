@@ -131,9 +131,12 @@ extension MediaPanelTestCase {
   /// - Parameters:
   ///   - steamImage: The bytes of Steam's picture for a preview URL; an animation when it is a GIF
   ///     of several frames.
+  ///   - searchTranslation: What translates searches typed in another language; when nil, a
+  ///     `FakeTranslation` with every language downloaded and no answers, never this Mac's.
   func makeDiscoverPanel(
     steamImage: @escaping @Sendable (URL) throws -> Data = { _ in try DiscoverPictures.flat() },
-    welcomeSeen: Bool = true, language: String = "en"
+    welcomeSeen: Bool = true, language: String = "en",
+    searchTranslation: WorkshopSearchTranslator? = nil
   ) throws -> DiscoverPanel {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "panel-discover-\(UUID().uuidString)")
@@ -154,7 +157,7 @@ extension MediaPanelTestCase {
     let store = makeStore().store
     let dialogs = RecordingDialogs()
     let presentation = PanelPresentation()
-    let theme = AppThemeStore(defaults: defaults)
+    let theme = AppThemeStore(defaults: defaults, now: { .outsideAnySeason })
     let previousHome = ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_HOME"]
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     setenv("WALLPAPER_MACHINE_HOME", root.path, 1)
@@ -170,12 +173,13 @@ extension MediaPanelTestCase {
         fetcher: LibraryPreviewFetcher(root: root.appendingPathComponent("Library")),
         keepsAnimation: false),
       libraryRoot: { root.appendingPathComponent("Library") })
+    let languages: AppLanguageStore =
+      language == "en" ? .english() : AppLanguageStore(defaults: defaults, systemLanguages: [language])
     let controller = PanelController(
       store: store, navigation: ControlPanelNavigation(selection: .workshop), workshop: workshop,
       pixiv: pixiv, presentation: presentation, theme: theme, defaults: defaults, images: images,
-      dialogs: dialogs,
-      appLanguage: language == "en"
-        ? .english() : AppLanguageStore(defaults: defaults, systemLanguages: [language]))
+      dialogs: dialogs, appLanguage: languages,
+      searchTranslation: searchTranslation ?? .fake(defaults: defaults, language: languages))
     addTeardownBlock { @MainActor in
       controller.stop()
       workshop.cancelSearch()

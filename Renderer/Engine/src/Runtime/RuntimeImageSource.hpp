@@ -101,9 +101,27 @@ public:
         if (m_fallback != nullptr) m_fallback->SetTextureSurfaceSize(width, height);
     }
 
+    void SetVariantCondition(VariantCondition condition) override {
+        if (m_fallback != nullptr) m_fallback->SetVariantCondition(std::move(condition));
+    }
+
     bool IsRuntimeImage(const std::string& name) const {
         std::lock_guard lock(m_mutex);
         return m_runtime_images.contains(name) || m_stand_ins.contains(name);
+    }
+
+    // Generated, immutable resources (for example an MDL's morph deltas) use the
+    // ordinary shared-image import, never the changing-image rings or versions.
+    std::shared_ptr<Image> StaticImage(const std::string& name) const {
+        std::lock_guard lock(m_mutex);
+        const auto found = m_static_images.find(name);
+        return found == m_static_images.end() ? nullptr : found->second;
+    }
+    bool SetStaticImage(const std::string& name, std::shared_ptr<Image> image) {
+        if (name.empty() || !image || image->header.width <= 0 || image->header.height <= 0) return false;
+        std::lock_guard lock(m_mutex);
+        if (m_runtime_images.contains(name) || m_stand_ins.contains(name)) return false;
+        return m_static_images.try_emplace(name, std::move(image)).second;
     }
 
     /// Changes whenever a name joins or leaves this source (`RemoveImage`,
@@ -139,12 +157,18 @@ public:
     /// is cheaper than any of that.
     bool MatchesRgba(const std::string& name, uint32_t width, uint32_t height,
                      const uint8_t* rgba, std::size_t rgba_len) const {
-        if (rgba == nullptr) return false;
+        return MatchesImage(name, width, height, TextureFormat::RGBA8, rgba, rgba_len);
+    }
+
+    /// `MatchesRgba` for an image of `format` (RGBA8 or R8).
+    bool MatchesImage(const std::string& name, uint32_t width, uint32_t height, TextureFormat format,
+                      const uint8_t* bytes, std::size_t len) const {
+        if (bytes == nullptr) return false;
         std::lock_guard lock(m_mutex);
         const auto      found = m_runtime_images.find(name);
         if (found == m_runtime_images.end() || found->second == nullptr) return false;
         const Image& image = *found->second;
-        if (image.header.format != TextureFormat::RGBA8 ||
+        if (image.header.format != format ||
             static_cast<uint32_t>(image.header.width) != width ||
             static_cast<uint32_t>(image.header.height) != height || image.slots.empty() ||
             image.slots.front().mipmaps.empty()) {
@@ -152,8 +176,26 @@ public:
         }
         const auto& level = image.slots.front().mipmaps.front();
         return level.data != nullptr && level.size >= 0 &&
-               static_cast<std::size_t>(level.size) == rgba_len &&
-               std::memcmp(level.data.get(), rgba, rgba_len) == 0;
+               static_cast<std::size_t>(level.size) == len &&
+               std::memcmp(level.data.get(), bytes, len) == 0;
+    }
+
+    /// Publishes `bytes` under `name` as an image of `format`: RGBA8 (4 bytes a texel) or R8
+    /// (one), as a text layer's mono glyph atlas is (decompiles/G-F8.md). Not for the cover.
+    void SetImage(std::string name, uint32_t width, uint32_t height, TextureFormat format,
+                  const uint8_t* bytes, std::size_t len) {
+        const std::size_t bpp = format == TextureFormat::R8 ? 1u : 4u;
+        if (name.empty() || name.front() == '$' || bytes == nullptr || width == 0 || height == 0 ||
+            (format != TextureFormat::R8 && format != TextureFormat::RGBA8) ||
+            width > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
+            height > static_cast<uint32_t>(std::numeric_limits<int32_t>::max()) ||
+            std::size_t(width) > std::numeric_limits<std::size_t>::max() / height / bpp ||
+            len != std::size_t(width) * height * bpp) {
+            return;
+        }
+        std::lock_guard lock(m_mutex);
+        const auto      made = MakeImageLocked(name, width, height, bytes, len, format);
+        PublishLocked(name, made.image, made.version);
     }
 
     void SetRgbaImage(std::string name, uint32_t width, uint32_t height, const uint8_t* rgba,
@@ -303,6 +345,11 @@ private:
     Resolution Resolve(const std::string& name) const {
         std::lock_guard lock(m_mutex);
         Resolution      out;
+        if (const auto own = m_static_images.find(name); own != m_static_images.end()) {
+            out.ours = true;
+            out.image = own->second;
+            return out;
+        }
         if (const auto own = m_runtime_images.find(name); own != m_runtime_images.end()) {
             out.ours  = true;
             out.image = own->second;
@@ -320,6 +367,7 @@ private:
 
     std::optional<ImageHeader> HeaderWeHold(const std::string& name) const {
         std::lock_guard lock(m_mutex);
+        if (const auto own = m_static_images.find(name); own != m_static_images.end()) return own->second->header;
         if (const auto own = m_runtime_images.find(name); own != m_runtime_images.end()) {
             return own->second->header;
         }
@@ -390,7 +438,8 @@ private:
         uint64_t               version { 0 };
     };
     MadeImage MakeImageLocked(const std::string& name, uint32_t width, uint32_t height,
-                              const uint8_t* rgba, std::size_t rgba_len) {
+                              const uint8_t* rgba, std::size_t rgba_len,
+                              TextureFormat format = TextureFormat::RGBA8) {
         const uint64_t version = ++m_version_counter;
         auto image             = std::make_shared<Image>();
         image->key             = name + "#" + std::to_string(version);
@@ -398,7 +447,8 @@ private:
         header.width = header.mapWidth = static_cast<i32>(width);
         header.height = header.mapHeight = static_cast<i32>(height);
         header.count                     = 1;
-        header.format                    = TextureFormat::RGBA8;
+        header.format                    = format;
+        if (format == TextureFormat::R8) header.formatCode = 9;
         header.sample.wrapS              = TextureWrap::CLAMP_TO_EDGE;
         header.sample.wrapT              = TextureWrap::CLAMP_TO_EDGE;
         header.sample.minFilter          = TextureFilter::LINEAR;
@@ -431,6 +481,7 @@ private:
     uint64_t                                                m_version_counter { 0 };
     std::unique_ptr<IImageParser>                           m_fallback;
     std::unordered_map<std::string, std::shared_ptr<Image>> m_runtime_images;
+    std::unordered_map<std::string, std::shared_ptr<Image>> m_static_images;
     std::unordered_map<std::string, StandIn>                m_stand_ins;
     std::unordered_map<std::string, uint64_t>               m_versions;
     std::atomic<uint64_t>                                   m_names_generation { 0 };

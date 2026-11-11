@@ -17,8 +17,8 @@ namespace wallpaper
 /// else.
 ///
 /// Starts empty. Whether a scene can be drawn is only known once the scene is
-/// parsed, and creating a device before then means creating one that the very
-/// next step may have to tear down (a scene that is refused gets none).
+/// parsed, so renderer creation and scene allocation wait until then. An eligible
+/// MSAA parse may query device sample counts without creating this renderer.
 /// Every forwarder therefore has to answer for an empty handle, and each answers
 /// with the honest "nothing has been created yet" value rather than with a value
 /// that reads as a fact.
@@ -144,6 +144,9 @@ public:
         OWE_FORWARD(ResizeRenderTargets(scene));
         return false;
     }
+    void RefreshDisplayOutput(Scene& scene) { OWE_FORWARD_VOID(RefreshDisplayOutput(scene)); }
+    void SetDisplayId(uint32_t identity) { OWE_FORWARD_VOID(SetDisplayId(identity)); }
+    void SetPresentHold(std::chrono::nanoseconds hold) { OWE_FORWARD_VOID(SetPresentHold(hold)); }
     bool ApplyRenderScale(Scene& scene, rg::RenderGraph& graph, double scale,
                           SceneResolution resolution) {
         OWE_FORWARD(ApplyRenderScale(scene, graph, scale, resolution));
@@ -196,8 +199,9 @@ public:
     void UpdateCameraFillMode(Scene& scene, FillMode mode) {
         OWE_FORWARD_VOID(UpdateCameraFillMode(scene, mode));
     }
-    void SetWallpaperScalingMode(WallpaperScalingMode mode) {
-        OWE_FORWARD_VOID(SetWallpaperScalingMode(mode));
+    bool SetWallpaperScalingMode(WallpaperScalingMode mode) {
+        OWE_FORWARD(SetWallpaperScalingMode(mode));
+        return false;
     }
     void SetWallpaperScalingFactor(double value) {
         OWE_FORWARD_VOID(SetWallpaperScalingFactor(value));
@@ -245,6 +249,8 @@ private:
         metal_info.render_height        = info.render_height;
         metal_info.display_scale_factor = info.display_scale_factor;
         metal_info.redraw_callback      = info.redraw_callback;
+        metal_info.display_hdr_output_allowed = info.display_hdr_output_allowed;
+        metal_info.display_id = info.display_id;
         metal_info.wants_poster         = info.wants_poster;
         metal_info.poster_ready         = info.poster_ready;
         return metal_info;

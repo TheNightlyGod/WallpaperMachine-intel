@@ -8,27 +8,31 @@
 #include <pthread.h>
 
 using namespace wallpaper;
-using micros = std::chrono::microseconds;
+using nanos = std::chrono::nanoseconds;
 
 ThreadTimer::ThreadTimer(std::function<void()> cb) : m_callback(std::move(cb)) {}
 
-ThreadTimer::~ThreadTimer() { Stop(); }
+ThreadTimer::~ThreadTimer() {
+    Stop();
+    // Only a timer destroyed by its own tick still has a thread here, one that cannot join itself.
+    if (m_thread.joinable()) m_thread.detach();
+}
 
 bool ThreadTimer::Running() const { return m_running.load(std::memory_order_acquire); }
 
-void ThreadTimer::SetInterval(micros v) {
+void ThreadTimer::SetInterval(nanos v) {
     {
         std::lock_guard lock(m_mutex);
-        m_interval = std::max(v, micros(1));
+        m_interval = std::max(v, nanos(1));
     }
     // The wait in progress was computed from the old period.
     m_wake.notify_all();
 }
 
-void ThreadTimer::SetMinInterval(micros v) {
+void ThreadTimer::SetMinInterval(nanos v) {
     {
         std::lock_guard lock(m_mutex);
-        m_min_interval = std::max(v, micros::zero());
+        m_min_interval = std::max(v, nanos::zero());
     }
     m_wake.notify_all();
 }
@@ -85,7 +89,10 @@ void ThreadTimer::FireNow() {
 void ThreadTimer::Start() {
     std::lock_guard control(m_control_mutex);
     if (m_running.load()) return;
-    if (m_thread.joinable()) m_thread.join();
+    // A tick that stopped its own timer and starts it again: the loop it runs on carries on once
+    // it returns. Any other caller waits for a stopped loop to end before it starts one.
+    const bool from_own_tick = m_thread.joinable() && m_thread.get_id() == std::this_thread::get_id();
+    if (m_thread.joinable() && ! from_own_tick) m_thread.join();
     {
         std::lock_guard lock(m_mutex);
         const auto now   = Clock::now();
@@ -95,6 +102,7 @@ void ThreadTimer::Start() {
         m_fire_now       = false;
         m_running.store(true, std::memory_order_release);
     }
+    if (from_own_tick) return;
     m_thread = std::thread([this] {
         pthread_setname_np("wp-frame-timer");
         Loop();
@@ -109,11 +117,10 @@ void ThreadTimer::Stop() {
     }
     m_wake.notify_all();
     if (! m_thread.joinable()) return;
-    if (m_thread.get_id() == std::this_thread::get_id()) {
-        // The tick asked for its own timer to stop: the loop ends once the tick returns.
-        m_thread.detach();
-        return;
-    }
+    // The tick asked for its own timer to stop: the loop ends once the tick returns, and the next
+    // Start or Stop from another thread (the destructor's included) joins it. Detached, it went on
+    // looping beside the one a later Start made, and outlived a timer destroyed meanwhile.
+    if (m_thread.get_id() == std::this_thread::get_id()) return;
     m_thread.join();
 }
 

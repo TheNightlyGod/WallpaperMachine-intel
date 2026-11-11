@@ -1,6 +1,6 @@
 <!-- README.md in 简体中文: change both together. Wording follows the app's zh-Hans catalog
      (App/Resources/Localizable.xcstrings) and the website's /zh/ pages. The Supporter list between the markers is written by scripts/update_sponsors.py, as in README.md. -->
-<p align="center"><sub><a href="README.md">English</a>&ensp;·&ensp;<b>简体中文</b></sub></p>
+<p align="center"><sub><a href="README.md">English</a>&ensp;·&ensp;<b>简体中文</b>&ensp;·&ensp;<a href="README.ko.md">한국어</a>&ensp;·&ensp;<a href="README.pt-BR.md">Português</a></sub></p>
 
 <a href="https://www.wallpapermachine.app/zh/">
   <img src="https://github.com/user-attachments/assets/df92d34d-b718-4d58-b8e9-b002c4915516" width="100%" alt="一台 Mac 的桌面轮流播放 WallpaperMachine 的六张动态壁纸：水波中的千咲、月球上的 Lucy、雪地里的红牛 F1 赛车、黄昏中的流萤、雨中公交站的艾莲，以及 Into The Abyss，上方是 macOS 菜单栏，下方是程序坞。">
@@ -38,7 +38,7 @@
   <a href="#开源与自行构建">自行构建</a>&ensp;·&ensp;
   <a href="https://www.wallpapermachine.app/zh/guides/">使用指南</a>&ensp;·&ensp;
   <a href="docs/README.md">文档（英文）</a>&ensp;·&ensp;
-  <a href="https://www.wallpapermachine.app/zh/pricing/">支持我们</a>
+  <a href="SPONSORS.md">赞助</a>
 </p>
 
 <p align="center">
@@ -57,7 +57,13 @@
 
 1. **下载**最新版本的[免费磁盘映像](https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest)。
 2. **安装**：打开它，把 WallpaperMachine 拖到“应用程序”文件夹。
-3. **打开它。** 下载版暂未经过公证，macOS 会拦下首次启动：在“系统设置 → 隐私与安全性”中点按一次**仍要打开**即可。
+3. **打开它。** 1.8.2 之后的版本已通过 Apple 公证，可以直接打开；1.8.2 及更早的版本未经公证，macOS 会拦下首次启动：在“系统设置 → 隐私与安全性”中点按一次**仍要打开**即可。
+
+在用 [Homebrew](https://brew.sh)？一条命令就能完成前两步：
+
+```bash
+brew install --cask wallpapermachine
+```
 
 接下来由首次使用引导带你完成设置，此后应用会自行更新。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)配有图片，逐步介绍每一个步骤。
 
@@ -74,22 +80,23 @@
 | --- | --- |
 | [**应用壁纸**](docs/features/control-panel.md#selection-versus-apply) | 场景、视频或[网页](docs/features/web-wallpapers.md)壁纸：点按“应用壁纸”，它就成为你的桌面。单击壁纸只是选中它。 |
 | [**预览**](docs/features/wallpaper-properties.md#live-preview) | 在单独的窗口中试看已安装的场景、视频或网页壁纸，使用当前选项和独立的播放控制，再决定是否更换桌面。滑块、颜色和开关会随你的调整即时显示。 |
-| [**创意工坊**](docs/features/workshop-downloads.md) | 实时的 Steam 创意工坊，浏览无需登录，还有[合集、每位作者的壁纸和你的订阅](docs/features/workshop-downloads.md#collections-authors-and-subscriptions)。下载在应用内进行，可同时下载多个，需要拥有 Wallpaper Engine 的 Steam 账户。已有壁纸的[更新](docs/features/workshop-downloads.md#updates)每天检查一次，一键安装。 |
+| [**创意工坊**](docs/features/workshop-downloads.md) | 实时的 Steam 创意工坊，浏览无需登录，还有[合集和每位作者的壁纸，登录 Steam 后还有你的订阅和收藏](docs/features/workshop-downloads.md#collections-authors-and-subscriptions)；登录后可在应用内订阅或取消订阅，也能查看作品最新的[评论](docs/features/workshop-downloads.md#comments)。下载在应用内进行，可同时下载多个，需要拥有 Wallpaper Engine 的 Steam 账户。已有壁纸的[更新](docs/features/workshop-downloads.md#updates)每天检查一次，一键安装。 |
 | [**pixiv**](docs/features/pixiv.md) | pixiv 的插画排行榜和标签搜索。作品的任意一页都能保存为静态壁纸；登录 pixiv 后可查看仅限会员的作品，账户允许的话还能查看 R-18 作品。 |
-| [**壁纸选项**](docs/features/wallpaper-properties.md#properties) | 作者提供的每一个选项，在你应用修改时保存；[命名的属性预设](docs/features/wallpaper-properties.md#property-presets)可以保留多个版本，并能导出或导入。设置中的一个可选开关能让桌面[在你调整时即时显示这些修改](docs/features/wallpaper-properties.md#showing-edits-on-the-desktop)。 |
+| [**壁纸选项**](docs/features/wallpaper-properties.md#properties) | 作者提供的每一个选项，以及场景和视频壁纸的 [Wallpaper Engine 自带色彩调整、图像滤镜、水平翻转、鼠标视差和播放速度](docs/features/wallpaper-properties.md#wallpaper-engine-options)，在你应用修改时保存；[命名的属性预设](docs/features/wallpaper-properties.md#property-presets)可以保留多个版本，并能导出或导入。设置中的一个可选开关能让桌面[在你调整时即时显示这些修改](docs/features/wallpaper-properties.md#showing-edits-on-the-desktop)。 |
 | [**音乐**](docs/features/audio-response.md) | 打开“音频响应”，为声音制作的壁纸就会随 Mac 播放的声音律动。“[媒体集成](docs/features/media-integration.md)”默认开启，带音乐显示的壁纸会显示正在播放的歌曲。 |
-| [**播放列表**](docs/features/playlists.md) | 让每台显示器轮流播放全部壁纸、收藏、它自己的列表或一个[本地合集](docs/features/control-panel.md#local-collections)，可按时间间隔更换，也可在每次解锁 Mac 时更换。可以调整列表顺序、保存命名的播放方案，或在白天和夜晚的壁纸之间切换。应用失败的壁纸会被暂时跳过。 |
+| [**播放列表**](docs/features/playlists.md) | 让每台显示器轮流播放全部壁纸、收藏、它自己的列表或一个[本地合集](docs/features/control-panel.md#local-collections)，可按时间间隔更换，也可在每次解锁 Mac 时更换；在合集上点“播放”或“随机”即可一键开始。可以调整列表顺序、保存命名的播放方案，或在白天和夜晚的壁纸之间切换。应用失败的壁纸会被暂时跳过。 |
 | [**显示器**](docs/features/control-panel.md#target-display) | 每台显示器都可以有自己的壁纸，也可以镜像另一台，缩放、位置、帧率和音量各自独立。[适应（模糊背景）](docs/features/wallpaper-properties.md#fit-with-blurred-backdrop)在比例不同的屏幕上完整显示壁纸，空白处用模糊的画面代替黑边。[一次把同一张壁纸应用到所有显示器，复制或交换壁纸，并保存多屏壁纸方案](docs/features/display-layouts.md)，之后可从设置或“快捷指令”恢复各显示器的壁纸选择。 |
-| [**电池**](docs/features/performance.md#playback) | 使用电池时，继续运行、降到你选择的渲染比例和帧率，或者暂停。低电量模式、Mac 过热和电量低时，也可以同样降低画质而不是暂停。在你选定之前保持关闭。其余播放与画质选项在[性能](docs/features/performance.md)中。 |
+| [**电池**](docs/features/performance.md#playback) | 使用电池时，继续运行、降到你选择的渲染比例和帧率、暂停，或者只在你使用其他应用时暂停。低电量模式、Mac 过热和电量低时，也可以同样降低画质而不是暂停。在你选定之前保持关闭。其余播放与画质选项在[性能](docs/features/performance.md)中。 |
 | [**能耗**](docs/features/performance.md#energy-use) | “设置 → 性能”会显示应用消耗的功率；在笔记本电脑上，还会显示它每小时消耗的电量占满电的比例。在那里更改设置，它会对比前后的差异。每张已安装的壁纸在测量后都会有自己的能耗评级。 |
-| [**原生体验**](docs/features/appearance.md) | 和 macOS 的其他部分一样，支持浅色、深色和你的强调色，界面提供 [English、简体中文、繁體中文、日本語和한국어](docs/features/control-panel.md#language)。 |
-| [**导入**](docs/features/control-panel.md#downloads-and-import) | 带入你已有的 Wallpaper Engine 文件夹，或你自己的视频和图片。把它们拖到程序坞图标上，或使用“导入”；应用会复制它们，原文件保持不动。 |
+| [**原生体验**](docs/features/appearance.md) | 和 macOS 的其他部分一样，支持浅色、深色和你的强调色，界面提供 [English、简体中文、繁體中文、日本語、한국어和 Português](docs/features/control-panel.md#language)。 |
+| [**导入**](docs/features/control-panel.md#downloads-and-import) | 带入你已有的 Wallpaper Engine 文件夹，或你自己的视频和图片。把它们拖到壁纸库或程序坞图标上，或使用“导入”；应用会复制它们，原文件保持不动。 |
 | [**备份你的设置**](docs/features/backup-restore.md#local-backup-and-restore) | 导出设置和保留的文件，还可以包含整个壁纸库；在下次启动时执行可撤回的恢复之前，先预览冲突。登录信息和密码只留在这台 Mac 上。 |
 | [**外置硬盘**](docs/features/library-location.md) | 把壁纸库和下载放在外置硬盘或其他文件夹中，随时都能移回这台 Mac。设置和 Steam 登录信息仍留在这台 Mac 上。 |
 | [**图片摆放**](docs/features/wallpaper-properties.md#image-placement) | 在每台显示器上分别拖动、定位和缩放导入的图片和保存的 pixiv 页面，不改动原图。 |
-| [**看不见就暂停**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | 被遮住的显示器会停止播放自己的壁纸，睡眠或锁屏时所有壁纸都会暂停。[播放规则](docs/features/performance.md#playback)还能在其他应用播放声音时、你选择的应用正在运行或位于前台时、电池电量低时、低电量模式下、Mac 过热时或专注模式期间暂停或静音壁纸。有多台显示器时，还可以只让你正在使用的那台继续播放。你自己按下的暂停，始终由你决定。 |
+| [**桌面小组件**](docs/features/desktop-widgets.md) | 在任何壁纸上方显示时钟（数字、指针或其他城市的时间）、日期（也可用农历等其他历法）、月历、便签、倒数日、问候语、电池电量和下一次日出或日落，更换壁纸后依然保留。在每台显示器上拖到想要的位置，并选择大小、字体、字重、颜色和格式。 |
+| [**看不见就暂停**](docs/architecture.md#desktop-wallpaper-windows-and-private-api-handling) | 被遮住的显示器会停止播放自己的壁纸，睡眠或锁屏时所有壁纸都会暂停。[播放规则](docs/features/performance.md#playback)还能在其他应用播放声音时、其他应用或你选择的应用位于前台时、你选择的应用正在运行时、电池电量低时、低电量模式下、Mac 过热时、专注模式期间或一段时间没有键盘、鼠标或触控板输入后暂停或静音壁纸。有多台显示器时，还可以只让你正在使用的那台继续播放。你自己按下的暂停，始终由你决定。 |
 | [**自动化**](docs/features/automation.md) | 按星期和时间的计划、根据本地日出日落计算、按浅色或深色外观选择、[每个桌面使用不同壁纸](docs/features/spaces.md)，以及临时的专注模式壁纸或播放列表。键盘快捷键、“快捷指令”、Siri、“聚焦”和链接都能控制播放、让所有壁纸静音、随机选一张壁纸，并应用壁纸、已存播放列表或属性预设。 |
-| [**锁定屏幕**](docs/features/lock-screen.md) | 视频和场景壁纸也能让锁屏动起来。实验性功能，默认关闭。 |
+| [**锁定屏幕**](docs/features/lock-screen.md) | 场景、视频、网页和静态壁纸也能让锁屏动起来。实验性功能，默认关闭。 |
 | [**屏幕保护程序**](docs/features/lock-screen.md#use-wallpaper-as-screen-saver) | 把每台显示器当前应用的场景、视频、网页或静态壁纸用作它的屏幕保护程序。与锁屏动画相互独立；在 macOS 26 及更高版本上为实验性功能。 |
 
 ## 为什么值得信任
@@ -100,7 +107,7 @@
   gh attestation verify WallpaperMachine-*-x86_64.dmg --repo TheNightlyGod/WallpaperMachine-intel
   ```
 - **没有追踪。** 应用只在你需要时联网：Steam 用于创意工坊，pixiv 在你打开它时使用，GitHub 用于检查更新；只有在你打开[发送性能数据](docs/features/telemetry.md)后，才会每天发送一份小报告，内容是加载耗时、帧率和你的 Mac 型号。报告不包含名称、文件或账户信息，关闭后会删除已发送的数据。除此之外，应用每天会发送一次[使用计数](docs/features/telemetry.md#daily-active-count)，只说明它当天运行过，带有版本号，不带安装 ID，用来统计有多少台 Mac 在用。登录信息和密码保存在你的 Mac 上。
-- **可校验的更新。** 内置更新程序只安装 SHA-256 与发布版本一致的磁盘映像；无法验证的会被[拒绝，绝不会未经校验就安装](docs/features/updates.md#downloading)。
+- **可校验的更新。** 内置更新程序只安装 SHA-256 与发布版本一致的磁盘映像；无法验证的会被[拒绝，绝不会未经校验就安装](docs/features/updates.md#downloading)。连不上 GitHub 时（例如在中国大陆不开 VPN），会通过[公共 GitHub 下载加速代理](docs/features/updates.md#what-a-check-reads)获取同样的文件，代理无法改变安装的内容。
 - **持续维护。** 新版本发布频繁，每一版都以英文和简体中文写进[更新日志](CHANGELOG.md)。
 - **问题有处可报。** 任意壁纸详情中的**无法正常使用？在 GitHub 上反馈**会打开一个预先填好的 [issue](https://github.com/TheNightlyGod/WallpaperMachine-intel/issues)；[诊断报告](docs/features/diagnostics.md)会在你分享之前移除你的个人文件夹路径、Mac 用户名和 Steam 账户名。
 
@@ -158,7 +165,7 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 <details>
 <summary><b>如何获取？</b></summary>
 
-签名版可以从 [GitHub 最新发布](https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest)免费下载，你也可以[用源代码自行构建](#开源与自行构建)。该版本未经公证，macOS 会拦下首次启动，直到你在“系统设置 → 隐私与安全性”中点按“仍要打开”。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。
+签名版可以从 [GitHub 最新发布](https://github.com/TheNightlyGod/WallpaperMachine-intel/releases/latest)免费下载，你也可以[用源代码自行构建](#开源与自行构建)。该版本包含 Intel (x86_64) 支持。[安装指南](https://www.wallpapermachine.app/zh/guides/install/)会带你从下载一直走到首次使用引导。此后应用会自行检查新版本；在能替换自身副本的情况下，它会提供**重启并更新**。
 
 </details>
 
@@ -172,12 +179,12 @@ WallpaperMachine 支持场景、视频和网页渲染。兼容性因壁纸而异
 <details>
 <summary><b>WallpaperMachine 真的免费吗？</b></summary>
 
-是的。签名版免费下载，如果你更想自己构建，完整源代码就在这里。成为支持者，可在网站和本 README 上获得赞助者位置，并享有优先支持。它不购买任何许可：有没有它，应用都一样。包含哪些内容以及如何成为支持者，见[价格页面](https://www.wallpapermachine.app/zh/pricing/)。
+是的。签名版免费下载，如果你更想自己构建，完整源代码就在这里。付费不会改变应用的任何部分。想支持它，可以在 [Open Collective](https://opencollective.com/mmfoundation) 上赞助开发 WallpaperMachine 的 MMFoundation。网站上的[优先支持](https://www.wallpapermachine.app/zh/pricing/)是一项付费服务，你的问题会优先得到回复。它不购买任何许可：有没有它，应用都一样。两者的说明见 [SPONSORS.md](SPONSORS.md)（英文）。
 
 </details>
 
 <details>
-<summary><b>可以用支付宝或微信支付吗？</b></summary>
+<summary><b>购买优先支持时可以用支付宝或微信支付吗？</b></summary>
 
 可以，前提是你从中国 IP 访问网站。结账时提供的支付方式由你的 IP 地址决定，支付宝和微信支付只对中国 IP 显示。如果你正在使用 VPN 或代理，请先关闭再结账。
 
@@ -201,6 +208,7 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 构建好的应用位于 `build/Build/Products/Release/WallpaperMachine.app`。`python3 scripts/test.py` 运行测试，`python3 scripts/package.py --configuration Release --install` 会让应用包自包含、封装成磁盘映像，并复制到 `~/Applications`。场景壁纸同样需要你所拥有的 Wallpaper Engine 中的共享资源。
 
 工具链、打包和故障排查：[docs/build.md](docs/build.md)。参与开发：[CONTRIBUTING.md](CONTRIBUTING.md)。
+翻译应用或申请新的语言：在 [Crowdin](https://translate.wallpapermachine.app/project/wallpaper-machine) 上进行，不需要写代码（[译文如何进入应用](docs/localization.md#contributing-translations)）。
 
 ## 文档
 
@@ -217,17 +225,43 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 | [docs/testing/README.md](docs/testing/README.md) | 测试策略、命令与验证记录规范 |
 | [docs/release.md](docs/release.md) | 版本号、发布说明与 CI 发布流程 |
 | [CHANGELOG.md](CHANGELOG.md) | 每个已发布版本的变更，含简体中文 |
-| [LICENSING.md](LICENSING.md) | 许可证政策、支持者模式与分发状态 |
-| [SPONSORS.md](SPONSORS.md) | 支持者价格、包含内容及其他支持方式 |
+| [LICENSING.md](LICENSING.md) | 许可证、代码来源、优先支持与组件许可证 |
+| [SPONSORS.md](SPONSORS.md) | 在 Open Collective 上赞助、优先支持及其他支持方式 |
 | [AGENTS.md](AGENTS.md) | 在本仓库中工作的 AI 代理须遵守的规则 |
 
-## 致每一位支持者
+## Open Collective 赞助者
 
-选择公开展示的支持者会列在这里和[赞助墙](https://www.wallpapermachine.app/zh/#sponsors)上。支持者是一次性购买，获得赞助者位置和优先支持；应用及其源代码对所有人始终免费。如果 WallpaperMachine 在你的桌面上占有了一席之地，欢迎[成为支持者](https://www.wallpapermachine.app/zh/pricing/)。
+WallpaperMachine 是 [MMFoundation](https://mmfoundation.dev/zh/) 的项目。MMFoundation 在 [Open Collective](https://opencollective.com/mmfoundation) 上接受赞助，每一笔赞助和每一笔开销都在那里公开。赞助者会出现在这里：公司展示标志和链接，个人展示头像。赞助不会解锁任何功能，应用对每个人都一样。如何赞助见 [SPONSORS.md](SPONSORS.md)（英文）。
 
-<!-- supporters:start: written by scripts/update_sponsors.py from the website's sponsor wall; edits here are overwritten -->
+<!-- MMFoundation's sponsors, drawn by Open Collective and kept current there (its images are
+     cached for up to a day): each company's logo links to its website, and people's avatars to the
+     Collective. While no company sponsors, the first logo slot is Open Collective's Contribute button.
+     The slots run from the middle out (8 6 4 2 0 1 3 5 7 9), so the first sponsor stands in the
+     middle and the row stays centred while slots are empty.
+     The same block is in OhMyShot's README. -->
 <p align="center">
-  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=02c7d939eeb2" width="100%" alt="WallpaperMachine Supporters: xwei12, umitsurumi, ReinforceZwei, hahagei2580, 你识认我, Yanami, LettuceWeng, Slikk878, 我懶得想, ZhuLegend, Muchacho Lindo, pardo. 12 Supporters on the wall. 6 more support privately."></a>
+  <a href="https://opencollective.com/mmfoundation/organization/8/website"><img src="https://opencollective.com/mmfoundation/organization/8/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/6/website"><img src="https://opencollective.com/mmfoundation/organization/6/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/4/website"><img src="https://opencollective.com/mmfoundation/organization/4/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/2/website"><img src="https://opencollective.com/mmfoundation/organization/2/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/0/website"><img src="https://opencollective.com/mmfoundation/organization/0/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/1/website"><img src="https://opencollective.com/mmfoundation/organization/1/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/3/website"><img src="https://opencollective.com/mmfoundation/organization/3/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/5/website"><img src="https://opencollective.com/mmfoundation/organization/5/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/7/website"><img src="https://opencollective.com/mmfoundation/organization/7/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/9/website"><img src="https://opencollective.com/mmfoundation/organization/9/avatar.svg" alt="赞助者"></a>
+</p>
+<p align="center">
+  <a href="https://opencollective.com/mmfoundation"><img src="https://opencollective.com/mmfoundation/individuals.svg?width=890&avatarHeight=48&button=false" alt="在 Open Collective 上赞助 MMFoundation 的个人"></a>
+</p>
+
+## 致每一位优先支持用户
+
+选择公开展示的优先支持用户会列在这里和[致谢墙](https://www.wallpapermachine.app/zh/#sponsors)上。以“支持者”名义购买的用户，保留当时承诺给他们的位置。新购买者可以选择出现在致谢墙上；默认关闭，不算在购买内容里。[优先支持](https://www.wallpapermachine.app/zh/pricing/)是一项付费服务，你的问题会优先得到回复；应用及其源代码对所有人始终免费。想赞助这个项目，请看 [SPONSORS.md](SPONSORS.md)（英文）。
+
+<!-- supporters:start: written by scripts/update_sponsors.py from the website's thank-you wall; edits here are overwritten -->
+<p align="center">
+  <a href="https://www.wallpapermachine.app/#sponsors"><img src="https://www.wallpapermachine.app/sponsors/wall?v=02c7d939eeb2" width="100%" alt="WallpaperMachine Priority Support members: xwei12, umitsurumi, ReinforceZwei, hahagei2580, 你识认我, Yanami, LettuceWeng, Slikk878, 我懶得想, ZhuLegend, Muchacho Lindo, pardo. 12 Priority Support members on the wall. 6 more stay private."></a>
 </p>
 <!-- supporters:end -->
 
@@ -235,9 +269,9 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 
 本节为译文，如有出入，以英文 [README](README.md#license) 和 [LICENSE](LICENSE) 为准。
 
-源代码以 GNU 通用公共许可证第 3 版（仅限该版本）提供（[LICENSE](LICENSE)）。内置的第三方代码保留其各自的版权和许可声明，记录在 [ThirdParty/provenance.json](ThirdParty/provenance.json) 中。无论是否为支持者，每位接收者都享有 GPL 授予的全部权利。
+源代码以 GNU 通用公共许可证第 3 版（仅限该版本）提供（[LICENSE](LICENSE)）。内置的第三方代码保留其各自的版权和许可声明，记录在 [ThirdParty/provenance.json](ThirdParty/provenance.json) 中。无论是否购买优先支持，每位接收者都享有 GPL 授予的全部权利。
 
-[LICENSING.md](LICENSING.md) 说明了代码的来源、每个第三方组件的许可证、支持者模式，以及在任何分发之前仍待完成的事项；本 README 不声称任何二进制文件已获准分发或已通过法律审查。构建过去所链接的 Apache-2.0 与 GPL-3.0 组件（MoltenVK、Vulkan loader、SPIRV-Tools、glslang、内置的 spirv_reflect，以及 spirv Rust crate）已于 2026-10-17 在早先的 GPL-2.0-only 政策下移除，这些组件与 GPLv3 兼容。创意工坊壁纸归其创作者所有，场景资源来自你所拥有的 Wallpaper Engine；应用两者都不附带。
+[LICENSING.md](LICENSING.md) 说明了代码的来源、每个第三方组件的许可证、优先支持，以及每个下载对应的源代码在哪里。构建过去所链接的 Apache-2.0 与 GPL-3.0 组件（MoltenVK、Vulkan loader、SPIRV-Tools、glslang、内置的 spirv_reflect，以及 spirv Rust crate）已于 2026-10-17 在早先的 GPL-2.0-only 政策下移除，这些组件与 GPLv3 兼容。创意工坊壁纸归其创作者所有，场景资源来自你所拥有的 Wallpaper Engine；应用两者都不附带。
 
 ## 友情链接
 
@@ -266,6 +300,6 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 
 <p align="center">
   <sub>
-    让 Mac 更有你的个性。<br>独立项目，与 Wallpaper Engine 及 Valve 均无关联。<br>图中壁纸：夜莺Night 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108">千咲 · 不散的春之花</a>和<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3276911872">流萤 · 仲夏萤火之约</a>，凉粥的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3521337568">Cyberpunk: Edgerunner-Lucy</a>，a bad driver 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3648679058">RedBull F1 2026</a>，BIGDEECK 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3288938880">绝区零 · 艾莲乔</a>，以及 Blloopy 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3626305963">Into The Abyss</a>。所有作品的版权归其所有者。
+    让 Mac 更有你的个性。<br><a href="https://mmfoundation.dev/zh/">MMFoundation</a> 的项目，与 Wallpaper Engine 及 Valve 均无关联。<br>图中壁纸：夜莺Night 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108">千咲 · 不散的春之花</a>和<a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3276911872">流萤 · 仲夏萤火之约</a>，凉粥的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3521337568">Cyberpunk: Edgerunner-Lucy</a>，a bad driver 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3648679058">RedBull F1 2026</a>，BIGDEECK 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3288938880">绝区零 · 艾莲乔</a>，以及 Blloopy 的 <a href="https://steamcommunity.com/sharedfiles/filedetails/?id=3626305963">Into The Abyss</a>。所有作品的版权归其所有者。
   </sub>
 </p>

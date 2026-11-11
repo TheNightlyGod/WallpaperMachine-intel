@@ -7,8 +7,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -339,6 +341,170 @@ TEST(VorbisDecoder, ASampleRateThatNoAudioFormatUsesIsRefused)
     const auto decoder = Open(bytes);
     ASSERT_NE(decoder, nullptr);
     EXPECT_EQ(decoder->format().sampleRate, 768'000u);
+}
+
+// ---- streams written from the specification -------------------------------------------------
+
+/// Vorbis packs its headers and packets least significant bit first.
+class BitWriter {
+public:
+    BitWriter& put(std::uint32_t value, int bits)
+    {
+        for (int i = 0; i < bits; ++i, ++m_bit) {
+            if (m_bit % 8 == 0) m_bytes.push_back(0);
+            if ((value >> i) & 1u) m_bytes.back() |= static_cast<std::uint8_t>(1u << (m_bit % 8));
+        }
+        return *this;
+    }
+    BitWriter& text(const char* chars)
+    {
+        for (; *chars != '\0'; ++chars) put(static_cast<std::uint8_t>(*chars), 8);
+        return *this;
+    }
+    std::vector<std::uint8_t> bytes() const { return m_bytes; }
+
+private:
+    std::vector<std::uint8_t> m_bytes;
+    std::size_t               m_bit { 0 };
+};
+
+/// A codebook of one dimension and no value lookup. Each length is a codeword's length,
+/// 0 for an entry with none (which makes the book sparse).
+void PutCodebook(BitWriter& w, const std::vector<int>& lengths)
+{
+    const bool sparse = std::find(lengths.begin(), lengths.end(), 0) != lengths.end();
+    w.put('B', 8).put('C', 8).put('V', 8).put(1, 16).put(static_cast<std::uint32_t>(lengths.size()), 24);
+    w.put(0, 1).put(sparse ? 1 : 0, 1);
+    for (const int length : lengths) {
+        if (sparse) w.put(length > 0 ? 1 : 0, 1);
+        if (length > 0) w.put(static_cast<std::uint32_t>(length - 1), 5);
+    }
+    w.put(0, 4);
+}
+
+/// A floor of type 1 whose one partition, if `masterbook` is given, is of a class with two
+/// subclasses chosen by that book; without one it has no partitions, only its two ends.
+void PutFloor(BitWriter& w, std::optional<int> masterbook)
+{
+    w.put(1, 16).put(masterbook ? 1 : 0, 5);
+    if (masterbook) {
+        w.put(0, 4);                                  // the partition's class
+        w.put(0, 3).put(1, 2).put(static_cast<std::uint32_t>(*masterbook), 8);
+        w.put(0, 8).put(0, 8);                        // neither subclass has a book
+    }
+    w.put(0, 2).put(8, 4);                            // multiplier 1, 8-bit positions
+    if (masterbook) w.put(128, 8);
+}
+
+struct Layout {
+    std::vector<std::vector<int>> codebooks { { 1, 1 } };
+    std::vector<std::optional<int>> floors { std::nullopt };
+    /// For each submap of the one mapping, its floor; the only channel uses submap 0.
+    std::vector<int> submapFloors { 0 };
+};
+
+/// A mono file of one short audio packet, laid out as the decoder expects: the
+/// identification header alone on the first page, the comment and setup headers on the
+/// second, the audio on the last.
+std::vector<std::uint8_t> Stream(const Layout& layout)
+{
+    BitWriter id;
+    id.put(1, 8).text("vorbis").put(0, 32).put(1, 8).put(44100, 32).put(0, 32).put(0, 32).put(0, 32);
+    id.put(0x88, 8).put(1, 8);                        // both blocks 256 samples, framing
+
+    BitWriter comment;
+    comment.put(3, 8).text("vorbis").put(0, 32).put(0, 32).put(1, 8);
+
+    BitWriter setup;
+    setup.put(5, 8).text("vorbis");
+    setup.put(static_cast<std::uint32_t>(layout.codebooks.size() - 1), 8);
+    for (const auto& book : layout.codebooks) PutCodebook(setup, book);
+    setup.put(0, 6).put(0, 16);                       // one time-domain transform, unused
+    setup.put(static_cast<std::uint32_t>(layout.floors.size() - 1), 6);
+    for (const auto& floor : layout.floors) PutFloor(setup, floor);
+    // One residue of type 0 that covers nothing, classified by book 0.
+    setup.put(0, 6).put(0, 16).put(0, 24).put(0, 24).put(0, 24).put(0, 6).put(0, 8).put(0, 3).put(0, 1);
+    const auto submaps = static_cast<std::uint32_t>(layout.submapFloors.size());
+    setup.put(0, 6).put(0, 16).put(submaps > 1 ? 1 : 0, 1);
+    if (submaps > 1) setup.put(submaps - 1, 4);
+    setup.put(0, 1).put(0, 2);                        // no coupling, reserved
+    if (submaps > 1) setup.put(0, 4);                 // the channel's submap
+    for (const int floor : layout.submapFloors) setup.put(0, 8).put(static_cast<std::uint32_t>(floor), 8).put(0, 8);
+    setup.put(0, 6).put(0, 1).put(0, 16).put(0, 16).put(0, 8).put(1, 1);
+
+    // Audio: packet type, then the floor in use, with both ends at 64.
+    BitWriter audio;
+    audio.put(0, 1).put(1, 1).put(64, 8).put(64, 8).put(0, 32);
+
+    std::vector<std::uint8_t> out;
+    const auto page = [&](std::uint8_t flags, std::uint64_t granule, std::uint32_t sequence,
+                          const std::vector<std::vector<std::uint8_t>>& packets) {
+        const std::uint8_t start[] = { 'O', 'g', 'g', 'S', 0, flags };
+        out.insert(out.end(), std::begin(start), std::end(start));
+        for (int i = 0; i < 64; i += 8) out.push_back(static_cast<std::uint8_t>(granule >> i));
+        Append32(out, 0x5eed);
+        Append32(out, sequence);
+        Append32(out, 0);                             // checksum, which nothing here reads
+        std::vector<std::uint8_t> table;
+        for (const auto& packet : packets) {
+            table.insert(table.end(), packet.size() / 255, 255);
+            table.push_back(static_cast<std::uint8_t>(packet.size() % 255));
+        }
+        out.push_back(static_cast<std::uint8_t>(table.size()));
+        out.insert(out.end(), table.begin(), table.end());
+        for (const auto& packet : packets) out.insert(out.end(), packet.begin(), packet.end());
+    };
+    page(0x02, 0, 0, { id.bytes() });
+    page(0x00, 0, 1, { comment.bytes(), setup.bytes() });
+    page(0x04, 128, 2, { audio.bytes() });
+    return out;
+}
+
+/// Opens a file and decodes it to the end; true when every sample is finite. A refused
+/// file is no failure here: what matters is that a crafted one never crashes.
+bool PlaysSafely(std::vector<std::uint8_t> bytes, bool* opened = nullptr)
+{
+    std::string error;
+    auto        decoder = Open(std::move(bytes), &error);
+    if (opened != nullptr) *opened = decoder != nullptr;
+    if (decoder == nullptr) return true;
+    const auto samples = ReadAll(*decoder, 64);
+    return std::all_of(samples.begin(), samples.end(), [](float s) { return std::isfinite(s); });
+}
+
+TEST(VorbisDecoder, AStreamWrittenFromTheSpecificationPlays)
+{
+    bool opened = false;
+    EXPECT_TRUE(PlaysSafely(Stream({}), &opened));
+    EXPECT_TRUE(opened);
+}
+
+TEST(VorbisDecoder, ABookWithNoCodewordsChoosesNothingAndReadsNothingBeforeItsTable)
+{
+    // A sparse book whose entries all lack a codeword keeps no table of values. Decoding
+    // through it finds no codeword, and that miss must stay a miss rather than become an
+    // index into the table the book does not have.
+    Layout layout;
+    layout.codebooks = { { 1, 1 }, { 0, 0, 0, 0 } };
+    layout.floors    = { 1 };
+    bool opened = false;
+    EXPECT_TRUE(PlaysSafely(Stream(layout), &opened));
+    // Refusing it would not reach that decode at all: the file is valid and must open.
+    EXPECT_TRUE(opened);
+}
+
+TEST(VorbisDecoder, AMappingOfSixteenSubmapsKeepsEveryOneApart)
+{
+    // The four-bit submap count allows sixteen. The last submap names floor 1, the one the
+    // channel uses (submap 0) floor 0; writing the sixteenth past a table of fifteen
+    // would land on the next table.
+    Layout layout;
+    layout.floors       = { std::nullopt, std::nullopt };
+    layout.submapFloors = std::vector<int>(16, 0);
+    layout.submapFloors.back() = 1;
+    bool opened = false;
+    EXPECT_TRUE(PlaysSafely(Stream(layout), &opened));
+    EXPECT_TRUE(opened);
 }
 
 TEST(VorbisDecoder, ChannelOrderIsRearrangedToTheOrderOfWav)

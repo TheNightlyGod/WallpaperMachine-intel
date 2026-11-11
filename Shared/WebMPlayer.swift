@@ -1,9 +1,19 @@
 import AVFoundation
+import CoreImage
 import CoreMedia
 import Foundation
 import QuartzCore
 import WallpaperMedia
 import os
+
+/// Whether a video player that cannot be heard (muted, at zero volume, muted by a rule or by Mute all
+/// wallpapers, or a mirror member that does not carry its group's sound) leaves its sound undecoded and
+/// its audio output stopped, rather than decoding it and playing it muted. The picture is the same
+/// either way. On by default; `WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO=1` plays the sound muted, as before,
+/// for an A/B power comparison in one binary. Read once.
+enum SilentVideoAudio {
+  static let isReleased = ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO"] != "1"
+}
 
 /// What a look at a WebM player's pipeline found, and what was done about it. The desktop surface
 /// turns it into the health events the host logs and counts.
@@ -44,7 +54,9 @@ struct WebMHealthReport: Equatable {
 ///   clock runs on and no flush happens. The sound does the same and is cut where the picture ends.
 /// - **Sound** is decoded to PCM by the reader (Opus, Vorbis, AAC, MP3) and played by an
 ///   `AVSampleBufferAudioRenderer` on the same synchronizer; without `withAudio` no audio is decoded,
-///   no renderer is made and no audio session is touched, which is what the lock screen needs.
+///   no renderer is made and no audio session is touched, which is what the lock screen needs. While
+///   the clip cannot be heard (muted or at zero volume) the sound is not decoded and the renderer is
+///   off the clock, so no audio output runs for it; becoming audible feeds it again from the clock.
 /// - **Placement** follows `NativeVideoLayout`, the rule the AVFoundation player and the scene engine
 ///   share, including the position, and the file's own orientation.
 ///
@@ -83,6 +95,15 @@ final class WebMPlayer {
   private var failureLatched = false
   private var hasShownFrame = false
   private var audioActive: Bool
+  /// Whether the sound can be heard: not muted and above zero volume.
+  private var audible = true
+  /// Whether the audio renderer is on the synchronizer's clock.
+  private var audioOnClock = false
+  /// Removals from the clock the synchronizer has not finished, and whether the renderer goes back
+  /// on once they have.
+  private var pendingAudioRemovals = 0
+  private var audioAddAwaitsRemoval = false
+  private let releasesSilentAudio: Bool
   private var observers: [NSObjectProtocol] = []
   private var statusObservation: NSKeyValueObservation?
   private var healthTask: Task<Void, Never>?
@@ -94,6 +115,12 @@ final class WebMPlayer {
   private var feedEpoch = 0
   private var repositioning = 0
   private var restartAfterReposition = false
+  /// Who waits for the clip to start over (`watchNextLoop`), and the synchronizer's boundary
+  /// observer at the end of the pass the clock is in. Both exist only while someone waits.
+  private var loopWatch: (@MainActor () -> Void)?
+  private var loopBoundary: Any?
+  /// Tells a crossing already on its way to the main queue for a watch that was replaced meanwhile.
+  private var loopWatchSerial: UInt64 = 0
 
   // Placement.
   private var mode: NativeVideoScalingMode = .fill
@@ -101,6 +128,15 @@ final class WebMPlayer {
   private var pan = NativeVideoLayout.Pan.centered
   private var viewport = CGRect.zero
   private var backingScale: CGFloat = 1
+  /// Wallpaper Engine's per-wallpaper options: the clock's rate (`rate` / 100, WE
+  /// `sub_1400FFCB0`), the horizontal flip, the Fit-style border colour and the colour pipeline,
+  /// whose filtered feed runs only while it changes the picture.
+  private var playRate: Float = 1
+  private var flipHorizontal = false
+  private var borderColor: CGColor?
+  private weak var root: CALayer?
+  private let colorPipeline = VideoColorPipeline()
+  private var filteredSink: WebMFilteredVideoSink?
 
   /// Why the file's sound is not played, when the file has some and it cannot be: the codec is not
   /// decodable, the reader refused the track. nil when it plays, or when none was asked for.
@@ -126,6 +162,7 @@ final class WebMPlayer {
   /// The clock the picture and the sound follow. Runs on past the file's end at every loop.
   var currentTime: CMTime { synchronizer.currentTime() }
   var videoSamplesFed: UInt64 { feeder.videoSamplesEnqueued }
+  var audioBuffersFed: UInt64 { feeder.audioBuffersEnqueued }
   var isReadyForDisplay: Bool { !stopped && layer.isReadyForDisplay }
   var isPlaying: Bool { started && !stopped && !failureLatched && !paused }
 
@@ -134,10 +171,12 @@ final class WebMPlayer {
     recovery: NativeVideoRecoveryBudget.Policy = .init(),
     feedQueue: DispatchQueue = DispatchQueue(label: "app.wallpapermachine.webm-feed", qos: .userInitiated),
     now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
-    sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+    sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+    releasesSilentAudio: Bool = SilentVideoAudio.isReleased
   ) {
     self.file = file
     self.paused = paused
+    self.releasesSilentAudio = releasesSilentAudio
     self.recovery = NativeVideoRecoveryBudget(policy: recovery)
     self.queue = feedQueue
     self.now = now
@@ -160,7 +199,10 @@ final class WebMPlayer {
     layer.videoGravity = .resizeAspectFill
     layer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
     synchronizer.addRenderer(layer.sampleBufferRenderer)
-    if let audioRenderer { synchronizer.addRenderer(audioRenderer) }
+    if let audioRenderer {
+      synchronizer.addRenderer(audioRenderer)
+      audioOnClock = true
+    }
     synchronizer.setRate(0, time: file.firstPresentationTime)
     feeder.onFailure = { [weak self] detail in
       DispatchQueue.main.async { MainActor.assumeIsolated { self?.fail(detail, settled: false) } }
@@ -178,6 +220,7 @@ final class WebMPlayer {
   func attach(to root: CALayer) {
     root.masksToBounds = true
     root.addSublayer(layer)
+    self.root = root
     applyPlacement()
   }
 
@@ -220,7 +263,9 @@ final class WebMPlayer {
     case .gravity(let gravity):
       layer.setAffineTransform(.identity)
       layer.videoGravity = gravity
-      layer.frame = viewport
+      layer.bounds = CGRect(origin: .zero, size: viewport.size)
+      layer.position = CGPoint(x: viewport.midX, y: viewport.midY)
+      layer.setAffineTransform(mirror)
     case .frame(let rect):
       // The rectangle already has the picture's own aspect, so nothing but a plain stretch may
       // apply another aspect rule to it.
@@ -228,35 +273,132 @@ final class WebMPlayer {
       // The layout measures from the top edge and the container's layer grows upward.
       let target = NativeVideoLayout.layerFrame(rect, viewportHeight: viewport.height)
         .offsetBy(dx: viewport.minX, dy: viewport.minY)
-      if upright {
-        layer.setAffineTransform(.identity)
-        layer.frame = target
-      } else {
-        // The layer keeps the stored shape and is turned about its centre onto the target.
-        let stored = file.transformSwapsAxes ? CGSize(width: target.height, height: target.width) : target.size
-        layer.setAffineTransform(.identity)
-        layer.bounds = CGRect(origin: .zero, size: stored)
-        layer.position = CGPoint(x: target.midX, y: target.midY)
-        layer.setAffineTransform(file.layerTransform)
-      }
+      // The layer keeps the stored shape and is turned about its centre onto the target; the
+      // flip mirrors the shown picture after the turn.
+      let stored = !upright && file.transformSwapsAxes ? CGSize(width: target.height, height: target.width) : target.size
+      layer.setAffineTransform(.identity)
+      layer.bounds = CGRect(origin: .zero, size: stored)
+      layer.position = CGPoint(x: target.midX, y: target.midY)
+      layer.setAffineTransform((upright ? .identity : file.layerTransform).concatenating(mirror))
     case .pending:
       break
     }
+    let fitStyle = mode != .fill && mode != .stretch
+    root?.backgroundColor = (fitStyle ? borderColor : nil) ?? CGColor(gray: 0, alpha: 1)
   }
+
+  private var mirror: CGAffineTransform { flipHorizontal ? CGAffineTransform(scaleX: -1, y: 1) : .identity }
+
+  /// Applies Wallpaper Engine's options. Switching the colour pipeline on or off rebuilds the
+  /// feed from the clock (not a repair: no recovery allowance is spent).
+  func setEngineOptions(_ options: WallpaperEngineOptions, lut: VideoLut?, borderColor: CGColor?) {
+    let rate = Float(max(10, min(options.playbackRate, 200)) / 100)
+    if rate != playRate {
+      playRate = rate
+      if started, !paused, !stopped { synchronizer.rate = rate }
+    }
+    let parameters = VideoColorPipeline.Parameters(options: options, lut: lut)
+    let wasFiltered = filteredSink != nil
+    colorPipeline.update(parameters)
+    flipHorizontal = options.flipHorizontal
+    self.borderColor = borderColor
+    applyPlacement()
+    let filtered = VideoColorPipeline.needsComposition(parameters)
+    guard filtered != wasFiltered else { return }
+    if filtered {
+      let sink = WebMFilteredVideoSink(output: layer.sampleBufferRenderer, pipeline: colorPipeline)
+      sink.onFailure = { [weak self, weak sink] error in
+        let detail = error.localizedDescription
+        Task { @MainActor in
+          guard let self, let sink, self.filteredSink === sink, !self.stopped else { return }
+          if self.hasShownFrame, self.restartPlayback(reason: detail) { return }
+          // A failure in the optional filtering path does not condemn the source file.
+          self.fail(detail, settled: false)
+        }
+      }
+      filteredSink = sink
+    } else {
+      filteredSink = nil
+    }
+    if started, !stopped, !failureLatched { rebuild() }
+  }
+
+  var rateForTest: Float { playRate }
+  var feedsFilteredForTest: Bool { filteredSink != nil }
+  var layerTransformForTest: CGAffineTransform { layer.affineTransform() }
 
   // MARK: - Sound
 
+  /// The volume and mute. A clip that cannot be heard stops asking for sound and its audio renderer
+  /// leaves the clock, so nothing decodes it and no audio output runs; the picture and the clock are
+  /// untouched. Becoming audible moves the sound to where the clock is and feeds it again, the way a
+  /// flush the system made is recovered.
   func setVolume(_ volume: Float, muted: Bool) {
     guard let audioRenderer, audioActive else { return }
     audioRenderer.volume = max(0, min(1, volume))
     audioRenderer.isMuted = muted
+    let audible = !muted && volume > 0
+    guard audible != self.audible else { return }
+    self.audible = audible
+    guard releasesSilentAudio, !stopped else { return }
+    if audible {
+      // Before `start` there is nothing to catch up with: starting feeds the sound from the beginning.
+      guard started, !failureLatched else { return }
+      let time = synchronizer.currentTime()
+      reposition(video: false, at: time.isNumeric ? time : file.firstPresentationTime)
+    } else {
+      audioRenderer.stopRequestingMediaData()
+      takeAudioOffClock(audioRenderer)
+    }
   }
+
+  /// Whether the sound is to be decoded and fed: it plays, and it can be heard or the A/B switch keeps
+  /// a silent one running.
+  private var feedsAudio: Bool { audioActive && (audible || !releasesSilentAudio) }
+
+  private func takeAudioOffClock(_ audioRenderer: AVSampleBufferAudioRenderer) {
+    guard audioOnClock else { return }
+    audioOnClock = false
+    audioAddAwaitsRemoval = false
+    pendingAudioRemovals += 1
+    synchronizer.removeRenderer(audioRenderer, at: .invalid) { [weak self] _ in
+      DispatchQueue.main.async { MainActor.assumeIsolated { self?.audioRemovalFinished(audioRenderer) } }
+    }
+  }
+
+  /// The synchronizer finished taking the renderer off its clock. An unmute that came while it was
+  /// still doing so adds it back now: added earlier, the removal would have taken it off again.
+  private func audioRemovalFinished(_ audioRenderer: AVSampleBufferAudioRenderer) {
+    pendingAudioRemovals -= 1
+    guard pendingAudioRemovals == 0, audioAddAwaitsRemoval else { return }
+    audioAddAwaitsRemoval = false
+    guard !stopped, audioOnClock else { return }
+    synchronizer.addRenderer(audioRenderer)
+  }
+
+  /// Puts the audio renderer back on the clock, emptied of what it held from before it left: that is
+  /// behind the clock now. Called only where nothing is feeding it.
+  private func putAudioOnClock(_ audioRenderer: AVSampleBufferAudioRenderer) {
+    guard !audioOnClock else { return }
+    audioOnClock = true
+    audioRenderer.flush()
+    if pendingAudioRemovals > 0 {
+      audioAddAwaitsRemoval = true
+      return
+    }
+    synchronizer.addRenderer(audioRenderer)
+  }
+
+  var isAudioOnClockForTest: Bool { audioOnClock }
+  var audioFedFromForTest: CMTime { feeder.audioFedFromSinceMove }
+  /// Sends the sound to an output that does not exist, so a test never reaches a real one.
+  func setAudioOutputDeviceForTest(_ uniqueID: String) { audioRenderer?.audioOutputDeviceUniqueID = uniqueID }
 
   private func dropAudio(_ detail: String) {
     guard !stopped, audioActive, let audioRenderer else { return }
     audioActive = false
     audioRenderer.stopRequestingMediaData()
-    synchronizer.removeRenderer(audioRenderer, at: .zero, completionHandler: nil)
+    takeAudioOffClock(audioRenderer)
     audioUnavailableReason = detail
     onAudioDropped?(detail)
   }
@@ -268,7 +410,7 @@ final class WebMPlayer {
     guard !started, !stopped else { return }
     started = true
     startFeeding()
-    synchronizer.setRate(paused ? 0 : 1, time: file.firstPresentationTime)
+    synchronizer.setRate(paused ? 0 : playRate, time: file.firstPresentationTime)
     if paused { pausedSince = now() }
   }
 
@@ -284,7 +426,7 @@ final class WebMPlayer {
       healthTask?.cancel()
       healthTask = nil
     } else {
-      synchronizer.rate = 1
+      synchronizer.rate = playRate
       if let since = pausedSince, now() - since >= Self.minimumPauseForCheck {
         verifyPlayback(reason: "resumed after \(Int((now() - since) / .seconds(1))) s")
       }
@@ -292,8 +434,40 @@ final class WebMPlayer {
     }
   }
 
+  /// Calls `handler` once, when the clock reaches the end of the pass it is in and the clip
+  /// starts over. The synchronizer reports that crossing itself, so nothing is sampled, and a
+  /// held clock crosses nothing. False for a still picture and for a player that has not
+  /// started, has stopped or has failed. A later call replaces the earlier watch.
+  func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool {
+    guard started, !stopped, !failureLatched,
+      let end = WebMFeeder.endOfPass(containing: synchronizer.currentTime(), in: file)
+    else { return false }
+    cancelLoopWatch()
+    loopWatchSerial &+= 1
+    let serial = loopWatchSerial
+    loopWatch = handler
+    loopBoundary = synchronizer.addBoundaryTimeObserver(forTimes: [NSValue(time: end)], queue: .main) {
+      [weak self] in
+      MainActor.assumeIsolated { self?.loopBoundaryCrossed(serial: serial) }
+    }
+    return true
+  }
+
+  func cancelLoopWatch() {
+    if let loopBoundary { synchronizer.removeTimeObserver(loopBoundary) }
+    loopBoundary = nil
+    loopWatch = nil
+  }
+
+  private func loopBoundaryCrossed(serial: UInt64) {
+    guard !stopped, serial == loopWatchSerial, let handler = loopWatch else { return }
+    cancelLoopWatch()
+    handler()
+  }
+
   func stop() {
     guard !stopped else { return }
+    cancelLoopWatch()
     stopped = true
     healthTask?.cancel()
     healthTask = nil
@@ -310,16 +484,22 @@ final class WebMPlayer {
     // The readers go once the queue has finished what it is doing; a read that hangs holds that
     // queue, not the caller.
     let feeder = self.feeder
+    filteredSink = nil
     queue.async { feeder.release() }
   }
 
   private func startFeeding() {
     let feeder = self.feeder
     let video = layer.sampleBufferRenderer
-    video.requestMediaDataWhenReady(on: queue) { [video] in
-      if !feeder.feedVideo(into: video) { video.stopRequestingMediaData() }
+    let filtered = filteredSink
+    let sink: WebMSampleSink = filtered ?? video
+    video.requestMediaDataWhenReady(on: queue) { [video, sink, filtered] in
+      if !feeder.feedVideo(into: sink) || filtered?.hasFailed == true { video.stopRequestingMediaData() }
     }
-    if let audioRenderer, audioActive { startFeedingAudio(into: audioRenderer) }
+    if let audioRenderer, feedsAudio {
+      putAudioOnClock(audioRenderer)
+      startFeedingAudio(into: audioRenderer)
+    }
   }
 
   private func startFeedingAudio(into audioRenderer: AVSampleBufferAudioRenderer) {
@@ -349,9 +529,15 @@ final class WebMPlayer {
   private func reposition(video: Bool, at time: CMTime) {
     repositioning += 1
     let feeder = self.feeder
+    let filtered = filteredSink
     let epoch = feedEpoch
+    // A sound nobody hears is not decoded up to the clock; it is moved there when it is heard again.
+    let audio = feedsAudio
     queue.async { [weak self] in
-      if video { feeder.reposition(at: time) } else { feeder.repositionAudio(at: time) }
+      if video {
+        filtered?.reset()
+        feeder.reposition(at: time, audio: audio)
+      } else { feeder.repositionAudio(at: time) }
       DispatchQueue.main.async { MainActor.assumeIsolated { self?.repositioned(epoch) } }
     }
   }
@@ -368,7 +554,8 @@ final class WebMPlayer {
       audioRenderer?.flush()
       decodeFailures = 0
       startFeeding()
-    } else if let audioRenderer, audioActive {
+    } else if let audioRenderer, feedsAudio {
+      putAudioOnClock(audioRenderer)
       startFeedingAudio(into: audioRenderer)
     }
   }
@@ -484,7 +671,8 @@ final class WebMPlayer {
   /// The system flushed the sound by itself (the output device changed): feed it again from where it
   /// was flushed.
   private func audioFlushed(at time: CMTime?) {
-    guard !stopped, !failureLatched, audioActive, let audioRenderer else { return }
+    // A renderer off the clock is flushed and fed from the clock when it goes back on.
+    guard !stopped, !failureLatched, feedsAudio, audioOnClock, let audioRenderer else { return }
     let at = time ?? synchronizer.currentTime()
     audioRenderer.stopRequestingMediaData()
     reposition(video: false, at: at.isNumeric ? at : file.firstPresentationTime)
@@ -581,8 +769,21 @@ final class WebMPlayer {
       inPass = CMTimeSubtract(time, CMTimeMultiplyByFloat64(length, multiplier: passes))
     }
     let file = self.file
-    return await Task.detached(priority: .utility) {
-      file.copyPosterImage(at: inPass)
+    let pipeline = colorPipeline
+    let flip = flipHorizontal
+    return await Task.detached(priority: .utility) { () -> CGImage? in
+      guard var image = file.copyPosterImage(at: inPass) else { return nil }
+      // The poster shows what the layer shows: the colour options, then the flip.
+      if VideoColorPipeline.needsComposition(pipeline.current) || flip {
+        guard var picture = try? pipeline.apply(to: CIImage(cgImage: image)) else { return nil }
+        if flip {
+          picture = picture.transformed(by: CGAffineTransform(scaleX: -1, y: 1)
+            .translatedBy(x: -picture.extent.width, y: 0))
+        }
+        guard let rendered = CIContext(options: [.cacheIntermediates: false]).createCGImage(picture, from: picture.extent) else { return nil }
+        image = rendered
+      }
+      return image
     }.value
   }
 }
@@ -622,6 +823,12 @@ final class WebMFeeder: @unchecked Sendable {
   /// Audio buffers decoded to reach a time after a reposition, ahead of the reader's next.
   private var heldAudio: CMSampleBuffer?
   private let counters = OSAllocatedUnfairLock(initialState: UInt64(0))
+  /// Audio buffers handed over, and the time of the first one since the sound was last moved.
+  private struct AudioFed {
+    var buffers: UInt64 = 0
+    var firstSinceMove = CMTime.invalid
+  }
+  private let audioFed = OSAllocatedUnfairLock(initialState: AudioFed())
 
   var onFailure: (@Sendable (String) -> Void)?
   var onAudioFailure: (@Sendable (String) -> Void)?
@@ -632,12 +839,29 @@ final class WebMFeeder: @unchecked Sendable {
     self.audio = audio
     first = file.firstPresentationTime
     length = file.duration
-    // One frame is a still picture: it is shown and held, not looped.
-    loops = file.frameCount > 1 && length.isNumeric && length.seconds > 0
+    loops = Self.loops(file)
     audio?.rewind(withTimeOffset: .zero, limit: loops ? length : .invalid)
   }
 
+  /// Whether `file` is played round and round. One frame is a still picture: it is shown and
+  /// held, not looped.
+  static func loops(_ file: WebMFile) -> Bool {
+    file.frameCount > 1 && file.duration.isNumeric && file.duration.seconds > 0
+  }
+
+  /// Where the pass of `file` that the clock time `time` falls in ends, which is where the clip
+  /// starts over; nil for a file that does not loop. Reads only the file's fixed facts, so any
+  /// thread may ask.
+  static func endOfPass(containing time: CMTime, in file: WebMFile) -> CMTime? {
+    guard loops(file) else { return nil }
+    let pass = passIndex(of: time, first: file.firstPresentationTime, length: file.duration)
+    return CMTimeAdd(file.firstPresentationTime, CMTimeMultiplyByFloat64(file.duration, multiplier: Double(pass + 1)))
+  }
+
   var videoSamplesEnqueued: UInt64 { counters.withLock { $0 } }
+  var audioBuffersEnqueued: UInt64 { audioFed.withLock { $0.buffers } }
+  /// Where the sound was fed from after it was last moved to a time; invalid until a buffer is.
+  var audioFedFromSinceMove: CMTime { audioFed.withLock { $0.firstSinceMove } }
 
   func release() {
     video = nil
@@ -684,6 +908,11 @@ final class WebMFeeder: @unchecked Sendable {
     while sink.hasRoom {
       guard let buffer = nextAudio() else { return !audioDone }
       sink.accept(buffer)
+      let time = CMSampleBufferGetPresentationTimeStamp(buffer)
+      audioFed.withLock {
+        $0.buffers += 1
+        if !$0.firstSinceMove.isValid { $0.firstSinceMove = time }
+      }
     }
     return true
   }
@@ -713,8 +942,8 @@ final class WebMFeeder: @unchecked Sendable {
   }
 
   /// Moves both readers to `time`: the video to the key frame at or before it within its pass, the
-  /// sound to the buffer that covers it.
-  func reposition(at time: CMTime) {
+  /// sound to the buffer that covers it. Without `audio` the sound is left where it is.
+  func reposition(at time: CMTime, audio moveAudio: Bool = true) {
     let pass = passIndex(of: time)
     if let video {
       videoPass = pass
@@ -722,7 +951,7 @@ final class WebMFeeder: @unchecked Sendable {
       _ = video.seek(to: CMTimeSubtract(time, passOffset(pass)))
       videoDone = false
     }
-    repositionAudio(at: time)
+    if moveAudio { repositionAudio(at: time) }
   }
 
   func repositionAudio(at time: CMTime) {
@@ -731,6 +960,7 @@ final class WebMFeeder: @unchecked Sendable {
     audioPass = pass
     audioDone = false
     heldAudio = nil
+    audioFed.withLock { $0.firstSinceMove = .invalid }
     audio.rewind(withTimeOffset: passOffset(pass), limit: loops ? length : .invalid)
     // Decode and drop what the clock has passed: the sound is rewound to its start and read forward.
     while let buffer = audio.copyNextSampleBuffer() {
@@ -743,7 +973,12 @@ final class WebMFeeder: @unchecked Sendable {
   }
 
   private func passIndex(of time: CMTime) -> Int {
-    guard loops, time.isNumeric, time >= first else { return 0 }
+    guard loops else { return 0 }
+    return Self.passIndex(of: time, first: first, length: length)
+  }
+
+  private static func passIndex(of time: CMTime, first: CMTime, length: CMTime) -> Int {
+    guard time.isNumeric, time >= first else { return 0 }
     return max(0, Int(floor((time - first).seconds / length.seconds)))
   }
 }

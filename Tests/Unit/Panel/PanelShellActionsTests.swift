@@ -12,6 +12,36 @@ final class PanelShellActionsTests: PanelTestCase {
     func raise() { raised = true }
   }
 
+  // MARK: Tile zoom
+
+  func testZoomingTheTilesIsSavedAndStopsAtTheLargestAndSmallestStep() throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let controller = panel.controller
+    XCTAssertEqual(controller.tileZoom, 0)
+    XCTAssertFalse(controller.canZoomTiles(.actualSize), "already the standard size")
+    XCTAssertTrue(controller.zoomTiles(.zoomIn))
+    XCTAssertEqual(PanelPreferences.tileZoom(in: panel.defaults), 1, "saved for the next window")
+    while controller.canZoomTiles(.zoomIn) { controller.zoomTiles(.zoomIn) }
+    XCTAssertFalse(controller.zoomTiles(.zoomIn), "no step past the largest")
+    XCTAssertEqual(
+      TileGridLayout.preferredWidth(zoom: controller.tileZoom), TileGridLayout.zoomWidths.last)
+    XCTAssertTrue(controller.zoomTiles(.actualSize))
+    XCTAssertEqual(controller.tileZoom, 0)
+    XCTAssertNil(panel.defaults.object(forKey: PanelPreferences.tileZoomKey), "the standard size is no saved choice")
+    while controller.canZoomTiles(.zoomOut) { controller.zoomTiles(.zoomOut) }
+    XCTAssertEqual(
+      TileGridLayout.preferredWidth(zoom: controller.tileZoom), TileGridLayout.zoomWidths.first)
+  }
+
+  func testTheGuidesOpenInChineseForEitherChineseAndInEnglishOtherwise() {
+    XCTAssertEqual(AppDelegate.guidesURL(languageTag: "zh-Hans").absoluteString, "https://www.wallpapermachine.app/zh/guides/")
+    XCTAssertEqual(AppDelegate.guidesURL(languageTag: "zh-Hant").absoluteString, "https://www.wallpapermachine.app/zh/guides/")
+    for tag in ["en", "ja", "ko"] {
+      XCTAssertEqual(AppDelegate.guidesURL(languageTag: tag).absoluteString, "https://www.wallpapermachine.app/guides/", tag)
+    }
+  }
+
   // MARK: Navigation
 
   func testNavigatingSelectsThePageAndLeavesAnOlderBannerShowing() async throws {

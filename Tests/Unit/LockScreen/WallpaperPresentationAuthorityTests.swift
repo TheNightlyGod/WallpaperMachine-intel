@@ -70,6 +70,27 @@ final class WallpaperPresentationAuthorityTests: XCTestCase {
     }
   }
 
+  /// Fast user switching puts another session on the screens. The switched-away
+  /// session may still read as locked, but its lock screen, screen saver and desktop
+  /// picture are on no screen, so none of its surfaces renders for anybody.
+  func testASessionSwitchedAwayHasNobodyWatchingItsLockScreenSurfaces() {
+    for mode in ["locked", "idle", "active"] {
+      var request = Authority.Request(
+        role: .lockScreen, sessionLocked: true, sessionOnConsole: false, presentationMode: mode,
+        presentedFor: .seconds(1))
+      XCTAssertEqual(
+        Authority.suspensionReasons(for: request), .noConsumer,
+        "mode \(mode): another session has the screens")
+      XCTAssertNil(
+        Authority.nextReevaluation(for: request), "a desktop nobody sees does not settle on screen")
+      request.sessionOnConsole = true
+      XCTAssertTrue(Authority.mayPresent(request), "mode \(mode): back on the console it presents again")
+    }
+    XCTAssertTrue(
+      Authority.mayPresent(.init(role: .preview, sessionOnConsole: false, presentedFor: .seconds(1))),
+      "a preview stays bounded by its own budget")
+  }
+
   func testUnlockingStopsALockScreenSurface() {
     let locked = Authority.Request(role: .lockScreen, sessionLocked: true, presentationMode: "locked")
     XCTAssertTrue(Authority.mayPresent(locked))

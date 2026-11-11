@@ -1,0 +1,40 @@
+# The fast pull request check: the Python script tests in scripts/tests/ on Linux.
+#
+# A minute or two on ubuntu-latest, against about 25 for the macOS gate. The script
+# tests need no Xcode: they cover the release, packaging, notes, localization-catalog
+# and panel-source rules, so a broken catalog or release script is caught before
+# merge. The native tests stay in the hand-run Test workflow (test.yml says why).
+# `python3 scripts/test.py --python-only` runs the same thing locally.
+name: Checks
+
+on:
+  pull_request:
+    branches: [main, "hotfix/**"]
+  push:
+    branches: [main, "hotfix/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  python:
+    name: Python script tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # scripts/tests read the history the way the release scripts do.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Script tests
+        run: python3 scripts/test.py --python-only

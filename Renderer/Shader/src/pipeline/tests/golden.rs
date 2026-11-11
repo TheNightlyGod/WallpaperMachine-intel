@@ -14,6 +14,16 @@ use crate::sha256::{Sha256, to_hex};
 const SHIPPED: &[(&str, &str)] = &[
     ("1:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
     ("2:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    ("3:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    ("4:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    ("5:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    ("6:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    ("7:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    ("8:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    // 9: the reflection document gains the coverage facts; the Metal text is unchanged.
+    ("9:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
+    // 10: the reflection document gains the read uniforms and the fragment colour; the Metal text is unchanged.
+    ("10:naga-29.0.3-msl2.0-untransformed", "81d5f272f54deb9007775fa53bda918b9a6656b2773cc935d54c91a992d1c453"),
 ];
 
 fn programs() -> Vec<crate::pipeline::CompiledProgram> {

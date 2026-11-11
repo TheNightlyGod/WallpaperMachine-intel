@@ -736,28 +736,99 @@ TEST(MouseInput, ALayerBehindABlockerHearsNeitherTheDownNorTheClickOfAPress) {
     listen("front");
     listen("beside");
 
-    // Where `front` covers `back`, only `front` is pressed.
+    const auto press = [&](bool pressed) {
+        stage.runtime->BeginFrame();
+        stage.runtime->SetCursorButton(0, pressed);
+        stage.was_in_window = stage.runtime->DispatchCursorFrameEvents(stage.was_in_window);
+        stage.runtime->Tick(1.0 / 60.0);
+    };
+
+    // Where `front` covers `back`, only `front` is pressed, and only it is clicked
+    // when the button comes up.
     stage.runtime->SetCursorInput(125.0f / 1920.0f, 1.0f - 500.0f / 1080.0f);
     stage.runtime->SetCursorEnter(true);
-    stage.runtime->SetCursorButton(0, true);
-    stage.was_in_window = stage.runtime->DispatchCursorFrameEvents(stage.was_in_window);
-    stage.runtime->Tick(1.0 / 60.0);
+    press(true);
     EXPECT_TRUE(stage.runtime->NodeVisible("front down"));
-    EXPECT_TRUE(stage.runtime->NodeVisible("front click"));
     EXPECT_FALSE(stage.runtime->NodeVisible("back down"));
-    EXPECT_FALSE(stage.runtime->NodeVisible("back click"));
     EXPECT_FALSE(stage.runtime->NodeVisible("beside down"));
-    stage.runtime->SetCursorButton(0, false);
-    stage.was_in_window = stage.runtime->DispatchCursorFrameEvents(stage.was_in_window);
+    press(false);
+    EXPECT_TRUE(stage.runtime->NodeVisible("front click"));
+    EXPECT_FALSE(stage.runtime->NodeVisible("back click"));
+    EXPECT_FALSE(stage.runtime->NodeVisible("beside click"));
 
     // Where only `back` is under the cursor, nothing stands in front of it.
     stage.runtime->SetCursorInput(75.0f / 1920.0f, 1.0f - 500.0f / 1080.0f);
-    stage.runtime->SetCursorButton(0, true);
-    stage.was_in_window = stage.runtime->DispatchCursorFrameEvents(stage.was_in_window);
-    stage.runtime->Tick(1.0 / 60.0);
+    press(true);
     EXPECT_TRUE(stage.runtime->NodeVisible("back down"));
+    press(false);
     EXPECT_TRUE(stage.runtime->NodeVisible("back click"));
     EXPECT_EQ(stage.runtime->scriptErrorCount(), 0u);
+}
+
+// Wallpaper Engine clicks a layer when the button comes up over the layer that took
+// the press: the press brings only `cursorDown`, the release `cursorUp` and then
+// `cursorClick`. A release elsewhere still brings the holder its `cursorUp`, but no
+// click, and a press that began off the layer clicks nothing where it ends.
+TEST(MouseInput, TheClickComesOnReleaseOverTheLayerThatTookThePress) {
+    // Each case gets a fresh stage, since a layer's script-written visibility holds.
+    struct ClickStage {
+        CursorStage stage;
+        ClickStage() {
+            stage.AddLayer("button", 100.0f, 100.0f, false);  // spans 50..150
+            for (const char* marker : { "down", "up", "click", "click before up" }) {
+                auto node = std::make_shared<SceneNode>();
+                node->SetVisible(false);
+                stage.runtime->RegisterNode(marker, node.get());
+                stage.nodes.push_back(node);
+            }
+            stage.runtime->RegisterSceneScript(
+                "let up = false;\n"
+                "function cursorDown() { up = false; scene.getObject('down').visible = true; }\n"
+                "function cursorUp() { up = true; scene.getObject('up').visible = true; }\n"
+                "function cursorClick() {\n"
+                "  scene.getObject('click').visible = true;\n"
+                "  if (!up) scene.getObject('click before up').visible = true;\n"
+                "}\n",
+                "button");
+        }
+        void At(float x, bool pressed) {
+            stage.runtime->BeginFrame();
+            stage.runtime->SetCursorInput(x / 1920.0f, 1.0f - 500.0f / 1080.0f);
+            stage.runtime->SetCursorEnter(true);
+            stage.runtime->SetCursorButton(0, pressed);
+            stage.was_in_window = stage.runtime->DispatchCursorFrameEvents(stage.was_in_window);
+            stage.runtime->Tick(1.0 / 60.0);
+        }
+        bool Seen(const char* marker) const { return stage.runtime->NodeVisible(marker); }
+    };
+
+    {
+        ClickStage click;
+        click.At(100.0f, true);
+        EXPECT_TRUE(click.Seen("down"));
+        EXPECT_FALSE(click.Seen("click")) << "the press alone is not a click";
+        click.At(110.0f, false);
+        EXPECT_TRUE(click.Seen("up"));
+        EXPECT_TRUE(click.Seen("click"));
+        EXPECT_FALSE(click.Seen("click before up"));
+        EXPECT_EQ(click.stage.runtime->scriptErrorCount(), 0u);
+    }
+    {
+        ClickStage away;
+        away.At(100.0f, true);
+        away.At(300.0f, true);
+        away.At(300.0f, false);
+        EXPECT_TRUE(away.Seen("up")) << "the layer that took the press hears its release anywhere";
+        EXPECT_FALSE(away.Seen("click")) << "a release off the layer cancels the click";
+    }
+    {
+        ClickStage onto;
+        onto.At(300.0f, true);
+        onto.At(100.0f, true);
+        onto.At(100.0f, false);
+        EXPECT_FALSE(onto.Seen("down"));
+        EXPECT_FALSE(onto.Seen("click")) << "a press that began elsewhere is no click on the layer";
+    }
 }
 
 // The blocker in front is found from the layers' order, which scripts and the
@@ -1074,6 +1145,75 @@ function cursorLeave() { scene.getObject('marker').visible = false; }
     move_to(linalg::Vector3d(14, 4, 0));
     EXPECT_TRUE(marker->Visible());
     EXPECT_EQ(stage.runtime->scriptErrorCount(), 0u);
+}
+
+// Wallpaper Engine's cursor ray (sub_1401EDB20) reads an image layer's `perspective` flag
+// (+288 & 0x80) on every event: set, the ray goes through the scene's perspective camera,
+// else through the scene's own. A script that writes the flag moves where the layer is hit
+// at once, whatever camera the layer was built with.
+TEST(MouseInput, APerspectiveFlagWriteMovesWhereTheLayerIsHit) {
+    Scene scene;
+    auto  runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {
+        .canvas_width = 1920, .canvas_height = 1080 });
+    runtime->AttachScene(&scene);
+    auto lens_node = std::make_shared<SceneNode>();
+    lens_node->SetTranslate(linalg::Vector3f(960, 540, 1000));
+    auto lens = std::make_shared<SceneCamera>(16.0f / 9.0f, 5.0f, 15000.0f, 60.0f);
+    lens->AttatchNode(lens_node);
+    lens->Update();
+    scene.cameras["global_perspective"] = lens;
+    auto canvas_node = std::make_shared<SceneNode>();
+    canvas_node->SetTranslate(linalg::Vector3f(960, 540, 0));
+    auto canvas = std::make_shared<SceneCamera>(1920, 1080, -5000.0f, 5000.0f);
+    canvas->AttatchNode(canvas_node);
+    canvas->Update();
+    scene.cameras["global"] = canvas;
+    scene.activeCamera      = canvas.get();
+
+    // A 100 by 100 card left of centre: the lens draws it further right than the canvas does.
+    auto card = std::make_shared<SceneNode>();
+    card->SetTranslate(linalg::Vector3f(300, 540, 0));
+    runtime->RegisterNode("card", card.get());
+    runtime->RegisterNodeSize("card", linalg::Vector2f(100, 100));
+    runtime->RegisterImageLayerFlags("card", card.get(), SceneRuntimeContext::ImageLayerFlags {}, {});
+    auto marker = std::make_shared<SceneNode>();
+    marker->SetVisible(false);
+    runtime->RegisterNode("marker", marker.get());
+    runtime->RegisterSceneScript(
+        R"JS(
+function cursorEnter() { scene.getObject('marker').visible = true; }
+function cursorLeave() { scene.getObject('marker').visible = false; }
+)JS",
+        "card");
+    runtime->Tick(0.01);
+
+    bool       was_in_window = false;
+    const auto point_to      = [&](float x, float y) {
+        runtime->SetCursorInput(x, y);
+        runtime->SetCursorEnter(true);
+        was_in_window = runtime->DispatchCursorFrameEvents(was_in_window);
+        runtime->Tick(0.01);
+        return marker->Visible();
+    };
+    // Where each camera draws a point 45 units right of the card's centre, 5 inside its edge.
+    const float on_canvas = 345.0f / 1920.0f;
+    const linalg::Vector4d clip = lens->GetViewProjectionMatrix() * linalg::Vector4d(345.0, 540.0, 0.0, 1.0);
+    const float through_lens = static_cast<float>(0.5 + 0.5 * clip.x() / clip.w());
+    ASSERT_GT(through_lens * 1920.0f, 350.0f) << "the lens point is off the card as the canvas draws it";
+
+    EXPECT_TRUE(point_to(on_canvas, 0.5f)) << "a flat layer is hit where the canvas draws it";
+    EXPECT_FALSE(point_to(through_lens, 0.5f));
+
+    ASSERT_TRUE(runtime->SetNodeLayerFlag("card", "perspective", 1.0));
+    EXPECT_TRUE(point_to(through_lens, 0.5f)) << "with the flag, where the lens draws it";
+    EXPECT_FALSE(point_to(0.135f, 0.5f)) << "and no longer near its canvas left edge";
+
+    // A layer built with the flag, which a script clears, is hit through the canvas again.
+    card->SetCamera("global_perspective");
+    ASSERT_TRUE(runtime->SetNodeLayerFlag("card", "perspective", 0.0));
+    EXPECT_TRUE(point_to(0.135f, 0.5f));
+    EXPECT_FALSE(point_to(through_lens, 0.5f));
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
 }
 
 // A particle system's mouse control point follows the cursor in the canvas

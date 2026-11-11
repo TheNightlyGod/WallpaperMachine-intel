@@ -158,13 +158,13 @@ async fn show_dragging(
     pending: Vec<BridgePropertyEdit>,
 ) -> Result<(), crate::BridgeError> {
     bridge
-        .preview_wallpaper_properties("100".into(), true, pending)
+        .preview_wallpaper_properties("100".into(), true, pending, Vec::new())
         .await
 }
 
 async fn show_saved(bridge: &WallpaperBridge) -> Result<(), crate::BridgeError> {
     bridge
-        .preview_wallpaper_properties("100".into(), false, Vec::new())
+        .preview_wallpaper_properties("100".into(), false, Vec::new(), Vec::new())
         .await
 }
 
@@ -728,7 +728,7 @@ async fn a_wallpaper_no_display_shows_a_video_and_a_web_wallpaper_are_silent() {
         .await
         .unwrap();
     bridge
-        .preview_wallpaper_properties("400".into(), true, Vec::new())
+        .preview_wallpaper_properties("400".into(), true, Vec::new(), Vec::new())
         .await
         .unwrap();
 
@@ -739,7 +739,7 @@ async fn a_wallpaper_no_display_shows_a_video_and_a_web_wallpaper_are_silent() {
         .await
         .unwrap();
     bridge
-        .preview_wallpaper_properties("300".into(), true, Vec::new())
+        .preview_wallpaper_properties("300".into(), true, Vec::new(), Vec::new())
         .await
         .unwrap();
 
@@ -757,7 +757,7 @@ async fn unknown_wallpaper_is_refused() {
 
     for show in [true, false] {
         let error = bridge
-            .preview_wallpaper_properties("404".into(), show, Vec::new())
+            .preview_wallpaper_properties("404".into(), show, Vec::new(), Vec::new())
             .await
             .unwrap_err();
         assert_eq!(error.kind(), BridgeErrorKind::InvalidInput);
@@ -1029,7 +1029,7 @@ async fn a_pending_value_is_checked_like_an_edit_and_a_refused_one_sends_nothing
     .unwrap_err();
     assert_eq!(mixed.kind(), BridgeErrorKind::InvalidInput);
     let restoring = bridge
-        .preview_wallpaper_properties("100".into(), false, vec![pending("alpha", number(9.0))])
+        .preview_wallpaper_properties("100".into(), false, vec![pending("alpha", number(9.0))], Vec::new())
         .await
         .unwrap_err();
     assert_eq!(restoring.kind(), BridgeErrorKind::InvalidInput);
@@ -1057,7 +1057,7 @@ async fn a_wallpaper_that_takes_no_document_is_not_asked_about_its_pending_value
     show_wallpaper(&bridge, &engine, "400", VIDEO, &[1]).await;
 
     bridge
-        .preview_wallpaper_properties("400".into(), true, vec![pending("alpha", number(9.0))])
+        .preview_wallpaper_properties("400".into(), true, vec![pending("alpha", number(9.0))], Vec::new())
         .await
         .unwrap();
 

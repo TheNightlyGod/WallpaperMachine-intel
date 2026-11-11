@@ -9,6 +9,8 @@ import Foundation
 enum WorkshopEmptyState: Equatable {
   /// Your subscriptions, with no Steam session: Steam shows them only to their owner.
   case signInToSeeSubscriptions(isSigningIn: Bool)
+  /// Your favorites, with no Steam session: the list is the signed-in account's own.
+  case signInToSeeFavorites(isSigningIn: Bool)
   case loading
   /// The load failed; the message is Steam's or the network's own and is never a catalog key.
   case unavailable(String)
@@ -26,6 +28,8 @@ enum WorkshopEmptyState: Equatable {
     case screened(isCollections: Bool, nextPage: Int?)
     /// Your subscriptions, signed in, with none.
     case browseWorkshop
+    /// Your favorites, signed in, with none.
+    case browseWorkshopForFavorites
     case refresh
   }
 
@@ -48,25 +52,33 @@ enum WorkshopEmptyState: Equatable {
     errorMessage: String?, totalCount: Int, page: Int, totalPages: Int, draftText: String,
     filterCount: Int
   ) -> WorkshopEmptyState {
-    if source.source == .subscriptions, !isSignedIn, !isLoading {
-      return .signInToSeeSubscriptions(isSigningIn: isSigningIn)
+    if source.source.isPersonal, !isSignedIn, !isLoading {
+      return source.source == .favorites
+        ? .signInToSeeFavorites(isSigningIn: isSigningIn) : .signInToSeeSubscriptions(isSigningIn: isSigningIn)
     }
     if isLoading { return .loading }
     if let errorMessage { return .unavailable(errorMessage) }
 
-    let hasText =
-      source.isSearchable && !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    // Personal, author and collection totals are read before local filtering. A zero total
+    // cannot be caused by the sidebar; its badge also counts choices that broaden the list.
+    if !source.isSearchable {
+      if totalCount > 0 {
+        return .noResults(.screened(isCollections: false, nextPage: page < totalPages ? page + 1 : nil))
+      }
+      if source.source == .subscriptions { return .noResults(.browseWorkshop) }
+      if source.source == .favorites { return .noResults(.browseWorkshopForFavorites) }
+      return .noResults(.refresh)
+    }
+    let hasText = !draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     if hasText && filterCount > 0 { return .noResults(.clearSearchAndFilters) }
     if hasText { return .noResults(.clearSearch) }
     if filterCount > 0 { return .noResults(.clearFilters(count: filterCount)) }
-    let screened = !source.isSearchable || source.source == .collections
-    if screened && totalCount > 0 {
+    if source.source == .collections && totalCount > 0 {
       return .noResults(
         .screened(
-          isCollections: source.source == .collections, nextPage: page < totalPages ? page + 1 : nil
+          isCollections: true, nextPage: page < totalPages ? page + 1 : nil
         ))
     }
-    if source.source == .subscriptions { return .noResults(.browseWorkshop) }
     return .noResults(.refresh)
   }
 }
@@ -76,6 +88,8 @@ enum WorkshopSummary: Equatable {
   case searching
   /// Your subscriptions, signed in. `count` is nil until the list has loaded.
   case subscriptions(count: Int?)
+  /// Your favorites, signed in. `count` is nil until the list has loaded.
+  case favorites(count: Int?)
   /// A pasted link or id named one item, to which no filter applies.
   case lookup
   /// The list came from the links of a Steam page whose markup changed.
@@ -98,6 +112,9 @@ enum WorkshopSummary: Equatable {
     if isLoading { return .searching }
     if source == .subscriptions, isSignedIn {
       return .subscriptions(count: hasLoaded ? totalCount : nil)
+    }
+    if source == .favorites, isSignedIn {
+      return .favorites(count: hasLoaded ? totalCount : nil)
     }
     guard hasLoaded else { return .idle }
     if isLookup { return .lookup }
@@ -147,6 +164,7 @@ extension WorkshopSourceState {
       switch summary {
       case .results(let total): L("\(total) results")
       case .subscriptions(let total): total.map { L("\($0) subscribed") }
+      case .favorites(let total): total.map { L("\($0) favorites") }
       case .searching, .lookup, .degraded, .idle: nil
       }
     return ([heading] + (count.map { [$0] } ?? [])).joined(separator: " · ")
@@ -193,6 +211,19 @@ extension WorkshopSort {
   }
 }
 
+extension WorkshopFavoritesOrder {
+  /// The order's name in the panel's language, as Steam's own menu words it.
+  @MainActor
+  var panelTitle: String {
+    switch self {
+    case .dateFavorited: L("Date favorited")
+    case .alphabetical: L("Alphabetical")
+    case .lastUpdated: L("Date updated")
+    case .dateCreated: L("Date created")
+    }
+  }
+}
+
 extension WorkshopList {
   /// The tab's name in the panel's language.
   @MainActor
@@ -201,6 +232,7 @@ extension WorkshopList {
     case .browse: L("Wallpapers")
     case .collections: L("Collections")
     case .subscriptions: L("Your subscriptions")
+    case .favorites: L("Your favorites")
     }
   }
 
@@ -209,6 +241,7 @@ extension WorkshopList {
     case .browse: "photo.on.rectangle"
     case .collections: "square.stack"
     case .subscriptions: "bookmark"
+    case .favorites: "heart"
     }
   }
 }

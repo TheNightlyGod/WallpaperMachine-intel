@@ -1,3 +1,4 @@
+import AppKit
 import CoreServices
 import Foundation
 
@@ -93,6 +94,54 @@ enum QuitReason: String, Codable, CaseIterable, Sendable {
         let bytes = [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: code >> $0) }
         guard bytes.allSatisfy({ (0x20..<0x7F).contains($0) }) else { return String(format: "0x%08X", code) }
         return "'" + String(decoding: bytes, as: UTF8.self) + "'"
+    }
+}
+
+/// Who asked for a quit, for the log line: the app's own Quit or Exit, or the process that
+/// sent the quit Apple event (the Dock, loginwindow, another app, a script).
+///
+/// `QuitReason.user` covers all of them, so without this a quit another program sent reads
+/// the same as one the user chose.
+enum QuitRequester: Equatable, Sendable {
+    /// The app's own Quit or Exit menu item. AppKit hands a menu choice no Apple event.
+    case menu
+    /// The process that sent the quit Apple event.
+    case process(pid_t)
+    /// Neither: a signal, the updater, or an event that does not name its sender.
+    case none
+
+    /// An event's sender beats the menu flag: a menu choice never arrives as an event.
+    static func resolve(menuChosen: Bool, senderPID: pid_t?) -> QuitRequester {
+        if let senderPID { return .process(senderPID) }
+        return menuChosen ? .menu : .none
+    }
+
+    /// The pid of the process that sent `event`. The Apple Event Manager sets it on an event
+    /// it delivers, never on one built in place. Like `QuitReason.appleEventReason(from:)`,
+    /// call this synchronously inside `applicationShouldTerminate`, while the event is handled.
+    static func senderPID(of event: NSAppleEventDescriptor?) -> pid_t? {
+        guard let pid = event?.attributeDescriptor(forKeyword: AEKeyword(keySenderPIDAttr))?.int32Value,
+              pid > 0 else { return nil }
+        return pid
+    }
+
+    /// The requester as the log shows it. A process is named by its bundle identifier, or
+    /// by its program's file name (never the full path, which can hold the user's name).
+    func logText(
+        ownPID: pid_t = ProcessInfo.processInfo.processIdentifier,
+        name: (pid_t) -> String? = QuitRequester.processName
+    ) -> String {
+        switch self {
+        case .menu: "menu"
+        case .none: "none"
+        case .process(let pid) where pid == ownPID: "self"
+        case .process(let pid): "\(name(pid) ?? "exited") (pid \(pid))"
+        }
+    }
+
+    static func processName(_ pid: pid_t) -> String? {
+        if let bundleID = NSRunningApplication(processIdentifier: pid)?.bundleIdentifier { return bundleID }
+        return InstanceHandOff.executablePath(ofProcess: pid).map { URL(fileURLWithPath: $0).lastPathComponent }
     }
 }
 

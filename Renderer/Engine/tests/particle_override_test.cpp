@@ -287,22 +287,19 @@ TEST(ParticleRateOverride, RateMultiplierIsConsultedAtEveryStep) {
     EXPECT_EQ(rig.LiveCount(), 5u) << "0.5 carried plus 0.5 owed makes one more";
 }
 
-TEST(ParticleRateOverride, NegativeOrNonNumericMultiplierMeansNoTimePasses) {
-    EmissionRig rig;
-    double      multiplier = -1.0;
-    rig.subsystem->SetRateMultiplier([&multiplier] { return multiplier; });
-    rig.subsystem->AddEmitter(WPParticleParser::genParticleEmittOp(SteadyEmitter()));
-
-    rig.subsystem->Emitt();
-    EXPECT_EQ(rig.LiveCount(), 0u);
-    multiplier = std::numeric_limits<double>::quiet_NaN();
-    rig.subsystem->Emitt();
-    EXPECT_EQ(rig.LiveCount(), 0u);
-
-    // Nothing was owed meanwhile: one ordinary second makes exactly one particle.
-    multiplier = 1.0;
-    rig.subsystem->Emitt();
-    EXPECT_EQ(rig.LiveCount(), 1u);
+// 0x14022AF30 holds the override rate at fmaxf(0.01, rate): a negative rate or one that is not a
+// number runs the system at a hundredth of its speed instead of stopping it.
+TEST(ParticleRateOverride, ARateBelowAHundredthRunsAtAHundredth) {
+    for (const double asked : { -1.0, std::numeric_limits<double>::quiet_NaN(), 0.0 }) {
+        EmissionRig rig(4);
+        rig.subsystem->SetRateMultiplier([asked] { return asked; });
+        rig.subsystem->AddEmitter(WPParticleParser::genParticleEmittOp(SteadyEmitter()));
+        for (int i = 0; i < 99; ++i) rig.subsystem->Emitt();
+        EXPECT_EQ(rig.LiveCount(), 0u) << asked;
+        rig.subsystem->Emitt();
+        rig.subsystem->Emitt();
+        EXPECT_EQ(rig.LiveCount(), 1u) << "a hundred and one hundredths of a second make one particle";
+    }
 }
 
 // PR-02

@@ -18,7 +18,7 @@ import XCTest
 ///
 /// They still open no window and touch no desktop: an `AVPlayerLayer` that is
 /// never added to a window's layer tree presents nothing. Nor is any audio
-/// session configured — every fixture is silent, and the one clip with an
+/// session configured — every fixture is silent, and every clip with an
 /// audio track is routed to an output device that does not exist.
 ///
 /// **Evidence discipline.** `readyForDisplay` means the layer has a frame it
@@ -64,9 +64,13 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
     }
 
     private func makePlayer(
-        url: URL, paused: Bool = false, viewSize: CGSize = CGSize(width: 64, height: 36)
+        url: URL, paused: Bool = false, viewSize: CGSize = CGSize(width: 64, height: 36),
+        configureComposition: @escaping @MainActor (VideoColorPipeline, AVPlayerItem) async throws -> Void = {
+            try await $0.configure($1)
+        }
     ) -> NativeVideoPlayer {
-        let player = NativeVideoPlayer(surface: surface, counters: counters, paused: paused)
+        let player = NativeVideoPlayer(
+            surface: surface, counters: counters, paused: paused, configureComposition: configureComposition)
         // A layer with no window shows nothing, but it still has to be the
         // production object: the poster path reads the item the layer's player
         // is playing.
@@ -99,6 +103,29 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
     /// edge handling does not matter, as 8-bit sRGB: top-left, top-right,
     /// bottom-left, bottom-right. Only red and green are meaningful for the
     /// fixture, whose blue changes per frame.
+    /// Which frames of a clip, in decode order, are key frames.
+    private static func keyFrameIndices(of url: URL) async throws -> [Int] {
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(tracks.first)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        reader.add(output)
+        XCTAssertTrue(reader.startReading(), "\(String(describing: reader.error))")
+        var indices: [Int] = []
+        var index = 0
+        while let sample = output.copyNextSampleBuffer() {
+            guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
+                as? [[CFString: Any]]
+            let notSync = attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
+            if !notSync { indices.append(index) }
+            index += 1
+        }
+        XCTAssertEqual(reader.status, .completed, "\(String(describing: reader.error))")
+        return indices
+    }
+
     private static func corners(of image: CGImage) -> [(red: Int, green: Int, blue: Int)] {
         let width = image.width, height = image.height
         var bytes = [UInt8](repeating: 0, count: width * height * 4)
@@ -181,6 +208,57 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         print("[media] loop: wraps=\(wraps) queued items=\(player.queuedItemCount)")
     }
 
+    /// The looper's own count tells a watch the clip started over: not at the first play, once
+    /// at the end of the pass, and not again unless asked; a watch cancelled or set on a paused
+    /// clip is never told.
+    func testAWatchOnTheNextLoopIsToldOnceWhenTheLooperStartsTheClipOver() async throws {
+        let url = try await makeClip(name: "loop-watch")
+        let player = makePlayer(url: url)
+        var told: [Duration] = []
+        let armed = ContinuousClock.now
+        XCTAssertTrue(player.watchNextLoop { told.append(ContinuousClock.now - armed) })
+        let itemReady = await wait { player.itemStatusForTest == .readyToPlay }
+        XCTAssertTrue(itemReady, "the item never became readyToPlay")
+        let reached = await wait(upTo: .seconds(6)) { !told.isEmpty }
+        XCTAssertTrue(reached, "the watch was never told: \(player.stateSummary)")
+        XCTAssertGreaterThanOrEqual(told.first ?? .zero, .milliseconds(800), "not before a whole pass of the one-second clip")
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertEqual(told.count, 1, "told once, not at every pass")
+
+        var cancelled = 0
+        XCTAssertTrue(player.watchNextLoop { cancelled += 1 })
+        player.cancelLoopWatch()
+        player.setUserPaused(true)
+        var paused = 0
+        XCTAssertTrue(player.watchNextLoop { paused += 1 })
+        try await Task.sleep(for: .seconds(1.5))
+        XCTAssertEqual(cancelled, 0)
+        XCTAssertEqual(paused, 0, "a paused clip does not start over")
+        player.stop()
+        XCTAssertFalse(player.watchNextLoop {}, "a stopped player has nothing to watch")
+    }
+
+    /// A colour option rebuilds the item and its looper; the watch follows the new looper, whose
+    /// count starts again from zero.
+    func testAWatchCarriesOverToTheLooperARebuildMakes() async throws {
+        let url = try await makeClip(name: "loop-watch-rebuild", frames: 60)
+        let player = makePlayer(url: url)
+        let itemReady = await wait { player.itemStatusForTest == .readyToPlay }
+        XCTAssertTrue(itemReady, "the item never became readyToPlay")
+        var told = 0
+        XCTAssertTrue(player.watchNextLoop { told += 1 })
+        var options = WallpaperEngineOptions.identity
+        options.colorEnabled = true
+        options.brightness = 0
+        player.setEngineOptions(options, lut: nil, borderColor: nil)
+        let rebuilt = await wait { player.hasColorCompositionForTest }
+        XCTAssertTrue(rebuilt, "the item was not rebuilt with its composition")
+        let reached = await wait(upTo: .seconds(6)) { told > 0 }
+        XCTAssertTrue(reached, "the rebuilt looper never told the watch: \(player.stateSummary)")
+        try await Task.sleep(for: .seconds(2.5))
+        XCTAssertEqual(told, 1)
+    }
+
     func testAPosterIsProducedFromTheItemPlayingAfterTwoLoops() async throws {
         let url = try await makeClip(name: "poster-loop")
         let player = makePlayer(url: url)
@@ -202,13 +280,10 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         XCTAssertNotNil(image, "the poster path must survive the item being replaced by a loop")
         XCTAssertEqual(image?.width, 64)
         XCTAssertEqual(image?.height, 36)
-        XCTAssertFalse(
-            player.posterOutputIsAttachedForTest,
-            "the video output must not stay attached; that would be a continuous readback")
-        let fallbacks = counters.snapshot().value(.nativeVideoPosterFallback, for: surface)
-        print(
-            "[media] poster after \(wraps) loops: pixel obtained=yes fallbacks=\(fallbacks) "
-                + "on screen=unavailable")
+        XCTAssertEqual(
+            player.currentItemForTest?.outputs.count, 0,
+            "a poster never attaches anything to the item that is playing")
+        print("[media] poster after \(wraps) loops: pixel obtained=yes on screen=unavailable")
     }
 
     func testConcurrentPosterRequestsCoalesceIntoOne() async throws {
@@ -230,7 +305,7 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
                 image === images[0],
                 "overlapping requests must share one read, not open three")
         }
-        XCTAssertFalse(player.posterOutputIsAttachedForTest)
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoPosterDecode, for: surface), 1)
     }
 
     func testAPausedPlayerAnswersAPosterWithoutResuming() async throws {
@@ -251,10 +326,138 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
             "a screenshot request must never restart playback the user stopped")
     }
 
-    func testAPosterOfAnUprightClipStillUsesTheVideoOutput() async throws {
-        // The generator is a second decode. A clip whose picture and frames
-        // agree must keep reading the frame that is already playing.
-        let url = try await makeClip(name: "poster-upright")
+    func testConcurrentFlippedPostersMirrorOnceAndKeepTheCachedSourceUnflipped() async throws {
+        // The clockwise display matrix makes the fixture's green gradient asymmetric
+        // horizontally. It also uses the generator, so removing the file below forces
+        // later requests to reuse the already-produced frame without a video-output read.
+        let url = try await makeRotatedClip(name: "poster-concurrent-flipped", degrees: 90)
+        let player = makePlayer(url: url)
+        let itemReady = await wait { player.itemStatusForTest == .readyToPlay }
+        XCTAssertTrue(itemReady, "the item never became readyToPlay")
+        player.setUserPaused(true)
+        var options = WallpaperEngineOptions.identity
+        options.flipHorizontal = true
+        player.setEngineOptions(options, lut: nil, borderColor: nil)
+
+        async let first = player.posterImage()
+        async let second = player.posterImage()
+        let images = await [first, second]
+        for image in images {
+            let corners = Self.corners(of: try XCTUnwrap(image))
+            XCTAssertEqual(corners.count, 4)
+            guard corners.count == 4 else { continue }
+            XCTAssertGreaterThan(corners[1].green, corners[0].green + 60, "mirrored top row")
+            XCTAssertGreaterThan(corners[3].green, corners[2].green + 60, "mirrored bottom row")
+        }
+        XCTAssertEqual(
+            counters.snapshot().value(.nativeVideoPosterDecode, for: surface), 1,
+            "concurrent callers must share the one source-frame decode")
+
+        try FileManager.default.removeItem(at: url)
+        options.flipHorizontal = false
+        player.setEngineOptions(options, lut: nil, borderColor: nil)
+        let cached = await player.posterImage()
+        let unflipped = try XCTUnwrap(cached)
+        let originalCorners = Self.corners(of: unflipped)
+        XCTAssertEqual(originalCorners.count, 4)
+        if originalCorners.count == 4 {
+            XCTAssertGreaterThan(originalCorners[0].green, originalCorners[1].green + 60)
+            XCTAssertGreaterThan(originalCorners[2].green, originalCorners[3].green + 60)
+        }
+        options.flipHorizontal = true
+        player.setEngineOptions(options, lut: nil, borderColor: nil)
+        for _ in 0..<2 {
+            let poster = await player.posterImage()
+            let corners = Self.corners(of: try XCTUnwrap(poster))
+            XCTAssertEqual(corners.count, 4)
+            if corners.count == 4 {
+                XCTAssertGreaterThan(corners[1].green, corners[0].green + 60)
+                XCTAssertGreaterThan(corners[3].green, corners[2].green + 60)
+            }
+        }
+        player.setEngineOptions(.identity, lut: nil, borderColor: nil)
+        let restored = await player.posterImage()
+        XCTAssertTrue(restored === unflipped, "mirroring must not replace the cached source image")
+        XCTAssertFalse(player.isPlaying, "poster requests must leave playback paused")
+    }
+
+    @MainActor
+    private final class CompositionPreparation {
+        var suspendNext = false
+        private var released = false
+        private var continuation: CheckedContinuation<Void, Never>?
+        var isWaiting: Bool { continuation != nil }
+
+        func configure(_ pipeline: VideoColorPipeline, item: AVPlayerItem) async throws {
+            try await pipeline.configure(item)
+            guard suspendNext, !released else { return }
+            suspendNext = false
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func resume() {
+            // A test's defer also prevents a late preparation from suspending after cleanup.
+            released = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
+    func testColourReloadKeepsThePositionAndPauseChosenDuringPreparation() async throws {
+        try await checkColourReload(pausedAtReplacement: true)
+    }
+
+    func testColourReloadKeepsThePositionAndResumeChosenDuringPreparation() async throws {
+        try await checkColourReload(pausedAtReplacement: false)
+    }
+
+    private func checkColourReload(pausedAtReplacement: Bool) async throws {
+        let url = try await makeClip(name: "colour-reload", frames: 300)
+        let preparation = CompositionPreparation()
+        defer { preparation.resume() }
+        let player = makePlayer(
+            url: url, paused: !pausedAtReplacement, configureComposition: preparation.configure)
+        let ready = await wait { player.itemStatusForTest == .readyToPlay }
+        XCTAssertTrue(ready)
+        let original = try XCTUnwrap(player.currentItemForTest)
+        preparation.suspendNext = true
+        var options = WallpaperEngineOptions.identity
+        options.colorEnabled = true
+        options.brightness = 0
+        player.setEngineOptions(options, lut: nil, borderColor: nil)
+        let preparing = await wait { preparation.isWaiting }
+        XCTAssertTrue(preparing, "the replacement must be held while the original remains usable")
+        XCTAssertTrue(player.currentItemForTest === original)
+
+        // A user seek while preparation is suspended must win over the position
+        // from when the colour option changed. Exercise both pause transitions.
+        player.setUserPaused(true)
+        let sought = await original.seek(
+            to: CMTime(seconds: 4, preferredTimescale: 30), toleranceBefore: .zero, toleranceAfter: .zero)
+        XCTAssertTrue(sought)
+        let position = player.playbackTimeForTest.seconds
+        XCTAssertEqual(position, 4, accuracy: 1.0 / 30)
+        player.setUserPaused(pausedAtReplacement)
+        preparation.resume()
+
+        let restored = await wait(upTo: .seconds(2)) {
+            player.currentItemForTest !== original && player.itemStatusForTest == .readyToPlay
+                && player.playbackTimeForTest.seconds >= position - 1.0 / 30
+        }
+        XCTAssertTrue(restored, "replacement rewound from \(position) to \(player.playbackTimeForTest.seconds)")
+        XCTAssertTrue(player.hasColorCompositionForTest)
+        XCTAssertEqual(player.isPlaying, !pausedAtReplacement)
+        if pausedAtReplacement {
+            XCTAssertEqual(player.playbackTimeForTest.seconds, position, accuracy: 1.0 / 30)
+        }
+    }
+
+    func testAPosterLeavesThePlayingPictureUntouched() async throws {
+        // Issue 110: adding a video output to the playing item, or taking one
+        // off, makes it reconfigure its pipeline and holds the picture for
+        // about a tenth of a second, a black flash on the desktop. A poster is
+        // decoded from its own copy of the file instead.
+        let url = try await makeClip(name: "poster-untouched")
         let player = makePlayer(url: url)
         let itemReady = await wait { player.itemStatusForTest == .readyToPlay }
         XCTAssertTrue(itemReady, "the item never became readyToPlay")
@@ -262,14 +465,62 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         let first = player.playbackTimeForTest
         let advanced = await wait { CMTimeCompare(player.playbackTimeForTest, first) > 0 }
         XCTAssertTrue(advanced, "playback time never advanced")
+        let playing = try XCTUnwrap(player.currentItemForTest)
 
-        let image = await player.posterImage()
+        let request = Task { await player.posterImage() }
+        var mostOutputs = 0
+        var done = false
+        Task { _ = await request.value; done = true }
+        while !done {
+            mostOutputs = max(mostOutputs, playing.outputs.count)
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        let image = await request.value
 
         XCTAssertEqual(image?.width, 64)
         XCTAssertEqual(image?.height, 36)
-        XCTAssertEqual(
-            counters.snapshot().value(.nativeVideoPosterFallback, for: surface), 0,
-            "an upright clip must not pay for a second decode")
+        XCTAssertEqual(mostOutputs, 0, "the request attached an output to the playing item")
+        XCTAssertEqual(playing.outputs.count, 0)
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoPosterDecode, for: surface), 1)
+        XCTAssertTrue(player.isPlaying)
+    }
+
+    func testAPosterOfAClipWithOneKeyFrameShowsWhereItPlays() async throws {
+        // The nearest key frame of a clip that has only its first one is the
+        // clip's opening, which as a settled poster would stay on the desktop
+        // until the wallpaper changes. The poster has to come from where the
+        // clip is: dark for the first half here, bright for the second.
+        var request = SyntheticVideoFixture.Request.constantRate(
+            name: "poster-one-key-frame", numerator: 30, denominator: 1, frames: 90)
+        request.maxKeyFrameInterval = 90
+        request.painter = { buffer, index in
+            CVPixelBufferLockBaseAddress(buffer, [])
+            defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+            guard let base = CVPixelBufferGetBaseAddress(buffer) else { return }
+            let level: UInt8 = index < 45 ? 0 : 255
+            memset(base, Int32(level), CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer))
+        }
+        let url = try await SyntheticVideoFixture.write(request, into: directory)
+        // The interval is a ceiling, and an encoder may still start a key frame
+        // at the cut from dark to bright, which would let the nearest key frame
+        // pass for the playing position.
+        let keyFrames = try await Self.keyFrameIndices(of: url)
+        XCTAssertEqual(keyFrames, [0], "the fixture needs its first frame as its only key frame")
+        let player = makePlayer(url: url)
+        let late = await wait(upTo: .seconds(8)) { player.playbackTimeForTest.seconds >= 2.0 }
+        XCTAssertTrue(late, "the clip never reached its second half")
+        player.setUserPaused(true)
+        let position = player.playbackTimeForTest.seconds
+        XCTAssertGreaterThanOrEqual(position, 2.0, "the loop wrapped before the pause: \(position)")
+
+        let poster = await player.posterImage()
+        let image = try XCTUnwrap(poster)
+
+        let corners = Self.corners(of: image)
+        XCTAssertEqual(corners.count, 4)
+        XCTAssertTrue(
+            corners.allSatisfy { $0.red > 128 && $0.green > 128 },
+            "the poster is the clip's opening, not where it plays (at \(position) s): \(corners)")
     }
 
     func testAPosterOfARotatedClipIsUpright() async throws {
@@ -292,10 +543,6 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         let image = try XCTUnwrap(poster)
 
         XCTAssertEqual(CGSize(width: image.width, height: image.height), presentation)
-        XCTAssertFalse(player.posterOutputIsAttachedForTest)
-        XCTAssertEqual(
-            counters.snapshot().value(.nativeVideoPosterFallback, for: surface), 1,
-            "a rotated clip's poster is the one-shot generator's, and it is counted")
         let reference = try await uprightReferenceFrame(of: url)
         XCTAssertEqual(image.width, reference.width)
         XCTAssertEqual(image.height, reference.height)
@@ -348,7 +595,6 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
             snapshot.value(.nativeVideoItemCreated, for: surface),
             snapshot.value(.nativeVideoItemReleased, for: surface),
             "a created item that is never released is a leaked player")
-        XCTAssertFalse(player.posterOutputIsAttachedForTest)
         XCTAssertFalse(player.isPlaying)
         let afterStop = await player.posterImage()
         XCTAssertNil(afterStop, "a stopped surface must not deliver a frame to whatever is next")
@@ -451,6 +697,189 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
             snapshot.value(.nativeVideoItemReleased, for: surface), 2,
             "the item that failed with its audio must be released, not leaked")
         print("[media] audio cannot start -> \(dropped ?? "none")")
+    }
+
+    /// A playing clip with sound whose audio goes to an output that does not
+    /// exist, given `volume` and `muted` before it loads, as the host does.
+    /// An audio output that starts for it fails the item at once (issue 31),
+    /// which is what makes a started audio path observable without a real device.
+    private func silentCandidate(
+        name: String, volume: Float, muted: Bool, audioTracks: [Bool] = [true], audioFirst: Bool = false,
+        releasesSilentAudio: Bool = true
+    ) async throws -> (NativeVideoPlayer, dropped: () -> String?, failure: () -> String?) {
+        var request = SyntheticVideoFixture.Request.constantRate(
+            name: name, numerator: 30, denominator: 1, frames: 30)
+        request.withAudio = true
+        request.audioTracksEnabled = audioTracks
+        request.audioTrackFirst = audioFirst
+        let url = try await SyntheticVideoFixture.write(request, into: directory)
+        let player = NativeVideoPlayer(
+            surface: surface, counters: counters, paused: false, releasesSilentAudio: releasesSilentAudio)
+        var dropped: String?
+        var failure: String?
+        player.onAudioDropped = { dropped = $0 }
+        player.onPreparationFailure = { _, detail, _ in failure = detail }
+        player.setAudioOutputDeviceForTest("org.wallpapermachine.tests.missing-output")
+        player.setVolume(volume, muted: muted)
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 64, height: 36))
+        view.wantsLayer = true
+        player.attach(to: view)
+        player.load(url: url)
+        self.player = player
+        return (player, { dropped }, { failure })
+    }
+
+    /// Plays `player` until the loop has wrapped `wraps` times, returning how
+    /// many distinct copies of the item were current and whether any queued
+    /// copy had its audio track on at any look.
+    private func play(_ player: NativeVideoPlayer, wraps target: Int) async -> (copies: Int, wraps: Int, audioSeen: Bool) {
+        var copies = Set<ObjectIdentifier>()
+        var wraps = 0
+        var audioSeen = false
+        var previous = player.playbackTimeForTest
+        let deadline = ContinuousClock.now + .seconds(Double(target) * 1.5 + 6)
+        while ContinuousClock.now < deadline && wraps < target {
+            try? await Task.sleep(for: .milliseconds(20))
+            if let item = player.currentItemForTest { copies.insert(ObjectIdentifier(item)) }
+            if player.queuedAudioTracksEnabledForTest.joined().contains(true) { audioSeen = true }
+            let now = player.playbackTimeForTest
+            if now.isValid && previous.isValid && CMTimeCompare(now, previous) < 0 { wraps += 1 }
+            previous = now
+        }
+        return (copies.count, wraps, audioSeen)
+    }
+
+    func testAClipThatCannotBeHeardNeverStartsItsAudio() async throws {
+        // Muted, and at zero volume: the two ways a surface is silent. The
+        // audio track is off on every copy the looper plays, the copies it
+        // recycles included, so no audio output starts: the output that does
+        // not exist never fails the item, as it does a muted clip without this
+        // (`testWithTheSwitchOffAMutedClipStillStartsItsAudio`).
+        for (volume, muted, recycling) in [(Float(1), true, true), (Float(0), false, false)] {
+            let (player, dropped, failure) = try await silentCandidate(
+                name: "silent-\(volume)-\(muted)", volume: volume, muted: muted)
+            let ready = await wait(upTo: .seconds(10)) { player.layerIsReadyForDisplayForTest }
+            XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+            // Every copy plays once, and the first again, when the loop recycles them.
+            let target = recycling ? player.loopCopyCountForTest + 1 : 2
+            let played = await play(player, wraps: target)
+            XCTAssertGreaterThanOrEqual(played.wraps, target, "the clip did not loop \(target) times")
+            XCTAssertGreaterThanOrEqual(played.copies, min(target, player.loopCopyCountForTest))
+            XCTAssertFalse(played.audioSeen, "a copy was queued with its audio on")
+            XCTAssertTrue(
+                player.queuedAudioTracksEnabledForTest.contains { !$0.isEmpty },
+                "no queued copy ever loaded its audio track")
+            XCTAssertNil(dropped(), "no audio output may start for a clip that cannot be heard")
+            XCTAssertNil(failure())
+            XCTAssertTrue(player.isPlaying)
+            player.stop()
+            XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 1)
+            print("[media] silent volume \(volume) muted \(muted): \(played.wraps) wraps over \(played.copies) copies")
+            counters = RuntimeCounters()
+            counters.startSession(duration: .seconds(120))
+        }
+    }
+
+    func testWithTheSwitchOffAMutedClipStillStartsItsAudio() async throws {
+        // `WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO=1` keeps the old path: muting
+        // only turns the sound down, the audio output still starts, and on an
+        // output that cannot start the clip fails with it (issue 31).
+        let (_, dropped, failure) = try await silentCandidate(
+            name: "muted-switch-off", volume: 1, muted: true, releasesSilentAudio: false)
+        let started = await wait(upTo: .seconds(20)) { dropped() != nil }
+        XCTAssertTrue(started, "a muted clip with its audio track on must start its audio output")
+        XCTAssertNil(failure())
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 2)
+    }
+
+    func testAnAudibleClipStartsItsAudio() async throws {
+        let (_, dropped, failure) = try await silentCandidate(name: "audible", volume: 0.5, muted: false)
+        let started = await wait(upTo: .seconds(20)) { dropped() != nil }
+        XCTAssertTrue(started, "a clip that is heard starts its audio output")
+        XCTAssertNil(failure())
+    }
+
+    func testAMutedClipWithSeveralAudioTracksKeepsItsSoundRunning() async throws {
+        // Which of two enabled tracks the platform plays is its choice, which
+        // switching one back on could not restore: such a clip is left as it was.
+        // (Two enabled tracks are mixed, and that path does not fail on the
+        // missing output, so the tracks themselves are what is checked.)
+        let (player, _, failure) = try await silentCandidate(
+            name: "muted-two-tracks", volume: 1, muted: true, audioTracks: [true, true])
+        let ready = await wait(upTo: .seconds(10)) {
+            player.layerIsReadyForDisplayForTest && player.queuedAudioTracksEnabledForTest.contains { !$0.isEmpty }
+        }
+        XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+        let played = await play(player, wraps: 1)
+        XCTAssertTrue(played.audioSeen, "the platform's own choice of the tracks must stand")
+        XCTAssertEqual(player.queuedAudioTracksEnabledForTest.first, [true, true])
+        XCTAssertNil(failure())
+    }
+
+    func testBecomingAudibleTurnsTheAudioBackOnWithoutANewItem() async throws {
+        let (player, dropped, failure) = try await silentCandidate(name: "unmute", volume: 1, muted: true)
+        let ready = await wait(upTo: .seconds(10)) {
+            player.layerIsReadyForDisplayForTest && player.queuedAudioTracksEnabledForTest.contains { !$0.isEmpty }
+        }
+        XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+        let item = try XCTUnwrap(player.currentItemForTest)
+        XCTAssertFalse(player.queuedAudioTracksEnabledForTest.joined().contains(true))
+
+        player.setVolume(1, muted: false)
+
+        XCTAssertTrue(player.currentItemForTest === item, "the playing item is kept")
+        XCTAssertTrue(player.layerIsReadyForDisplayForTest, "the picture is kept")
+        XCTAssertFalse(
+            player.queuedAudioTracksEnabledForTest.joined().contains(false), "every copy's audio is back on")
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 1)
+        // The audio output starts again: on this missing output it fails the
+        // clip, which goes on without its sound, as an audible clip does.
+        let started = await wait(upTo: .seconds(20)) { dropped() != nil }
+        XCTAssertTrue(started, "the audio output must start again once the clip can be heard")
+        XCTAssertNil(failure())
+    }
+
+    func testARebuiltSilentClipKeepsItsAudioOff() async throws {
+        // A restart replaces the looper and all of its copies; the new ones are
+        // switched off before the platform prepares them.
+        let (player, dropped, failure) = try await silentCandidate(name: "silent-rebuild", volume: 1, muted: true)
+        let ready = await wait(upTo: .seconds(10)) { player.layerIsReadyForDisplayForTest }
+        XCTAssertTrue(ready, "no picture: \(player.stateSummary)")
+        let before = try XCTUnwrap(player.currentItemForTest)
+
+        XCTAssertTrue(player.restartPlayback(reason: "test"))
+        let replaced = await wait(upTo: .seconds(10)) {
+            player.currentItemForTest.map { $0 !== before } == true && player.layerIsReadyForDisplayForTest
+        }
+        XCTAssertTrue(replaced, "the rebuilt item never showed a picture: \(player.stateSummary)")
+        let played = await play(player, wraps: 2)
+        XCTAssertGreaterThanOrEqual(played.wraps, 2)
+        XCTAssertFalse(played.audioSeen)
+        XCTAssertNil(dropped())
+        XCTAssertNil(failure())
+        XCTAssertEqual(counters.snapshot().value(.nativeVideoItemCreated, for: surface), 2)
+    }
+
+    func testMutingAClipPlayingWithoutItsAudioLeavesItsPictureOn() async throws {
+        // The item a clip falls back to is a composition that numbers its one
+        // video track 1, the number this file gave its audio track: muting
+        // must not take the one for the other.
+        let (player, dropped, failure) = try await silentCandidate(
+            name: "audio-track-first", volume: 1, muted: false, audioFirst: true)
+        let fellBack = await wait(upTo: .seconds(20)) {
+            dropped() != nil && player.itemStatusForTest == .readyToPlay && player.layerIsReadyForDisplayForTest
+        }
+        XCTAssertTrue(fellBack, "the clip must fall back to its picture alone: \(player.stateSummary)")
+
+        player.setVolume(1, muted: true)
+
+        let tracks = try XCTUnwrap(player.currentItemForTest?.tracks)
+        XCTAssertFalse(tracks.isEmpty)
+        XCTAssertTrue(tracks.allSatisfy(\.isEnabled), "the picture's track must stay on")
+        let played = await play(player, wraps: 1)
+        XCTAssertGreaterThanOrEqual(played.wraps, 1, "the picture must keep playing")
+        XCTAssertTrue(player.currentItemForTest?.tracks.allSatisfy(\.isEnabled) == true)
+        XCTAssertNil(failure())
     }
 
     func testEveryLoopPassStopsAtTheEndOfThePicture() async throws {
@@ -695,6 +1124,28 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         print("[media] corrupt -> \(refusal?.reason ?? "ACCEPTED")")
     }
 
+    func testAnHev1ClipReachesAFirstFrameFromItsRetaggedCopy() async throws {
+        // The clip the stall cases below use, through the host's own route: the format check
+        // makes the copy and the player is given it.
+        let url = try Hev1Fixture.write(name: "hev1-retag", into: directory)
+        let folder = directory.appendingPathComponent("DerivedVideos", isDirectory: true)
+        let derived = DerivedVideoCache(folder: { folder })
+        let refusal = await VideoFormatSupport.refusal(url: url, derived: derived)
+        XCTAssertNil(refusal, "\(refusal?.reason ?? "")")
+        guard case let .copy(lease) = derived.playableFile(for: url) else {
+            throw XCTSkip("this macOS plays hev1 itself, so nothing needs a copy")
+        }
+        defer { lease.release() }
+        let player = makePlayer(url: lease.url)
+        var failures: [String] = []
+        player.onPreparationFailure = { _, detail, _ in failures.append(detail) }
+        let shown = await wait { player.layerIsReadyForDisplayForTest }
+        XCTAssertTrue(shown, "no first frame: \(player.stateSummary)")
+        XCTAssertNotEqual(player.presentationSizeForTest ?? .zero, .zero, "the picture has a size")
+        XCTAssertTrue(failures.isEmpty, "\(failures)")
+        print("[media] hev1 retagged copy: first frame, state: \(player.stateSummary)")
+    }
+
     // MARK: Restart
 
     /// The number of items this player has created, and released.
@@ -860,7 +1311,7 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         let player = makeCheckedPlayer(
             url: url,
             health: .init(
-                minimumPause: .seconds(5), settle: .milliseconds(50), window: .seconds(2),
+                minimumPause: .seconds(300), settle: .milliseconds(50), window: .seconds(2),
                 step: .milliseconds(50)),
             now: { clock })
         var events: [NativeVideoHealthEvent] = []
@@ -869,15 +1320,13 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         XCTAssertTrue(shown, "the clip never showed a frame")
 
         player.setUserPaused(true)
-        clock = clock + .seconds(6)
+        clock = clock + .seconds(301)
         player.setUserPaused(false)
         let reported = await wait(upTo: .seconds(10)) { !events.isEmpty }
 
         XCTAssertTrue(reported, "no check followed the resume")
         XCTAssertEqual(events.first?.verdict, .advancing)
         XCTAssertEqual(events.count, 1)
-        XCTAssertFalse(
-            player.livenessOutputIsAttachedForTest, "a finished check leaves nothing attached")
         XCTAssertEqual(itemCounts().created, 1, "a healthy clip is not rebuilt")
     }
 
@@ -889,16 +1338,17 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         let shown = await wait { player.isEligibleForCheck }
         XCTAssertTrue(shown, "the clip never showed a frame")
 
-        // A flick of the occlusion state is not worth a look.
-        player.setUserPaused(true)
-        clock = clock + .seconds(2)
-        player.setUserPaused(false)
+        // A cover of a few minutes (a full-screen app, Mission Control) is not
+        // worth a look: the look itself holds the picture for a moment.
+        player.setPresentationSuspended(true)
+        clock = clock + .seconds(240)
+        player.setPresentationSuspended(false)
         for _ in 0..<50 { await Task.yield() }
         XCTAssertTrue(sleeper.requested.isEmpty, "a short pause starts no check")
 
         // A long one is, whichever way the clip was stopped.
         player.setUserPaused(true)
-        clock = clock + .seconds(6)
+        clock = clock + .seconds(301)
         player.setUserPaused(false)
         await sleeper.waitUntilPending()
         XCTAssertEqual(sleeper.requested.count, 1, "the check is waiting out its settle")
@@ -906,8 +1356,7 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         // Pausing again ends it: what it would conclude no longer holds.
         player.setPresentationSuspended(true)
         XCTAssertEqual(sleeper.cancelledCount, 1)
-        XCTAssertFalse(player.livenessOutputIsAttachedForTest)
-        clock = clock + .seconds(6)
+        clock = clock + .seconds(301)
         player.setPresentationSuspended(false)
         await sleeper.waitUntilPending()
         XCTAssertEqual(sleeper.requested.count, 2, "a hidden display counts as a pause too")
@@ -915,7 +1364,7 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         // A resume that leaves the clip paused starts nothing.
         player.setUserPaused(true)
         player.setPresentationSuspended(true)
-        clock = clock + .seconds(6)
+        clock = clock + .seconds(301)
         player.setPresentationSuspended(false)
         for _ in 0..<50 { await Task.yield() }
         XCTAssertEqual(sleeper.requested.count, 2)
@@ -935,7 +1384,7 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         try XCTSkipIf(shown, "this OS decodes hev1, so the clip is no longer frame-less")
 
         player.setUserPaused(true)
-        clock = clock + .seconds(6)
+        clock = clock + .seconds(301)
         player.setUserPaused(false)
         for _ in 0..<50 { await Task.yield() }
 
@@ -976,7 +1425,6 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         guard case .stalled = evaluator.timedOut() else {
             return XCTFail("a pipeline that decodes nothing is stalled: \(evaluator.timedOut())")
         }
-        XCTAssertFalse(player.livenessOutputIsAttachedForTest)
     }
 
     func testSamplingProvesAHealthyClipAndFollowsTheLoopToItsNextCopy() async throws {
@@ -1002,7 +1450,29 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
             itemsThatProducedFrames.count, 2,
             "an output left on the retired copy would never see another frame")
         player.finishSampling()
+    }
+
+    func testACheckTakesItsOutputOffOnlyOnceTheLoopHasRetiredItsItem() async throws {
+        // Issue 110: taking a video output off the playing item holds the
+        // picture just as adding one does, so a finished check leaves it where
+        // it is and the loop's next copy, which never had it, plays on.
+        let url = try await makeClip(name: "health-retire")
+        let player = makePlayer(url: url)
+        let shown = await wait { player.layerIsReadyForDisplayForTest }
+        XCTAssertTrue(shown, "the clip never showed a frame")
+        _ = player.liveSample()
+        let checked = try XCTUnwrap(player.currentItemForTest)
+        player.finishSampling()
+
+        XCTAssertTrue(player.livenessOutputIsAttachedForTest)
+        XCTAssertEqual(checked.outputs.count, 1, "the output came off the picture on screen")
+
+        // The clip is one second long.
+        let moved = await wait(upTo: .seconds(4)) { player.currentItemForTest !== checked }
+        XCTAssertTrue(moved, "the loop never moved on")
         XCTAssertFalse(player.livenessOutputIsAttachedForTest)
+        XCTAssertEqual(checked.outputs.count, 0, "the retired copy keeps the output")
+        XCTAssertEqual(player.currentItemForTest?.outputs.count, 0)
     }
 
     func testAFrozenPipelineStopsAnsweringThatItProducedAFrame() async throws {
@@ -1050,7 +1520,7 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
     /// Short windows keep a real-time run to a couple of seconds. They are the
     /// policy's numbers, not waits in the test.
     private let quickChecks = NativeVideoHealthSupervisor.Policy(
-        minimumPause: .seconds(5), settle: .milliseconds(50), window: .milliseconds(400),
+        minimumPause: .seconds(300), settle: .milliseconds(50), window: .milliseconds(400),
         step: .milliseconds(50), rebuildWindow: .milliseconds(600))
 
     /// A player on an `hev1` clip that is told it showed a picture once: the
@@ -1100,7 +1570,6 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         let items = itemCounts()
         XCTAssertEqual(items.created, 2, "the rebuild made one new item")
         XCTAssertEqual(items.created, items.released + 1, "and released the one it replaced")
-        XCTAssertFalse(player.livenessOutputIsAttachedForTest, "the check leaves nothing attached")
         print("[media] hev1 ladder: \(failures.first ?? "")")
     }
 
@@ -1164,7 +1633,8 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         XCTAssertEqual(count(.nativeVideoPlaybackRebuild), 0, "and the check rebuilt nothing")
         XCTAssertTrue(failures.isEmpty)
         XCTAssertEqual(sleeper.pendingCount, 0)
-        XCTAssertFalse(player.livenessOutputIsAttachedForTest)
+        XCTAssertFalse(
+            player.livenessOutputIsAttachedForTest, "the rebuilt item never had the check's output")
     }
 
     func testAHealthyPlayerIsNeitherKickedNorRebuiltByAWake() async throws {
@@ -1188,7 +1658,6 @@ final class NativeVideoPlayerMediaTests: XCTestCase {
         XCTAssertEqual(items.created, 1, "the item was never replaced")
         XCTAssertEqual(items.released, 0)
         XCTAssertTrue(player.isPlaying)
-        XCTAssertFalse(player.livenessOutputIsAttachedForTest)
     }
 
     func testAWakeDoesNotCheckAClipThatIsPausedOrHidden() async throws {

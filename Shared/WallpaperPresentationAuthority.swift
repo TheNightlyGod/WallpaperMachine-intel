@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Who is allowed to keep presenting a wallpaper surface, and why not.
@@ -38,7 +39,7 @@ enum WallpaperPresentationAuthority {
     /// The host told us this surface is no longer active.
     static let hostSuspended = SuspensionReasons(rawValue: 1 << 2)
     /// Nothing is showing this surface: the session is not locked and the host
-    /// is not presenting the lock screen.
+    /// is not presenting the lock screen, or another login session has the screens.
     static let noConsumer = SuspensionReasons(rawValue: 1 << 3)
     /// A preview had its animated look and has now had long enough.
     static let previewBudgetSpent = SuspensionReasons(rawValue: 1 << 4)
@@ -55,6 +56,9 @@ enum WallpaperPresentationAuthority {
     var displaysAsleep: Bool
     /// Whether the login session is showing the lock screen.
     var sessionLocked: Bool
+    /// Whether the login session owns the screens. Fast user switching puts another
+    /// session (or the login window) there, and nothing this session draws is seen.
+    var sessionOnConsole: Bool
     /// The host's native mode name. Idle playback belongs to the screen saver,
     /// even when macOS has also locked the login session.
     var presentationMode: String
@@ -73,6 +77,7 @@ enum WallpaperPresentationAuthority {
       userPaused: Bool = false,
       displaysAsleep: Bool = false,
       sessionLocked: Bool = false,
+      sessionOnConsole: Bool = true,
       presentationMode: String = "active",
       hostActivity: HostActivity = .active,
       presentedFor: Duration? = nil,
@@ -84,6 +89,7 @@ enum WallpaperPresentationAuthority {
       self.userPaused = userPaused
       self.displaysAsleep = displaysAsleep
       self.sessionLocked = sessionLocked
+      self.sessionOnConsole = sessionOnConsole
       self.presentationMode = presentationMode
       self.hostActivity = hostActivity
       self.presentedFor = presentedFor
@@ -117,7 +123,11 @@ enum WallpaperPresentationAuthority {
     switch request.role {
     case .lockScreen:
       let showing: Bool
-      if request.presentationMode == "idle" {
+      if !request.sessionOnConsole {
+        // Another session has the screens: neither this session's lock screen, nor its
+        // screen saver, nor its desktop picture is on any of them.
+        showing = false
+      } else if request.presentationMode == "idle" {
         showing = request.screenSaverEnabled
       } else {
         showing = request.lockScreenEnabled
@@ -164,9 +174,41 @@ enum WallpaperPresentationAuthority {
   /// `desktopSettleBudget` since its first frame. Producing that first frame is
   /// readiness, not settling, so a surface still producing it does not count.
   private static func isSettlingAsDesktop(_ request: Request) -> Bool {
-    guard request.role == .lockScreen, request.lockScreenEnabled,
+    guard request.role == .lockScreen, request.lockScreenEnabled, request.sessionOnConsole,
       request.presentationMode != "idle", let presentedFor = request.presentedFor
     else { return false }
     return presentedFor < desktopSettleBudget
+  }
+}
+
+extension WallpaperPresentationAuthority {
+  /// What the login session's dictionary (`CGSessionCopyCurrentDictionary`) says about
+  /// who can see this session's screens. Reading it is a synchronous window-server round
+  /// trip, so callers ask when it can have changed, not per frame.
+  struct SessionState: Equatable, Sendable {
+    /// The session shows the lock screen.
+    var locked: Bool
+    /// The session owns the console. False while fast user switching has another
+    /// user's session or the login window on the screens.
+    var onConsole: Bool
+
+    init(locked: Bool = false, onConsole: Bool = true) {
+      self.locked = locked
+      self.onConsole = onConsole
+    }
+
+    /// A missing key reads as unlocked and on the console, so a dictionary without
+    /// them pauses nothing.
+    init(dictionary: [String: Any]?) {
+      locked = dictionary?["CGSSessionScreenIsLocked"] as? Bool ?? false
+      onConsole = dictionary?[Self.onConsoleKey] as? Bool ?? true
+    }
+
+    static func current() -> SessionState {
+      SessionState(dictionary: CGSessionCopyCurrentDictionary() as? [String: Any])
+    }
+
+    /// `kCGSessionOnConsoleKey`, spelled out: the SDK defines it as a `CFSTR` macro.
+    static let onConsoleKey = "kCGSSessionOnConsoleKey"
   }
 }

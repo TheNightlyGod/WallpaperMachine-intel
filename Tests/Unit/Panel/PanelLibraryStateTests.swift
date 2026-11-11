@@ -307,11 +307,11 @@ final class PanelLibraryStateTests: PanelTestCase {
         BridgeSceneBackendReport(
           displayId: 1, displayName: "Main", wallpaperId: "ghost", wallpaperTitle: "Ghost",
           backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
-          optimizationApplied: nil),
+          optimizationApplied: nil, qualityInForce: nil),
         BridgeSceneBackendReport(
           displayId: 2, displayName: "Side", wallpaperId: "ghost", wallpaperTitle: "Ghost",
           backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
-          optimizationApplied: nil),
+          optimizationApplied: nil, qualityInForce: nil),
       ]
       func fields(_ url: URL?) throws -> [String: String] {
         let components = try XCTUnwrap(URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false))
@@ -347,12 +347,81 @@ final class PanelLibraryStateTests: PanelTestCase {
         BridgeSceneBackendReport(
           displayId: 1, displayName: "Main", wallpaperId: "ghost", wallpaperTitle: "Ghost",
           backend: "unknown", failureStage: "unsupported",
-          failureReason: "the scene uses a puppet", videoPath: "none", optimizationApplied: nil)
+          failureReason: "the scene uses a puppet", videoPath: "none", optimizationApplied: nil, qualityInForce: nil)
       ]
       let held = try details(panel.controller.issueReportURL(for: "ghost"))
       XCTAssertTrue(
         held.contains("**Renderer:** not drawn (unsupported: the scene uses a puppet)"), "\(held)")
       XCTAssertFalse(held.contains { $0.contains("unknown") }, "a backend nobody named is not a renderer: \(held)")
     }
+  }
+
+  func testTheReportListsThePropertiesChangedFromTheirDefaultsWithoutTypedTextOrPaths() async throws {
+    try await withPanel { panel in
+      panel.store.librarySnapshot.wallpapers = [
+        BridgeWallpaperEntry(
+          id: "ghost", title: "Ghost", kind: .projectScene, supported: true, active: false,
+          selected: false, previewPath: nil),
+        BridgeWallpaperEntry(
+          id: "other", title: "Other", kind: .projectScene, supported: true, active: false,
+          selected: false, previewPath: nil),
+      ]
+      typealias Context = PanelPropertyContext
+      panel.store.wallpaperOptionsSnapshot = BridgeSnapshotFixtures.options(
+        wallpaperId: "ghost",
+        properties: [
+          Context.property("speed", .slider, .number(value: 0.25), defaultValue: .number(value: 1)),
+          Context.property("fine", .slider, .number(value: 0.123456789), defaultValue: .number(value: 0)),
+          Context.property("rain", .bool, .bool(value: true), dirty: true, defaultValue: .bool(value: false)),
+          Context.property(
+            "tint", .color, .colorRgb(red: 1, green: 0.5, blue: 0),
+            defaultValue: .colorRgb(red: 1, green: 1, blue: 1)),
+          Context.property("unchanged", .slider, .number(value: 3)),
+          Context.property(
+            "name", .textInput, .string(value: "my secret note"), defaultValue: .string(value: "")),
+          Context.property(
+            "photo", .file, .string(value: "/Users/someone/Pictures/me.jpg"), defaultValue: .string(value: "")),
+        ])
+      func details(_ url: URL?) throws -> String {
+        let items = try XCTUnwrap(URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false)?.queryItems)
+        return try XCTUnwrap(items.first { $0.name == "app-details" }?.value)
+      }
+
+      let report = try details(panel.controller.issueReportURL(for: "ghost"))
+      XCTAssertTrue(report.contains("`speed`: 0.25 (default: 1)"), report)
+      XCTAssertTrue(report.contains("`fine`: 0.123456789 (default: 0)"), "every digit, to reproduce it: \(report)")
+      XCTAssertTrue(report.contains("`rain`: true (default: false) (not applied)"), report)
+      XCTAssertTrue(report.contains("`tint`: 1 0.5 0 (default: 1 1 1)"), report)
+      XCTAssertFalse(report.contains("`unchanged`"), "a property at its default is not listed: \(report)")
+      XCTAssertTrue(report.contains("`name`"), report)
+      XCTAssertFalse(report.contains("my secret note"), "typed text stays out: \(report)")
+      XCTAssertTrue(report.contains("`photo`"), report)
+      XCTAssertFalse(report.contains("/Users/"), "file paths stay out: \(report)")
+
+      let other = try details(panel.controller.issueReportURL(for: "other"))
+      XCTAssertFalse(other.contains("`speed`"), "another wallpaper's options are not this one's")
+    }
+  }
+
+  func testTheReportQuotesTheFilesTheLastCheckFoundMissing() throws {
+    let url = LibraryIssueReport.url(
+      for: row("rain"), missingFiles: [
+        MissingSceneFile(layer: "Drops", path: "materials/drops.json"),
+        MissingSceneFile(layer: "", path: "effects/glow/effect.json"),
+      ], version: "1.0")
+    let items = try XCTUnwrap(URLComponents(url: XCTUnwrap(url), resolvingAgainstBaseURL: false)?.queryItems)
+    let details = try XCTUnwrap(items.first { $0.name == "app-details" }?.value)
+    XCTAssertTrue(details.contains("`materials/drops.json`"), details)
+    XCTAssertTrue(details.contains("Drops"), "the layer that asked for it: \(details)")
+    XCTAssertTrue(details.contains("`effects/glow/effect.json`"), details)
+  }
+
+  func testTheChangedPropertyListIsCappedAndCountsTheRest() {
+    let changed = (0..<25).map {
+      PanelPropertyContext.property("p\($0)", .slider, .number(value: 1), defaultValue: .number(value: 0))
+    }
+    let lines = LibraryIssueReport.changedProperties(changed)
+    XCTAssertEqual(lines.count, LibraryIssueReport.changedPropertyLimit + 1)
+    XCTAssertEqual(lines.last, "- and 5 more")
   }
 }

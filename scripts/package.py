@@ -6,17 +6,28 @@ Homebrew keg must carry license files to ship, and every notice the build places
 the bundle must match its repository original. The signed bundle then goes into
 `WallpaperMachine-<version>-arm64.dmg`, the drag-to-install image laid out by
 scripts/lib/dmg.py, which is mounted and verified before its `.sha256` sidecar is
-written. The image is for local use; LICENSING.md records why it is not cleared for
-distribution.
+written. LICENSING.md describes the license and the notices the bundle carries.
 
 The signed bundle, and again the copy inside the mounted image, must still carry what the
 lock screen extension and the permission prompts need: the extension's sandbox and
-entitlements, the Info.plist keys, and a matching signing team (scripts/lib/bundle_contract.py).
+entitlements, the host's entitlements, the Info.plist keys, and a matching signing team
+(scripts/lib/bundle_contract.py).
+
+A Developer ID identity (`--sign-identity "Developer ID Application: …"`) signs every
+library, framework, extension and the app with the hardened runtime and a secure
+timestamp, and then the disk image. `--notarize PROFILE` (a `notarytool
+store-credentials` profile; `--notary-keychain` when it is not in the login keychain)
+has Apple notarize the app, staples the ticket to it before the image is made, then
+notarizes and staples the image too (scripts/lib/notary.py). The checksum is written
+last, because stapling changes the image's bytes.
 
 Every bundled dylib keeps the minimum macOS it was built for, which for a Homebrew
 bottle is the host's release. When one is newer than the app's deployment target the
 bundle's `LSMinimumSystemVersion` is raised to match, so macOS refuses to open it
 instead of it failing at launch; `--require-deployment-target` makes that an error.
+A `minos` does not cover the system libraries a file loads, so every one the bundle
+loads unconditionally must be known to ship with macOS 15.0 (SYSTEM_LIBRARIES), or
+packaging stops: one that macOS lacks makes dyld refuse to start the app.
 
 `--check` runs the preflight against the built bundle and exits without changing it.
 
@@ -28,13 +39,16 @@ in the file, and `--require-notices` makes it an error too (the gate for a distr
 """
 import argparse
 import hashlib
+import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+from typing import NamedTuple
 
 import check_licenses
-from lib import bundle_contract, dmg
+from lib import bundle_contract, dmg, notary
 from lib.homebrew import KEG_LICENSE_FILE, keg_of
 from lib.glyphs import markers
 from lib.paths import PROVENANCE, ROOT, THIRD_PARTY, app_bundle
@@ -47,6 +61,19 @@ IMPORTED_RENDERER_LICENSE = THIRD_PARTY / "received-licenses/wallpaper-engine-fo
 # does not record where those dylibs came from. Repackaging therefore needs fresh
 # build output rather than an incremental rebuild, which leaves Frameworks as it was.
 FRESH_BUILD = "Packaging requires fresh, unrelocated build output; incremental builds retain bundled dylibs. See docs/build.md before cleaning any delivered app"
+# The system libraries the bundle may load unconditionally: each ships with macOS 15.0, the
+# deployment target. A Homebrew bottle is linked against the newest SDK of its macOS release
+# and records that release's `minos`, so a library added later in the release passes the
+# minimum-version check yet stops the app before main() on an earlier one (FreeType 2.15
+# linked /usr/lib/libhvf.dylib, which macOS has only from 15.4). Add a library here only
+# once it is known to ship with macOS 15.0. Weak loads are skipped when missing; not checked.
+SYSTEM_LIBRARIES = frozenset({
+    "/usr/lib/libSystem.B.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libobjc.A.dylib",
+    "/usr/lib/libiconv.2.dylib", "/usr/lib/libz.1.dylib", "/usr/lib/libbz2.1.0.dylib",
+})
+# What Xcode links the app and its extension against at the deployment target, weak-linking
+# anything newer: Apple's frameworks and the Swift runtime. Bundled libraries get no such pass.
+LINKED_AT_TARGET = ("/System/Library/Frameworks/", "/usr/lib/swift/")
 
 
 class PackagingError(Exception):
@@ -61,30 +88,69 @@ def run(args):
     subprocess.run(list(map(str, args)), check=True)
 
 
+class Signing(NamedTuple):
+    """How packaging signs: ad hoc (`-`), a certificate, or a Developer ID that can be notarized.
+
+    Release builds use the Developer ID: its designated requirement (identifier, Apple's
+    Developer ID chain and the team) stays the same from one release to the next, so macOS
+    privacy permissions survive an update, and it is the only signature Apple notarizes.
+    An ad-hoc requirement is the build's cdhash, which every release changes.
+    """
+    identity: str
+    developer_id: bool = False
+
+    def options(self):
+        if self.developer_id:
+            # Notarization requires both; library validation then needs every bundled
+            # library signed by the same team, which this identity does.
+            return ["--timestamp", "--options", "runtime"]
+        # Without a team, the hardened runtime's library validation would refuse the
+        # app's own libraries, so ad hoc and self-signed builds run without it.
+        return ["--options", "0"] if self.identity == "-" else ["--timestamp=none", "--options", "0"]
+
+
+IDENTITY_LINE = re.compile(r'^\s*\d+\) ([0-9A-F]{40}) "(.*)"')
+
+
+def signing_for(identity, listing=None):
+    """The `Signing` for `--sign-identity`, matched the way codesign matches it: a SHA-1 or part of the name.
+
+    `listing` is `security find-identity -v -p codesigning` output (valid identities only), read
+    from the keychains when omitted. An identity matching several of them stops packaging here,
+    before the bundle is touched, rather than in codesign after it is relocated: a renewed
+    certificate shares its name with the old one, so the SHA-1 picks between them. One that
+    matches none (an untrusted self-signed certificate is not listed) is left to codesign.
+    """
+    if identity == "-":
+        return Signing("-")
+    if listing is None:
+        listing = output(["security", "find-identity", "-v", "-p", "codesigning"])
+    names = {match.group(1): match.group(2) for match in map(IDENTITY_LINE.match, listing.splitlines()) if match}
+    matches = {digest: name for digest, name in names.items() if identity.upper() == digest or identity in name}
+    if len(matches) > 1:
+        listed = "; ".join(f"{digest} {name}" for digest, name in sorted(matches.items()))
+        raise PackagingError(f"--sign-identity {identity!r} matches {len(matches)} identities; pass one SHA-1 instead: {listed}")
+    return Signing(identity, any(name.startswith(bundle_contract.DEVELOPER_ID) for name in matches.values()))
+
+
 FALLBACK_TO_ADHOC = False
 
 
-def sign(file, identity, *options):
-    """Ad hoc (`-`) by default. Release builds pass the project certificate, whose designated
-    requirement (identifier plus certificate) stays the same from one release to the next,
-    so macOS privacy permissions survive an update; an ad-hoc requirement is the build's
-    cdhash, which every release changes."""
+def sign(file, signing, *options):
     global FALLBACK_TO_ADHOC
-    target_identity = "-" if FALLBACK_TO_ADHOC else identity
-    command = ["codesign", "--force", "--sign", target_identity]
-    if target_identity != "-":
-        command.append("--timestamp=none")
+    target_signing = Signing("-") if FALLBACK_TO_ADHOC else signing
+    command = ["codesign", "--force", "--sign", target_signing.identity, *target_signing.options(), *options, file]
     try:
-        if target_identity != "-":
-            subprocess.run(list(map(str, [*command, *options, file])), check=True, capture_output=True, text=True)
+        if target_signing.identity != "-":
+            subprocess.run(list(map(str, command)), check=True, capture_output=True, text=True)
         else:
-            run([*command, *options, file])
+            run(command)
     except subprocess.CalledProcessError as e:
-        if target_identity != "-":
+        if target_signing.identity != "-":
             err = (e.stderr or "").strip()
-            print(f"{MARK.warn} codesign failed with identity {target_identity!r}: {err}; falling back to ad hoc (-)", file=sys.stderr)
+            print(f"{MARK.warn} codesign failed with identity {target_signing.identity!r}: {err}; falling back to ad hoc (-)", file=sys.stderr)
             FALLBACK_TO_ADHOC = True
-            run(["codesign", "--force", "--sign", "-", *options, file])
+            run(["codesign", "--force", "--sign", "-", "--options", "0", *options, file])
         else:
             raise
 
@@ -101,14 +167,50 @@ def dependencies(file):
     return [line.strip().split(" (compatibility")[0] for line in output(["otool", "-L", file]).splitlines()[1:] if line.strip()]
 
 
+def rpaths(file):
+    """The LC_RPATH entries of a Mach-O file, in load-command order."""
+    load_commands = output(["otool", "-l", file]).splitlines()
+    return [load_commands[index + 2].strip().split(" (offset")[0].removeprefix("path ")
+            for index, line in enumerate(load_commands) if line.strip() == "cmd LC_RPATH"]
+
+
+def keg_rpath_target(file, dependency, prefix):
+    """The Homebrew file an `@rpath/` dependency of a Homebrew dylib names, or None.
+
+    Some kegs load a sibling library through `@rpath` and an `@loader_path/../lib` entry
+    of their own (brotli's decoder loads its common library that way, and FreeType loads
+    brotli since 2.15). Only rpaths that stay inside the Homebrew prefix are followed:
+    a bundle relocated by an earlier run points its rpaths at Contents/Frameworks, and
+    that input is still refused.
+    """
+    root = Path(prefix).resolve()
+    if not Path(file).resolve().is_relative_to(root):
+        return None
+    name = dependency.removeprefix("@rpath/")
+    for entry in rpaths(file):
+        if entry.startswith("@loader_path/"):
+            base = Path(file).parent / entry.removeprefix("@loader_path/")
+        elif entry.startswith(str(prefix)):
+            base = Path(entry)
+        else:
+            continue
+        # Named as it is loaded, like an absolute dependency, so the bundled copy keeps that
+        # name; the check that it stays in the prefix follows any links.
+        candidate = base / name
+        if candidate.is_file() and candidate.resolve().is_relative_to(root):
+            return candidate
+    return None
+
+
 def resolve_libraries(roots, seeds, prefix):
     """Every Homebrew dylib the roots load, directly or transitively, keyed by file name.
 
     Read-only: the walk runs over the Homebrew files themselves, so the bundle is
-    known before anything is copied into it. An `@rpath` dependency that is not a
-    Swift runtime library means the input was already relocated by an earlier run,
-    whose provenance this script does not track, so it is refused rather than
-    resolved against whatever the host has installed.
+    known before anything is copied into it. A Homebrew dylib's `@rpath` dependency is
+    followed through that dylib's own rpaths inside the prefix (`keg_rpath_target`).
+    Any other `@rpath` dependency that is not a Swift runtime library means the input
+    was already relocated by an earlier run, whose provenance this script does not
+    track, so it is refused rather than resolved against whatever the host has installed.
     """
     libraries = {}
     relocated = []
@@ -126,15 +228,19 @@ def resolve_libraries(roots, seeds, prefix):
         for dependency in dependencies(file):
             if dependency.startswith(str(prefix)):
                 add(Path(dependency))
-            elif dependency.startswith("@rpath/"):
-                dep_name = Path(dependency).name
-                candidate = file.parent / dep_name
-                if not candidate.is_file():
-                    candidate = prefix / "lib" / dep_name
-                if candidate.is_file():
-                    add(candidate)
-                elif dep_name not in libraries and "libswift" not in dependency:
-                    relocated.append(f"{file}: {dependency}")
+            elif dependency.startswith("@rpath/") and Path(dependency).name not in libraries and "libswift" not in dependency:
+                target = keg_rpath_target(file, dependency, prefix)
+                if target is not None:
+                    add(target)
+                else:
+                    dep_name = Path(dependency).name
+                    candidate = file.parent / dep_name
+                    if not candidate.is_file():
+                        candidate = prefix / "lib" / dep_name
+                    if candidate.is_file():
+                        add(candidate)
+                    else:
+                        relocated.append(f"{file}: {dependency}")
     if relocated:
         raise PackagingError(f"{FRESH_BUILD}\n  " + "\n  ".join(relocated))
     return libraries
@@ -147,6 +253,29 @@ def minimum_system_version(file):
         if fields[:1] == ["minos"]:
             return fields[1]
     raise PackagingError(f"No minimum macOS version recorded in {file}")
+
+
+def strong_dependencies(file):
+    """The libraries a Mach-O file loads unconditionally; `otool -L` marks the weak ones."""
+    return [line.strip().split(" (compatibility")[0] for line in output(["otool", "-L", file]).splitlines()[1:]
+            if line.strip() and not line.rstrip().endswith(", weak)")]
+
+
+def unavailable_system_libraries(compiled, libraries, prefix):
+    """`<file>: <library>` for every system library outside SYSTEM_LIBRARIES that the bundle loads unconditionally.
+
+    `compiled` are the app's and extension's own executables, which may also load what
+    LINKED_AT_TARGET names; `libraries` are the Homebrew files to bundle. Homebrew and
+    `@rpath` dependencies are the bundle's own and are not system libraries.
+    """
+    found = []
+    for file, exempt in [*((file, LINKED_AT_TARGET) for file in compiled), *((file, ()) for file in libraries)]:
+        for dependency in strong_dependencies(file):
+            if not dependency.startswith("/") or dependency.startswith(str(prefix)):
+                continue
+            if dependency not in SYSTEM_LIBRARIES and not dependency.startswith(exempt):
+                found.append(f"{Path(file).name}: {dependency}")
+    return found
 
 
 def version_key(version):
@@ -261,6 +390,12 @@ def relocate(file, prefix, rpath):
 
 
 def package(args):
+    signing = signing_for(args.sign_identity)
+    credentials = None
+    if args.notarize:
+        if not signing.developer_id:
+            raise PackagingError(f"Notarization needs a Developer ID Application identity, not {args.sign_identity!r} (docs/build.md#release-signing)")
+        credentials = notary.Credentials(args.notarize, args.notary_keychain)
     app = app_bundle(args.configuration)
     binary = app / "Contents/MacOS/WallpaperMachine"
     extensions = list((app / "Contents/Extensions").glob("*.appex"))
@@ -282,6 +417,11 @@ def package(args):
     third_party = third_party_notices(app, args.require_notices)
     info = app / "Contents/Info.plist"
     target = output(["/usr/libexec/PlistBuddy", "-c", "Print :LSMinimumSystemVersion", info]).strip()
+    unavailable = unavailable_system_libraries([binary, *extension_binaries], libraries.values(), prefix)
+    if unavailable:
+        raise PackagingError(f"The bundle loads system libraries macOS {target} may not have, so it would stop at launch "
+                             "there; rebuild without them, or list one in SYSTEM_LIBRARIES once it is known to ship with "
+                             "that release:\n  " + "\n  ".join(unavailable))
     floor, newer = raised_minimum(target, {name: minimum_system_version(source) for name, source in libraries.items()})
     if newer:
         detail = ", ".join(f"{name} ({version})" for name, version in sorted(newer.items()))
@@ -311,11 +451,16 @@ def package(args):
     write_licenses(resources, licenses, third_party)
     if floor != target:
         run(["/usr/libexec/PlistBuddy", "-c", f"Set :LSMinimumSystemVersion {floor}", info])
-    for file in frameworks.glob("*.dylib"):
-        sign(file, args.sign_identity)
+    # Inside out: a signature seals the nested code's signatures as they are.
+    for file in sorted(frameworks.glob("*.dylib")):
+        sign(file, signing)
+    for framework in sorted(frameworks.glob("*.framework")):
+        sign(framework, signing)
+    # Exactly the repository's entitlements: Xcode adds com.apple.security.get-task-allow
+    # to the extension even in a Release build, and Apple will not notarize it.
     for extension in extensions:
-        sign(extension, args.sign_identity, "--preserve-metadata=entitlements")
-    sign(app, args.sign_identity, "--options", "0")
+        sign(extension, signing, "--entitlements", bundle_contract.EXTENSION_ENTITLEMENTS)
+    sign(app, signing, "--entitlements", bundle_contract.HOST_ENTITLEMENTS)
     run(["codesign", "--verify", "--deep", "--strict", app])
     # A valid signature says nothing about what it signs: re-signing can drop an entitlement
     # or a key silently, and the lock screen then fails on the user's Mac, not here.
@@ -327,13 +472,26 @@ def package(args):
                 raise PackagingError(f"Unbundled dependency: {file}: {dependency}")
             if dependency.startswith("@rpath/") and not (frameworks / Path(dependency).name).exists() and "libswift" not in dependency:
                 raise PackagingError(f"Missing bundled dependency: {dependency}")
+    if credentials:
+        # Stapled before the image is made, so the copy a user drags out opens offline too.
+        notary.notarize(app, credentials)
+        print(f"{MARK.ok} Notarized and stapled: {app.name}")
     version = output(["/usr/libexec/PlistBuddy", "-c", "Print :CFBundleShortVersionString", info]).strip()
     image = dmg.build(app, app.parent / dmg.image_name(version), dmg.volume_name(version), icon=resources / "AppIcon.icns")
+    if signing.developer_id:
+        run(["codesign", "--force", "--sign", signing.identity, "--timestamp", image])
+    if credentials:
+        notary.notarize(image, credentials)
+        print(f"{MARK.ok} Notarized and stapled: {image.name}")
     # Prove the image, not the build tree: users and the in-app updater install
     # exactly this file, and a bundle that does not survive the round trip is not one.
-    report(dmg.verify(image, version), reported)
+    metadata = {}
+    report(dmg.verify(image, version, contract=image_contract(credentials is not None), metadata=metadata), reported)
+    digest = sha256(image)
+    metadata.update(image=image.name, size=image.stat().st_size, sha256=digest)
+    image.with_name(image.name + ".metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     checksum = image.with_name(image.name + ".sha256")
-    checksum.write_text(f"{sha256(image)}  {image.name}\n")
+    checksum.write_text(f"{digest}  {image.name}\n")
     if args.install:
         destination = Path.home() / "Applications/WallpaperMachine.app"
         destination.parent.mkdir(exist_ok=True)
@@ -342,8 +500,19 @@ def package(args):
         shutil.copytree(app, destination)
         print(f"{MARK.ok} Installed {destination}")
     print(f"{MARK.ok} Verified bundle: {app}")
-    print(f"{MARK.ok} Verified disk image (not cleared for distribution, see LICENSING.md): {image}")
+    print(f"{MARK.ok} Verified disk image: {image}")
     print(f"{MARK.ok} Checksum: {checksum}")
+
+
+def image_contract(notarized):
+    """What the app inside the mounted image must meet: the bundle contract, and its ticket when notarized."""
+    if not notarized:
+        return bundle_contract.verify_bundle
+
+    def contract(app):
+        notary.check_stapled(app)
+        return bundle_contract.verify_bundle(app)
+    return contract
 
 
 def sha256(file):
@@ -361,11 +530,13 @@ def main():
     parser.add_argument("--check", action="store_true", help="Run the license preflight against the built bundle and change nothing.")
     parser.add_argument("--require-deployment-target", action="store_true", help="Fail instead of raising the app's minimum macOS when a bundled library needs a newer one.")
     parser.add_argument("--require-notices", action="store_true", help="Fail instead of warning when a component's license text cannot be found for THIRD-PARTY-NOTICES.txt.")
-    parser.add_argument("--sign-identity", default="-", help="Code-signing identity for the dylibs, extensions and app; `-` (the default) signs ad hoc. Release builds pass the project certificate (docs/build.md).")
+    parser.add_argument("--sign-identity", default="-", help="Code-signing identity for the dylibs, frameworks, extensions and app; `-` (the default) signs ad hoc. Release builds pass the Developer ID (docs/build.md#release-signing).")
+    parser.add_argument("--notarize", metavar="PROFILE", help="Notarize and staple the app and the disk image with this `xcrun notarytool store-credentials` profile; needs a Developer ID --sign-identity.")
+    parser.add_argument("--notary-keychain", type=Path, help="Keychain holding the --notarize profile, when it is not the login keychain.")
     args = parser.parse_args()
     try:
         package(args)
-    except (PackagingError, dmg.DiskImageError, bundle_contract.BundleContractError) as error:
+    except (PackagingError, dmg.DiskImageError, bundle_contract.BundleContractError, notary.NotarizationError) as error:
         print(f"{MARK.missing} {error}", file=sys.stderr)
         return 1
     return 0

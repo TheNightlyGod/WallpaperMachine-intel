@@ -314,10 +314,12 @@ class AppWalkTests(unittest.TestCase):
         self.assertEqual([(c.name, c.license, c.source) for c in components], [("lz4", "BSD-2-Clause", "map")])
 
     def test_an_override_beats_the_homebrew_string(self):
-        self.keg("freetype", "2.14.3", "libfreetype.6.dylib")
-        tools = FakeTools(otool={"Main": [self.opt("freetype", "libfreetype.6.dylib")], "Ext": [], "libfreetype.6.dylib": []})
-        components = check_licenses.dylib_components(self.walk(tools), self.prefix, self.app,
-                                                     FakeTools(brew_licenses={"freetype": "FTL"}))
+        self.keg("sample-font", "2.14.3", "libsamplefont.6.dylib")
+        tools = FakeTools(otool={"Main": [self.opt("sample-font", "libsamplefont.6.dylib")], "Ext": [], "libsamplefont.6.dylib": []})
+        override = {"sample-font": ("FTL OR GPL-2.0-or-later", "Homebrew reports only one of the two licenses")}
+        with mock.patch.dict(check_licenses.OVERRIDES, override):
+            components = check_licenses.dylib_components(self.walk(tools), self.prefix, self.app,
+                                                         FakeTools(brew_licenses={"sample-font": "FTL"}))
         self.assertEqual((components[0].license, components[0].source), ("FTL OR GPL-2.0-or-later", "override"))
         self.assertEqual(check_licenses.assess(components[0])[0], "ok")
 
@@ -424,6 +426,17 @@ class InventoryTests(unittest.TestCase):
         # The link-lib list and pkg_check_modules name the same component once.
         self.assertEqual(sum(1 for name in components if name == "lz4"), 1)
         self.assertEqual(components["lz4"].reached_from, ("CMake src/CMakeLists.txt", "build.rs dylib"))
+
+    def test_the_vendored_text_archives_carry_their_license(self):
+        self.build_rs.write_text(
+            'const STATIC_ARCHIVES: [&str; 2] = ["harfbuzz", "msdfgen"];\n'
+            'fn main() {\n    let kinds = [("static", &STATIC_ARCHIVES)];\n'
+            '    for (kind, names) in kinds { for name in names { println!("cargo:rustc-link-lib={kind}={name}"); } }\n}\n')
+        components = self.components()
+        self.assertEqual(components["harfbuzz"].license, "MIT-Modern-Variant")
+        self.assertEqual(components["msdfgen"].license, "MIT")
+        for name in ("harfbuzz", "msdfgen"):
+            self.assertEqual(check_licenses.assess(components[name])[0], "ok", name)
 
     def test_entries_missing_from_the_table_are_unknown(self):
         components = self.components()

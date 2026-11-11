@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 /// Keeps the pixiv session between launches. Injected so tests never touch the keychain.
 protocol PixivSessionStoring: Sendable {
@@ -9,59 +8,46 @@ protocol PixivSessionStoring: Sendable {
     func remove()
 }
 
-/// The session as a generic password in the user's login keychain. Releases share one
-/// designated requirement, so an update reads what the version before it saved; a locally
-/// built, ad-hoc signed app is a different app to the keychain, and macOS asks once whether
-/// it may read the item.
+/// The session as a generic password in the user's login keychain (`KeychainGenericPassword`
+/// says when macOS asks before handing it over).
 struct KeychainPixivSessionStore: PixivSessionStoring {
     static let service = "app.wallpapermachine.pixiv"
     static let account = "session"
 
-    private var query: [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.service,
-            kSecAttrAccount as String: Self.account,
-        ]
+    private let item: KeychainGenericPassword
+
+    init(calls: any KeychainItemCalls = SystemKeychain()) {
+        item = KeychainGenericPassword(
+            service: Self.service, account: Self.account, label: "WallpaperMachine pixiv sign-in", calls: calls)
     }
 
     func load() -> String? {
-        var request = query
-        request[kSecReturnData as String] = true
-        request[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(request as CFDictionary, &item)
-        guard status == errSecSuccess else {
-            if status != errSecItemNotFound { AppLog.warn("pixiv sign-in could not be read from the keychain (\(status))") }
+        let data: Data?
+        do {
+            data = try item.read()
+        } catch {
+            AppLog.warn("pixiv sign-in could not be read from the keychain (\(error))")
             return nil
         }
-        guard let data = item as? Data, let session = String(data: data, encoding: .utf8),
-            PixivService.isSessionValue(session)
+        guard let data, let session = String(data: data, encoding: .utf8), PixivService.isSessionValue(session)
         else { return nil }
         return session
     }
 
     func save(_ session: String) throws {
-        let data = Data(session.utf8)
-        var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if status != errSecSuccess {
-            // Missing, or saved by a build this one may not change: start over.
-            if status != errSecItemNotFound { SecItemDelete(query as CFDictionary) }
-            var item = query
-            item[kSecValueData as String] = data
-            item[kSecAttrLabel as String] = "WallpaperMachine pixiv sign-in"
-            status = SecItemAdd(item as CFDictionary, nil)
-        }
-        guard status == errSecSuccess else {
-            AppLog.warn("pixiv sign-in could not be saved in the keychain (\(status))")
+        do {
+            try item.write(Data(session.utf8))
+        } catch {
+            AppLog.warn("pixiv sign-in could not be saved in the keychain (\(error))")
             throw PixivFailure(code: .notSaved)
         }
     }
 
     func remove() {
-        let status = SecItemDelete(query as CFDictionary)
-        if status != errSecSuccess, status != errSecItemNotFound {
-            AppLog.warn("pixiv sign-in could not be removed from the keychain (\(status))")
+        do {
+            try item.delete()
+        } catch {
+            AppLog.warn("pixiv sign-in could not be removed from the keychain (\(error))")
         }
     }
 }

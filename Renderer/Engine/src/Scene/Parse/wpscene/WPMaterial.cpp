@@ -248,6 +248,7 @@ bool WPMaterial::FromJson(const nlohmann::json& json) {
     word("cullmode", cullmode);
     word("depthtest", depthtest);
     word("depthwrite", depthwrite);
+    word("alphawriting", alphawriting);
     ReadPassShape(first, *this);
     return true;
 }

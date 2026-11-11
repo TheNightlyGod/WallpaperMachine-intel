@@ -1,11 +1,11 @@
-# Keep the READMEs' Supporter list in step with the website's sponsor wall.
+# Keep the READMEs' Supporter list in step with the website's thank-you wall.
 #
 # Every hour, and on demand from Actions -> Supporters -> Run workflow, this reads the
 # wall (https://www.wallpapermachine.app/api/sponsors) with scripts/update_sponsors.py
-# and, when the list changed, commits README.md and README.zh-CN.md to main as
+# and, when the list changed, commits README.md and its translations to main as
 # `docs(readme): update the Supporter list`. A push made with GITHUB_TOKEN starts no
 # other workflow, so the commit never runs Version. A wall that can't be read fails
-# the run and leaves both as they were.
+# the run and leaves them as they were.
 name: Supporters
 
 on:
@@ -50,10 +50,10 @@ jobs:
             git fetch --quiet origin main
             git reset --quiet --hard origin/main
             python3 scripts/update_sponsors.py
-            if git diff --quiet -- README.md README.zh-CN.md; then
+            if git diff --quiet -- README.md README.zh-CN.md README.pt-BR.md README.ko.md; then
               exit 0
             fi
-            git commit --quiet -m "docs(readme): update the Supporter list" -- README.md README.zh-CN.md
+            git commit --quiet -m "docs(readme): update the Supporter list" -- README.md README.zh-CN.md README.pt-BR.md README.ko.md
             if git push origin HEAD:main; then
               exit 0
             fi

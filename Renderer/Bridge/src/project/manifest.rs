@@ -360,7 +360,11 @@ fn parse_property(id: &str, entry: &Map<String, Value>) -> ProjectProperty {
         }
     } else {
         match (&kind, entry.get("value")) {
-            (PropertyKind::File | PropertyKind::Directory | PropertyKind::Texture, value) => {
+            // A file or folder is the user's to pick. A path the project names is the
+            // author's (or a Workshop preset's), and staging it would hand the page a
+            // folder of the user's own nobody chose: these properties start empty.
+            (PropertyKind::File | PropertyKind::Directory, _) => PropertyValue::String(String::new()),
+            (PropertyKind::Texture, value) => {
                 PropertyValue::String(
                     value
                         .map(PropertyValue::json_scalar_to_string)

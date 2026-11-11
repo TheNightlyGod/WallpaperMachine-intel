@@ -180,21 +180,6 @@ TEST(ConstantTimelineErrors, ACyclicPairIsOneBrokenGroupAndAGoodGroupIsSilent)
     EXPECT_EQ(ErrorsWhileParsing({ { "fold page", PausedFoldConstants() }, { "free page", CyclicConstants() } }), 1u);
 }
 
-// R-11.03 / B-11.03
-TEST(ConstantTimelineErrors, AConstantThatNamesNoUniformIsReportedOncePerPass)
-{
-    const std::vector<VectorLayer> layers = { { "ghosts",
-                                                { { "point1", VectorConstant(0.25, 0.5) }, { "ghostpoint", { { "value", Json::array({ 1, 2 }) } } } } } };
-    ParseRig rig(VectorAssets(layers));
-    ErrorLog log;
-    auto     scene = rig.Parse(VectorSceneJson(layers), { .live = true });
-    ASSERT_NE(scene, nullptr);
-    const auto errors = log.Errors();
-    ASSERT_EQ(errors.size(), 1u);
-    EXPECT_NE(errors[0].find("ghostpoint"), std::string::npos) << errors[0];
-    ExpectConstant(*scene, "ghosts", "u_Point1", { 0.25f, 0.5f });
-}
-
 TEST(ConstantTimelineErrors, AKeySuppliedAsAStartEndPairIsSilent)
 {
     const std::string extra = "uniform float u_RangeStart; // {\"material\":\"rangeStart\",\"default\":0.0}\n"

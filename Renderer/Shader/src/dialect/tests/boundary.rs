@@ -17,16 +17,16 @@ fn frag_with(body: &str) -> String {
 }
 
 #[test]
-fn the_derivative_sharpening_of_the_colour_alpha_is_replaced_by_the_source_alpha() {
+fn derivative_sharpening_of_the_colour_alpha_is_preserved() {
     let t = frag(&frag_with(&format!("vec4 col = g_C; gl_FragColor = col;\n{SHARPEN}")));
-    assert!(t.contains("gl_FragColor.a = clamp(col.a, 0.0, 1.0);"), "{t}");
-    assert!(!t.contains("fwidth"), "{t}");
-    // without the saturate wrapper the replacement has no clamp
+    assert!(t.contains("fwidth(gl_FragColor.a)") && t.contains("clamp("), "{t}");
+    assert!(!t.contains("clamp(col.a, 0.0, 1.0)"), "{t}");
+    // The same expression without saturate keeps its range, and a renamed source
+    // variable does not cause the formula to be replaced by that variable.
     let t = frag(&frag_with("vec4 col = g_C; gl_FragColor = col;\ngl_FragColor.a = (gl_FragColor.a - 0.5) / max(fwidth(gl_FragColor.a), 0.0001) + 0.5;"));
-    assert!(t.contains("gl_FragColor.a = col.a;"), "{t}");
-    // a reserved word as the source variable
+    assert!(t.contains("fwidth(gl_FragColor.a)") && !t.contains("clamp("), "{t}");
     let t = frag(&frag_with(&format!("vec4 sample = g_C; gl_FragColor = sample;\n{SHARPEN}")));
-    assert!(t.contains("gl_FragColor.a = clamp(sample_wm.a, 0.0, 1.0);"), "{t}");
+    assert!(t.contains("gl_FragColor = sample_wm;") && t.contains("fwidth(gl_FragColor.a)"), "{t}");
     legacy_frag(&frag_with(&format!("vec4 col = g_C; gl_FragColor = col;\n{SHARPEN}")));
 }
 
@@ -47,7 +47,7 @@ fn the_idiom_is_left_alone_when_no_visible_source_exists() {
 }
 
 #[test]
-fn only_the_colour_output_alpha_is_neutralised() {
+fn derivative_alpha_expressions_are_preserved_in_helpers_and_locals() {
     let helper = "void sharpen(inout float alpha) { alpha = saturate((alpha - 0.5) / max(fwidth(alpha), 0.0001) + 0.5); }";
     let t = frag(&format!("{helper}\nuniform vec4 g_C;\nvoid main() {{ vec4 col = g_C; sharpen(col.a); gl_FragColor = col; }}"));
     assert!(t.contains("fwidth(alpha)"), "{t}");
@@ -57,35 +57,26 @@ fn only_the_colour_output_alpha_is_neutralised() {
 }
 
 #[test]
-fn the_sharpening_idiom_is_fragment_only() {
+fn a_vertex_expression_is_preserved_by_the_dialect() {
     let t = vert("attribute vec4 a_C;\nvoid main() { vec4 col = a_C; gl_Position = col; gl_Position.a = (gl_Position.a - 0.5) / max(fwidth(gl_Position.a), 0.0001) + 0.5; }");
     assert!(t.contains("fwidth"), "{t}");
 }
 
-// ----- matrix inverse (R87) -----
+// ----- matrix inverse -----
 
 #[test]
-fn inverse_of_every_square_size_compiles_to_metal() {
-    let c = legacy_frag("uniform vec4 g_V; uniform mat3 g_B; uniform mat4 g_C;\nvoid main() { mat2 a = inverse(mat2(g_V.xy, g_V.zw)); mat3 b = inverse(g_B); mat4 c = inverse(g_C); gl_FragColor = vec4(a[0], b[1].x, c[2].y); }");
-    assert_eq!(c.local_type("b"), "mat3x3");
-    assert!(!c.msl.contains("metal::inverse") && !c.msl.contains("Inverse"), "the Metal writer has no inverse: {}", c.msl);
-}
-
-#[test]
-fn only_the_sizes_a_stage_calls_are_generated() {
-    let t = frag("uniform mat3 g_B;\nvoid main() { mat3 b = inverse(g_B); gl_FragColor = vec4(b[0], 1.0); }");
-    assert!(t.contains("mat3 _wm_inverse(mat3 m)") && !t.contains("mat2 _wm_inverse") && !t.contains("mat4 _wm_inverse"), "{t}");
-    assert!(!frag("void main() { gl_FragColor = vec4(1.0); }").contains("inverse"));
-}
-
-#[test]
-fn a_shader_defined_mat3_inverse_is_called_and_the_other_sizes_are_still_supplied() {
-    let src = "uniform mat3 g_B; uniform mat4 g_C;
+fn a_builtin_matrix_inverse_is_refused_and_a_declared_one_is_called() {
+    // Wallpaper Engine's HLSL has no `inverse` (probe T13 draws its fallback shader); its
+    // perspective include declares a `mat3 inverse(mat3)`, which is an ordinary function.
+    let Err(d) = convert_stage(StageKind::Fragment, "uniform mat3 g_B;\nvoid main() { gl_FragColor = vec4(inverse(g_B)[0], 1.0); }") else {
+        panic!("the built-in is refused")
+    };
+    assert!(d[0].message.contains("unsupported construct `inverse`"), "{d:?}");
+    let src = "uniform mat3 g_B;
 mat3 inverse(mat3 m) { return transpose(m); }
-void main() { mat3 b = inverse(g_B); mat4 c = inverse(g_C); gl_FragColor = vec4(b[0], c[1].x); }";
+void main() { mat3 b = inverse(g_B); gl_FragColor = vec4(b[0], 1.0); }";
     let t = frag(src);
     assert!(t.contains("mat3 b = inverse(g_B);"), "the author's function is called: {t}");
-    assert!(t.contains("mat4 c = _wm_inverse(g_C);"), "{t}");
     legacy_frag(src);
 }
 
@@ -110,7 +101,7 @@ fn only_the_uint_spelling_restates_a_builtin_and_other_gl_names_keep_their_handl
     let t = vert("in uint gl_VertexID;\nin int gl_ViewportIndex;\nattribute vec3 my_gl_thing;\nvoid main() { gl_Position = vec4(my_gl_thing, 1.0); }");
     assert!(!t.contains("gl_VertexID;"), "{t}");
     assert!(t.contains("in int gl_ViewportIndex;") && t.contains("attribute vec3 my_gl_thing;"), "{t}");
-    let t = vert("in int gl_VertexID;\nvoid main() { gl_Position = vec4(1.0); }");
+    let t = vert("in int gl_VertexID;\nvoid main() { gl_Position = CAST4(1.0); }");
     assert!(t.contains("in int gl_VertexID;"), "the same name with another type is a user variable: {t}");
 }
 
@@ -118,7 +109,7 @@ fn only_the_uint_spelling_restates_a_builtin_and_other_gl_names_keep_their_handl
 
 #[test]
 fn the_output_starts_with_the_version_and_precision_lines() {
-    let t = frag("void main() { gl_FragColor = vec4(1.0); }");
+    let t = frag("void main() { gl_FragColor = CAST4(1.0); }");
     let mut lines = t.lines();
     assert_eq!(lines.next(), Some("#version 450"));
     assert_eq!(lines.next(), Some("precision highp float;"));
@@ -146,10 +137,11 @@ void main() {
   outColor = col;
 }";
     let direct = compile_glsl(StageKind::Fragment, src).unwrap();
-    let converted = convert_stage(StageKind::Fragment, src).unwrap();
+    let options = crate::dialect::ConvertOptions { glsl_builtins: true, ..Default::default() };
+    let converted = crate::dialect::convert_stage_with(StageKind::Fragment, src, options).unwrap();
     let through = compile_glsl(StageKind::Fragment, &converted.text).unwrap();
     assert_eq!(direct.msl, through.msl, "the meaning is unchanged");
-    let again = convert_stage(StageKind::Fragment, &converted.text).unwrap();
+    let again = crate::dialect::convert_stage_with(StageKind::Fragment, &converted.text, options).unwrap();
     assert_eq!(again.text, converted.text, "converting the output again changes nothing");
 }
 
@@ -179,7 +171,7 @@ void main() { float3 c = CAST3(0.5); float2 p = v_T * 2; c = lerp(c, saturate(c)
 
 #[test]
 fn success_carries_one_informational_codegen_entry() {
-    let src = "void main() { gl_FragColor = vec4(1.0); }";
+    let src = "void main() { gl_FragColor = CAST4(1.0); }";
     let c = convert_stage(StageKind::Fragment, src).unwrap();
     assert_eq!(c.diagnostics.len(), 1);
     let d = &c.diagnostics[0];
@@ -191,12 +183,12 @@ fn success_carries_one_informational_codegen_entry() {
 
 #[test]
 fn a_rejection_carries_the_stage_the_pass_and_a_span_inside_the_source() {
-    let src = "uniform sampler2D g_T; varying vec2 v;\nvoid main() { gl_FragColor = texSample2DCompare(g_T, v, 0.5); }";
+    let src = "uniform sampler2D g_T; varying vec2 v;\nvoid main() { gl_FragColor = textureCompare(g_T, v, 0.5); }";
     let Err(d) = convert_stage(StageKind::Fragment, src) else { panic!("should be refused") };
     assert_eq!(d[0].stage, Some(StageKind::Fragment));
     assert_eq!(d[0].pass, Some(Pass::Codegen));
     let s = d[0].span.unwrap();
-    assert!(s.is_within(src) && src[s.start()..s.end()].contains("texSample2DCompare"));
+    assert!(s.is_within(src) && src[s.start()..s.end()].contains("textureCompare"));
     let Err(d) = convert_stage(StageKind::Fragment, "void main() { if (a) { b(); }") else { panic!() };
     assert!(d[0].span.is_some());
 }
@@ -212,11 +204,11 @@ fn converted_output_is_pinned_per_pipeline_revision() {
     use crate::sha256::{Sha256, to_hex};
     const INPUTS: [&str; 6] = [
         "varying vec2 v_T; uniform sampler2D g_Texture0; uniform float g_F;\nvoid main() { vec3 c = texSample2D(g_Texture0, v_T); gl_FragColor = vec4(c * lerp(1.0, 2.0, saturate(g_F)), 1.0); }",
-        "uniform float g_F;\nvoid main() { int k = floor(g_F * 3.0); float r = g_F % 2; bool b = g_F; gl_FragColor = vec4(float(k) + r + b); }",
+        "uniform float g_F;\nvoid main() { int k = floor(g_F * 3.0); float r = g_F % 2; bool b = g_F; gl_FragColor = CAST4(float(k) + r + b); }",
         "attribute vec3 a_Position; uniform mat4 g_M; varying vec2 v_T; attribute vec2 a_T;\nvoid main() { a_T *= 2.0; v_T = a_T; gl_Position = mul(vec4(a_Position, 1.0), g_M); }",
-        "uniform float g_X;\nfloat pool(float v[4], float s) { return v[0] * s; }\nuniform float g_L[4];\nvoid main() { gl_FragColor = vec4(pool(g_L, g_X) + smoothstep(0.9, 0.4, g_X)); }",
-        "uniform mat3 g_B; uniform vec4 g_C;\nvoid main() { clip(g_C.x); gl_FragColor = vec4(inverse(g_B)[0], 1.0); }",
-        "const float K = 2.0; uniform vec4 g_C; const float G = g_C.x * K;\nvoid main() { vec3 a = g_C; vec2 b = g_C.xyz + vec2(1.0); gl_FragColor = vec4(a, b.x * G); }",
+        "uniform float g_X;\nfloat pool(float v[4], float s) { return v[0] * s; }\nuniform float g_L[4];\nvoid main() { gl_FragColor = CAST4(pool(g_L, g_X) + smoothstep(0.9, 0.4, g_X)); }",
+        "uniform mat3 g_B; uniform vec4 g_C;\nvoid main() { clip(g_C.x); gl_FragColor = vec4(transpose(g_B)[0], 1.0); }",
+        "const float K = 2.0; uniform vec4 g_C; const float G = g_C.x * K;\nvoid main() { vec3 a = g_C; vec2 b = g_C.xyz + CAST2(1.0); gl_FragColor = vec4(a, b.x * G); }",
     ];
     let mut hash = Sha256::new();
     for (i, src) in INPUTS.iter().enumerate() {
@@ -229,6 +221,14 @@ fn converted_output_is_pinned_per_pipeline_revision() {
     const PINNED: &[(u32, &str)] = &[
         (1, "598de99a1dfb6a8fe0e1cf6098dc80652da65681d6a9c506da39ee3628871b9c"),
         (2, "598de99a1dfb6a8fe0e1cf6098dc80652da65681d6a9c506da39ee3628871b9c"),
+        (3, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (4, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (5, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (6, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (7, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (8, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (9, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
+        (10, "40f2dbbad70e204ef9588f929b360067f132b1964e51fc9e20bd0d0a0d587a3a"),
     ];
     let row = PINNED.iter().find(|(r, _)| *r == PIPELINE_REVISION);
     match row {
@@ -285,9 +285,9 @@ fn an_alias_of_a_non_sampler_and_a_function_like_macro_are_not_samplers() {
 fn macro_constants_take_the_type_of_their_replacement() {
     let c = ok("#define K 2.0\n#define W 2\n#define U 3u\n", "vec3 v = K; vec3 p = pow(K, u3); int r = ui % W; uint s = uu % U; o = vec4(v + p, float(r) + float(s));");
     assert_eq!(c.local_type("v"), "vec3<f32>");
-    let t = text("#define W 2\n", "int r = ui % W; o = vec4(float(r));");
+    let t = text("#define W 2\n", "int r = ui % W; o = CAST4(float(r));");
     assert!(t.contains("ui % 2"), "an integer macro keeps the integer remainder: {t}");
-    let t = text("#define K 2.5\n", "float r = uf % K; o = vec4(r);");
+    let t = text("#define K 2.5\n", "float r = uf % K; o = CAST4(r);");
     assert!(t.contains("uf % 2.5"), "{t}");
 }
 
@@ -301,8 +301,8 @@ fn a_vector_macro_keeps_its_width_in_a_builtin_and_follows_the_usual_rules_elsew
 
 #[test]
 fn an_unresolved_macro_name_is_not_scalar_in_a_remainder_or_a_condition() {
-    let t = text("", "float r = UNRESOLVED % 2.0; if (UNRESOLVED) { r = 1.0; } o = vec4(r);");
-    assert!(t.contains("UNRESOLVED % 2.0") && t.contains("if (UNRESOLVED)"), "{t}");
+    let t = text("", "float r = UNRESOLVED % 2.0; if (UNRESOLVED) { r = 1.0; } o = CAST4(r);");
+    assert!(t.contains("UNRESOLVED % 2.0") && t.contains("if (bool(UNRESOLVED))"), "{t}");
 }
 
 // ----- non-square matrices (R10, R103) -----
@@ -314,7 +314,7 @@ fn skinning_with_mat4x3_bones_compiles() {
         "vec3 p = i3; vec4 w = u4; uvec4 idx = uuv4;
 mat4x3 sum = ub[idx.x] * w.x + ub[idx.y] * w.y + ub[idx.z] * w.z + ub[idx.w] * w.w;
 vec3 a = mul(vec4(p, 1.0), sum);
-vec4 b4 = vec4(0.0); b4.xyz = mul(vec4(p, 1.0), sum);
+vec4 b4 = CAST4(0.0); b4.xyz = mul(vec4(p, 1.0), sum);
 vec3 c = mul(vec4(p, 1.0), ub[idx.x] * w.x + ub[idx.y] * w.y);
 mat3 n3 = CAST3X3(ub[idx.x]);
 vec3 d = mul(p, CAST3X3(ub[idx.x]) * w.x + CAST3X3(ub[idx.y]) * w.y);
@@ -341,7 +341,7 @@ fn the_stand_in_lighting_function_serves_calls_of_eight_and_nine_arguments() {
 
 #[test]
 fn the_stand_in_is_emitted_only_when_called_and_never_beside_a_definition() {
-    assert!(!text("", "o = vec4(1.0);").contains("PerformLighting_V1"));
+    assert!(!text("", "o = CAST4(1.0);").contains("PerformLighting_V1"));
     let t = text("vec3 PerformLighting_V1(vec3 a) { return a; }", "vec3 r = PerformLighting_V1(u3); o = vec4(r, 1.0);");
     assert_eq!(count(&t, "vec3 PerformLighting_V1("), 1, "{t}");
     // with a user function of another arity the call is left to naga
@@ -361,7 +361,7 @@ void main() {
   #undef u_Bins
   #define u_Bins g_AudioSpectrum8Right
   float f = u_Bins[2];
-  gl_FragColor = vec4(e + f);
+  gl_FragColor = CAST4(e + f);
 }";
     let t = legacy_text(StageKind::Fragment, src);
     assert!(t.contains("g_AudioSpectrum32Right[3]") && t.contains("g_AudioSpectrum8Right[2]"), "{t}");
@@ -391,7 +391,7 @@ fn smoothstep_keeps_the_backends_own_function_because_it_already_has_the_direct3
     // A probe on the Metal backend (tests/probes/smoothstep_reversed.swift, run by
     // `WM_SHADER_GPU_PROBES=1 cargo test --test gpu_probe`) shows `smoothstep(0.9, 0.4, x)` already
     // returns the saturated-ratio Hermite, so no call is rewritten (R106); the shape rules of R28 still apply.
-    let t = text("", "float a = smoothstep(0.9, 0.4, uf); float b = smoothstep(0.1, 0.9, uf); vec3 c = smoothstep(0.9, 0.4, u3); vec3 d = smoothstep(2, 5, u3); o = vec4(a + b + c.x + d.x);");
+    let t = text("", "float a = smoothstep(0.9, 0.4, uf); float b = smoothstep(0.1, 0.9, uf); vec3 c = smoothstep(0.9, 0.4, u3); vec3 d = smoothstep(2, 5, u3); o = CAST4(a + b + c.x + d.x);");
     assert!(t.contains("smoothstep(0.9, 0.4, uf)") && t.contains("smoothstep(0.1, 0.9, uf)"), "{t}");
     assert!(t.contains("smoothstep(0.9, 0.4, u3)") && t.contains("smoothstep(2.0, 5.0, u3)"), "{t}");
     assert!(!t.contains("_wm_smoothstep"), "{t}");

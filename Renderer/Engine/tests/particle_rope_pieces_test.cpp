@@ -399,20 +399,18 @@ TEST(RopePieces, ATrailRunsFromTheCurrentPositionBackThroughTheRecordedPoints) {
 }
 
 // RG-10
-TEST(RopePieces, AFullHistoryGivesItsOldestPointUpToTheNewerOneByTheTrailFraction) {
-    const auto draw = [](uint32_t capacity, float fraction) {
+// WE's trail writer (0x1402308A0) draws the recorded points where they were recorded; the
+// period fraction only moves the texture coordinate.
+TEST(RopePieces, AFullHistoryKeepsItsOldestPointWhereItWasRecorded) {
+    for (const float fraction : { 0.0f, 0.5f, 1.0f, 7.0f }) {
+        SCOPED_TRACE(fraction);
         auto instance = InstanceOf({ LiveAt({ 0, 30, 0 }) });
-        Record(*instance, 0, capacity, { { 0, 0, 0 }, { 0, 10, 0 }, { 0, 20, 0 } });
+        Record(*instance, 0, 3, { { 0, 0, 0 }, { 0, 10, 0 }, { 0, 20, 0 } });
         auto mesh = NewRopeMesh(true, RopeKind::Trail);
         ParticleRenderScale scale;
         scale.trail_fraction = fraction;
         auto instances       = Single(std::move(instance));
         Generate(instances, *mesh, scale);
-        return mesh;
-    };
-
-    {
-        auto mesh = draw(3, 0.5f);
         ASSERT_EQ(Pieces(*mesh), 3u);
         const Quad first(*mesh, 0), last(*mesh, 2);
         EXPECT_TRUE(SamePoint(first.start(), { 0, 30, 0 }));
@@ -420,27 +418,8 @@ TEST(RopePieces, AFullHistoryGivesItsOldestPointUpToTheNewerOneByTheTrailFractio
         EXPECT_EQ(first.length(), 3.0f);
         EXPECT_EQ(first.along(), 0.0f);
         EXPECT_TRUE(SamePoint(last.start(), { 0, 10, 0 }));
-        EXPECT_TRUE(SamePoint(last.end(), { 0, 5, 0 })) << "halfway from 0 to 10";
-        EXPECT_EQ(last.length(), 3.0f);
+        EXPECT_TRUE(SamePoint(last.end(), { 0, 0, 0 }));
         EXPECT_EQ(last.along(), 2.0f);
-    }
-    {
-        auto mesh = draw(3, 0.0f);
-        ASSERT_EQ(Pieces(*mesh), 3u);
-        EXPECT_TRUE(SamePoint(Quad(*mesh, 2).end(), { 0, 0, 0 }));
-    }
-    {
-        auto mesh = draw(3, 1.0f);
-        EXPECT_EQ(Pieces(*mesh), 2u) << "the oldest point has reached the next one";
-    }
-    {
-        auto mesh = draw(3, 7.0f);
-        EXPECT_EQ(Pieces(*mesh), 2u) << "a fraction above one counts as one";
-    }
-    {
-        auto mesh = draw(8, 0.5f);
-        ASSERT_EQ(Pieces(*mesh), 3u);
-        EXPECT_TRUE(SamePoint(Quad(*mesh, 2).end(), { 0, 0, 0 })) << "a history with room left keeps its tail";
     }
 }
 
@@ -484,9 +463,11 @@ TEST(RopePieces, EachParticlesTrailIsItsOwnStrip) {
 }
 
 // RU-01
-TEST(RopeTextureRepeat, UvScaleMultipliesTheRepeatsAlongTheRope) {
+// WE stores 1 / uvscale and writes the point count times it (0x1402308A0; probe rope-uv-v3,
+// where uvscale 2 and 0.5 ropes end at the coordinates this length gives).
+TEST(RopeTextureRepeat, TheRecordedLengthIsThePointCountOverTheUvScale) {
     for (const auto& [uv_scale, expected_length, expected_span] :
-         { std::tuple { 1.0f, 3.0f, 1.0 }, std::tuple { 2.0f, 2.0f, 2.0 } }) {
+         { std::tuple { 1.0f, 3.0f, 1.0 }, std::tuple { 2.0f, 1.5f, 4.0 }, std::tuple { 0.5f, 6.0f, 0.4 } }) {
         SCOPED_TRACE(testing::Message() << "uv_scale " << uv_scale);
         auto mesh      = NewRopeMesh(false);
         auto instances = ThreeInALine();
@@ -511,56 +492,74 @@ TEST(RopeTextureRepeat, SubdividingDoesNotAddRepeats) {
         Generate(instances, *mesh, scale);
         ASSERT_EQ(Pieces(*mesh), 2u * subdivision);
         spans[slot++] = RepeatSpan(*mesh);
-        if (subdivision == 3) EXPECT_EQ(Quad(*mesh, 0).length(), 4.0f);
+        if (subdivision == 3) EXPECT_EQ(Quad(*mesh, 0).length(), 2.5f);
     }
-    EXPECT_NEAR(spans[0], 2.0, 1e-5);
+    EXPECT_NEAR(spans[0], 4.0, 1e-5);
     EXPECT_NEAR(spans[1], spans[0], 1e-5);
 }
 
 // RU-03
-TEST(RopeTextureRepeat, ScrollingMeasuresAgainstTheMeshCapacityNotTheLiveCount) {
-    for (const auto& [uv_scale, expected] : { std::pair { 1.0f, 17.0f }, std::pair { 2.0f, 9.0f } }) {
-        SCOPED_TRACE(testing::Message() << "uv_scale " << uv_scale);
+// A scrolling rope is measured against rate x lifetime less one, the rate bounded by the
+// frame-rate cap while it holds fewer particles, and moves on by one for each that died
+// (0x1402308A0; probe rope-uv-v4).
+TEST(RopeTextureRepeat, ScrollingMeasuresAgainstRateTimesLifetimeAndMovesOnWithEachDeath) {
+    for (const auto& [fps, uv_scale, expected] :
+         { std::tuple { 0u, 1.0f, 39.0f }, std::tuple { 0u, 2.0f, 19.5f }, std::tuple { 3u, 1.0f, 29.0f } }) {
+        SCOPED_TRACE(testing::Message() << "fps " << fps << " uv_scale " << uv_scale);
         auto mesh      = NewRopeMesh(false);
         auto instances = ThreeInALine();
+        instances.front()->CountDeath();
+        instances.front()->CountDeath();
         ParticleRenderScale scale;
-        scale.uv_scrolling = true;
-        scale.uv_scale     = uv_scale;
+        scale.uv_scrolling  = true;
+        scale.uv_scale      = uv_scale;
+        scale.rope_rate     = 4.0f;
+        scale.rope_lifetime = 10.0f;
+        scale.target_fps    = fps;
         Generate(instances, *mesh, scale);
         EXPECT_EQ(Quad(*mesh, 0).length(), expected);
-        EXPECT_EQ(Quad(*mesh, 0).length(), EncodeRopeTrailLength(kQuadCapacity + 1, uv_scale));
-        EXPECT_NE(Quad(*mesh, 0).length(), 3.0f);
+        EXPECT_EQ(Quad(*mesh, 0).along(), 2.0f) << "two particles have died";
+        EXPECT_EQ(Quad(*mesh, 1).along(), 3.0f);
     }
 }
 
 // RU-04
-TEST(RopeTextureRepeat, SmoothingEasesInteriorPositionsAndIsDroppedWhileScrolling) {
+TEST(RopeTextureRepeat, SmoothingDrawsAsWithoutUntilTheRopeIsSteady) {
     const Point row[4] = { { 0, 0, 0 }, { 10, 0, 0 }, { 20, 0, 0 }, { 30, 0, 0 } };
-    const auto  four   = [&] {
-        return Single(InstanceOf({ LiveAt(row[0]), LiveAt(row[1]), LiveAt(row[2]), LiveAt(row[3]) }));
-    };
-    {
-        auto mesh      = NewRopeMesh(false);
-        auto instances = four();
-        ParticleRenderScale scale;
-        scale.uv_smoothing = true;
-        Generate(instances, *mesh, scale);
-        ASSERT_EQ(Pieces(*mesh), 3u);
-        EXPECT_EQ(Quad(*mesh, 0).along(), 0.0f);
-        EXPECT_GT(Quad(*mesh, 1).along(), 0.0f);
-        EXPECT_LT(Quad(*mesh, 1).along(), 1.0f);
-        EXPECT_NEAR(Quad(*mesh, 1).along(), 0.7778f, 1e-4f);
-        EXPECT_NEAR(Quad(*mesh, 2).along(), 2.2222f, 1e-4f);
+    auto instances = Single(InstanceOf({ LiveAt(row[0]), LiveAt(row[1]), LiveAt(row[2]), LiveAt(row[3]) }));
+    auto mesh      = NewRopeMesh(false);
+    ParticleRenderScale scale;
+    scale.uv_smoothing = true;
+    Generate(instances, *mesh, scale);
+    ASSERT_EQ(Pieces(*mesh), 3u);
+    for (std::size_t i = 0; i < 3; ++i) EXPECT_EQ(Quad(*mesh, i).along(), static_cast<float>(i));
+    EXPECT_EQ(Quad(*mesh, 0).length(), 4.0f);
+}
+
+// RU-04b
+// A rope that holds its steady count (rate x lifetime) and `uvsmoothing` starts at the newest
+// particle's age over a particle's spacing in time, saturated, less one
+// (0x140230A42-0x140230A7C) and is measured against that count less one (probe rope-uv-v5).
+TEST(RopeTextureRepeat, ASteadySmoothedRopeStartsAtItsFirstParticlesAge) {
+    auto instance = InstanceOf({ LiveAt({ 0, 0, 0 }), LiveAt({ 10, 0, 0 }), LiveAt({ 20, 0, 0 }), LiveAt({ 30, 0, 0 }) });
+    // Born 0.5 s apart; the newest has lived 0.125 s, a quarter of the 0.5 s spacing.
+    const float ages[4] = { 1.625f, 1.125f, 0.625f, 0.125f };
+    for (std::size_t i = 0; i < 4; ++i) {
+        instance->ParticlesVec()[i].init.lifetime = 2.0f;
+        instance->ParticlesVec()[i].lifetime      = 2.0f - ages[i];
     }
-    {
-        auto mesh      = NewRopeMesh(false);
-        auto instances = four();
-        ParticleRenderScale scale;
-        scale.uv_smoothing = true;
-        scale.uv_scrolling = true;
-        Generate(instances, *mesh, scale);
-        EXPECT_EQ(Quad(*mesh, 1).along(), 1.0f);
-    }
+    auto instances = Single(std::move(instance));
+    auto mesh      = NewRopeMesh(false);
+    ParticleRenderScale scale;
+    scale.uv_smoothing  = true;
+    scale.rope_rate     = 2.0f;                     // 2 x 1 s = 2 particles, fewer than the 4 held
+    scale.rope_lifetime = 1.0f;
+    Generate(instances, *mesh, scale);
+    ASSERT_EQ(Pieces(*mesh), 3u);
+    EXPECT_EQ(Quad(*mesh, 0).length(), 1.0f) << "steady count 2, less one";
+    // saturate((1 - 0.875) / (1 / 2)) - 1 = 0.25 - 1
+    EXPECT_FLOAT_EQ(Quad(*mesh, 0).along(), -0.75f);
+    EXPECT_FLOAT_EQ(Quad(*mesh, 2).along(), 1.25f);
 }
 
 // RU-05
@@ -589,7 +588,7 @@ TEST(RopeTextureRepeat, ChangingTheScaleLaterRewritesTheLengthAndLeavesThePartic
     ParticleRenderScale scale;
     scale.uv_scale = 2.0f;
     Generate(instances, *mesh, scale);
-    EXPECT_EQ(Quad(*mesh, 0).length(), 2.0f);
+    EXPECT_EQ(Quad(*mesh, 0).length(), 1.5f);
     EXPECT_EQ(instances.front()->Particles().size(), 3u);
 }
 

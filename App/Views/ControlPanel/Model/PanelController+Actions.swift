@@ -105,10 +105,21 @@ extension PanelController {
     return id
   }
 
-  /// The distinct installed ids of `ids`, in request order. Empty or more than 4,096 is invalid,
-  /// and any id that is not installed refuses the whole batch.
+  /// The most wallpapers one batch action (Trash, a playlist, a collection) takes.
+  static let batchLimit = 4096
+
+  /// A selection too large for one batch is something the user did, with Select all in a very
+  /// large library, and not a control sending nonsense: it says how many one batch takes.
+  static func batchTooLarge() -> WallpaperActionError {
+    WallpaperActionError(message: L("Select at most \(batchLimit) wallpapers at a time."))
+  }
+
+  /// The distinct installed ids of `ids`, in request order. Empty is invalid, more than
+  /// `batchLimit` is refused with the limit, and any id that is not installed refuses the whole
+  /// batch.
   func installedWallpaperIDs(_ ids: [String]) throws -> [String] {
-    guard !ids.isEmpty, ids.count <= 4096 else { throw InvalidControlValue() }
+    guard !ids.isEmpty else { throw InvalidControlValue() }
+    guard ids.count <= Self.batchLimit else { throw Self.batchTooLarge() }
     let installed = Set(store.librarySnapshot.wallpapers.map(\.id))
     var seen = Set<String>()
     let distinct = ids.filter { seen.insert($0).inserted }
@@ -127,7 +138,7 @@ extension PanelController {
     let id = displayID ?? navigation.targetDisplayID
     guard
       store.settingsSnapshot.displays.contains(where: {
-        $0.displayId == id && $0.enabled && $0.mode == .standalone
+        $0.displayId == id && $0.isIndependent
       })
     else { throw InvalidControlValue() }
     return id

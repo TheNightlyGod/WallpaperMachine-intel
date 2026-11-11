@@ -30,8 +30,8 @@ use crate::error::ShaderError;
 use crate::items::{BraceMode, scan_items};
 use crate::lexer::lex;
 use crate::metadata::{ExtractMode, extract};
-use crate::preprocess::{MacroFacts, Mode, preprocess_stage};
-use crate::request::{Combo, StageKind, ValidRequest};
+use crate::preprocess::{MacroFacts, Mode, Prelude, preprocess_stage_with};
+use crate::request::{Combo, Stage, StageKind, ValidRequest};
 use crate::response::Metadata;
 use crate::source::{CachingSource, IncludeSource};
 
@@ -67,18 +67,38 @@ fn add_if_absent(list: &mut Vec<Combo>, name: &str, value: &str) {
     }
 }
 
-/// Runs the protocol above for a validated request.
+/// Runs the protocol above for a validated request with Wallpaper Engine's dialect macros.
 pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> Result<PreparedProgram, ShaderError> {
+    prepare_program_with(request, includes, Prelude::Direct3D)
+}
+
+/// [`prepare_program`] with the given dialect macros for every preprocessing run.
+pub fn prepare_program_with(
+    request: &ValidRequest,
+    includes: &dyn IncludeSource,
+    prelude: Prelude,
+) -> Result<PreparedProgram, ShaderError> {
     let name = request.shader_name();
     let cache = CachingSource::new(includes);
     let textures = request.textures();
+    let geometry_stage = request.point_geometry().map(|geometry| Stage {
+        kind: StageKind::Vertex, source: geometry.source.clone(),
+    });
+    let mut inputs: Vec<&Stage> = Vec::new();
+    for stage in request.stages() {
+        inputs.push(stage);
+        if stage.kind == StageKind::Vertex {
+            if let Some(geometry) = &geometry_stage { inputs.push(geometry); }
+        }
+    }
+
 
     // 1 and 2: the view with the request combos, the reported metadata, the texture switches.
     let mut views = Vec::new();
     let mut reported = Metadata::default();
     let mut compile_combos: Vec<Combo> = request.combos().to_vec();
-    for stage in request.stages() {
-        let view = preprocess_stage(stage.kind, &stage.source, request.combos(), &cache, Mode::MetadataPreserving)
+    for stage in &inputs {
+        let view = preprocess_stage_with(stage.kind, &stage.source, request.combos(), &cache, Mode::MetadataPreserving, prelude)
             .map_err(|e| e.into_shader_error(name))?;
         let tokens = lex(&view.text);
         let items = scan_items(&tokens, &view.text, BraceMode::Conditional)
@@ -98,8 +118,8 @@ pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> 
     // 3: evaluated text for request plus texture-derived combos; annotation defaults that survive.
     let mut discovered: Vec<(String, String)> = Vec::new();
     let mut first_pass = Vec::new();
-    for stage in request.stages() {
-        let evaluated = preprocess_stage(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated)
+    for stage in &inputs {
+        let evaluated = preprocess_stage_with(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated, prelude)
             .map_err(|e| e.into_shader_error(name))?;
         let tokens = lex(&evaluated.text);
         let items = scan_items(&tokens, &evaluated.text, BraceMode::Compiled)
@@ -116,9 +136,9 @@ pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> 
 
     // 4: the final text.
     let mut stages = Vec::new();
-    for ((stage, view), earlier) in request.stages().iter().zip(views).zip(first_pass) {
+    for ((stage, view), earlier) in inputs.iter().zip(views).zip(first_pass) {
         let evaluated = if changed {
-            preprocess_stage(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated)
+            preprocess_stage_with(stage.kind, &stage.source, &compile_combos, &cache, Mode::Evaluated, prelude)
                 .map_err(|e| e.into_shader_error(name))?
         } else {
             earlier
@@ -130,6 +150,14 @@ pub fn prepare_program(request: &ValidRequest, includes: &dyn IncludeSource) -> 
             view,
             diagnostics: evaluated.diagnostics,
         });
+    }
+    if let Some(geometry) = request.point_geometry() {
+        let vertex = stages.iter().position(|stage| stage.kind == StageKind::Vertex).expect("vertex stage");
+        let geometry_stage = stages.remove(vertex + 1);
+        stages[vertex].evaluated = crate::point_geometry::lower(
+            &stages[vertex].evaluated, &geometry_stage.evaluated, geometry)
+            .map_err(|message| ShaderError::Request(crate::request::RequestError::Program(message)))?;
+        stages[vertex].diagnostics.extend(geometry_stage.diagnostics);
     }
     Ok(PreparedProgram { stages, compile_combos, metadata: reported, includes_read: cache.paths_read() })
 }

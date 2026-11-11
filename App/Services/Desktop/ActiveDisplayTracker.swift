@@ -69,7 +69,7 @@ final class ActiveDisplayTracker {
         pollInterval: Duration = .milliseconds(250),
         pollSleep: @escaping Sleep = { try await Task.sleep(for: $0, tolerance: .milliseconds(100)) }
     ) {
-        self.screens = screens ?? { Self.systemScreens() }
+        self.screens = screens ?? { SystemDisplays.screens().map { Screen(id: $0.id, frame: $0.frame) } }
         self.pointer = pointer ?? { NSEvent.mouseLocation }
         self.installMonitor = installMonitor ?? { Self.systemMonitor($0) }
         self.notificationCenter = notificationCenter
@@ -255,12 +255,6 @@ final class ActiveDisplayTracker {
     }
 
     // MARK: - The system
-
-    static func systemScreens() -> [Screen] {
-        NSScreen.screens.compactMap { screen in
-            WallpaperCoverageProbes.displayID(of: screen).map { Screen(id: $0, frame: screen.frame) }
-        }
-    }
 
     /// One global monitor and one local one. A global monitor sees nothing while this app is in
     /// front, and a local one sees only what is sent to this app's windows, so the tracker reads the

@@ -195,6 +195,9 @@ pub enum Callee {
     Name(String),
     /// A constructor: `vec3(...)`, `float[2](...)`, `S(...)`.
     Type(TypeRef),
+    /// An explicit scalar/vector HLSL cast, whose broadcast/truncation rules
+    /// differ from a numeric constructor's component count.
+    Cast(TypeRef),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -313,7 +316,7 @@ impl Expr {
             ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => l.has_effects() || r.has_effects(),
             ExprKind::Cond(a, b, c) => a.has_effects() || b.has_effects() || c.has_effects(),
             ExprKind::Comma(list) | ExprKind::InitList(list) => list.iter().any(Expr::has_effects),
-            ExprKind::Call(Callee::Type(_), args) => args.iter().any(Expr::has_effects),
+            ExprKind::Call(Callee::Type(_) | Callee::Cast(_), args) => args.iter().any(Expr::has_effects),
             ExprKind::Call(Callee::Name(_), _) => true,
         }
     }

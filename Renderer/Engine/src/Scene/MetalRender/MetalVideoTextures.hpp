@@ -64,8 +64,8 @@ struct VideoFramePlanes
 ///
 /// One frame is imported per generation, no matter how many passes sample it,
 /// and every object that frame's texture depends on — the pixel buffer, the
-/// Core Video wrappers, the conversion destination — stays retained until the
-/// command buffer that read it completes.
+/// plane textures made on its IOSurface, the conversion destination — stays
+/// retained until the command buffer that read it completes, and no longer.
 class MetalVideoTextures {
 public:
     MetalVideoTextures();
@@ -122,7 +122,21 @@ public:
     /// Render thread, once per frame, before any pass is encoded into
     /// `command`. Conversions are encoded into `command`, so ordering against
     /// the passes that sample them comes from the command buffer itself.
-    bool beginFrame(Scene& scene, id<MTLCommandBuffer> command, std::string* error);
+    ///
+    /// `imported`, when given, says whether any key took a frame this call:
+    /// a newer generation, or the same one again for a demand that changed.
+    /// False means every consumer samples exactly what it sampled last frame
+    /// and nothing was encoded into `command`.
+    bool beginFrame(Scene& scene, id<MTLCommandBuffer> command, std::string* error,
+                    bool* imported = nullptr);
+
+    /// Which import `key`'s current frame came from: a number that changes with
+    /// every import of that key, the same generation imported again included,
+    /// and never comes back. Zero when nothing has been imported. Everything a
+    /// consumer reads of the frame (its image, its planes and their constants,
+    /// its size, its path) belongs to one import, so an unchanged number is an
+    /// unchanged input.
+    [[nodiscard]] std::uint64_t importSerial(const std::string& key) const;
 
     /// Last valid frame for `key`, at the decoded frame's own size. Nil when no
     /// frame was ever produced for it, and also when every consumer samples the

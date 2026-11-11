@@ -7,7 +7,7 @@ enum LockScreenExtensionDiagnostics {
     status: LockScreenExtensionStatus, revision: String, expectedBundle: URL
   ) -> LockScreenWallpaperFailure? {
     guard status.revision == revision else { return nil }
-    if !isSameBundle(URL(fileURLWithPath: status.bundlePath), expectedBundle) {
+    if !FileLocation.isSame(URL(fileURLWithPath: status.bundlePath), expectedBundle) {
       return LockScreenWallpaperFailure(message: differentCopyMessage, reason: .differentExtensionCopy)
     }
     if status.supportedVersion != LockScreenConfiguration.supportedVersion {
@@ -17,12 +17,6 @@ enum LockScreenExtensionDiagnostics {
       return LockScreenWallpaperFailure(message: String(localized: "The lock-screen renderer could not load its configuration: \(error)"))
     }
     return nil
-  }
-
-  static func isSameBundle(_ first: URL, _ second: URL) -> Bool {
-    // URL equality also compares directory hints/trailing slashes.
-    first.resolvingSymlinksInPath().standardizedFileURL.path
-      == second.resolvingSymlinksInPath().standardizedFileURL.path
   }
 
   /// Legacy extensions cannot send diagnostics. Inspect only this user's extension processes

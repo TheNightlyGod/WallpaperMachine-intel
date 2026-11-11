@@ -22,7 +22,7 @@ final class ActivationPolicyRuleTests: XCTestCase {
     }
 
     func testEachOrdinaryWindowCountsOnScreenOrInTheDock() {
-        let roles: [Window.Role] = [.controlPanel, .whatsNew, .preview, .signIn]
+        let roles: [Window.Role] = [.controlPanel, .update, .preview, .signIn]
         for role in roles {
             XCTAssertTrue(keepsRegular([window(role, visible: true)]), "\(role) on screen")
             XCTAssertTrue(keepsRegular([window(role, minimized: true)]), "\(role) minimized")
@@ -42,9 +42,9 @@ final class ActivationPolicyRuleTests: XCTestCase {
     }
 
     func testAPanelAQuitPutAwayDoesNotCount() {
-        XCTAssertFalse(keepsRegular([window(.controlPanel), window(.whatsNew)]))
+        XCTAssertFalse(keepsRegular([window(.controlPanel), window(.update)]))
         // Whatever AppKit still reports for a minimized one that was ordered out.
-        let putAway = [window(.controlPanel, minimized: true), window(.whatsNew, visible: true)]
+        let putAway = [window(.controlPanel, minimized: true), window(.update, visible: true)]
         XCTAssertFalse(keepsRegular(putAway, quitting: true))
         XCTAssertTrue(keepsRegular(putAway, quitting: false))
     }

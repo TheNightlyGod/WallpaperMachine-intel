@@ -35,7 +35,7 @@ REGRESSION_BINARIES = {
     "particle_override_test": False, "particle_rope_pieces_test": False,
     "layer_texture_reference_test": False,
     "project_property_preview_test": False,
-    "scenescript_media_event_smoke": False, "scenescript_behavior_test": False, "media_thumbnail_texture_smoke": False,
+    "scenescript_media_event_smoke": False, "scenescript_behavior_test": False, "scenescript_storage_test": False, "media_thumbnail_texture_smoke": False,
     "scene_schema_tests": False, "scene_schema_fixtures_selftest": False, "scene_schema_part01_test": False,
     "scene_schema_part02_test": False, "scene_schema_part03_test": False, "scene_schema_part04_test": False,
     "scene_schema_part05_test": False, "scene_schema_part06_test": False, "scene_schema_part07_test": False, "scene_schema_part08_test": False,
@@ -44,17 +44,20 @@ REGRESSION_BINARIES = {
     "sound_layer_cursor_behavior_test": False, "media_event_behavior_test": False,
     "texture_slot_behavior_test": False, "material_constant_behavior_test": False,
     "create_layer_behavior_test": False, "script_host_behavior_test": False,
-    "shader_updater_behavior_test": False,
+    "shader_updater_behavior_test": False, "scenescript_puppet_bones_test": False,
     "mouse_input_test": False, "cursor_input_state_test": False, "mdl_schema_tests": False, "tex_schema_tests": False,
     "mdl_parse_tests": False, "puppet_pose_tests": False, "tex_container_tests": False,
     "timer_tests": False, "metal_backend_test": False,
     "metal_scene_draw_smoke": True, "metal_poster_capture_test": True,
     "metal_video_texture_test": True, "unchanged_present_test": True, "scene_failure_policy_test": True,
     "scene_load_sound_test": True,
-    "scene_harness_selftest": True, "backdrop_scene_test": True, "horizontal_flip_pointer_test": True,
+    "scene_harness_selftest": True, "backdrop_scene_test": True, "metalfx_upscale_test": True,
+    "horizontal_flip_pointer_test": True, "scene_options_binding_test": True,
     "scene_placeholder_picture_test": True, "scene_passthrough_layout_test": True,
     "scene_fullscreen_parallax_test": True, "scene_layer_size_test": False,
+    "scene_capability_probe_test": False,
     "layer_composite_render_test": True, "cover_slot_composite_test": True, "perspective_image_layer_test": True, "model_parallax_test": True, "unbound_texture_slot_test": True, "scene_lighting_fog_test": True,
+    "script_model_layer_test": True,
     "metal_memory_test": True, "scene_video_input_test": False,
     "audio_tests": False, "miniaudio_failure_paths_test": False, "sprite_animation_test": False,
     "rendergraph_smoke": False,
@@ -280,14 +283,14 @@ attribute vec3 a_Position;
 attribute vec2 a_TexCoord;
 varying vec2 v_TexCoord;
 void main() {
-    gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);
     v_TexCoord = a_TexCoord;
 }
 """,
         "shaders/generated_copy.frag": """uniform sampler2D g_Texture0;
 varying vec2 v_TexCoord;
 void main() {
-    gl_FragColor = texture(g_Texture0, v_TexCoord);
+    gl_FragColor = texSample2D(g_Texture0, v_TexCoord);
 }
 """,
     }
@@ -309,9 +312,9 @@ def fixtures(root):
             "materials/tile.json": json.dumps({"passes": [{"shader": "probe_tile", "blending": "translucent", "cullmode": "nocull", "depthtest": "disabled", "depthwrite": "disabled"}]}),
             "effects/probe.json": json.dumps({"name": "probe copy", "passes": [{"material": "materials/copy.json"}]}),
             "materials/copy.json": json.dumps({"passes": [{"shader": "probe_copy", "blending": "translucent", "cullmode": "nocull", "depthtest": "disabled", "depthwrite": "disabled", "textures": [None]}]}),
-            "shaders/probe_tile.vert": "uniform mat4 g_ModelViewProjectionMatrix; attribute vec3 a_Position; attribute vec2 a_TexCoord; varying vec2 v_TexCoord; void main(){gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);v_TexCoord=a_TexCoord;}",
+            "shaders/probe_tile.vert": "uniform mat4 g_ModelViewProjectionMatrix; attribute vec3 a_Position; attribute vec2 a_TexCoord; varying vec2 v_TexCoord; void main(){gl_Position=mul(vec4(a_Position,1.0),g_ModelViewProjectionMatrix);v_TexCoord=a_TexCoord;}",
             "shaders/probe_tile.frag": "varying vec2 v_TexCoord; void main(){gl_FragColor=vec4(v_TexCoord,0.3,0.8);}",
-            "shaders/probe_copy.frag": "uniform sampler2D g_Texture0; varying vec2 v_TexCoord; void main(){gl_FragColor=texture(g_Texture0,v_TexCoord);}",
+            "shaders/probe_copy.frag": "uniform sampler2D g_Texture0; varying vec2 v_TexCoord; void main(){gl_FragColor=texSample2D(g_Texture0,v_TexCoord);}",
         }
         files["shaders/probe_copy.vert"] = files["shaders/probe_tile.vert"]
         def tile(id_, name, origin, parent=None):
@@ -353,25 +356,29 @@ attribute vec3 a_Position;
 attribute vec2 a_TexCoord;
 varying vec2 v_TexCoord;
 void main() {
-    gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);
     v_TexCoord = a_TexCoord;
 }
 """
+    # The alpha-to-coverage variant follows the shipped shaders: an `#if GLSL` discard below
+    # half alpha that Wallpaper Engine never takes (it does not define GLSL), so coverage alone
+    # decides what is kept.
+    discard = "\n#if GLSL\n    if (gl_FragColor.a < 0.5) discard;\n#endif\n" if alpha_to_coverage else "\n"
+    under_alpha = "0.25 + floor(v_TexCoord.x * 3.0) * 0.375" if alpha_to_coverage else "floor(v_TexCoord.x * 3.0) * 0.5"
+    over_alpha = "0.25" if alpha_to_coverage else "0.5"
     fragments = {
-        "under": """varying vec2 v_TexCoord;
-void main() {
-    gl_FragColor = vec4(0.2, 0.4, 0.6, floor(v_TexCoord.x * 3.0) * 0.5);
-}
+        "under": f"""varying vec2 v_TexCoord;
+void main() {{
+    gl_FragColor = vec4(0.2, 0.4, 0.6, {under_alpha});{discard}}}
 """,
-        "over": """void main() {
-    gl_FragColor = vec4(0.8, 0.6, 0.4, 0.5);
-}
+        "over": f"""void main() {{
+    gl_FragColor = vec4(0.8, 0.6, 0.4, {over_alpha});{discard}}}
 """,
         "coverage": """uniform sampler2D g_Texture0;
 varying vec2 v_TexCoord;
 void main() {
-    float coverage = texture(g_Texture0, v_TexCoord).a;
-    gl_FragColor = vec4(vec3(coverage), 1.0);
+    float coverage = texSample2D(g_Texture0, v_TexCoord).a;
+    gl_FragColor = vec4(coverage, coverage, coverage, 1.0);
 }
 """,
     }
@@ -409,7 +416,7 @@ attribute vec3 a_Position;
 attribute vec2 a_TexCoord;
 varying vec2 v_TexCoord;
 void main() {
-    gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);
     v_TexCoord = a_TexCoord;
 }
 """
@@ -506,7 +513,7 @@ def origin_animation_fixture(root):
         "shaders/card.vert": """uniform mat4 g_ModelViewProjectionMatrix;
 attribute vec3 a_Position;
 void main() {
-    gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);
 }
 """,
         "shaders/card.frag": "void main() {\n    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);\n}\n",
@@ -541,10 +548,16 @@ def check_generated_pixels(data, index):
         offset = (y * width + x) * 3
         return pixels[offset:offset + 3]
     if index in (8, 11):
-        # A half-covered source over transparent, half-covered and opaque targets:
-        # Aout = As + Ad * (1 - As). RGB readback makes lost coverage observable.
-        return all(abs(channel - expected) <= 1
-                   for x, expected in [(96, 128), (192, 191), (288, 255)]
+        # Index 8: a half-covered source over transparent, half-covered and opaque
+        # targets, the children of a compose layer without copybackground: Wallpaper
+        # Engine draws them with alpha MAX (sub_1401ECB20), Aout = max(As, Ad).
+        # Index 11: the same children as alpha-to-coverage on one sample: a fragment
+        # below half alpha is not covered (the 0.25 source never, the 0.25 target third
+        # neither) and a covered one is written unblended (0.625 -> 159, 1 -> 255).
+        # RGB readback makes the composed alpha observable.
+        expected = [(96, 128), (192, 128), (288, 255)] if index == 8 else [(96, 0), (192, 159), (288, 255)]
+        return all(abs(channel - value) <= 1
+                   for x, value in expected
                    for channel in pixel(x, 128))
     if index == 9:
         # The page has to cover the centre and the margin has to stay exactly the

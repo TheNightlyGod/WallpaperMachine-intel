@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <string>
 #include <vector>
@@ -166,6 +167,62 @@ TEST_F(ColourScripts, NoScriptOfTheScenarioFails)
     scene_->runtime->DispatchMediaEventJson(R"({"type":"mediaThumbnailChanged","hasThumbnail":true,"primaryColor":[0.25,0.5,0.75]})");
     Tick(2);
     EXPECT_EQ(scene_->runtime->scriptErrorCount(), 0u);
+}
+
+// ---- scene general settings that a script or a property drives ---------------------------------
+
+// Wallpaper Engine evaluates `general.ambientcolor` (and the other lighting and fog settings)
+// every frame like any setting; the uniform every material shares follows the script each tick.
+TEST(SceneGeneralScripts, AnAmbientColourScriptIsFollowedEveryTick)
+{
+    ParseRig   rig(TintableAssets());
+    const Json general = { { "ambientcolor",
+                             { { "script", "var t = 0; export function update() { t++; return new Vec3(t / 10, 0, 0); }" },
+                               { "value", "0 0 0" } } } };
+    auto scene = rig.Parse(CanvasOf(Json::array({ ImageObject(1, "lit") }), general), { .live = true });
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    SceneNode* node = FindRootChild(*scene, "lit");
+    ASSERT_NE(node, nullptr);
+    const auto materials = MaterialsOf(*scene, *node);
+    ASSERT_FALSE(materials.empty());
+    for (int tick = 1; tick <= 2; ++tick) {
+        scene->runtime->Tick(1.0 / 60.0);
+        const auto ambient = Constant(*materials.front(), "g_LightAmbientColor");
+        ASSERT_EQ(ambient.size(), 3u);
+        EXPECT_FLOAT_EQ(ambient[0], tick / 10.0f) << "tick " << tick;
+        EXPECT_FLOAT_EQ(ambient[1], 0.0f);
+    }
+    EXPECT_EQ(scene->runtime->scriptErrorCount(), 0u);
+}
+
+TEST(SceneGeneralScripts, AHeightFogStartBoundToAPropertyFollowsItWithoutAReload)
+{
+    ParseRig rig(TintableAssets());
+    rig.properties()["fog_start"] = RuntimeScalarValue::Float(2.0f);
+    const Json general = { { "fogheight", true },
+                           { "fogheightstart", { { "user", "fog_start" }, { "value", 1.0 } } },
+                           { "fogheightend", -3.0 } };
+    auto scene = rig.Parse(CanvasOf(Json::array({ ImageObject(1, "fogged") }), general), { .live = true });
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    SceneNode* node = FindRootChild(*scene, "fogged");
+    ASSERT_NE(node, nullptr);
+    const auto materials = MaterialsOf(*scene, *node);
+    ASSERT_FALSE(materials.empty());
+    const auto params = [&] { return Constant(*materials.front(), "g_FogHeightParams"); };
+    ASSERT_EQ(params().size(), 4u);
+    EXPECT_FLOAT_EQ(params()[0], 2.0f) << "the property's value as the scene loads";
+    EXPECT_FLOAT_EQ(params()[1], -5.0f);
+
+    ProjectProperties changed = rig.properties();
+    changed["fog_start"]      = RuntimeScalarValue::Float(4.0f);
+    scene->runtime->ApplyProjectPropertyOverride(changed);
+    scene->runtime->Tick(1.0 / 60.0);
+    EXPECT_FLOAT_EQ(params()[0], 4.0f) << "the live edit reached the uniform";
+    EXPECT_FLOAT_EQ(params()[1], -7.0f);
+    const auto held = scene->runtime->LoadOnlyProperties();
+    EXPECT_EQ(std::find(held.begin(), held.end(), "fog_start"), held.end()) << "no reload is asked for";
 }
 
 // ---- layer alpha -------------------------------------------------------------------------------

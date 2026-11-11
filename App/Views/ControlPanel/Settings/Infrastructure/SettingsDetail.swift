@@ -77,6 +77,7 @@ struct SettingsPages: View {
     case .general: GeneralSettingsSection()
     case .appearance: AppearanceSettingsSection()
     case .desktop: DesktopSettingsSection()
+    case .widgets: WidgetsSettingsSection()
     case .playback: PlaybackSettingsSection()
     case .performance: PerformanceSettingsSection()
     case .displays: DisplaysSettingsSection()

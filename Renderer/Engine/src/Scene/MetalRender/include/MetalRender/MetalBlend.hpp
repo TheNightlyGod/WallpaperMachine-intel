@@ -43,9 +43,7 @@ enum class MetalCullMode : uint32_t
     Back = 2,
 };
 
-/// The cull mode a scene pass is drawn with when its target has no depth
-/// attachment: none. A pass into a depth-attached target -- a model, a
-/// skybox -- takes its material's cull mode instead
+/// The cull mode a render pass starts with, before a draw sets its material's
 /// (`SceneMetalCullMode`). Named here rather than written at the call site so
 /// the invariant can be asserted.
 inline constexpr MetalCullMode kSceneCullMode = MetalCullMode::None;
@@ -57,11 +55,11 @@ inline constexpr MetalCullMode kSceneCullMode = MetalCullMode::None;
 /// that mirrors an axis would reverse it, which is why it is named.
 inline constexpr bool kSceneFrontFaceCounterClockwise = true;
 
-/// The cull mode a material asks for, applied only to a pass whose target has a depth attachment.
-[[nodiscard]] constexpr MetalCullMode SceneMetalCullMode(CullMode material_cull_mode,
-                                                         bool     target_has_depth)
+/// The cull mode a material asks for. WE applies it whether or not the target has
+/// depth: a 2D canvas culls a `cullmode normal` card mirrored by a negative scale
+/// (WE probe ordinary-cull-v1).
+[[nodiscard]] constexpr MetalCullMode SceneMetalCullMode(CullMode material_cull_mode)
 {
-    if (! target_has_depth) return kSceneCullMode;
     switch (material_cull_mode) {
     case CullMode::Front: return MetalCullMode::Front;
     case CullMode::Back: return MetalCullMode::Back;
@@ -88,12 +86,20 @@ struct MetalBlendState
 };
 
 /// Translates an authored blend mode to Metal state, factor for factor as
-/// Wallpaper Engine blends.
+/// Wallpaper Engine 2.8.0.42 blends (`sub_140099F60`).
 ///
 /// `BlendMode::Normal` is ONE / ZERO, an opaque replace. It is not Porter-Duff
 /// source-over despite the name, and turning it into source-over would change
 /// every scene that uses it.
-/// Single-sample targets use source-over instead of a nonexistent coverage mask.
-[[nodiscard]] MetalBlendState ToMetalBlendState(BlendMode mode, std::uint32_t sample_count = 1);
+/// `BlendMode::Translucent` blends alpha with the colour's factors, SRC_ALPHA /
+/// INV_SRC_ALPHA, under `AlphaBlendRule::Material`; `AlphaBlendRule::SourceOver`
+/// gives ONE / INV_SRC_ALPHA instead. `AlphaBlendRule::Max` turns the alpha of a
+/// translucent or additive draw into MAX(As, Ad), as Wallpaper Engine draws the
+/// children of a layer without copybackground; it leaves unblended modes alone.
+/// Single-sample targets use translucent blending instead of a nonexistent
+/// coverage mask.
+[[nodiscard]] MetalBlendState ToMetalBlendState(BlendMode mode,
+                                                AlphaBlendRule alpha_rule = AlphaBlendRule::Material,
+                                                std::uint32_t sample_count = 1);
 
 } // namespace wallpaper::metal

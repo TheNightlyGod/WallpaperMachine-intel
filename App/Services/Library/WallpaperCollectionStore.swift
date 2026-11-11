@@ -10,16 +10,21 @@ struct WallpaperCollection: Codable, Equatable, Sendable, Identifiable {
 @MainActor
 final class WallpaperCollectionStore {
     static let shared = WallpaperCollectionStore()
-    static let storageKey = "WallpaperMachine.collections"
+    nonisolated static let storageKey = "WallpaperMachine.collections"
     static let didChangeNotification = Notification.Name("WallpaperMachine.collectionsDidChange")
 
     private let defaults: UserDefaults
     private(set) var collections: [WallpaperCollection]
+    /// Saved collections this build could not read, as they were saved (`PreservedJSON`).
+    private var unread: [Data] = []
 
     init(defaults: UserDefaults = ClientPreferences.defaults) {
         self.defaults = defaults
-        collections = defaults.data(forKey: Self.storageKey)
-            .flatMap { try? JSONDecoder().decode([WallpaperCollection].self, from: $0) } ?? []
+        // A collection this build cannot read stays as it was saved and is written back with the others.
+        let saved = defaults.data(forKey: Self.storageKey)
+            .flatMap { PreservedJSON.readArray($0, as: WallpaperCollection.self) }
+        collections = saved?.values ?? []
+        unread = saved?.unread ?? []
     }
 
     func collection(id: String) -> WallpaperCollection? {
@@ -87,7 +92,7 @@ final class WallpaperCollectionStore {
 
     private func commit(_ updated: [WallpaperCollection]) throws {
         guard updated != collections else { return }
-        let data = try JSONEncoder().encode(updated)
+        let data = try PreservedJSON.writeArray(updated, keeping: unread)
         defaults.set(data, forKey: Self.storageKey)
         collections = updated
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)

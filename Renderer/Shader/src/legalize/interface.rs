@@ -286,7 +286,7 @@ fn check_component_budget(inputs: &[IfaceDecl], kind: StageKind) -> Result<(), L
         }
     }
     match crossed {
-        Some(first) => Err(LegalizeError::request(format!(
+        Some(first) => Err(LegalizeError::ComponentBudget(format!(
             "the {} stage declares {total} components of stage-to-stage varyings, above the limit of {MAX_INTERSTAGE_COMPONENTS} (the addition of `{}` crossed it)",
             kind.name(),
             first.author

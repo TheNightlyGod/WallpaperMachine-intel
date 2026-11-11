@@ -223,6 +223,58 @@ final class WebWallpaperSuspensionTests: XCTestCase {
     XCTAssertEqual(snapshot.value(.webAttached, for: surface), 1)
   }
 
+  func testSuspensionInterruptsThePagesAudioContextsAndResumeRestoresEach() async throws {
+    // Muting the page silences an audio graph but would leave it rendering. Suspending media
+    // playback interrupts every context instead, and lifting it gives each its own state
+    // back: one the page had suspended itself stays suspended.
+    try """
+      <!doctype html><html><body><script>
+      window.__log = [];
+      window.__played = new AudioContext();
+      window.__own = new AudioContext();
+      for (const [name, context] of [["played", __played], ["own", __own]])
+        context.addEventListener("statechange", () => __log.push(name + ":" + context.state));
+      </script></body></html>
+      """.write(to: project.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
+    // In a window that reports itself visible: WebKit starts no audio for a page in none.
+    let (page, container) = hostedPage(timing: Self.noGrace)
+    let window = VisibilityWindow(
+      contentRect: container.frame, styleMask: .borderless, backing: .buffered, defer: true)
+    window.isReleasedWhenClosed = false
+    window.contentView = container
+    defer {
+      page.stop()
+      window.contentView = nil
+      window.close()
+    }
+    page.load()
+    try await waitUntilLoaded(page)
+    let started = try await page.webView.callAsyncJavaScript(
+      """
+      // A context that cannot start here (no output device) never settles.
+      const settled = promise => Promise.race([promise, new Promise(done => setTimeout(done, 1000))]);
+      await settled(__played.resume());
+      await settled(__own.suspend());
+      __log.length = 0;
+      return __played.state + "/" + __own.state;
+      """, arguments: [:], in: nil, contentWorld: .page) as? String
+    try XCTSkipUnless(started == "running/suspended", "no running AudioContext on this machine (\(started ?? "?"))")
+
+    page.setPaused(true)
+    try await poll { !page.isInWindowTree }
+    page.setPaused(false)
+    var states = ""
+    try await poll {
+      states = (try? await page.webView.callAsyncJavaScript(
+        "return __played.state + '/' + __own.state", arguments: [:], in: nil, contentWorld: .page) as? String) ?? ""
+      return states == "running/suspended"
+    }
+    let log = try await page.webView.callAsyncJavaScript(
+      "return __log", arguments: [:], in: nil, contentWorld: .page) as? [String] ?? []
+    XCTAssertTrue(log.contains("played:interrupted"), "the running context stopped while suspended: \(log)")
+    XCTAssertEqual(states, "running/suspended", "each context is back where the page left it: \(log)")
+  }
+
   func testUserPauseWaitsForTheFirstFrameWindow() async throws {
     let gate = Gate()
     let counters = RuntimeCounters()

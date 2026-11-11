@@ -16,7 +16,7 @@ struct WallpaperDisplayLayout: Codable, Equatable, Identifiable, Sendable {
 @MainActor
 final class WallpaperDisplayLayoutStore {
     static let shared = WallpaperDisplayLayoutStore()
-    static let storageKey = "WallpaperMachine.displayLayouts"
+    nonisolated static let storageKey = "WallpaperMachine.displayLayouts"
     static let didChangeNotification = Notification.Name("WallpaperMachine.displayLayoutsChanged")
     nonisolated static let limit = 64
     private let defaults: UserDefaults

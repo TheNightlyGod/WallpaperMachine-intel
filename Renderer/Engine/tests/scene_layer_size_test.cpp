@@ -229,7 +229,8 @@ std::optional<Card> CardOf(const Case& which, std::array<float, 3> origin = { 12
     ParsedScene parsed(package);
     EXPECT_NE(parsed.scene(), nullptr) << parsed.error();
     if (parsed.scene() == nullptr) return std::nullopt;
-    EXPECT_TRUE(parsed.scene()->shader_compile_error.empty()) << parsed.scene()->shader_compile_error;
+    EXPECT_TRUE(parsed.scene()->shader_fallbacks.empty())
+        << (parsed.scene()->shader_fallbacks.empty() ? std::string {} : parsed.scene()->shader_fallbacks.front());
     if (which.sprite_sheet) {
         const auto sheet = parsed.scene()->textures.find("sheet");
         EXPECT_TRUE(sheet != parsed.scene()->textures.end() && sheet->second.isSprite &&

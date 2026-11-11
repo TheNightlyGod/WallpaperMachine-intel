@@ -190,6 +190,14 @@ pub(crate) enum EngineObservation {
         enabled: bool,
         phase: OperationPhase,
     },
+    DisplayFraming {
+        enabled: bool,
+        phase: OperationPhase,
+    },
+    Upscaling {
+        enabled: bool,
+        phase: OperationPhase,
+    },
     Resolution {
         resolution: wallpaper_core::SceneResolution,
         phase: OperationPhase,
@@ -286,6 +294,8 @@ struct Data {
     optimization: Option<bool>,
     on_demand: Option<bool>,
     video_sampling: Option<bool>,
+    display_framing: Option<bool>,
+    upscaling: Option<bool>,
     resolution: Option<wallpaper_core::SceneResolution>,
     counters_enabled: bool,
     pointer_consumer: Option<wallpaper_core::PointerConsumerCallback>,
@@ -347,6 +357,8 @@ impl ControlledEngine {
                     optimization: None,
                     on_demand: None,
                     video_sampling: None,
+                    display_framing: None,
+                    upscaling: None,
                     resolution: None,
                     counters_enabled: false,
                     pointer_consumer: None,
@@ -1348,6 +1360,18 @@ impl EngineFacade for ControlledEngine {
             |d| d.video_sampling = Some(enabled),
         )
     }
+    fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.setting(
+            move |phase| EngineObservation::DisplayFraming { enabled, phase },
+            |d| d.display_framing = Some(enabled),
+        )
+    }
+    fn set_metalfx_upscaling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.setting(
+            move |phase| EngineObservation::Upscaling { enabled, phase },
+            |d| d.upscaling = Some(enabled),
+        )
+    }
     fn set_scene_resolution(
         &self,
         resolution: wallpaper_core::SceneResolution,
@@ -1380,6 +1404,38 @@ impl EngineFacade for ControlledEngine {
         _: Vec<u8>,
     ) -> EngineFuture<()> {
         unsupported("apply_system_media_artwork")
+    }
+    /// Answers like the engine does for a live scene of the wallpaper and for
+    /// one that draws another, without recording anything: the controlled
+    /// scenarios observe property documents, not the per-wallpaper options.
+    fn preview_user_options(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        options: wallpaper_core::project::SceneUserOptions,
+    ) -> EngineFuture<wallpaper_core::PropertyPreview> {
+        let engine = self.clone();
+        Box::pin(async move {
+            options.validate()?;
+            let data = engine.inner.data.lock().unwrap();
+            if !data.rows.iter().any(|row| row.handle == Some(handle)) {
+                return Err(EngineError::InvalidInput(format!(
+                    "user options preview target is not a live controlled scene: {handle:?}"
+                )));
+            }
+            if !direct_template(&data, handle).is_some_and(|template| template.scene_path == scene_path) {
+                return Ok(wallpaper_core::PropertyPreview::OtherWallpaper);
+            }
+            Ok(wallpaper_core::PropertyPreview::Shown)
+        })
+    }
+    /// The controlled engine has no scene files: no scene offers the
+    /// mouse-parallax switch.
+    fn read_scene_traits(
+        &self,
+        _: &std::path::Path,
+    ) -> Result<wallpaper_core::SceneTraits, EngineError> {
+        Ok(wallpaper_core::SceneTraits::default())
     }
     fn preview_property_override(
         &self,
@@ -2156,7 +2212,7 @@ async fn nonempty_bootstrap_releases_real_readiness_before_queued_first_frame_ha
         let scenes = bounded(control.entered).await.unwrap(); assert_eq!(scenes.len(), 1); assert_eq!(scenes[0].display.display_id, 731);
         let observed = engine.observations();
         let reconcile_start = observed.iter().position(|e| matches!(e, EngineObservation::Reconcile { phase: OperationPhase::Started, .. })).unwrap();
-        for index in [observed.iter().position(|e| matches!(e, EngineObservation::Optimization { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::OnDemand { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::Resolution { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::VideoSampling { phase: OperationPhase::Applied, .. }))] {
+        for index in [observed.iter().position(|e| matches!(e, EngineObservation::Optimization { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::OnDemand { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::Resolution { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::VideoSampling { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::DisplayFraming { phase: OperationPhase::Applied, .. })), observed.iter().position(|e| matches!(e, EngineObservation::Upscaling { phase: OperationPhase::Applied, .. }))] {
             assert!(index.expect("real bootstrap must configure renderer before opening") < reconcile_start);
         }
         release.release();

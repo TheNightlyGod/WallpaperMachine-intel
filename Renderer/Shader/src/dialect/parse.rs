@@ -646,8 +646,15 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            // DECLARE_SAMPLER2D_PARAMETER(name)
-            if self.at_ident_text("DECLARE_SAMPLER2D_PARAMETER") && self.at_op_k(1, Operator::LParen) {
+            // DECLARE_SAMPLER2D_PARAMETER(name), DECLARE_SAMPLER2D_COMPARE_PARAMETER(name) (E-D8)
+            let declared = if self.at_ident_text("DECLARE_SAMPLER2D_PARAMETER") {
+                Some("sampler2D")
+            } else if self.at_ident_text("DECLARE_SAMPLER2D_COMPARE_PARAMETER") {
+                Some("sampler2DShadow")
+            } else {
+                None
+            };
+            if let Some(sampler_type) = declared.filter(|_| self.at_op_k(1, Operator::LParen)) {
                 self.pos += 2;
                 let name = match self.peek() {
                     Some(t) if t.kind == TokenKind::Identifier => {
@@ -659,7 +666,7 @@ impl<'a> Parser<'a> {
                 self.expect_op(Operator::RParen)?;
                 params.push(Param {
                     quals,
-                    ty: TypeRef::named("sampler2D"),
+                    ty: TypeRef::named(sampler_type),
                     name: Some(name),
                     dims: Vec::new(),
                     sampler_param: true,
@@ -1024,6 +1031,16 @@ impl<'a> Parser<'a> {
 
     fn unary_inner(&mut self) -> PResult<Expr> {
         let Some(t) = self.peek() else { return self.soft() };
+        if self.at_op(Operator::LParen)
+            && let Some(ty) = self.toks.get(self.pos + 1)
+            && builtin_type(&ty.text).is_some_and(|ty| ty.is_scalar() || ty.vec_width().is_some())
+            && self.toks.get(self.pos + 2).is_some_and(|t| t.kind == TokenKind::Operator(Operator::RParen)) {
+                let name = super::ty::canonical_type_name(&ty.text);
+                self.pos += 3;
+                let value = self.unary()?;
+                let span = t.start..value.span.end;
+                return Ok(Expr::new(ExprKind::Call(Callee::Cast(TypeRef::named(&name)), vec![value]), span));
+            }
         if let TokenKind::Operator(op) = t.kind
             && matches!(op, Operator::Not | Operator::BitNot | Operator::Add | Operator::Sub | Operator::Inc | Operator::Dec) {
                 self.pos += 1;

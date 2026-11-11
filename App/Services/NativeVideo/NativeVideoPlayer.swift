@@ -1,6 +1,5 @@
 import AVFoundation
 import AppKit
-import VideoToolbox
 
 /// Owns the `AVQueuePlayer` / `AVPlayerLooper` / `AVPlayerLayer` trio for one
 /// display.
@@ -10,13 +9,6 @@ import VideoToolbox
 /// is why the counters report queued items rather than claiming a single one.
 @MainActor
 final class NativeVideoPlayer {
-    /// Ceiling on how long one poster request will wait for the playing item
-    /// to hand over a frame before falling back. Bounded so a stalled item
-    /// cannot hold a request open, and short enough that a poster request is
-    /// never mistaken for a reason to keep the decoder awake.
-    static let posterWaitStep = Duration.milliseconds(25)
-    static let posterWaitSteps = 12
-
     private let player = AVQueuePlayer()
     private var looper: AVPlayerLooper?
     private let layer = AVPlayerLayer()
@@ -28,12 +20,6 @@ final class NativeVideoPlayer {
     private var presentationSuspended = false
     private var stopped = false
 
-    /// Attached only while a poster request is in flight, and always to the
-    /// item that is playing right now rather than to the looper's template.
-    /// A permanently attached output would mean a second, continuous readback
-    /// of every frame for a picture nobody asked for.
-    private var videoOutput: AVPlayerItemVideoOutput?
-    private weak var outputItem: AVPlayerItem?
     /// The single in-flight poster request. Concurrent callers await this one
     /// instead of each opening their own read path.
     private var posterRequest: Task<CGImage?, Never>?
@@ -65,14 +51,6 @@ final class NativeVideoPlayer {
     /// outlives every item the player replaces.
     private var recovery: NativeVideoRecoveryBudget
     private let now: @MainActor () -> ContinuousClock.Instant
-    /// The clip's display matrix, read once at load. `nil` until the read
-    /// finishes; a clip whose matrix cannot be read is treated as upright.
-    ///
-    /// The picture the layer shows has this matrix applied, but the frames a
-    /// video output hands back do not, so it decides which poster path can be
-    /// trusted for an upright result.
-    private var displayTransform: CGAffineTransform?
-    private var orientationTask: Task<Void, Never>?
 
     /// Looks at the pipeline after a long pause. Owned here because its verdict
     /// is about this player's item, and it dies with the player.
@@ -85,9 +63,14 @@ final class NativeVideoPlayer {
     /// Whether a picture has ever been on the layer. A pipeline that never
     /// showed one is the first-frame watch's to judge, not the health check's.
     private var hasShownFrame = false
-    /// Attached only while a health check is sampling, and to the item playing
-    /// at that moment. It takes the source's own pixel format, so reading it
-    /// converts nothing.
+    /// Attached when a health check first samples, to the item playing at that
+    /// moment, and removed only once that item has left the screen (the loop
+    /// moved on, the item was rebuilt, the player stopped). Adding or removing
+    /// a video output makes the item reconfigure its pipeline, which holds the
+    /// picture for about a tenth of a second (issue 110), so it is never taken
+    /// off the picture that is showing. It takes the source's own pixel format,
+    /// so reading it converts nothing, and it is read only while a check
+    /// samples.
     private var livenessOutput: AVPlayerItemVideoOutput?
     private weak var livenessItem: AVPlayerItem?
 
@@ -106,6 +89,41 @@ final class NativeVideoPlayer {
     private var presentationSize: CGSize?
     /// Follows the playing item's `presentationSize`, re-pointed with it.
     private var sizeObservation: NSKeyValueObservation?
+    /// Wallpaper Engine's colour adjustments and image filter, read per frame by the item's
+    /// composition; attached only while they change the picture.
+    private let colorPipeline = VideoColorPipeline()
+    private let configureComposition: @MainActor (VideoColorPipeline, AVPlayerItem) async throws -> Void
+    private var flipHorizontal = false
+    private var playbackRate: Float = 1
+    /// The project's `schemecolor`, shown around the picture in Fit-style modes (I2).
+    private var borderColor: CGColor?
+    private weak var container: NSView?
+    /// Whether the clip can be heard: not muted and above zero volume. A clip
+    /// that cannot be heard has its audio track switched off, so its sound is
+    /// neither decoded nor sent to an output (`SilentVideoAudio`).
+    private var audible = true
+    private let releasesSilentAudio: Bool
+    /// The file's one audio track its container marks enabled: the track the
+    /// platform plays when the clip is heard, and the one switched off while it
+    /// is not. `nil` when the file has no such track or several the platform
+    /// chooses between; that clip keeps its sound running muted, as before.
+    private var silenceableAudioTrack: CMPersistentTrackID?
+    /// The `tracks` observation of each copy of the item the looper plays: a
+    /// copy's tracks exist only once it has loaded, and its audio track has to
+    /// be set before the platform prepares the copy to play. Emptied with the looper.
+    private var copyObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
+    /// The copies whose audio track this player switched off. Until a copy is
+    /// switched off, the platform's own choice of its tracks stands, so a clip
+    /// that is always heard plays exactly as it did; becoming audible switches
+    /// back on only these.
+    private var silencedCopies: Set<ObjectIdentifier> = []
+    /// Who waits for the clip to start over (`watchNextLoop`), and the observation of the
+    /// looper's count that tells it. Both exist only while someone waits; the observation is
+    /// made again on the looper of a rebuilt item, whose count starts from zero.
+    private var loopWatch: (@MainActor () -> Void)?
+    private var loopCountObservation: NSKeyValueObservation?
+    /// Tells a report on its way to the main actor for a watch that was replaced meanwhile.
+    private var loopWatchSerial: UInt64 = 0
     /// Reported when the clip keeps playing without its audio, with the
     /// failure that caused it, so the host can log it against its load.
     var onAudioDropped: (@MainActor (String) -> Void)?
@@ -141,14 +159,20 @@ final class NativeVideoPlayer {
         recovery: NativeVideoRecoveryBudget.Policy = .init(),
         health: NativeVideoHealthSupervisor.Policy = .init(),
         now: @escaping @MainActor () -> ContinuousClock.Instant = { .now },
-        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
+        sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+        configureComposition: @escaping @MainActor (VideoColorPipeline, AVPlayerItem) async throws -> Void = {
+            try await $0.configure($1)
+        },
+        releasesSilentAudio: Bool = SilentVideoAudio.isReleased
     ) {
         self.surface = surface
         self.counters = counters
+        self.releasesSilentAudio = releasesSilentAudio
         self.userPaused = paused
         self.recovery = NativeVideoRecoveryBudget(policy: recovery)
         self.now = now
         self.healthPolicy = health
+        self.configureComposition = configureComposition
         self.supervisor = NativeVideoHealthSupervisor(policy: health, sleep: sleep)
         player.actionAtItemEnd = .advance
         // Nothing here needs the system's "now playing" treatment, and taking
@@ -167,6 +191,7 @@ final class NativeVideoPlayer {
         // window or the desktop around it.
         view.layer?.masksToBounds = true
         view.layer?.addSublayer(layer)
+        container = view
         relayout(bounds: view.bounds, backingScale: view.window?.backingScaleFactor ?? 1)
     }
 
@@ -194,33 +219,142 @@ final class NativeVideoPlayer {
         switch placement {
         case .gravity(let gravity):
             layer.videoGravity = gravity
-            layer.frame = viewportBounds
+            setLayerRect(viewportBounds)
         case .frame(let rect):
             // The rectangle already has the picture's own aspect; anything but
             // a plain stretch would re-apply an aspect rule to it.
             layer.videoGravity = .resize
             // The layout measures from the top edge and the container's layer
             // grows upward, so the rectangle is flipped into it.
-            layer.frame = NativeVideoLayout.layerFrame(
+            setLayerRect(NativeVideoLayout.layerFrame(
                 rect, viewportHeight: viewportBounds.height
-            ).offsetBy(dx: viewportBounds.minX, dy: viewportBounds.minY)
+            ).offsetBy(dx: viewportBounds.minX, dy: viewportBounds.minY))
         case .pending:
             break
         }
+        // Wallpaper Engine draws a Fit-style video over its scheme colour; Fill and Stretch
+        // cover the display and stay black (`sub_1400FFCB0`).
+        let border = Self.borderShows(for: scalingMode) ? borderColor : nil
+        let background = border ?? CGColor(gray: 0, alpha: 1)
+        layer.backgroundColor = background
+        container?.layer?.backgroundColor = background
+    }
+
+    /// Whether `mode` leaves room around the picture that the border colour fills.
+    nonisolated static func borderShows(for mode: BridgeScalingMode) -> Bool {
+        mode != .fill && mode != .stretch
+    }
+
+    /// Places the layer by bounds and position rather than `frame`, which is undefined once
+    /// the layer carries a transform, and mirrors it about its centre for Flip horizontally.
+    private func setLayerRect(_ rect: CGRect) {
+        layer.setAffineTransform(.identity)
+        layer.bounds = CGRect(origin: .zero, size: rect.size)
+        layer.position = CGPoint(x: rect.midX, y: rect.midY)
+        layer.setAffineTransform(flipHorizontal ? CGAffineTransform(scaleX: -1, y: 1) : .identity)
+    }
+
+    /// Wallpaper Engine's per-wallpaper options for this clip: the playback rate, the
+    /// horizontal flip, the colour adjustments and the image filter (`lut`, already decoded).
+    /// Values change in place; only switching the colour pipeline on or off rebuilds the item,
+    /// keeping its time and without spending a recovery rebuild.
+    func setEngineOptions(_ options: WallpaperEngineOptions, lut: VideoLut?, borderColor: CGColor?) {
+        let rate = Float(max(10, min(options.playbackRate, 200)) / 100)
+        if rate != playbackRate {
+            playbackRate = rate
+            player.defaultRate = rate
+            if player.rate > 0 { player.rate = rate }
+        }
+        let parameters = VideoColorPipeline.Parameters(options: options, lut: lut)
+        let wasFiltered = VideoColorPipeline.needsComposition(colorPipeline.current)
+        colorPipeline.update(parameters)
+        let placementChanged = options.flipHorizontal != flipHorizontal || borderColor != self.borderColor
+        flipHorizontal = options.flipHorizontal
+        self.borderColor = borderColor
+        if placementChanged { applyPlacement() }
+        if wasFiltered != VideoColorPipeline.needsComposition(parameters), looper != nil {
+            reloadItem(reason: "the colour options were switched")
+        }
+    }
+
+    /// The item rebuilt from the file at the time it was playing, with or without the colour
+    /// composition. Not a repair, so the recovery allowance is not spent.
+    private func reloadItem(reason: String) {
+        guard !stopped, !failureReported, let mediaURL, rebuild == nil else { return }
+        let silent = audioDropped
+        AppLog.debug("native video: reloading the item (\(reason))")
+        rebuild = Task { @MainActor [weak self] in
+            let item = silent ? await Self.videoOnlyItem(url: mediaURL) : AVPlayerItem(url: mediaURL)
+            var range = CMTimeRange.invalid
+            if let item { range = await Self.loopRange(of: item.asset) }
+            guard let self, !self.stopped, !Task.isCancelled else { return }
+            if let item, !(await self.attachComposition(to: item)) { self.rebuild = nil; return }
+            guard !self.stopped, !Task.isCancelled else { return }
+            self.rebuild = nil
+            guard let item else { return }
+            // Preparation leaves the old item usable: playback and seeks during its awaits
+            // must carry over. `start` also reads the current pause/suspension state.
+            let time = self.player.currentItem?.currentTime() ?? .zero
+            self.releaseItem()
+            self.start(item, looping: range)
+            if time.isNumeric { self.player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero, completionHandler: { _ in }) }
+        }
+    }
+
+    /// Sets the colour composition on an item before it plays; none at the identity.
+    private func attachComposition(to item: AVPlayerItem) async -> Bool {
+        do {
+            try await configureComposition(colorPipeline, item)
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            reportPreparationFailure(error.localizedDescription, settled: false)
+            return false
+        }
+    }
+
+    var playerDefaultRateForTest: Float { player.defaultRate }
+    var layerTransformForTest: CGAffineTransform { layer.affineTransform() }
+    var layerBoundsForTest: CGRect { layer.bounds }
+    var layerPositionForTest: CGPoint { layer.position }
+    var layerBackgroundForTest: CGColor? { layer.backgroundColor }
+    var hasColorCompositionForTest: Bool { player.currentItem?.videoComposition != nil }
+
+    /// Fails without loading anything, unsettled: for a file the player must not be given (an
+    /// `hev1` clip whose corrected copy has gone). Delivered like any preparation failure.
+    func refuse(_ detail: String) {
+        reportPreparationFailure(detail, settled: false)
     }
 
     func load(url: URL) {
         mediaURL = url
         let item = AVPlayerItem(url: url)
-        readDisplayTransform(of: item.asset)
         // Held as the pending rebuild so a repair cannot start an item of its
         // own before this one is playing, and `stop()` cancels it.
+        let releasesSilentAudio = self.releasesSilentAudio
         rebuild = Task { @MainActor [weak self] in
             let range = await Self.loopRange(of: item.asset)
+            // Every rebuild reopens this same file, so its tracks are read once.
+            let audioTrack = releasesSilentAudio ? await Self.silenceableAudioTrack(of: item.asset) : nil
             guard let self, !self.stopped, !Task.isCancelled else { return }
+            self.silenceableAudioTrack = audioTrack
+            guard await self.attachComposition(to: item) else { self.rebuild = nil; return }
+            guard !self.stopped, !Task.isCancelled else { return }
             self.rebuild = nil
             self.start(item, looping: range)
         }
+    }
+
+    /// The file's only audio track that its container marks enabled, or `nil`
+    /// when it has none or several. One such track is the one the platform
+    /// plays, so switching it back on restores exactly what it chose; between
+    /// several, its choice is not known here, and that clip is left alone.
+    nonisolated static func silenceableAudioTrack(of asset: AVAsset) async -> CMPersistentTrackID? {
+        guard let tracks = try? await asset.loadTracks(withMediaType: .audio) else { return nil }
+        var enabled: [CMPersistentTrackID] = []
+        for track in tracks where (try? await track.load(.isEnabled)) == true { enabled.append(track.trackID) }
+        return enabled.count == 1 ? enabled[0] : nil
     }
 
     /// The stretch of the file one pass of the loop plays: the video track's
@@ -240,47 +374,6 @@ final class NativeVideoPlayer {
         return range
     }
 
-    /// Reads the display matrix from the asset the player itself is loading,
-    /// so the file is not opened a second time for it.
-    private func readDisplayTransform(of asset: AVAsset) {
-        orientationTask?.cancel()
-        orientationTask = Task { @MainActor [weak self] in
-            let transform: CGAffineTransform
-            do {
-                transform = try await Self.loadDisplayTransform(of: asset)
-            } catch {
-                AppLog.debug(
-                    "native video: could not read the clip's orientation "
-                        + "(\(Self.describe(error))); treating it as upright")
-                transform = .identity
-            }
-            guard let self, !self.stopped, !Task.isCancelled else { return }
-            self.displayTransform = transform
-        }
-    }
-
-    /// The display matrix of the clip's first video track, or the identity for
-    /// a clip with no video track.
-    nonisolated static func loadDisplayTransform(of asset: AVAsset) async throws
-        -> CGAffineTransform
-    {
-        guard let video = try await asset.loadTracks(withMediaType: .video).first else {
-            return .identity
-        }
-        return try await video.load(.preferredTransform)
-    }
-
-    /// Whether a frame read back from a video output differs in orientation
-    /// from the picture the layer shows.
-    ///
-    /// Any rotation or flip does: `AVPlayerItem.presentationSize` and the layer
-    /// follow the matrix, while the output's buffers stay in the file's own
-    /// orientation. Such a clip is read with `AVAssetImageGenerator`, which
-    /// applies the matrix itself.
-    nonisolated static func needsUprightGenerator(_ transform: CGAffineTransform) -> Bool {
-        !transform.isIdentity
-    }
-
     private func start(_ item: AVPlayerItem, looping range: CMTimeRange) {
         // AVPlayerLooper takes ownership of the queue, so it is created once
         // per item and replaced wholesale rather than mutated.
@@ -288,7 +381,48 @@ final class NativeVideoPlayer {
         self.looper = looper
         counters.record(.nativeVideoItemCreated, for: surface)
         observeFailures(looper: looper)
+        followLoopCopies()
+        observeLoopCount()
         applyPlaybackState()
+    }
+
+    /// Calls `handler` once, when the looper next starts the clip over: the end of the pass
+    /// playing now, or, for a clip still loading or being rebuilt, the end of its first pass.
+    /// False for a player that is stopped, has failed or was never loaded.
+    func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool {
+        guard !stopped, !failureReported, mediaURL != nil else { return false }
+        loopWatchSerial &+= 1
+        loopWatch = handler
+        observeLoopCount()
+        return true
+    }
+
+    func cancelLoopWatch() {
+        loopWatch = nil
+        loopCountObservation = nil
+    }
+
+    /// Follows the count of the looper playing now, for the watch. `AVPlayerLooper` raises it
+    /// each time it starts the item again, and says so through key-value observing, so nothing
+    /// is sampled.
+    private func observeLoopCount() {
+        loopCountObservation = nil
+        guard loopWatch != nil, let looper else { return }
+        let start = looper.loopCount
+        let identity = ObjectIdentifier(looper)
+        let serial = loopWatchSerial
+        loopCountObservation = looper.observe(\.loopCount, options: [.new]) { [weak self] looper, _ in
+            guard looper.loopCount > start else { return }
+            Task { @MainActor [weak self] in self?.loopStartedOver(identity, serial: serial) }
+        }
+    }
+
+    private func loopStartedOver(_ identity: ObjectIdentifier, serial: UInt64) {
+        guard !stopped, serial == loopWatchSerial, let looper, ObjectIdentifier(looper) == identity,
+            let handler = loopWatch
+        else { return }
+        cancelLoopWatch()
+        handler()
     }
 
     /// Takes the looper and its queued copies down, leaving the player and
@@ -301,11 +435,14 @@ final class NativeVideoPlayer {
         currentItemObservation = nil
         sizeObservation = nil
         observedItem = nil
+        // A watch for the next loop carries over to the looper that replaces this one.
+        loopCountObservation = nil
         // A check in flight describes the item that is going away, unless it is
         // the check that is replacing it.
         if cancellingCheck { supervisor.cancel() }
         detachLivenessOutput()
-        detachPosterOutput()
+        copyObservations.removeAll()
+        silencedCopies.removeAll()
         // The looper holds the queue; disabling it first stops it re-filling
         // the queue while the items are being removed.
         looper.disableLooping()
@@ -358,6 +495,12 @@ final class NativeVideoPlayer {
     /// Re-points the item-status observation at whatever is playing now.
     private func followCurrentItem(_ item: AVPlayerItem?) {
         guard !stopped else { return }
+        // The copy the check's output sits on has left the screen, so taking
+        // the output off it no longer disturbs the picture.
+        if let livenessItem, livenessItem !== item { detachLivenessOutput() }
+        // The looper can finish making its copies after `start`; the first one
+        // it queues is seen here.
+        followLoopCopies()
         guard let item else {
             currentItemObservation = nil
             sizeObservation = nil
@@ -412,6 +555,8 @@ final class NativeVideoPlayer {
             var range = CMTimeRange.invalid
             if let silent { range = await Self.loopRange(of: silent.asset) }
             guard let self, !self.stopped else { return }
+            if let silent, !(await self.attachComposition(to: silent)) { self.rebuild = nil; return }
+            guard !self.stopped, !Task.isCancelled else { return }
             self.rebuild = nil
             guard let silent else {
                 self.reportPreparationFailure(detail)
@@ -487,6 +632,8 @@ final class NativeVideoPlayer {
             var range = CMTimeRange.invalid
             if let item { range = await Self.loopRange(of: item.asset) }
             guard let self, !self.stopped, !Task.isCancelled else { return }
+            if let item, !(await self.attachComposition(to: item)) { self.rebuild = nil; return }
+            guard !self.stopped, !Task.isCancelled else { return }
             self.rebuild = nil
             guard let item else {
                 self.reportPreparationFailure("the clip could not be reopened for a restart")
@@ -583,10 +730,72 @@ final class NativeVideoPlayer {
         applyPlacement()
     }
 
+    /// The volume and mute. A clip that cannot be heard (muted, or at zero
+    /// volume) has its audio track switched off on every copy the looper
+    /// plays, so nothing decodes its sound and no audio output runs for it:
+    /// muting the player alone still starts the audio output. The item is not
+    /// rebuilt either way, and the picture is not touched.
     func setVolume(_ volume: Float, muted: Bool) {
         player.volume = max(0, min(volume, 1))
         player.isMuted = muted
+        let audible = !muted && volume > 0
+        guard audible != self.audible else { return }
+        self.audible = audible
+        followLoopCopies()
+        for item in looper?.loopingPlayerItems ?? [] { applyAudibility(to: item) }
     }
+
+    /// Follows every copy the looper has made that is not followed yet,
+    /// setting its audio track at once and again whenever its tracks load.
+    private func followLoopCopies() {
+        // A clip already playing without its audio has none to switch off.
+        guard releasesSilentAudio, !stopped, !audioDropped, silenceableAudioTrack != nil, let looper else { return }
+        // A copy the looper no longer holds is forgotten, so a new copy at a reused address
+        // is followed afresh rather than taken for one already switched off.
+        let current = Set(looper.loopingPlayerItems.map(ObjectIdentifier.init))
+        for key in copyObservations.keys where !current.contains(key) {
+            copyObservations.removeValue(forKey: key)?.invalidate()
+            silencedCopies.remove(key)
+        }
+        for item in looper.loopingPlayerItems where copyObservations[ObjectIdentifier(item)] == nil {
+            copyObservations[ObjectIdentifier(item)] = item.observe(\.tracks, options: [.new]) {
+                [weak self] item, _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated { self?.applyAudibility(to: item) }
+                } else {
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.applyAudibility(to: item) } }
+                }
+            }
+            applyAudibility(to: item)
+        }
+    }
+
+    /// Sets a copy's audio track for whether the clip can be heard. It is
+    /// switched off explicitly even while it reads as off: the platform chooses
+    /// a copy's tracks only when it prepares it, and then turns on, and starts
+    /// the audio output for, every track nobody switched off.
+    private func applyAudibility(to item: AVPlayerItem) {
+        let key = ObjectIdentifier(item)
+        guard !stopped, let trackID = silenceableAudioTrack, copyObservations[key] != nil else { return }
+        // A copy that was never switched off keeps the platform's own choice.
+        if audible && !silencedCopies.contains(key) { return }
+        for track in item.tracks {
+            // The media type too: a composition numbers its own tracks.
+            guard let asset = track.assetTrack, asset.trackID == trackID, asset.mediaType == .audio else { continue }
+            track.isEnabled = audible
+        }
+        if audible { silencedCopies.remove(key) } else { silencedCopies.insert(key) }
+    }
+
+    /// Whether the audio track of each queued copy is switched on, in queue
+    /// order; a copy whose tracks have not loaded yet reports none.
+    var queuedAudioTracksEnabledForTest: [[Bool]] {
+        player.items().map { item in
+            item.tracks.filter { $0.assetTrack?.mediaType == .audio }.map(\.isEnabled)
+        }
+    }
+    /// How many copies of the item the looper keeps and recycles.
+    var loopCopyCountForTest: Int { looper?.loopingPlayerItems.count ?? 0 }
 
     /// The user's own pause. Independent of presentation suspension: a display
     /// becoming visible again must not start a wallpaper the user paused.
@@ -618,7 +827,6 @@ final class NativeVideoPlayer {
     /// replaces it: a poster taken from the looper's template would be a
     /// frame from a different object than the one on screen.
     var currentItemForTest: AVPlayerItem? { player.currentItem }
-    var posterOutputIsAttachedForTest: Bool { videoOutput != nil }
     /// Playback position inside the item that is playing. A loop restarts it,
     /// which is how a test tells a wrap from a stall.
     var playbackTimeForTest: CMTime { player.currentItem?.currentTime() ?? .invalid }
@@ -641,113 +849,86 @@ final class NativeVideoPlayer {
         player.audioOutputDeviceUniqueID = uniqueID
     }
 
-    /// One frame for a poster request, from the item that is playing.
+    /// One frame for a poster request, at the playing item's position.
     ///
-    /// Concurrent requests coalesce into one. Nothing here resumes playback:
-    /// a paused player answers from the last frame it produced, because
-    /// resuming to take a screenshot would restart decode, audio and power
-    /// draw the user had stopped.
+    /// Read by a one-shot image generator on its own copy of the file, never
+    /// from the item that is playing: attaching a video output to that item
+    /// holds its picture for about a tenth of a second while the pipeline is
+    /// reconfigured, which showed as a black flash on the desktop whenever a
+    /// poster was taken (issue 110). The generator applies the clip's display
+    /// matrix, so the poster is upright like the picture. Concurrent requests
+    /// coalesce into one. Nothing here resumes playback: a paused player is
+    /// read where it stands, and answers from the last frame it produced when
+    /// the read fails.
     func posterImage() async -> CGImage? {
         guard !stopped else { return nil }
-        if let posterRequest { return await posterRequest.value }
-        let request = Task { @MainActor [weak self] in
-            await self?.producePoster() ?? nil
+        let request: Task<CGImage?, Never>
+        if let posterRequest {
+            request = posterRequest
+        } else {
+            request = Task { @MainActor [weak self] in
+                await self?.producePoster() ?? nil
+            }
+            posterRequest = request
         }
-        posterRequest = request
         let image = await request.value
         if posterRequest == request { posterRequest = nil }
-        return image
+        // Every caller applies the layer's flip to the shared, unflipped source frame.
+        // Keeping it out of the cached image lets later requests change the option.
+        return flipHorizontal ? image.flatMap(Self.mirrored) : image
     }
 
+    nonisolated static func mirrored(_ image: CGImage) -> CGImage? {
+        guard
+            let context = CGContext(
+                data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        context.translateBy(x: CGFloat(image.width), y: 0)
+        context.scaleBy(x: -1, y: 1)
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
+    }
+
+    /// How far from the playing position a poster's frame may be. Unbounded,
+    /// the generator answers with the nearest key frame, which in a clip with
+    /// few of them can be its intro, and a settled poster is kept until the
+    /// wallpaper changes. Bounded, it decodes from the key frame before up to
+    /// this window, a one-shot cost of at most one group of pictures.
+    static let posterTolerance = CMTime(value: 1, timescale: 2)
+
+    /// A second decode of a few frames, created and released inside this
+    /// request and counted: a permanently retained generator would be a
+    /// second decoder for the whole session.
     private func producePoster() async -> CGImage? {
-        defer { detachPosterOutput() }
-        // A header read that normally finished long ago; awaited so the first
-        // request can never pick the path before the orientation is known.
-        await orientationTask?.value
-        if Self.needsUprightGenerator(displayTransform ?? .identity) {
-            // The playing item's frames would come back un-rotated. Skip the
-            // video output altogether rather than read frames to discard them.
-            guard !stopped, let item = player.currentItem else { return lastPoster }
-            return await generatorPoster(for: item) ?? lastPoster
-        }
-        for step in 0..<Self.posterWaitSteps {
-            guard !stopped, let item = player.currentItem else { return lastPoster }
-            // Re-resolved every step: crossing a loop boundary replaces
-            // `currentItem`, and an output attached to the retired copy would
-            // never produce another frame.
-            let output = attachPosterOutput(to: item)
-            let time = item.currentTime()
-            if output.hasNewPixelBuffer(forItemTime: time),
-                let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil),
-                let image = Self.makeImage(from: buffer)
-            {
-                counters.record(.readinessFrameRendered, for: surface)
-                lastPoster = image
-                return image
-            }
-            if step + 1 < Self.posterWaitSteps {
-                try? await Task.sleep(for: Self.posterWaitStep)
-            }
-        }
-        guard !stopped else { return nil }
-        if let item = player.currentItem, let image = await generatorPoster(for: item) {
-            return image
-        }
-        // Still nothing: the last frame this player produced is a truthful
-        // answer, and nil is a truthful "none yet". Neither resumes playback.
-        return lastPoster
-    }
-
-    /// One upright frame from a one-shot image generator, created and
-    /// released inside this request.
-    ///
-    /// It is a second decode of a few frames, which is why it is counted: a
-    /// permanently retained generator would be a second decoder for the whole
-    /// session. A rotated or mirrored clip takes this path for every poster,
-    /// an upright one only when the playing item produced no frame in time.
-    /// Playback is never resumed to make the picture.
-    private func generatorPoster(for item: AVPlayerItem) async -> CGImage? {
-        guard let mediaURL else { return nil }
+        guard !stopped, let mediaURL, let item = player.currentItem else { return lastPoster }
         let generator = AVAssetImageGenerator(asset: AVURLAsset(url: mediaURL))
         generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = .positiveInfinity
-        generator.requestedTimeToleranceAfter = .positiveInfinity
-        counters.record(.nativeVideoPosterFallback, for: surface)
-        guard let image = try? await generator.image(at: item.currentTime()).image,
-            !stopped
-        else { return nil }
+        generator.requestedTimeToleranceBefore = Self.posterTolerance
+        generator.requestedTimeToleranceAfter = Self.posterTolerance
+        // The colour options reach the poster too, as they reach the playing item's frames
+        // (its `videoComposition`, plan check P0-5).
+        do { generator.videoComposition = try await colorPipeline.videoComposition(for: generator.asset) }
+        catch { return stopped ? nil : lastPoster }
+        counters.record(.nativeVideoPosterDecode, for: surface)
+        let requested = item.currentTime()
+        guard let (image, actual) = try? await generator.image(at: requested),
+            Self.isWithinPosterTolerance(actual, of: requested)
+        else {
+            return stopped ? nil : lastPoster
+        }
+        guard !stopped else { return nil }
         lastPoster = image
         return image
     }
 
-    private func attachPosterOutput(to item: AVPlayerItem) -> AVPlayerItemVideoOutput {
-        if let output = videoOutput, outputItem === item { return output }
-        detachPosterOutput()
-        let output = AVPlayerItemVideoOutput(outputSettings: [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
-        ])
-        item.add(output)
-        videoOutput = output
-        outputItem = item
-        return output
-    }
-
-    private func detachPosterOutput() {
-        if let output = videoOutput, let item = outputItem {
-            item.remove(output)
-        }
-        videoOutput = nil
-        outputItem = nil
-    }
-
-    private static func makeImage(from buffer: CVPixelBuffer) -> CGImage? {
-        var image: CGImage?
-        // Retains nothing: no Core Image context is kept alive between
-        // requests, so a failed poster leaves no converter behind.
-        guard VTCreateCGImageFromCVPixelBuffer(buffer, options: nil, imageOut: &image)
-            == noErr
-        else { return nil }
-        return image
+    /// Whether a frame the generator returned is close enough to the playing
+    /// position to stand for it. The generator is asked for the same window;
+    /// this keeps a frame it returned from elsewhere out of `lastPoster`.
+    nonisolated static func isWithinPosterTolerance(_ actual: CMTime, of requested: CMTime) -> Bool {
+        guard actual.isNumeric, requested.isNumeric else { return false }
+        return CMTimeAbsoluteValue(CMTimeSubtract(actual, requested)) <= posterTolerance
     }
 
     func stop() {
@@ -760,18 +941,16 @@ final class NativeVideoPlayer {
         posterRequest = nil
         rebuild?.cancel()
         rebuild = nil
-        orientationTask?.cancel()
-        orientationTask = nil
         sizeObservation = nil
         supervisor.cancel()
         detachLivenessOutput()
-        detachPosterOutput()
         lastPoster = nil
         pendingFailure = nil
         onPreparationFailure = nil
         onReadyForDisplay = nil
         onAudioDropped = nil
         onHealthEvent = nil
+        cancelLoopWatch()
         player.pause()
         releaseItem()
         layer.player = nil
@@ -836,9 +1015,11 @@ extension NativeVideoPlayer: NativeVideoHealthTarget {
             waiting: player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
     }
 
-    func finishSampling() {
-        detachLivenessOutput()
-    }
+    /// The output stays on the item it was attached to: taking it off the
+    /// picture that is showing would hold that picture, the very hitch the
+    /// output's lifetime is arranged to avoid. `followCurrentItem` removes it
+    /// once its item has left the screen.
+    func finishSampling() {}
 
     func reportHealth(_ event: NativeVideoHealthEvent) {
         guard !stopped else { return }
@@ -890,7 +1071,9 @@ extension NativeVideoPlayer: NativeVideoHealthTarget {
     }
 
     /// Re-attached whenever the loop replaces the playing item: an output left
-    /// on the retired copy would never see another frame.
+    /// on the retired copy would never see another frame. A check that has an
+    /// output on the playing item already reuses it, so only the first check
+    /// on a copy pays for attaching one.
     private func attachLivenessOutput(to item: AVPlayerItem) -> AVPlayerItemVideoOutput {
         if let output = livenessOutput, livenessItem === item { return output }
         detachLivenessOutput()

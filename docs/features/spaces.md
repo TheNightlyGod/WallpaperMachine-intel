@@ -10,14 +10,17 @@ Desktop & Lock Screen**, both for the display the Library applies wallpapers to 
 an appearance rule on that display, and turning it off leaves the display on the wallpaper it
 shows. Only enabled independent displays offer it.
 
-Only the desktop the person is on plays. A desktop they have visited keeps its wallpaper loaded
-and paused in a window on that desktop, so a swipe brings in the frame they left and arriving
-runs it on from there: no intro plays again and no still picture shows first. A desktop not
-visited yet shows a still picture of its own wallpaper until its first visit loads it. A paused
+Only the desktop the person is on plays. At launch and when desktop choices change, the app
+prepares each distinct wallpaper in the background, one at a time, without visiting its desktop
+or changing the current assignment. Each window is placed on its chosen desktops before it is
+shown, draws its first frame muted, then stays paused there. Once prepared, a swipe brings in
+that desktop’s own frame and arrival resumes it: no load or still-picture replacement is needed.
+During initial preparation, or after a preparation fails, the desktop’s cached poster remains
+the fallback until its wallpaper is ready. A paused
 scene, clip or page draws nothing, so the mode costs about as much CPU, GPU and power as one
 wallpaper on the display; a kept web page that ignores the pause may still run timers under
 WebKit's inactive scheduling. Its real cost is memory, one loaded wallpaper for each different
-wallpaper the display's visited desktops show ([below](#keeping-each-desktops-wallpaper)).
+wallpaper the display's desktops show ([below](#keeping-each-desktops-wallpaper)).
 
 ## Choosing each desktop's wallpaper
 
@@ -67,20 +70,31 @@ window instead of replacing it, and the web and video hosts do the same with a p
 When that wallpaper comes back to the display, the parked one becomes the live one again: no
 load, no new window and no wait for a first frame (`set_parked_scenes` in the renderer,
 `set_display_parked_wallpapers` in the bridge). Desktops that show the same wallpaper share one
-loaded copy, whose window is on all of them. A desktop set to a playlist keeps nothing.
+loaded copy. Its live window belongs to all of them, with independent still windows underneath
+for the Space animation ([below](#windows-that-stay-on-their-desktop)). A desktop set to a playlist keeps nothing.
+
+Switching to a video or web wallpaper leaves the other desktops' scene windows paused in
+place. An empty scene assignment for the current desktop does not release the parking plan;
+returning to a scene reuses its existing window and frame. An explicit unload still closes
+all prepared scenes, even before the host finishes updating that plan.
 
 A paused scene's frame clock is stopped, a clip is paused and a page is suspended and taken out
 of the window tree, as for any paused wallpaper, so a kept wallpaper costs no CPU, GPU or power;
 a web page that ignores the pause may still run timers under WebKit's inactive scheduling. The
 cost is memory: everything the wallpaper loaded stays loaded, a few hundred megabytes for a scene
 ([measured footprints](performance.md#2d-scene-resolution)), so a display holds at most one
-loaded wallpaper for each different wallpaper its desktops are chosen for, and only once each
-has played there. Nothing is saved: after a relaunch only the current desktop is loaded.
+loaded wallpaper for each different wallpaper its desktops are chosen for. After relaunch the
+current desktop loads normally and the others are prepared in the background. A scene's first-frame
+callback pauses only the prepared instance; a switch that promotes it first keeps it running.
+Preparation never applies unsaved drafts or changes the selected Library item, playback choice
+or display assignments. Generated image pages use the same preparation as ordinary activation.
+It uses the existing load journal and crash holds.
+An unfinished scene is closed after 90 seconds; a failed target falls back to normal loading on arrival.
 
-A kept wallpaper is let go, and loads again on its next visit, when:
+A kept wallpaper is let go when:
 
 - the Mac reports memory pressure (warning or critical); desktops keep their wallpapers again
-  from the next visit once it reports normal ([memory pressure](diagnostics.md#memory-pressure));
+  by preparing them again once it reports normal ([memory pressure](diagnostics.md#memory-pressure));
 - a rule or condition set to **Stop (free memory)** unloads the wallpapers;
 - the desktop choices change so no desktop shows it any more, or the mode is turned off;
 - its display is unplugged or changes size or scale (a display that only moves takes its kept
@@ -90,10 +104,18 @@ A kept wallpaper is let go, and loads again on its next visit, when:
 Each change to a display's list is logged with the app's memory footprint (`space parking:
 display … keeps … wallpapers`), and the renderer logs each scene it keeps or runs again.
 
-Fullscreen app Spaces are not listed and change nothing. Missing, malformed or ambiguous topology
-leaves the switch unavailable and automatic selection waiting; manual commands still work.
+Fullscreen app Spaces are not listed and do not change the selected wallpaper; their displays
+stay paused until the desktop returns ([playback](performance.md#playback)). Missing, malformed
+or ambiguous topology leaves the switch unavailable and automatic selection waiting; manual
+commands still work.
 
 ## Windows that stay on their desktop
+
+Wallpaper windows stay stationary in Mission Control so the current desktop
+can show a live wallpaper. Their windows use translucent composition to avoid
+foreground trails observed with fully opaque desktop windows during fullscreen
+Space transitions. When macOS excludes the live window, its desktop picture
+shows through.
 
 Wallpaper windows normally join every Space (`canJoinAllSpaces`), so the live wallpaper would be
 the picture of every desktop: Mission Control and the Spaces bar would show it on each one, and a
@@ -105,12 +127,18 @@ and the hosts name each window's wallpaper):
 - **During a swipe** the window leaves with the old desktop. A desktop whose wallpaper is kept
   slides in with that wallpaper's window, paused on the frame it was left on; one that is not
   loaded shows its macOS desktop picture, the poster of its own wallpaper. A wallpaper two
-  desktops share is on both, so it stays still between them as a window on every Space does.
+  desktops share belongs to both, but macOS does not guarantee that a multi-Space window is
+  composited into each sliding desktop. `WallpaperSpaceReplicas` therefore prepares a separate
+  still window on each desktop sharing a wallpaper, below the live window. Each belongs to
+  exactly one Space and is placed there before being shown. This covers repeated arrangements
+  such as A–B–A–B without exposing the system desktop picture during the slide.
 - **On arrival** (`NSWorkspace.activeSpaceDidChangeNotification`, which comes once the animation
   ends) a kept wallpaper runs on at once: nothing is hidden or moved and the switch hold takes no
   picture. A wallpaper that is not loaded opens in a new window, which is hidden and kept off the
   other desktops before it is first ordered in (the renderer's `wallpaperLayerInstalled`
-  notification with reason `open`). A window that belongs on the new desktop and is not ready
+  notification with reason `open`). Background preloads remain transparent until their first
+  frame, including while the person arrives on that desktop; being ordered in does not establish
+  readiness. A window that belongs on the new desktop and is not ready
   there is made fully transparent before it moves: a window's alpha reaches the screen only with
   the next Core Animation commit while the move takes effect at once, so the hide is flushed
   (`CATransaction.flush()`) before the move; without it the window arrived opaque and the old
@@ -119,6 +147,8 @@ and the hosts name each window's wallpaper):
   0.2 s (none under Reduce Motion) once the scheduler has applied the choice and the
   [switch hold](wallpaper-switching.md) has let go: a scene's first presented frame, a page or a
   clip's own readiness. The wallpaper left behind stays on its own desktops, paused or replaced.
+  A loading hold belongs to that desktop: it does not hide an already prepared destination
+  after a Space change, or a window being prepared for a different desktop.
 - **A wallpaper no desktop is chosen for** (a Focus wallpaper, a playlist's) follows the person to
   the current desktop as before, except while another wallpaper is on its way there: then it
   stays where it is, so it never shows on the desktop it is leaving for.
@@ -136,9 +166,27 @@ optional private CoreGraphics calls `CGSCopySpacesForWindows` and `CGSMoveWindow
 resolved with `dlsym`, with each desktop's `ManagedSpaceID` from the topology; a window that
 belongs on several desktops is added to and taken off Spaces with `CGSAddWindowsToSpaces` and
 `CGSRemoveWindowsFromSpaces`, and without those two it goes to the one the person is on if it is
-among them, else to the first. Without the move calls, or while posters are off (the other desktops
-would show the person's own picture), the animated lock screen owns the desktop, or topology is
+among them, else to the first. Without the move calls, while the animated lock screen owns the desktop, or topology is
 unavailable, every window stays on every Space as before and nothing is kept.
+Poster writing is optional: with it off, prepared windows still stay on their desktops; a desktop
+whose instance is not ready yet shows its original system wallpaper during preparation.
+
+The replica windows share one image per display and repeated wallpaper; they do not load another
+scene, player or web page. Images are read through the existing poster request path, including
+paused/preloaded instances, on preparation, parking, a new active desktop visit, or content/layout
+changes. There is no frame timer or continuous capture. The underlying live window supplies the
+animation on arrival; the still is a captured frame, so it does not promise animation continuity
+between two adjacent desktops sharing a wallpaper that was playing throughout the gesture.
+These frames never become the macOS desktop picture and do not change its Settings switch.
+
+Replicas retain at most 64 MiB of decoded images across displays, sharing each image between its
+windows and downsampling only when that budget requires it. WindowServer/compositor allocations
+are additional; at most 32 replica windows are created, with whole wallpaper groups admitted in
+display/wallpaper order. Beyond that limit, or when capture or Space placement fails, the existing
+live-window/system-picture fallback remains. Captures are serial, with a one-second wait per
+source revision; stale completions cannot restore removed content. Choices, source replacement,
+display removal, memory pressure, unloading, lock-screen ownership and shutdown release unused
+windows and images. Distinct arrangements such as A–B–C–D create no replicas.
 
 ## Pictures of the other desktops
 
@@ -181,9 +229,12 @@ currently applied per-display content.
 
 `WallpaperSpaceMonitor` reads the optional private `CGSCopyManagedDisplaySpaces` entry point and
 decodes `Display Identifier`, `Spaces`, `Current Space` and the current desktop's `ManagedSpaceID`.
-The data shape is private and not guaranteed on every macOS version, so the symbol and decoding are
-optional; no Accessibility permission, synthetic gesture, Space mutation, plist patch or Dock restart
-is used.
+macOS names the primary desktop with an empty `uuid` string (`""`), which `WallpaperSpaceMonitor`
+normalizes to `"default"` so every desktop has a non-empty identity while `DesktopSpaceWallpaperAPI`
+and `DesktopWallpaperLedger` match it to the `""` key in the system wallpaper store and per-Space
+picture calls. The data shape is private and not guaranteed on every macOS version, so the symbol
+and decoding are optional; no Accessibility permission, synthetic gesture, Space mutation, plist
+patch or Dock restart is used.
 
 Poster requests carry a context containing the current visit, assignment and content revision. Scene,
 Web and native-video producers return the context of the original request, and the coordinator rejects
@@ -208,7 +259,7 @@ recreation may not match; those choices remain unavailable until explicitly reas
 events and Focus recovery on successful restore; failed restore journals put that local state back.
 The saved posters are a cache and are not backed up.
 
-Topology, the current `ManagedSpaceID`, shared/independent groups, reordered UUIDs, fullscreen Spaces,
+Topology, the primary desktop's empty UUID (`"default"`), the current `ManagedSpaceID`, shared/independent groups, reordered UUIDs, fullscreen Spaces,
 malformed topology, persistent visits and notification teardown are covered by
 `WallpaperSpaceMonitorTests`, with every desktop's `ManagedSpaceID`; manual overrides, a hand-picked wallpaper becoming the desktop's own,
 unmapped visits, a desktop following Desktop 1, rapid queued switches, paused catch-up, the pending choice and Focus exit while
@@ -217,11 +268,12 @@ the hold and the 30 s ceiling, waiting changes, fullscreen Spaces, late windows,
 calls, stop, windows on the desktops of their wallpaper, a shared wallpaper on several desktops and the
 fallback without the calls for that, hiding only the window that loads, a wallpaper on its way and a
 window hidden before it opens by `WallpaperSpacePinningTests`; the lists each display keeps, memory
-pressure, unloading and refused lists by `WallpaperSpaceParkingTests`; parking a scene that has drawn,
+pressure, unloading, serial preparation without a visit and cancellation while a frame waits by
+`WallpaperSpaceParkingTests`; unvisited window placement before presentation by `WallpaperSpacePinningTests`; parking a scene that has drawn,
 running it again without a job, the same handle, closing on a shorter list, a new size or an unplugged
 display, a global resume and closing everything by the renderer's `space_parking_tests`, and the
-bridge's lists, scene windows and the first-frame wait it skips by `tests::space_parking` and
-`a_wallpaper_the_display_keeps_parked_is_not_awaited`; kept clips and pages by
+bridge's preparation without changing saved assignments, lists, scene windows and the first-frame wait it skips by `tests::space_parking` and
+`a_wallpaper_the_display_keeps_parked_is_not_awaited`; unvisited-scene preparation, promotion and release by `space_preloading::tests`; prepared and kept clips and pages by
 `NativeVideoWallpaperHostTests` and `WebWallpaperHostLifecycleTests`; the start and end of memory
 pressure by `MemoryPressureMonitorTests`; the hold's release and instant drop on a hidden display
 by `WallpaperSwitchHoldTests`; the audit's excuses, a kept window off the active Space among them, by `WallpaperWindowAuditorTests`; scoped writes, saved
@@ -244,6 +296,6 @@ real swipe, since every desktop was covered by windows. A build signed different
 again for System Audio Recording, and an audio-responsive scene waits for that answer before its first
 frame; that is a property of test builds, not of the mode. Multi-display separate Spaces, web and video
 wallpapers on a pinned display, VoiceOver and the chooser's search were not checked on the desktop.
-Keeping each desktop's wallpaper (no intro on return, the kept frame during a swipe, a shared
+Preloading unvisited desktops and keeping each desktop's wallpaper (no intro on return, the kept frame during a swipe, a shared
 wallpaper on several desktops, the extra Space calls, the memory it holds and letting go under real
 memory pressure) has not been watched on a desktop yet.

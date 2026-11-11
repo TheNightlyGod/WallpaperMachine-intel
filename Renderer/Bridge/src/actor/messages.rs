@@ -1,7 +1,7 @@
 use crate::{
     api::{
         BridgeAppSnapshot, BridgeDisplayMode, BridgeDisplayMutationBundle,
-        BridgeError, BridgeLibrarySnapshot, BridgeLockScreenScene,
+        BridgeEngineOptionEdit, BridgeEngineOptionId, BridgeError, BridgeLibrarySnapshot, BridgeLockScreenScene,
         BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgePropertyEdit, BridgePropertyValue,
         BridgeNativeVideoWallpaper, BridgeQualityThrottleCause, BridgeRendererCountersReport,
         BridgeScalingMode, BridgeSettingsSnapshot, BridgeSnapshotBundle, BridgeWallpaperEntry,
@@ -35,6 +35,8 @@ pub struct GetWallpaperPreview {
     pub display_id: String,
     /// Values shown without being saved, made to the draft for this export only.
     pub pending: Vec<BridgePropertyEdit>,
+    /// Per-wallpaper option values shown without being saved, likewise.
+    pub pending_engine_options: Vec<BridgeEngineOptionEdit>,
 }
 
 pub struct GetWebWallpapers;
@@ -57,6 +59,12 @@ pub struct ClearShaderCache;
 /// Asks for the editable options of one wallpaper: its properties, the
 /// per-display switches and the audio switches, with edits not yet applied.
 pub struct GetWallpaperOptionsSnapshot {
+    pub wallpaper_id: String,
+}
+
+/// Asks what reading one installed scene without drawing it needs: its project file, the shared
+/// assets, the shader cache and its saved property choices (not the editor's draft).
+pub struct GetSceneProbeRequest {
     pub wallpaper_id: String,
 }
 
@@ -223,6 +231,8 @@ pub struct PreviewWallpaperProperties {
     pub show: bool,
     /// Values shown without being saved, made to the draft for this call only.
     pub pending: Vec<BridgePropertyEdit>,
+    /// Per-wallpaper option values shown without being saved, likewise.
+    pub pending_engine_options: Vec<BridgeEngineOptionEdit>,
 }
 
 pub struct SetTargetFps {
@@ -261,8 +271,15 @@ pub struct SetDisplayParkedWallpapers {
     pub wallpaper_ids: Vec<String>,
 }
 
+pub struct PreloadDesktopWallpaper { pub display_id: u32, pub wallpaper_id: String }
+pub struct CompleteDesktopPreload { pub display_id: u32, pub wallpaper_id: String, pub succeeded: bool }
+
 pub struct SetAudioSuppressed {
     pub suppressed: bool,
+}
+
+pub struct SetAudioGain {
+    pub gain: f32,
 }
 
 pub struct SetLabelLanguages {
@@ -296,7 +313,15 @@ pub struct SetBatteryQualityProfile {
     pub target_fps: u32,
 }
 
+pub struct SetSceneQuality {
+    pub quality: crate::config::SceneQualityCfg,
+}
+
 pub struct SetSceneOptimizationEnabled {
+    pub enabled: bool,
+}
+
+pub struct SetMetalFxUpscalingEnabled {
     pub enabled: bool,
 }
 
@@ -305,6 +330,10 @@ pub struct SetSceneOnDemandEnabled {
 }
 
 pub struct SetSceneVideoPlaneSamplingEnabled {
+    pub enabled: bool,
+}
+
+pub struct SetSceneDisplayFramingEnabled {
     pub enabled: bool,
 }
 
@@ -398,6 +427,21 @@ pub struct RestoreAllPropertyDefaults {
     pub wallpaper_id: String,
 }
 
+pub struct EditEngineOption {
+    pub wallpaper_id: String,
+    pub option: BridgeEngineOptionId,
+    pub value: BridgePropertyValue,
+}
+
+pub struct RestoreEngineOptionDefault {
+    pub wallpaper_id: String,
+    pub option: BridgeEngineOptionId,
+}
+
+pub struct RestoreAllEngineOptionDefaults {
+    pub wallpaper_id: String,
+}
+
 pub struct ApplyWallpaperOptions {
     pub wallpaper_id: String,
     /// The user chose this (Apply, a click on a tile, Try again), as opposed
@@ -438,6 +482,7 @@ pub type LibrarySnapshotReply = Result<BridgeLibrarySnapshot, BridgeError>;
 pub type MonitorInformationSnapshotReply = Result<BridgeMonitorInformationSnapshot, BridgeError>;
 pub type SettingsSnapshotReply = Result<BridgeSettingsSnapshot, BridgeError>;
 pub type WallpaperOptionsSnapshotReply = Result<BridgeWallpaperOptionsSnapshot, BridgeError>;
+pub type SceneProbeRequestReply = Result<crate::engine::SceneProbeRequest, BridgeError>;
 
 // Replies for the lock screen and web wallpapers, which are listed apart from
 // the library because their hosts consume them through other channels.
@@ -457,6 +502,7 @@ pub type SetDisplayPresentationSuspendedReply = Result<(), BridgeError>;
 pub type SetDisplayParkedWallpapersReply = Result<(), BridgeError>;
 pub type SetPresentationUnloadedReply = AllSnapshotsReply;
 pub type SetAudioSuppressedReply = AllSnapshotsReply;
+pub type SetAudioGainReply = AllSnapshotsReply;
 pub type SetLabelLanguagesReply = Result<(), BridgeError>;
 pub type SetPowerSourceReply = AllSnapshotsReply;
 pub type InitialFrameReadyReply = AllSnapshotsReply;
@@ -470,8 +516,11 @@ pub type SetQualityThrottleReply = AllSnapshotsReply;
 pub type SetBatteryQualityProfileReply = AllSnapshotsReply;
 pub type SetSceneOptimizationEnabledReply = AllSnapshotsReply;
 pub type SetSceneResolutionReply = AllSnapshotsReply;
+pub type SetSceneQualityReply = AllSnapshotsReply;
 pub type SetSceneOnDemandEnabledReply = AllSnapshotsReply;
+pub type SetMetalFxUpscalingEnabledReply = AllSnapshotsReply;
 pub type SetSceneVideoPlaneSamplingEnabledReply = AllSnapshotsReply;
+pub type SetSceneDisplayFramingEnabledReply = AllSnapshotsReply;
 pub type SetWebAudioSubscribedReply = Result<(), BridgeError>;
 pub type AudioRequirementChangedReply = Result<(), BridgeError>;
 pub type SetMediaIntegrationEnabledReply = WallpaperMutationReply;

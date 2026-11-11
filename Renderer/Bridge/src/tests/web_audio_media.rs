@@ -332,6 +332,29 @@ async fn web_output_policy_mute_preserves_saved_mute_and_audio_response() {
 }
 
 #[tokio::test]
+async fn web_output_gain_turns_the_page_down_and_keeps_the_saved_volume() {
+    let engine = FakeEngineFacade::default();
+    let bridge = web_bridge(&engine).await;
+    bridge.play_all().await.unwrap();
+    bridge.set_web_audio_subscribed("300".into(), 7, true).await.unwrap();
+    bridge.set_volume("300".into(), 0.8).await.unwrap();
+
+    bridge.set_audio_gain(0.5).await.unwrap();
+    let wallpaper = bridge.web_wallpapers().await.unwrap().remove(0);
+    assert_eq!(wallpaper.volume, 0.8 * 0.5);
+    assert!(!wallpaper.muted, "turning down is not muting");
+    assert!(!wallpaper.paused);
+    assert_eq!(audio_consumers(&bridge).await, 1);
+
+    let saved = bridge.set_volume("300".into(), 0.6).await.unwrap();
+    assert_eq!(saved.wallpaper_options.volume, 0.6);
+    assert_eq!(bridge.web_wallpapers().await.unwrap()[0].volume, 0.6 * 0.5);
+
+    bridge.set_audio_gain(1.0).await.unwrap();
+    assert_eq!(bridge.web_wallpapers().await.unwrap()[0].volume, 0.6);
+}
+
+#[tokio::test]
 async fn turning_audio_response_off_removes_a_subscribed_web_page_as_a_consumer() {
     let engine = FakeEngineFacade::default();
     let bridge = web_bridge(&engine).await;
@@ -1044,6 +1067,151 @@ async fn video_plane_sampling_defaults_off_and_survives_a_restart() {
     );
 }
 
+#[tokio::test]
+async fn display_framing_defaults_off_and_survives_a_restart() {
+    // The picture is not byte-identical to drawing the whole layout, so it is
+    // off unless asked for; a running scene resizes its targets in place, so
+    // it is pushed straight at the renderer rather than through a rebuild;
+    // and it is pushed back in on the next launch, because the value lives in
+    // C, not in the config the bridge reads.
+    let temp = tempfile::tempdir().unwrap();
+    let store = crate::config::ConfigStore::open(temp.path().to_path_buf());
+    let engine = FakeEngineFacade::default();
+    let bridge = BridgeBuilder::new(engine.clone())
+        .with_config_store(store.clone())
+        .build()
+        .unwrap();
+
+    assert!(
+        !bridge
+            .settings_snapshot()
+            .await
+            .unwrap()
+            .scene_display_framing_enabled,
+        "a framing that moves pixels is opted into"
+    );
+    bridge.bootstrap().await.unwrap();
+    assert_eq!(
+        engine.scene_display_framing_calls().last().copied(),
+        Some(false),
+        "the renderer is told the saved default before anything opens"
+    );
+
+    let rendered = engine.rendered_scenes().len();
+    let snapshot = bridge
+        .set_scene_display_framing_enabled(true)
+        .await
+        .unwrap()
+        .settings;
+    assert!(snapshot.scene_display_framing_enabled);
+    assert!(
+        !snapshot.scene_video_plane_sampling_enabled,
+        "one experimental switch does not turn another on"
+    );
+    assert_eq!(
+        engine.scene_display_framing_calls().last().copied(),
+        Some(true),
+        "the renderer is told directly; a running scene resizes its targets in place"
+    );
+    assert_eq!(
+        engine.rendered_scenes().len(),
+        rendered,
+        "changing it must not reopen, reparse or restart anything"
+    );
+
+    drop(bridge);
+    let restarted_engine = FakeEngineFacade::default();
+    let restarted = BridgeBuilder::new(restarted_engine.clone())
+        .with_config_store(store)
+        .build()
+        .unwrap();
+    assert!(
+        restarted
+            .settings_snapshot()
+            .await
+            .unwrap()
+            .scene_display_framing_enabled
+    );
+    restarted.bootstrap().await.unwrap();
+    assert_eq!(
+        restarted_engine
+            .scene_display_framing_calls()
+            .last()
+            .copied(),
+        Some(true),
+        "a process-wide renderer switch lives in C, so a saved opt-in has to be pushed back in"
+    );
+
+    let snapshot = restarted
+        .set_scene_display_framing_enabled(false)
+        .await
+        .unwrap()
+        .settings;
+    assert!(!snapshot.scene_display_framing_enabled);
+    assert_eq!(
+        restarted_engine
+            .scene_display_framing_calls()
+            .last()
+            .copied(),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn metalfx_upscaling_defaults_off_and_survives_a_restart() {
+    // Like the other process-wide renderer switches: off unless asked for,
+    // pushed straight at the renderer without reopening a scene, and pushed
+    // back in on the next launch because the value lives in C.
+    let temp = tempfile::tempdir().unwrap();
+    let store = crate::config::ConfigStore::open(temp.path().to_path_buf());
+    let engine = FakeEngineFacade::default();
+    let bridge = BridgeBuilder::new(engine.clone())
+        .with_config_store(store.clone())
+        .build()
+        .unwrap();
+
+    assert!(
+        !bridge
+            .settings_snapshot()
+            .await
+            .unwrap()
+            .metalfx_upscaling_enabled,
+        "an extra pass per frame is the user's to choose"
+    );
+
+    let snapshot = bridge
+        .set_metalfx_upscaling_enabled(true)
+        .await
+        .unwrap()
+        .settings;
+    assert!(snapshot.metalfx_upscaling_enabled);
+    assert_eq!(engine.metalfx_upscaling_calls(), vec![true]);
+    assert!(
+        engine.rendered_scenes().is_empty(),
+        "changing it must not reopen, reparse or restart anything"
+    );
+
+    drop(bridge);
+    let restarted_engine = FakeEngineFacade::default();
+    let restarted = BridgeBuilder::new(restarted_engine.clone())
+        .with_config_store(store)
+        .build()
+        .unwrap();
+    assert!(
+        restarted
+            .settings_snapshot()
+            .await
+            .unwrap()
+            .metalfx_upscaling_enabled
+    );
+    restarted.bootstrap().await.unwrap();
+    assert_eq!(
+        restarted_engine.metalfx_upscaling_calls().last().copied(),
+        Some(true),
+        "a saved opt-in has to be pushed back into the renderer"
+    );
+}
+
 /// The tap is rebuilt when the default output device changes. The listener that
 /// reports the change is `CoreAudio` glue and needs a device, so these replay
 /// the worker's decisions through the production handlers and the real
@@ -1053,6 +1221,7 @@ mod output_device_change {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::{Duration, Instant};
 
     use wallpaper_core::media::audio::{
         AudioCaptureBackend, AudioCaptureController, AudioCaptureError, AudioFrameConsumer,
@@ -1063,6 +1232,7 @@ mod output_device_change {
     use crate::engine::{
         AudioCaptureDemand, AudioRestartState, OutputWatchGate, RestartAction,
         apply_audio_capture_demand, handle_audio_restart_retry, handle_output_device_change,
+        handle_tap_stall_check,
     };
 
     struct NullConsumer;
@@ -1079,7 +1249,8 @@ mod output_device_change {
     /// A tap that always has permission and whose next `failing_starts` start
     /// attempts fail, as a start does while the new device is still settling.
     /// The count is shared so a test can change it while the controller owns
-    /// the backend.
+    /// the backend. With `silent_taps`, every tap it starts is counted but
+    /// never called back while the output device runs: a stalled tap.
     #[derive(Default)]
     struct ScriptedBackend {
         running: bool,
@@ -1087,6 +1258,7 @@ mod output_device_change {
         stops: usize,
         start_attempts: usize,
         failing_starts: Arc<AtomicUsize>,
+        silent_taps: bool,
     }
 
     impl AudioCaptureBackend for ScriptedBackend {
@@ -1117,6 +1289,12 @@ mod output_device_change {
         }
         fn is_running(&self) -> bool {
             self.running
+        }
+        fn io_callback_count(&self) -> Option<u64> {
+            (self.silent_taps && self.running).then_some(0)
+        }
+        fn output_device_is_running(&self) -> bool {
+            self.silent_taps
         }
     }
 
@@ -1304,6 +1482,84 @@ mod output_device_change {
             "a healthy tap is left alone"
         );
     }
+
+    /// A web-only session whose taps never call back while the output runs.
+    fn silent_web_only_controller() -> (Controller, Arc<AtomicUsize>) {
+        let backend = ScriptedBackend { silent_taps: true, ..ScriptedBackend::default() };
+        let failing_starts = Arc::clone(&backend.failing_starts);
+        let mut controller = AudioCaptureController::new(Arc::new(NullConsumer), backend);
+        apply_audio_capture_demand(&mut controller, web_demand(false)).unwrap();
+        assert!(controller.watches_tap_stall());
+        (controller, failing_starts)
+    }
+
+    /// The worker's once-a-second checks before the tap has been silent for
+    /// three seconds: none of them rebuilds anything.
+    fn check_first_three_seconds(
+        controller: &mut Controller,
+        state: &mut AudioRestartState,
+        base: Instant,
+    ) {
+        for second in 0..3 {
+            let now = base + Duration::from_secs(second);
+            assert_eq!(handle_tap_stall_check(controller, state, now), RestartAction::Done);
+        }
+        assert_eq!((controller.backend().stops, controller.backend().starts), (0, 1));
+    }
+
+    #[test]
+    fn a_tap_that_stops_calling_back_is_rebuilt() {
+        let (mut controller, _) = silent_web_only_controller();
+        let mut state = AudioRestartState::default();
+        let base = Instant::now();
+        check_first_three_seconds(&mut controller, &mut state, base);
+
+        let action = handle_tap_stall_check(&mut controller, &mut state, base + Duration::from_secs(3));
+
+        assert_eq!(action, RestartAction::Done);
+        assert!(controller.is_capturing());
+        assert_eq!(
+            (controller.backend().stops, controller.backend().starts),
+            (1, 2),
+            "the silent tap is released and a new one started"
+        );
+    }
+
+    #[test]
+    fn a_newer_device_change_supersedes_a_failed_stall_rebuild() {
+        let (mut controller, failing_starts) = silent_web_only_controller();
+        failing_starts.store(2, Ordering::SeqCst);
+        let mut state = AudioRestartState::default();
+        let base = Instant::now();
+        check_first_three_seconds(&mut controller, &mut state, base);
+
+        let RestartAction::RetryIn { delay, generation: stall, attempt } =
+            handle_tap_stall_check(&mut controller, &mut state, base + Duration::from_secs(3))
+        else {
+            panic!("the stall rebuild fails and asks for a retry");
+        };
+        assert_eq!(delay, RESTART_RETRY_DELAYS[0], "it retries on the device-change ladder");
+        // The output device changes before that retry is due, and fails too.
+        let RestartAction::RetryIn { generation: device, .. } =
+            handle_output_device_change(&mut controller, &mut state)
+        else {
+            panic!("the device-change rebuild also fails and asks for a retry");
+        };
+        let attempts = controller.backend().start_attempts;
+
+        assert_eq!(
+            handle_audio_restart_retry(&mut controller, &state, stall, attempt),
+            RestartAction::Done,
+            "the stall rebuild's retry is superseded"
+        );
+        assert_eq!(controller.backend().start_attempts, attempts, "it started nothing");
+        assert_eq!(
+            handle_audio_restart_retry(&mut controller, &state, device, 1),
+            RestartAction::Done
+        );
+        assert!(controller.is_capturing(), "the device change's retry brings the tap back");
+    }
+
     /// A stand-in for the real watcher that counts how many are alive.
     struct LiveWatcher(Arc<AtomicUsize>);
 

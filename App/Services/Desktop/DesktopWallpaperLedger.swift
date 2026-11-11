@@ -200,10 +200,11 @@ final class DesktopWallpaperLedger {
         for target in targets {
             // A key with an empty set holds every Space on that display. The public
             // fallback has no identity and cannot safely accept a Space-specific poster.
-            let otherDesktop = targetSpaces[target.display].map { allowed in target.space.map(allowed.contains) != true } ?? false
+            let desktopID = target.space.map(WallpaperSpaceMonitor.desktopID(for:))
+            let otherDesktop = targetSpaces[target.display].map { allowed in desktopID.map(allowed.contains) != true } ?? false
             // Only a display whose posters are scoped to its desktops takes saved ones.
             let ownPoster = targetSpaces[target.display] == nil ? nil
-                : target.space.flatMap { spacePosters[target.display]?[$0] }
+                : desktopID.flatMap { spacePosters[target.display]?[$0] }
             if otherDesktop, ownPoster == nil { continue }
             let fresh = otherDesktop ? nil : posters[target.display]
             do {

@@ -13,6 +13,9 @@
 /// Creates only private GPU textures and an offscreen layer. No window, no
 /// desktop, no audio device, no screen capture.
 
+#include "support/command_buffer_gpu_time.hpp"
+#include "support/font_assets.hpp"
+#include "support/scene_quality_environment.hpp"
 #include "Runtime/RuntimeImageSource.hpp"
 #include "MetalRender/MetalBackendRouter.hpp"
 #include "MetalRender/MetalCapability.hpp"
@@ -20,6 +23,7 @@
 #include "MetalRender/MetalShaderReflection.hpp"
 #include "MetalRender/MetalVideoSupport.hpp"
 #include "MetalRender/SceneMetalProgram.hpp"
+#include "MetalRender/ScenePassDescription.hpp"
 
 #include "Audio/AudioResponseService.h"
 #include "Audio/SoundManager.h"
@@ -30,6 +34,7 @@
 #include "Project/ProjectProperties.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
 #include "Runtime/VirtualAssetRegistry.hpp"
+#include "Scripting/ScriptEngine.hpp"
 #include "Scene/Scene.h"
 #include "Scene/SceneBackendSelection.hpp"
 #include "Scene/SceneUpdateDemand.hpp"
@@ -44,6 +49,7 @@
 #include "WPShaderValueUpdater.hpp"
 #include "RenderGraph/RenderGraph.hpp"
 #include "RenderCommon/ScenePass.hpp"
+#include "RenderCommon/SceneRaster.hpp"
 #include "RenderCommon/SceneToRenderGraph.hpp"
 #include "RenderCommon/StaticSubgraphCache.hpp"
 #include "Shader/SceneMetalVariants.hpp"
@@ -57,9 +63,11 @@
 #include "synthetic_video.hpp"
 #include "scene_probe_controls.hpp"
 #include "scene_graph_changes.hpp"
+#include "mdl_fixtures.hpp"
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <CommonCrypto/CommonDigest.h>
 
 
 #include <gtest/gtest.h>
@@ -85,7 +93,9 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -114,7 +124,7 @@ std::filesystem::path WriteFixture(const std::filesystem::path& root,
         "attribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n"
         "}\n";
     const std::string fragment =
@@ -194,14 +204,14 @@ std::filesystem::path WriteFeedbackFixture(const std::filesystem::path& root)
           "attribute vec2 a_TexCoord;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
           "  v_TexCoord = a_TexCoord;\n"
           "}\n" },
         { "shaders/feedback_lens.frag",
           "uniform sampler2D g_Texture0;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  vec4 behind = texture(g_Texture0, v_TexCoord);\n"
+          "  vec4 behind = texSample2D(g_Texture0, v_TexCoord);\n"
           "  gl_FragColor = vec4(1.0 - behind.r, behind.g, 1.0 - behind.b, 1.0);\n"
           "}\n" },
         { "layout.json",
@@ -242,14 +252,14 @@ std::filesystem::path WriteHistoryFixture(const std::filesystem::path& root)
           "attribute vec2 a_TexCoord;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
           "  v_TexCoord = a_TexCoord;\n"
           "}\n" },
         { "shaders/history_echo.frag",
           "uniform sampler2D g_Texture0;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_FragColor = vec4(texture(g_Texture0, v_TexCoord).rgb, 1.0);\n"
+          "  gl_FragColor = vec4(texSample2D(g_Texture0, v_TexCoord).rgb, 1.0);\n"
           "}\n" },
         { "layout.json",
           R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
@@ -277,9 +287,13 @@ struct LoadedScene
 };
 
 bool LoadScene(const std::filesystem::path& project, const std::filesystem::path& cache,
-               LoadedScene& out, std::string& error)
+               LoadedScene& out, std::string& error, const WeUserOptions& user_options = {},
+               SceneQuality quality = { .post_processing = static_cast<int>(PostProcessing::Ultra) },
+               std::function<uint32_t(uint32_t)> sample_selector = MetalRender::SelectSampleCountForDevice)
 {
     const auto directory = project.parent_path();
+    // A fixture's text layers need the font materials; the stand-ins fill in where it has none.
+    wallpaper::test::WriteFontAssets(directory);
     if (! out.vfs.Mount("/assets", fs::CreatePhysicalFs(directory.string()), "assets")) {
         error = "assets mount failed";
         return false;
@@ -301,6 +315,11 @@ bool LoadScene(const std::filesystem::path& project, const std::filesystem::path
                                  .scene_id           = "metal-draw-smoke",
                                  .project_path       = project.string(),
                                  .project_properties = &out.properties,
+                                 // Fixtures parse at Ultra post-processing, so an HDR scene keeps
+                                 // its HDR pipeline (the app's default level draws LDR bloom).
+                                 .quality            = quality,
+                                 .user_options       = user_options,
+                                 .select_msaa_samples = std::move(sample_selector),
                              },
                              source->ReadAllStr(), out.vfs, out.sound);
     if (out.scene == nullptr) {
@@ -364,6 +383,13 @@ struct RebuildWatch
     /// one, `rebuilt_at` only the first) and render target resizes.
     int rebuilds { 0 };
     int resizes { 0 };
+    /// Draws whose final composition is wanted on their own, whatever the rest of the run
+    /// does: each draw `sample_at` says yes to is captured through the poster path, waited
+    /// for before the next draw begins, and handed to `sampled` with its index. A draw that
+    /// left the picture as it was has its poster served from that picture, as the host's
+    /// mailbox serves an idle wallpaper's.
+    std::function<bool(int)>                          sample_at;
+    std::function<void(int, const RendererPicture&)> sampled;
 };
 
 /// Draws `scene` with Native Metal on a layer no
@@ -385,7 +411,8 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
                                  double display_scale_factor = 1.0,
                                  tests::SceneProbeControls* input = nullptr,
                                  RendererCounters* counters = nullptr,
-                                 RebuildWatch* watch = nullptr)
+                                 RebuildWatch* watch = nullptr,
+                                 WallpaperScalingMode scaling = WallpaperScalingMode::FILL)
 {
     RendererPicture picture;
     @autoreleasepool {
@@ -440,10 +467,11 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
             return picture;
         }
         // As the host presents a wallpaper: the scaling layout crops the
-        // finished picture to the surface; the camera keeps the canvas's shape,
-        // since the host changes it only for an explicit fill mode, which the
-        // app never sends. Narrowing it too would crop twice.
-        render.SetWallpaperScalingMode(WallpaperScalingMode::FILL);
+        // finished picture to the surface (fill, unless the caller pushes another
+        // mode); the camera keeps the canvas's shape, since the host changes it
+        // only for an explicit fill mode, which the app never sends. Narrowing it
+        // too would crop twice.
+        render.SetWallpaperScalingMode(scaling);
         render.SetWallpaperScalingFactor(1.0);
         render.SetWallpaperFraming(WallpaperFraming {});
         render.SetWallpaperHorizontalFlip(false);
@@ -458,6 +486,8 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
             if (input != nullptr && input->hasInput()) {
                 input->input(scene, static_cast<uint32_t>(frame), render.CursorMapping(scene));
             }
+            // The host's FPS cap is the frame rate these steps stand for.
+            scene.targetFps = static_cast<uint32_t>(std::lround(1.0 / step));
             scene.paritileSys->Emitt();
             if (scene.runtime != nullptr) {
                 scene.runtime->Tick(step);
@@ -501,6 +531,8 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
             }
             const bool looking = watch != nullptr && watch->shown && watch->accepted_at < 0 &&
                                  frame >= watch->look_from;
+            const bool sampling =
+                watch != nullptr && watch->sample_at && watch->sampled && watch->sample_at(frame);
             uint64_t   posters_before = 0;
             {
                 std::lock_guard lock(poster_mutex);
@@ -510,7 +542,10 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
                 final_requested      = true;
                 final_posters_before = posters_before;
             }
-            if (frame == last_frame || looking) wanted = true;
+            if (frame == last_frame || looking || sampling) wanted = true;
+            // The host does this after scripts: visibility and explicit particle
+            // emission/clearing may have changed since the ordinary simulation.
+            scene.paritileSys->RebuildVisibleMeshes();
             if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
             if (! render.drawFrame(scene)) {
                 picture.error = "frame " + std::to_string(frame) + ": " + render.lastError();
@@ -532,8 +567,28 @@ RendererPicture DrawWithRenderer(Scene& scene, uint32_t width, uint32_t height,
                 }
                 if (! seen.rgb.empty() && watch->shown(seen)) watch->accepted_at = frame;
             }
+            if (sampling && picture.error.empty()) {
+                // A draw that encoded nothing new left the request pending: the host serves
+                // that from the picture already made, and so does this.
+                if (wanted.load()) (void)render.ServicePosterRequest(scene);
+                RendererPicture seen;
+                {
+                    std::unique_lock lock(poster_mutex);
+                    if (poster_arrived.wait_for(lock, std::chrono::seconds(30),
+                                                [&] { return posters > posters_before; })) {
+                        seen.rgb    = picture.rgb;
+                        seen.width  = picture.width;
+                        seen.height = picture.height;
+                    }
+                }
+                if (seen.rgb.empty()) {
+                    picture.error = "draw " + std::to_string(frame) + " delivered no picture";
+                } else {
+                    watch->sampled(frame, seen);
+                }
+            }
         }
-        if (final_requested && watch != nullptr && watch->shown) {
+        if (final_requested && watch != nullptr && (watch->shown || watch->sample_at)) {
             // Earlier posters filled the picture already: the last one is waited for, or the
             // run has no picture rather than an old one.
             std::unique_lock lock(poster_mutex);
@@ -560,8 +615,8 @@ rg::TexNode::Desc TexDesc(const std::string& key)
     };
 }
 
-void AddDraw(rg::RenderGraph& graph, SceneNode* node, const std::string& output,
-             const std::vector<std::string>& inputs, bool clear = true)
+rg::DrawPass::Desc& AddDraw(rg::RenderGraph& graph, SceneNode* node, const std::string& output,
+                            const std::vector<std::string>& inputs, bool clear = true)
 {
     const auto* pass = graph.addPass<rg::DrawPass>(
         "draw", rg::PassNode::Type::CustomShader,
@@ -583,6 +638,7 @@ void AddDraw(rg::RenderGraph& graph, SceneNode* node, const std::string& output,
     desc.write_alpha = output != SpecTex_Default;
     desc.clear_on_first_use = clear;
     desc.preserve_target_contents = ! clear;
+    return desc;
 }
 
 void AddCopy(rg::RenderGraph& graph, const std::string& source, const std::string& destination)
@@ -701,7 +757,7 @@ constexpr const char* kStandInVertexShader =
     "uniform mat4 g_ModelViewProjectionMatrix;\n"
     "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
     "varying vec2 v_TexCoord;\n"
-    "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+    "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
     "v_TexCoord=a_TexCoord; }\n";
 
 // Entirely original stand-ins for the materials a scene with `bloom` (and, with
@@ -711,20 +767,20 @@ void WriteBloomStandIns(const std::filesystem::path& root)
 {
     const std::string sample =
         "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-        "void main(){ gl_FragColor=texture(g_Texture0,v_TexCoord); }\n";
+        "void main(){ gl_FragColor=texSample2D(g_Texture0,v_TexCoord); }\n";
     const std::string combine =
         "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\n"
         "varying vec2 v_TexCoord;\nvoid main(){"
-        "gl_FragColor=vec4(texture(g_Texture0,v_TexCoord).rgb+"
-        "texture(g_Texture1,v_TexCoord).rgb,1.0); }\n";
+        "gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).rgb+"
+        "texSample2D(g_Texture1,v_TexCoord).rgb,1.0); }\n";
     const std::string extract =
         "uniform sampler2D g_Texture0;\n"
         "uniform float g_BloomStrength; // {\"material\":\"bloomstrength\",\"default\":1.0}\n"
         "uniform vec4 g_BloomBlendParams;\n"
         "uniform vec3 g_BloomTint; // {\"material\":\"bloomtint\",\"default\":\"1 1 1\"}\n"
         "varying vec2 v_TexCoord;\n"
-        "vec3 bright(vec2 uv){ return max(texture(g_Texture0,uv).rgb-"
-        "vec3(g_BloomBlendParams.x),vec3(0.0)); }\n"
+        "vec3 bright(vec2 uv){ return max(texSample2D(g_Texture0,uv).rgb-"
+        "CAST3(g_BloomBlendParams.x),vec3(0.0, 0.0, 0.0)); }\n"
         "void main(){ gl_FragColor=vec4((bright(v_TexCoord)+"
         "bright(v_TexCoord+vec2(-0.125,0.0))+"
         "bright(v_TexCoord+vec2(0.125,0.0)))*"
@@ -735,15 +791,25 @@ void WriteBloomStandIns(const std::filesystem::path& root)
         { "parsed_upsample",
           "uniform sampler2D g_Texture0;\nuniform float g_BloomScatter;\n"
           "varying vec2 v_TexCoord;\nvoid main(){"
-          "gl_FragColor=vec4(texture(g_Texture0,v_TexCoord).rgb*g_BloomScatter,1.0); }\n" },
+          "gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).rgb*g_BloomScatter,1.0); }\n" },
         { "parsed_combine", combine },
+        { "parsed_hdr_combine",
+          "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\n"
+          "uniform vec4 g_RenderVar0;\nvarying vec2 v_TexCoord;\n"
+          "vec3 lin(vec3 c){return mix(c/12.92,pow((c+0.055)/1.055,vec3(2.4, 2.4, 2.4)),step(vec3(0.04045, 0.04045, 0.04045),c));}\n"
+          "void main(){vec3 c=texSample2D(g_Texture0,v_TexCoord).rgb+texSample2D(g_Texture1,v_TexCoord).rgb;"
+          "gl_FragColor=vec4(lin(max(c,vec3(0.0, 0.0, 0.0)))*g_RenderVar0.x,1.0);}\n" },
+        { "parsed_srgb",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "vec3 lin(vec3 c){return mix(c/12.92,pow((c+0.055)/1.055,vec3(2.4, 2.4, 2.4)),step(vec3(0.04045, 0.04045, 0.04045),c));}\n"
+          "void main(){vec4 c=texSample2D(g_Texture0,v_TexCoord);gl_FragColor=vec4(lin(max(c.rgb,vec3(0.0, 0.0, 0.0))),c.a);}\n" },
         { "parsed_ldr_extract",
           "uniform sampler2D g_Texture0;\n"
           "uniform float g_BloomStrength; // {\"material\":\"bloomstrength\",\"default\":1.0}\n"
           "uniform float g_BloomThreshold; // {\"material\":\"bloomthreshold\",\"default\":0.0}\n"
           "varying vec2 v_TexCoord;\nvoid main(){"
-          "gl_FragColor=vec4(max(texture(g_Texture0,v_TexCoord).rgb-"
-          "vec3(g_BloomThreshold),vec3(0.0))*g_BloomStrength,1.0); }\n" },
+          "gl_FragColor=vec4(max(texSample2D(g_Texture0,v_TexCoord).rgb-"
+          "CAST3(g_BloomThreshold),vec3(0.0, 0.0, 0.0))*g_BloomStrength,1.0); }\n" },
     };
     std::filesystem::create_directories(root / "shaders");
     for (const auto& [name, fragment] : fragments) {
@@ -755,6 +821,11 @@ void WriteBloomStandIns(const std::filesystem::path& root)
     WriteStandInMaterial(root, "materials/util/hdr_upsample.json", "parsed_upsample", { "_rt_default" }, true);
     WriteStandInMaterial(root, "materials/util/combine_hdr_upsample_linear.json", "parsed_combine",
                          { "_rt_default", "_rt_default" });
+    WriteStandInMaterial(root, "materials/util/combine_hdr_upsample.json", "parsed_hdr_combine",
+                         { "_rt_default", "_rt_default" });
+    WriteStandInMaterial(root, "materials/util/combine_dhdr_upsample.json", "parsed_hdr_combine",
+                         { "_rt_default", "_rt_default" });
+    WriteStandInMaterial(root, "materials/util/combine_srgb.json", "parsed_srgb", { "_rt_default" });
     WriteStandInMaterial(root, "materials/util/downsample_quarter_bloom.json", "parsed_ldr_extract",
                          { "_rt_default" });
     WriteStandInMaterial(root, "materials/util/downsample_eighth_blur_v.json", "parsed_sample",
@@ -774,10 +845,10 @@ std::filesystem::path WriteParsedRadianceFixture(const std::filesystem::path& ro
         { "parsed_emitter",
           "uniform sampler2D g_Texture2; // {\"combo\":\"MASKS\",\"components\":[{\"combo\":\"M0\"},{\"combo\":\"M1\"},{\"combo\":\"M2\"},{\"combo\":\"EMISSIVE_MAP\"}]}\n"
           "varying vec2 v_TexCoord;\nvoid main(){\n#if HDR && EMISSIVE_MAP\n"
-          "float radiance=4.0*texture(g_Texture2,v_TexCoord).a;\n#else\nfloat radiance=0.5;\n#endif\n"
+          "float radiance=4.0*texSample2D(g_Texture2,v_TexCoord).a;\n#else\nfloat radiance=0.5;\n#endif\n"
           "gl_FragColor=vec4(v_TexCoord.x<0.5?radiance:0.0,0.0,0.0,1.0); }\n" },
         { "parsed_effect", "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-          "void main(){ gl_FragColor=vec4(texture(g_Texture0,v_TexCoord).rgb*0.5,1.0); }\n" },
+          "void main(){ gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).rgb*0.5,1.0); }\n" },
     };
     for (const auto& [name, fragment] : fragments) {
         std::ofstream(root / ("shaders/" + name + ".vert")) << kStandInVertexShader;
@@ -912,9 +983,19 @@ TEST_F(MetalSceneDraw, ParsedHdrRadianceSurvivesEffectsLayerLinksAndBloom)
                     << key;
             };
             expect_radiance(effect_input, hdr ? 4.0f : 0.5f);
-            expect_radiance(GenLinkTex(1), hdr ? 2.0f : 0.25f);
-            expect_radiance(LayerCompositeTargetKey(2), hdr ? 2.0f : 0.25f);
-            expect_radiance(GenLinkTex(2), hdr ? 2.0f : 0.25f);
+            // Cross-object readers bind the retained composite directly. Verify
+            // their actual inputs and radiance rather than a redundant copy name.
+            for (const int source : {1, 2}) {
+                const auto key = LayerCompositeTargetKey(source);
+                bool sampled = false;
+                for (const auto id : graph->topologicalOrder()) {
+                    const auto* draw = dynamic_cast<const rg::DrawPass*>(graph->getPass(id));
+                    if (draw && std::find(draw->desc().textures.begin(), draw->desc().textures.end(), key) !=
+                                draw->desc().textures.end()) sampled = true;
+                }
+                EXPECT_TRUE(sampled) << key;
+                expect_radiance(key, hdr ? 2.0f : 0.25f);
+            }
 
             std::vector<uint8_t> bytes;
             std::vector<float> radiance;
@@ -953,6 +1034,189 @@ TEST_F(MetalSceneDraw, ParsedHdrRadianceSurvivesEffectsLayerLinksAndBloom)
     }
 }
 
+namespace
+{
+
+// An entirely original stand-in for Wallpaper Engine's `ccsimple` (the per-wallpaper colour
+// options and image filter): the documented COL step -- mix(0.5, c, params.y), then in HSV
+// v *= params.x, s *= params.z, h += params.w -- and the LUT step, mix(c, lut(c), lutparams).
+constexpr const char* kCcsimpleStandIn =
+    "uniform sampler2D g_Texture0;\n"
+    "#if LUT\nuniform sampler3D g_Texture1;\n#endif\n"
+    "uniform vec4 g_Params; // {\"material\":\"params\",\"default\":\"1 1 1 0\"}\n"
+    "uniform float g_LutParams; // {\"material\":\"lutparams\",\"default\":1}\n"
+    "varying vec2 v_TexCoord;\n"
+    "vec3 toHsv(vec3 c){ float hi=max(c.r,max(c.g,c.b)); float d=hi-min(c.r,min(c.g,c.b));\n"
+    "  float h=0.0; if(d>0.0){ if(hi==c.r) h=mod((c.g-c.b)/d,6.0); else if(hi==c.g) h=(c.b-c.r)/d+2.0;\n"
+    "  else h=(c.r-c.g)/d+4.0; h=h/6.0; } return vec3(h, hi>0.0?d/hi:0.0, hi); }\n"
+    "vec3 toRgb(vec3 c){ vec3 p=abs(frac(vec3(c.x,c.x,c.x)+vec3(1.0,2.0/3.0,1.0/3.0))*6.0-3.0);\n"
+    "  return c.z*mix(vec3(1.0,1.0,1.0),clamp(p-1.0,0.0,1.0),c.y); }\n"
+    "void main(){ vec4 c=texSample2D(g_Texture0,v_TexCoord);\n"
+    "#if COL\n c.rgb=mix(vec3(0.5,0.5,0.5),c.rgb,g_Params.y); vec3 h=toHsv(c.rgb);\n"
+    " h.z*=g_Params.x; h.y*=g_Params.z; h.x+=g_Params.w; c.rgb=toRgb(h);\n#endif\n"
+    "#if LUT\n c.rgb=mix(c.rgb,texSample3D(g_Texture1,c.rgb).rgb,g_LutParams);\n#endif\n"
+    " gl_FragColor=c; }\n";
+
+/// A 384x256 canvas filled with flat (0.5, 0.25, 0.25), LDR bloom that adds nothing, the
+/// `ccsimple` stand-in, and `materials/lut/green.tex`: a 2x2x2 LUT that maps every colour to
+/// green.
+std::filesystem::path WriteColourOptionsFixture(const std::filesystem::path& root)
+{
+    const auto project = WriteFixture(root);
+    std::ofstream(root / "shaders/metal_probe.frag")
+        << "varying vec2 v_TexCoord;\nvoid main(){ gl_FragColor=vec4(0.5,0.25,0.25,1.0); }\n";
+    WriteBloomStandIns(root);
+    std::ofstream(root / "shaders/ccsimple_standin.vert") << kStandInVertexShader;
+    std::ofstream(root / "shaders/ccsimple_standin.frag") << kCcsimpleStandIn;
+    WriteStandInMaterial(root, "materials/util/ccsimple.json", "ccsimple_standin", { "_rt_FullFrameBuffer" });
+    {
+        std::filesystem::create_directories(root / "materials/lut");
+        std::ofstream lut(root / "materials/lut/green.tex", std::ios::binary);
+        const auto i32 = [&](int32_t value) { lut.write(reinterpret_cast<const char*>(&value), 4); };
+        lut.write("TEXV0005", 9);
+        lut.write("TEXI0001", 9);
+        i32(0);    // rgba8888
+        i32(0x42); // clamp | volume
+        for (int i = 0; i < 5; ++i) i32(2); // texture and image size, then the depth
+        i32(0);
+        lut.write("TEXB0003", 9);
+        i32(1); i32(-1); i32(1); // one picture, no type, one level
+        i32(2); i32(2); i32(2); i32(0); i32(32); i32(32);
+        for (int voxel = 0; voxel < 8; ++voxel) {
+            const char green[] { 0, char(255), 0, char(255) };
+            lut.write(green, sizeof(green));
+        }
+    }
+    std::ifstream source(root / "layout.json");
+    auto layout = nlohmann::json::parse(source);
+    layout["general"]["bloom"]          = true;
+    layout["general"]["bloomstrength"]  = 1.0;
+    layout["general"]["bloomthreshold"] = 1.0;
+    layout["objects"][0]["scale"]       = { 1.5, 1.4, 1 };
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+/// The scene output's pixel at the canvas centre after one frame.
+std::array<uint8_t, 4> CentreAfterOneFrame(Scene& scene, std::string& error)
+{
+    std::array<uint8_t, 4> pixel {};
+    const auto graph = sceneToRenderGraph(scene);
+    if (graph == nullptr) {
+        error = "no graph";
+        return pixel;
+    }
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device        = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat   = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize  = CGSizeMake(384, 256);
+        MetalRender render;
+        if (! render.init(MetalRenderInitInfo { .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                                                .render_width = 384, .render_height = 256,
+                                                .display_scale_factor = 1.0 }) ||
+            ! render.compileRenderGraph(scene, *graph) || ! render.drawFrame(scene)) {
+            error = render.lastError();
+            if (error.empty()) error = "the frame was not drawn";
+            return pixel;
+        }
+        std::vector<uint8_t> bytes;
+        uint32_t             width = 0, height = 0;
+        if (! render.ReadRenderTargetForTests(scene.ResolveRenderTargetName(SpecTex_Default), bytes, width,
+                                              height)) {
+            error = "the scene output cannot be read";
+        } else {
+            const size_t at = (static_cast<size_t>(height / 2) * width + width / 2) * 4;
+            std::copy_n(bytes.begin() + static_cast<std::ptrdiff_t>(at), 4, pixel.begin());
+        }
+        render.destroy();
+    }
+    return pixel;
+}
+
+} // namespace
+
+// Wallpaper Engine's colour options run after bloom and its combine (sub_14017FA70) with
+// params (pow(brs/50, 2), pow(con/50, .5), pow(sa/50, .5), hue/100 - .5) (sub_140181F30):
+// brightness 60 scales the value by 1.44, so (0.5, 0.25, 0.25) becomes (0.72, 0.36, 0.36).
+TEST_F(MetalSceneDraw, UserColourOptionsRunAfterBloom)
+{
+    const auto directory = root_ / "colour-options";
+    const auto project   = WriteColourOptionsFixture(directory);
+    WeUserOptions options;
+    options.color_enabled = true;
+    options.brightness    = 60.0f;
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error, options)) << error;
+    auto& scene = *loaded.scene;
+    ASSERT_EQ(scene.post_processes.size(), 2u);
+    EXPECT_EQ(scene.post_processes[0]->name, "__bloom");
+    EXPECT_EQ(scene.post_processes[1]->name, "__ccsimple") << "the colour pass follows bloom";
+    ASSERT_NE(scene.color_correction_material, nullptr);
+
+    const auto pixel = CentreAfterOneFrame(scene, error);
+    ASSERT_TRUE(error.empty()) << error;
+    EXPECT_NEAR(pixel[0], 184, 1);
+    EXPECT_NEAR(pixel[1], 92, 1);
+    EXPECT_NEAR(pixel[2], 92, 1);
+}
+
+// The image filter mixes the LUT's colour in by its strength: every colour of `green` is
+// green, so at 50% (0.5, 0.25, 0.25) becomes (0.25, 0.625, 0.125).
+TEST_F(MetalSceneDraw, UserImageFilterMixesItsVolumeLutByItsStrength)
+{
+    const auto directory = root_ / "image-filter";
+    const auto project   = WriteColourOptionsFixture(directory);
+    WeUserOptions options;
+    options.lut          = "green";
+    options.lut_strength = 50.0f;
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error, options)) << error;
+    ASSERT_NE(loaded.scene->color_correction_material, nullptr);
+    EXPECT_TRUE(loaded.scene->ccsimple_shape.lut);
+    EXPECT_FALSE(loaded.scene->ccsimple_shape.col) << "the colour options are off";
+
+    const auto pixel = CentreAfterOneFrame(*loaded.scene, error);
+    ASSERT_TRUE(error.empty()) << error;
+    EXPECT_NEAR(pixel[0], 64, 1);
+    EXPECT_NEAR(pixel[1], 159, 1);
+    EXPECT_NEAR(pixel[2], 32, 1);
+}
+
+// At the identity WE builds no `ccsimple` pass (sub_140181F30 clears it): sliders at 50,
+// a filter of strength 0, or no filter, add nothing.
+TEST_F(MetalSceneDraw, UserColourOptionsAtIdentityAddNoPass)
+{
+    WeUserOptions untouched;
+    untouched.color_enabled = true;
+    WeUserOptions no_strength;
+    no_strength.lut          = "green";
+    no_strength.lut_strength = 0.0f;
+    WeUserOptions switched_off;
+    switched_off.brightness = 80.0f;
+    int run = 0;
+    for (const auto& options : { WeUserOptions {}, untouched, no_strength, switched_off }) {
+        SCOPED_TRACE(run);
+        const auto directory = root_ / ("identity-" + std::to_string(run++));
+        const auto project   = WriteColourOptionsFixture(directory);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error, options)) << error;
+        ASSERT_EQ(loaded.scene->post_processes.size(), 1u);
+        EXPECT_EQ(loaded.scene->post_processes[0]->name, "__bloom");
+        EXPECT_EQ(loaded.scene->color_correction_material, nullptr);
+        EXPECT_EQ(loaded.scene->FindRenderTarget("_rt_ccsimple"), nullptr);
+
+        const auto pixel = CentreAfterOneFrame(*loaded.scene, error);
+        ASSERT_TRUE(error.empty()) << error;
+        EXPECT_NEAR(pixel[0], 128, 1);
+        EXPECT_NEAR(pixel[1], 64, 1);
+        EXPECT_NEAR(pixel[2], 64, 1);
+    }
+}
+
 TEST_F(MetalSceneDraw, HdrBloomWeighsItsLevelsAsWallpaperEngine)
 {
     const auto directory = root_ / "bounded-bloom";
@@ -964,7 +1228,7 @@ TEST_F(MetalSceneDraw, HdrBloomWeighsItsLevelsAsWallpaperEngine)
     std::ofstream(directory / "shaders/parsed_upsample.frag") <<
         "uniform sampler2D g_Texture0;\nuniform float g_BloomScatter;\n"
         "varying vec2 v_TexCoord;\nvoid main(){\n"
-        "gl_FragColor=vec4(texture(g_Texture0,v_TexCoord-vec2(0.125,0)).rgb"
+        "gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord-vec2(0.125,0)).rgb"
         "*g_BloomScatter,1); }\n";
     {
         std::ifstream input(directory / "layout.json");
@@ -1029,6 +1293,129 @@ TEST_F(MetalSceneDraw, HdrBloomWeighsItsLevelsAsWallpaperEngine)
     }
 }
 
+TEST_F(MetalSceneDraw, HdrBloomLevelCountFollowsPhysicalRasterAcrossScaleAndResolution)
+{
+    const auto directory = root_ / "hdr-raster-levels";
+    const auto project = WriteParsedRadianceFixture(directory, true);
+    {
+        std::ifstream input(directory / "layout.json");
+        auto layout = nlohmann::json::parse(input);
+        layout["general"]["bloomhdriterations"] = 8;
+        layout["general"]["bloomhdrstrength"] = 3.0;
+        layout["general"]["bloomhdrscatter"] = 2.0;
+        std::ofstream(directory / "layout.json") << layout;
+    }
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    scene.resolution = SceneResolution::Display;
+    scene.render_scale = 1.0;
+    auto graph = sceneToRenderGraph(scene);
+    ASSERT_NE(graph, nullptr);
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize = CGSizeMake(64, 64);
+        MetalRender render;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 64, .height = 64,
+            .render_width = 64, .render_height = 64, .display_scale_factor = 1.0,
+        }));
+        ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+        const auto check = [&](int levels, int width, int height) {
+            const auto* frame = scene.FindRenderTarget(SpecTex_Default);
+            ASSERT_NE(frame, nullptr);
+            EXPECT_EQ(frame->width, width);
+            EXPECT_EQ(frame->height, height);
+            ASSERT_EQ(scene.post_processes.size(), 1u);
+            const auto& chain = *scene.post_processes.front();
+            EXPECT_EQ(chain.steps.size(), size_t(2 * levels + 1));
+            EXPECT_NE(scene.FindRenderTarget("_rt_hdr_bloom_" + std::to_string(levels - 1)), nullptr);
+            EXPECT_EQ(scene.FindRenderTarget("_rt_hdr_bloom_" + std::to_string(levels)), nullptr);
+            const auto* pass = std::get_if<ScenePostProcessPass>(&chain.steps.front());
+            ASSERT_NE(pass, nullptr);
+            ASSERT_NE(pass->node->Mesh()->Material(), nullptr);
+            const auto& values = pass->node->Mesh()->Material()->customShader.constValues;
+            ASSERT_TRUE(values.contains("g_BloomStrength"));
+            EXPECT_FLOAT_EQ(values.at("g_BloomStrength")[0], 3.0f / (std::pow(2.0f, levels - 2) + 1.0f));
+            ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+        };
+        check(6, 64, 64);
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 0.5, SceneResolution::Display));
+        check(5, 32, 32);
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 0.5, SceneResolution::Canvas));
+        check(7, 192, 128);
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 1.0, SceneResolution::Canvas));
+        check(8, 384, 256);
+        render.destroy();
+    }
+}
+
+TEST_F(MetalSceneDraw, HdrBloomCanGrowPastTheAuthoredCanvasAndRetireItsExtraLevels)
+{
+    const auto directory = root_ / "hdr-small-canvas";
+    const auto project = WriteParsedRadianceFixture(directory, true);
+    {
+        std::ifstream input(directory / "layout.json");
+        auto layout = nlohmann::json::parse(input);
+        layout["general"]["orthogonalprojection"] = {{"width", 64}, {"height", 64}};
+        layout["general"]["bloomhdriterations"] = 12;
+        for (auto& object : layout["objects"]) object["origin"] = {32, 32, 0};
+        std::ofstream(directory / "layout.json") << layout;
+        for (const char* name : {"emitter", "relay", "consumer"}) {
+            const auto path = directory / (std::string("models/") + name + ".json");
+            std::ifstream model_file(path);
+            auto model = nlohmann::json::parse(model_file);
+            model["width"] = 64;
+            model["height"] = 64;
+            std::ofstream(path) << model;
+        }
+    }
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    scene.resolution = SceneResolution::Canvas;
+    scene.render_scale = 1.0;
+    auto graph = sceneToRenderGraph(scene);
+    ASSERT_NE(graph, nullptr);
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize = CGSizeMake(512, 512);
+        MetalRender render;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 512, .height = 512,
+            .render_width = 512, .render_height = 512, .display_scale_factor = 1.0,
+        }));
+        ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+        ASSERT_EQ(scene.post_processes.size(), 1u);
+        EXPECT_EQ(scene.post_processes.front()->steps.size(), 13u);
+        std::weak_ptr<ScenePostProcess> small = scene.post_processes.front();
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 1.0, SceneResolution::Display));
+        EXPECT_TRUE(small.expired());
+        EXPECT_EQ(scene.post_processes.front()->steps.size(), 17u);
+        EXPECT_NE(scene.FindRenderTarget("_rt_hdr_bloom_7"), nullptr);
+        EXPECT_EQ(scene.FindRenderTarget("_rt_hdr_bloom_8"), nullptr);
+        ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+        auto unchanged = scene.post_processes.front();
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 0.75, SceneResolution::Display));
+        EXPECT_EQ(scene.post_processes.front(), unchanged)
+            << "a raster edit inside the same level count retains the existing materials";
+        unchanged.reset();
+        std::weak_ptr<ScenePostProcess> large = scene.post_processes.front();
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 1.0, SceneResolution::Canvas));
+        EXPECT_TRUE(large.expired());
+        EXPECT_EQ(scene.post_processes.front()->steps.size(), 13u);
+        EXPECT_EQ(scene.FindRenderTarget("_rt_hdr_bloom_6"), nullptr);
+        ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+        render.destroy();
+    }
+}
+
 TEST_F(MetalSceneDraw, ParsedHdrMissingLayerSourceRetainsBackendRejection)
 {
     const auto directory = root_ / "missing-hdr-source";
@@ -1059,7 +1446,7 @@ std::filesystem::path WriteComposePaletteFixture(const std::filesystem::path& ro
         "uniform mat4 g_ModelViewProjectionMatrix;\n"
         "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
-        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+        "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
         "v_TexCoord=a_TexCoord; }\n";
     const std::map<std::string, std::string> files {
         { "models/util/composelayer.json",
@@ -1079,7 +1466,7 @@ std::filesystem::path WriteComposePaletteFixture(const std::filesystem::path& ro
         { "shaders/palette_sample.vert", vertex },
         { "shaders/palette_sample.frag",
           "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-          "void main(){ gl_FragColor=texture(g_Texture0,v_TexCoord); }\n" },
+          "void main(){ gl_FragColor=texSample2D(g_Texture0,v_TexCoord); }\n" },
         { "shaders/palette_fill.vert", vertex },
         { "shaders/palette_fill.frag",
           "varying vec2 v_TexCoord;\n"
@@ -1088,8 +1475,8 @@ std::filesystem::path WriteComposePaletteFixture(const std::filesystem::path& ro
         { "shaders/palette_swap.frag",
           "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\n"
           "varying vec2 v_TexCoord;\nvoid main(){\n"
-          "vec4 picture=texture(g_Texture0,v_TexCoord);\n"
-          "vec3 palette=texture(g_Texture1,v_TexCoord).bgr;\n"
+          "vec4 picture=texSample2D(g_Texture0,v_TexCoord);\n"
+          "vec3 palette=texSample2D(g_Texture1,v_TexCoord).bgr;\n"
           "gl_FragColor=vec4(mix(palette,picture.rgb,picture.a),1.0); }\n" },
         { "layout.json",
           R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
@@ -1281,17 +1668,44 @@ TEST_F(MetalSceneDraw, TranslatedAuthorShaderCompilesAndDrawsTheScene)
     }
 }
 
-TEST_F(MetalSceneDraw, MatrixInversesOfEverySizeAreTranslatedAndDrawnExactly)
+TEST_F(MetalSceneDraw, AuthorDefinedMatrixInversesOfEverySizeAreTranslatedAndDrawnExactly)
 {
-    // Naga's MSL writer has no `inverse`, so a stage that inverts a matrix --
-    // the stock perspective-warping effects undo `squareToQuad` in the vertex
-    // stage -- failed to translate and was dropped by this backend. Each size
-    // undoes its own matrix here and the residual is drawn a hundredfold: the
-    // card stays white only if every inverse is right, and one wrong cofactor
-    // sign drives its channel to black.
+    // Wallpaper Engine's HLSL has no builtin inverse; its perspective shaders
+    // declare their own. Keep exercising author functions of all square sizes:
+    // the round-trip residual is drawn a hundredfold, and the card stays white
+    // only when the overloads, matrix indexing and arithmetic are all correct.
+    const char* inverses = R"(
+mat2 inverse(mat2 m) {
+    float d = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    return mat2(m[1][1], -m[0][1], -m[1][0], m[0][0]) / d;
+}
+mat3 inverse(mat3 m) {
+    vec3 a = cross(m[1], m[2]);
+    vec3 b = cross(m[2], m[0]);
+    vec3 c = cross(m[0], m[1]);
+    return transpose(mat3(a, b, c)) / dot(m[0], a);
+}
+mat4 inverse(mat4 m) {
+    // These fixtures have nonzero pivots; column elimination produces the inverse.
+    mat4 result = mat4(1.0);
+    for (int j = 0; j < 4; ++j) {
+        float pivot = m[j][j];
+        m[j] /= pivot;
+        result[j] /= pivot;
+        for (int i = 0; i < 4; ++i) {
+            if (i != j) {
+                float weight = m[i][j];
+                m[i] -= m[j] * weight;
+                result[i] -= result[j] * weight;
+            }
+        }
+    }
+    return result;
+}
+)";
     const auto directory = root_ / "inverse";
     const auto project = WriteFixture(directory);
-    std::ofstream(directory / "shaders/metal_probe.vert") << R"(
+    std::ofstream(directory / "shaders/metal_probe.vert") << inverses << R"(
 uniform mat4 g_ModelViewProjectionMatrix;
 attribute vec3 a_Position;
 attribute vec2 a_TexCoord;
@@ -1299,11 +1713,11 @@ varying float v_Residual3;
 void main() {
     mat3 warp = mat3(1.5, 0.25, 0.125, -0.5, 1.25, 0.375, 0.75, -0.25, 1.0);
     vec3 a = vec3(0.3, -0.6, 0.9);
-    v_Residual3 = distance(inverse(warp) * (warp * a), a);
-    gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);
+    v_Residual3 = distance(mul(mul(a, warp), inverse(warp)), a);
+    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);
 }
 )";
-    std::ofstream(directory / "shaders/metal_probe.frag") << R"(
+    std::ofstream(directory / "shaders/metal_probe.frag") << inverses << R"(
 varying float v_Residual3;
 void main() {
     mat2 shear = mat2(1.25, -0.5, 0.75, 1.5);
@@ -1311,9 +1725,9 @@ void main() {
                       -0.375, 0.5, 1.25, 0.5, 0.25, -0.75, 0.5, 1.0);
     vec2 a = vec2(0.4, -0.7);
     vec4 b = vec4(-0.2, 0.5, 0.8, -0.9);
-    float residual2 = distance(inverse(shear) * (shear * a), a);
-    float residual4 = distance(inverse(frame) * (frame * b), b);
-    gl_FragColor = vec4(vec3(1.0) - 100.0 * vec3(residual2, v_Residual3, residual4), 1.0);
+    float residual2 = distance(mul(mul(a, shear), inverse(shear)), a);
+    float residual4 = distance(mul(mul(b, frame), inverse(frame)), b);
+    gl_FragColor = vec4(vec3(1.0, 1.0, 1.0) - 100.0 * vec3(residual2, v_Residual3, residual4), 1.0);
 }
 )";
     LoadedScene loaded;
@@ -1381,7 +1795,7 @@ vec3 mul(mat3 basis, vec3 color) {
     return color * basis[0][0] + vec3(mul(0.0625, 0.0625), 0.25, 0.5);
 }
 void main() {
-    gl_FragColor = vec4(mul(mat3(0.5), vec3(mul(0.125, 0.125))), 1.0);
+    gl_FragColor = vec4(mul(mat3(0.5), CAST3(mul(0.125, 0.125))), 1.0);
 }
 )";
         LoadedScene loaded;
@@ -1549,14 +1963,76 @@ void main() { gl_FragColor = v_Color; }
     }
 }
 
-TEST_F(MetalSceneDraw, SingleSampleAlphaCoveragePreservesTransparentAndPartialPixels)
+// Metal's own single-sample alpha-to-coverage, without the scene: a fragment's coverage is its
+// alpha thresholded at one half, and a covered fragment is written unblended. Wallpaper Engine's
+// `alphatocoverage` (blend mode 3, `sub_140099F60`) is that state at any sample count, and the
+// translation keeps it at one sample only because this holds (plan Appendix D item 4).
+TEST_F(MetalSceneDraw, MetalSingleSampleAlphaToCoverageThresholdsAtHalf)
+{
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        ASSERT_NE(device, nil);
+        NSString* source = @"#include <metal_stdlib>\nusing namespace metal;\n"
+                            "vertex float4 v(uint id [[vertex_id]]) {\n"
+                            "  float2 p = float2((id << 1) & 2, id & 2);\n"
+                            "  return float4(p * 2.0 - 1.0, 0.0, 1.0);\n}\n"
+                            "fragment float4 f(float4 pos [[position]]) {\n"
+                            "  const float alphas[4] = { 0.25, 0.49, 0.51, 0.75 };\n"
+                            "  return float4(1.0, 0.5, 0.25, alphas[min(uint(pos.x), 3u)]);\n}\n";
+        NSError* error = nil;
+        id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+        ASSERT_NE(library, nil) << error.localizedDescription.UTF8String;
+        MTLRenderPipelineDescriptor* pipe = [MTLRenderPipelineDescriptor new];
+        pipe.vertexFunction                  = [library newFunctionWithName:@"v"];
+        pipe.fragmentFunction                = [library newFunctionWithName:@"f"];
+        pipe.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+        pipe.colorAttachments[0].blendingEnabled = NO;
+        pipe.rasterSampleCount               = 1;
+        pipe.alphaToCoverageEnabled          = YES;
+        id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:pipe error:&error];
+        ASSERT_NE(state, nil) << error.localizedDescription.UTF8String;
+        MTLTextureDescriptor* td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                      width:4
+                                                                                     height:1
+                                                                                  mipmapped:NO];
+        td.usage       = MTLTextureUsageRenderTarget;
+        td.storageMode = MTLStorageModeShared;
+        id<MTLTexture> target = [device newTextureWithDescriptor:td];
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture     = target;
+        pass.colorAttachments[0].loadAction  = MTLLoadActionClear;
+        pass.colorAttachments[0].clearColor  = MTLClearColorMake(0, 0, 0, 0);
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        id<MTLCommandBuffer> commands = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+        [encoder setRenderPipelineState:state];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [encoder endEncoding];
+        [commands commit];
+        [commands waitUntilCompleted];
+        std::array<uint8_t, 16> pixels {};
+        [target getBytes:pixels.data() bytesPerRow:16 fromRegion:MTLRegionMake2D(0, 0, 4, 1) mipmapLevel:0];
+        const std::array<std::array<int, 4>, 4> expected { {
+            { 0, 0, 0, 0 }, { 0, 0, 0, 0 }, { 255, 128, 64, 130 }, { 255, 128, 64, 191 } } };
+        for (std::size_t x = 0; x < 4; ++x) {
+            for (std::size_t c = 0; c < 4; ++c) {
+                EXPECT_NEAR(pixels[x * 4 + c], expected[x][c], 1) << "texel " << x << " channel " << c;
+            }
+        }
+    }
+}
+
+// One sample: a texel whose alpha is below one half is not covered and keeps the background;
+// a covered one is written unblended, at the fragment's own colour.
+TEST_F(MetalSceneDraw, SingleSampleAlphaCoverageWritesCoveredTexelsUnblended)
 {
     const auto project = WriteFixture(root_ / "coverage");
     std::ofstream(project.parent_path() / "materials/tile.json")
         << R"({"passes":[{"shader":"metal_probe","blending":"alphatocoverage","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})";
     std::ofstream(project.parent_path() / "shaders/metal_probe.frag")
         << "varying vec2 v_TexCoord;\nvoid main() {"
-        << "gl_FragColor=vec4(1,0,0,floor(v_TexCoord.x*3.0)*0.5); }\n";
+        << "gl_FragColor=vec4(1,0,0,0.25+floor(v_TexCoord.x*3.0)*0.375); }\n";
     LoadedScene loaded;
     std::string error;
     ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
@@ -1581,7 +2057,7 @@ TEST_F(MetalSceneDraw, SingleSampleAlphaCoveragePreservesTransparentAndPartialPi
                 loaded.scene->ResolveRenderTargetName(SpecTex_Default), pixels, width, height));
             ASSERT_EQ(width, 384u);
             ASSERT_EQ(height, 256u);
-            for (const auto& [x, red] : { std::pair {100, 0}, {192, 128}, {284, 255} }) {
+            for (const auto& [x, red] : { std::pair {100, 0}, {192, 255}, {284, 255} }) {
                 const auto offset = (128 * width + x) * 4;
                 EXPECT_NEAR(pixels[offset], red, 1);
                 EXPECT_EQ(pixels[offset + 1], 0);
@@ -1869,7 +2345,7 @@ void main() {
                 std::ofstream(directory / "shaders/view.vert") << vertex;
                 std::ofstream(directory / "shaders/view.frag") <<
                     "uniform sampler2D g_Texture0;\n" << declarations <<
-                    "void main() {\nvec4 color = texture(g_Texture0, v_TexCoord);\n" << lighting;
+                    "void main() {\nvec4 color = texSample2D(g_Texture0, v_TexCoord);\n" << lighting;
                 layout["objects"][0]["effects"] = nlohmann::json::array({
                     { { "file", "effects/view.json" }, { "visible", true } }
                 });
@@ -1945,7 +2421,7 @@ TEST_F(MetalSceneDraw, ParentedCardsStayJoinedWhileParallaxMovesAndReverses)
                                        directory / "shaders/copy.vert");
             std::ofstream(directory / "shaders/copy.frag") <<
                 "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n";
+                "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n";
             card["effects"] = nlohmann::json::array({{{"file", "effects/copy.json"}}});
         }
         auto right = card;
@@ -2037,7 +2513,7 @@ TEST_F(MetalSceneDraw, AnAnimatedCurtainRevealsTheWholeCanvasAndStaysOpen)
                                        directory / "shaders/copy.vert");
             std::ofstream(directory / "shaders/copy.frag") <<
                 "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                "void main() {\n gl_FragColor = texture(g_Texture0, v_TexCoord);\n}\n";
+                "void main() {\n gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n";
             card["effects"] = nlohmann::json::array({ { { "file", "effects/copy.json" } } });
         }
         std::ofstream(directory / "layout.json") << layout;
@@ -2199,7 +2675,7 @@ TEST_F(MetalSceneDraw, AnAnimatedLayerColourTintsTheLayer)
                                                directory / "shaders/copy.vert");
                     std::ofstream(directory / "shaders/copy.frag") <<
                         "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                        "void main() {\n gl_FragColor = texture(g_Texture0, v_TexCoord);\n}\n";
+                        "void main() {\n gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n";
                     card["effects"] = nlohmann::json::array({ { { "file", "effects/copy.json" } } });
                 }
                 std::ofstream(directory / "layout.json") << layout;
@@ -2244,7 +2720,7 @@ TEST_F(MetalSceneDraw, PuppetEffectsApplyLightingOnceAfterAssembly)
                     const auto str = [&model](const char* value) {
                         model.write(value, std::strlen(value) + 1);
                     };
-                    const uint32_t flags = 0x00800000u | 0x01000000u | 0x00000008u;
+                    const uint32_t flags = 0x00000001u | 0x00800000u | 0x01000000u | 0x00000008u;
                     str("MDLV0021");
                     put(flags); put(uint32_t(1)); put(uint32_t(1));
                     str("materials/tile.json"); put(uint32_t(0));
@@ -2300,9 +2776,9 @@ attribute uvec4 a_BlendIndices;
 void main() {
     vec3 position = a_Position;
 #if SKINNING
-    position = g_Bones[a_BlendIndices.x] * vec4(position, 1.0);
+    position = mul(vec4(position, 1.0), g_Bones[a_BlendIndices.x]);
 #endif
-    gl_Position = g_ModelViewProjectionMatrix * vec4(position, 1.0);
+    gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);
     v_TexCoord = a_TexCoord;
 }
 )";
@@ -2310,7 +2786,7 @@ void main() {
 uniform sampler2D g_Texture0;
 varying vec2 v_TexCoord;
 void main() {
-    vec4 color = texture(g_Texture0, v_TexCoord);
+    vec4 color = texSample2D(g_Texture0, v_TexCoord);
 #if LIGHTING
     color.rgb *= vec3(0.4, 0.6, 0.8);
 #endif
@@ -2373,6 +2849,557 @@ void main() {
                     render.destroy();
                 }
             }
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, SkinningAlphaFadesTheBonesVertices)
+{
+    // A one-bone card whose first mesh flag word has bit 4 (SKINNING_ALPHA, 0x140206AE0) and
+    // whose clip holds a per-bone curve of 0.5 (the MDLA 3 per-bone block, 0x1401FDF90): the
+    // vertex shader reads g_BonesAlpha and the card is drawn at half grey. Without the flag
+    // the combo is off and the card stays white.
+    for (const bool flagged : { false, true }) {
+        SCOPED_TRACE(flagged);
+        const auto directory = root_ / (std::string("skinning-alpha-") + (flagged ? "on" : "off"));
+        const auto project   = WriteFixture(directory);
+        std::string model;
+        const auto  put = [&model](auto value) {
+            model.append(reinterpret_cast<const char*>(&value), sizeof(value));
+        };
+        const auto str = [&model](const char* value) { model.append(value, std::strlen(value) + 1); };
+        const uint32_t flags = 0x00000001u | 0x00800000u | 0x01000000u | 0x00000008u;
+        str("MDLV0021");
+        put(flags); put(uint32_t(1)); put(uint32_t(1));
+        str("materials/tile.json"); put(uint32_t(flagged ? 4 : 0));
+        for (float v : { -128.f, -96.f, 0.f, 128.f, 96.f, 0.f }) put(v);
+        put(flags); put(uint32_t(4 * 52));
+        for (const auto& vertex : std::array<std::array<float, 4>, 4> {{
+                 { -128, -96, 0, 1 }, { 128, -96, 1, 1 }, { 128, 96, 1, 0 }, { -128, 96, 0, 0 } }}) {
+            put(vertex[0]); put(vertex[1]); put(0.f);
+            for (int i = 0; i < 4; ++i) put(uint32_t(0));
+            for (float weight : { 1.f, 0.f, 0.f, 0.f }) put(weight);
+            put(vertex[2]); put(vertex[3]);
+        }
+        put(uint32_t(12));
+        for (uint16_t index : { 0, 1, 2, 0, 2, 3 }) put(index);
+        put(uint8_t(0)); put(uint8_t(0));
+        str("MDLS0001"); put(uint32_t(0)); put(uint16_t(1)); put(uint16_t(0));
+        str("root"); put(int32_t(0)); put(uint32_t(0xFFFFFFFFu)); put(uint32_t(64));
+        for (int col = 0; col < 4; ++col)
+            for (int row = 0; row < 4; ++row) put(row == col ? 1.f : 0.f);
+        str("{}");
+        const std::size_t mdla = model.size();
+        str("MDLA0003"); put(uint32_t(0)); // end offset, patched below
+        put(uint32_t(1));                  // one animation
+        put(int32_t(1)); put(uint32_t(0)); str("fade"); str("loop");
+        put(1.f); put(int32_t(1)); put(int32_t(0)); put(uint32_t(1));
+        put(int32_t(0)); put(uint32_t(72));
+        for (int frame = 0; frame < 2; ++frame)
+            for (float v : { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f }) put(v);
+        put(uint32_t(0));                                       // no translation track
+        put(uint8_t(1)); put(uint32_t(0)); put(uint32_t(8));    // the per-bone curve block
+        put(0.5f); put(0.5f);
+        put(uint32_t(0));                                       // no events
+        const uint32_t end = static_cast<uint32_t>(model.size());
+        std::memcpy(model.data() + mdla + 9, &end, sizeof(end));
+        std::ofstream(directory / "models/card.mdl", std::ios::binary) << model;
+        std::ofstream(directory / "models/tile.json") <<
+            R"({"width":256,"height":192,"material":"materials/tile.json","puppet":"models/card.mdl"})";
+        std::ofstream(directory / "shaders/metal_probe.vert") << R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+attribute vec3 a_Position;
+varying float v_Shade;
+#if SKINNING
+uniform mat4x3 g_Bones[BONECOUNT];
+attribute uvec4 a_BlendIndices;
+#endif
+#if SKINNING_ALPHA
+uniform float g_BonesAlpha[BONECOUNT];
+#endif
+void main() {
+    vec3 position = a_Position;
+    v_Shade = 1.0;
+#if SKINNING
+    position = mul(vec4(position, 1.0), g_Bones[a_BlendIndices.x]);
+#endif
+#if SKINNING_ALPHA
+    v_Shade = g_BonesAlpha[a_BlendIndices.x];
+#endif
+    gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);
+}
+)";
+        std::ofstream(directory / "shaders/metal_probe.frag") <<
+            "varying float v_Shade;\nvoid main() {\n gl_FragColor = vec4(CAST3(v_Shade), 1.0);\n}\n";
+        auto layout = nlohmann::json::parse(std::ifstream(directory / "layout.json"));
+        layout["objects"][0]["animationlayers"] = nlohmann::json::array({
+            { { "animation", 1 }, { "blend", 1.0 }, { "rate", 1.0 }, { "visible", true } } });
+        std::ofstream(directory / "layout.json") << layout;
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        const std::size_t centre = (128u * 384u + 192u) * 3u;
+        for (std::size_t channel = 0; channel < 3; ++channel)
+            EXPECT_NEAR(picture.rgb[centre + channel], flagged ? 128.0 : 255.0, 1.5) << channel;
+    }
+}
+
+namespace
+{
+/// One piece of a masked puppet card: a quad spanning `x0..x1` of the 256 x 192 card at
+/// its full height, drawn red (u 1), green (u 0.5) or blue (u 0) by the probe shader.
+struct MaskPiece { float x0, x1, u; };
+/// A clipping mask of the card: drawn from the pieces `drawn_from`, clipping `clips`, with the
+/// record's flag word `flags` (bit 1 inverts the mask, sub_14020D6A0).
+struct MaskRecord { std::vector<uint32_t> clips, drawn_from; uint32_t flags { 0 }; };
+
+/// A one-bone version-23 puppet whose single mesh holds `pieces` (one part each) and
+/// `masks`, with every clipping mask sampling `materials/mask_half.tex` (red 128). The
+/// project draws it over black with WE's own clipping-mask shader and a probe that
+/// multiplies its alpha by the mask target's red at the screen position
+/// (genericimage4 CLIPPINGTARGET).
+std::filesystem::path WriteMaskedPuppetFixture(const std::filesystem::path& directory,
+                                               const std::vector<MaskPiece>& pieces,
+                                               const std::vector<MaskRecord>& masks,
+                                               uint32_t mask_texel = 0xFF000080u)
+{
+    const auto  project = WriteFixture(directory);
+    std::string model;
+    const auto  put = [&model](auto value) {
+        model.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    const auto str = [&model](const char* value) { model.append(value, std::strlen(value) + 1); };
+    const uint32_t flags = 0x00000001u | 0x00800000u | 0x01000000u | 0x00000008u;
+    str("MDLV0023");
+    put(flags); put(uint32_t(1)); put(uint32_t(1));
+    str("materials/tile.json"); put(uint32_t(0));
+    for (float v : { -128.f, -96.f, 0.f, 128.f, 96.f, 0.f }) put(v);
+    put(flags); put(uint32_t(pieces.size() * 4 * 52));
+    for (const auto& piece : pieces) {
+        for (const auto& corner : std::array<std::array<float, 3>, 4> {{
+                 { piece.x0, -96, 1 }, { piece.x1, -96, 1 }, { piece.x1, 96, 0 }, { piece.x0, 96, 0 } }}) {
+            put(corner[0]); put(corner[1]); put(0.f);
+            for (int i = 0; i < 4; ++i) put(uint32_t(0));
+            for (float weight : { 1.f, 0.f, 0.f, 0.f }) put(weight);
+            put(piece.u); put(corner[2]);
+        }
+    }
+    put(uint32_t(pieces.size() * 12));
+    for (std::size_t p = 0; p < pieces.size(); ++p)
+        for (uint16_t index : { 0, 1, 2, 0, 2, 3 }) put(static_cast<uint16_t>(p * 4 + index));
+    put(uint8_t(1)); put(uint8_t(0));                           // no second uv payload
+    put(uint8_t(1)); put(uint32_t(pieces.size() * 16));         // the parts table
+    for (std::size_t p = 0; p < pieces.size(); ++p) {
+        put(uint32_t(p + 1)); put(uint32_t(0)); put(uint32_t(p * 6)); put(uint32_t(6));
+    }
+    put(uint32_t(masks.size()));
+    for (const auto& mask : masks) {
+        put(uint32_t(7)); put(uint32_t(0)); str("mask_half"); put(mask.flags);
+        for (const auto* list : { &mask.clips, &mask.drawn_from }) {
+            put(uint32_t(list->size()));
+            for (uint32_t part : *list) put(part);
+        }
+    }
+    str("MDLS0001"); put(uint32_t(0)); put(uint16_t(1)); put(uint16_t(0));
+    str("root"); put(int32_t(0)); put(uint32_t(0xFFFFFFFFu)); put(uint32_t(64));
+    for (int col = 0; col < 4; ++col)
+        for (int row = 0; row < 4; ++row) put(row == col ? 1.f : 0.f);
+    str("{}"); str("MDLA0000"); put(uint8_t(0));
+    std::ofstream(directory / "models/card.mdl", std::ios::binary) << model;
+    std::ofstream(directory / "models/tile.json") <<
+        R"({"width":256,"height":192,"material":"materials/tile.json","puppet":"models/card.mdl"})";
+
+    std::filesystem::create_directories(directory / "materials");
+    const auto texture = [&directory](const char* name, uint32_t rgba) {
+        std::ofstream file(directory / "materials" / name, std::ios::binary);
+        const auto put = [&file](uint32_t value) {
+            file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+        };
+        file.write("TEXV0005", 9); file.write("TEXI0001", 9);
+        for (uint32_t value : { 0u, 0u, 1u, 1u, 1u, 1u, 0u }) put(value);
+        file.write("TEXB0001", 9);
+        for (uint32_t value : { 1u, 1u, 1u, 1u, 4u, rgba }) put(value);
+    };
+    texture("white.tex", 0xFFFFFFFFu);
+    texture("mask_half.tex", mask_texel); // red 128 unless the test asks otherwise, alpha 255
+    auto material = nlohmann::json::parse(std::ifstream(directory / "materials/tile.json"));
+    material["passes"][0]["textures"] = { "white" };
+    std::ofstream(directory / "materials/tile.json") << material;
+
+    const std::string vertex = R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+varying vec3 v_ScreenPos;
+#if SKINNING
+uniform mat4x3 g_Bones[BONECOUNT];
+attribute uvec4 a_BlendIndices;
+#endif
+void main() {
+    vec3 position = a_Position;
+#if SKINNING
+    position = mul(vec4(position, 1.0), g_Bones[a_BlendIndices.x]);
+#endif
+    gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);
+    v_TexCoord = a_TexCoord;
+    v_ScreenPos = gl_Position.xyw;
+#ifdef HLSL
+    v_ScreenPos.y = -v_ScreenPos.y;
+#endif
+}
+)";
+    std::ofstream(directory / "shaders/metal_probe.vert") << vertex;
+    std::ofstream(directory / "shaders/metal_probe.frag") << R"(
+uniform sampler2D g_Texture0;
+#if CLIPPINGTARGET
+uniform sampler2D g_Texture8;
+#endif
+varying vec2 v_TexCoord;
+varying vec3 v_ScreenPos;
+void main() {
+    vec4 color = v_TexCoord.x > 0.75 ? vec4(1.0, 0.0, 0.0, 1.0)
+               : (v_TexCoord.x > 0.25 ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(0.0, 0.0, 1.0, 1.0));
+    color.a *= texSample2D(g_Texture0, v_TexCoord).a;
+#if CLIPPINGTARGET
+    vec2 screenUV = (v_ScreenPos.xy / v_ScreenPos.z) * 0.5 + 0.5;
+    color.a *= texSample2D(g_Texture8, screenUV).r;
+#endif
+    gl_FragColor = color;
+}
+)";
+    // Wallpaper Engine's clippingmaskimage4 as shipped, without its alpha-to-coverage branch.
+    std::ofstream(directory / "shaders/clippingmaskimage4.vert") << vertex;
+    std::ofstream(directory / "shaders/clippingmaskimage4.frag") << R"(
+uniform sampler2D g_Texture0;
+uniform sampler2D g_Texture1;
+uniform vec4 g_RenderVar0;
+varying vec2 v_TexCoord;
+void main() {
+    float albedoAlpha = texSample2D(g_Texture0, v_TexCoord.xy).a;
+    float mask = texSample2D(g_Texture1, v_TexCoord.xy).r;
+    vec4 color = vec4(mask, 0.0, 0.0, mix(pow(albedoAlpha, 4), albedoAlpha, mask));
+    color.r *= color.a;
+    color.r = mix(color.r, 1.0 - color.r, g_RenderVar0.x);
+    gl_FragColor = color;
+}
+)";
+    return project;
+}
+
+/// The scene colour at canvas column `x` on the card's middle row.
+std::array<int, 3> CardColourAt(const RendererPicture& picture, uint32_t x)
+{
+    const std::size_t at = (128u * picture.width + x) * 3u;
+    return { picture.rgb[at], picture.rgb[at + 1], picture.rgb[at + 2] };
+}
+} // namespace
+
+TEST_F(MetalSceneDraw, ANestedPuppetMaskIsTheProductOfItsMasks)
+{
+    // sub_140208670 / sub_14020D6A0 (WE 2.8.0.42): mask 1 is drawn from piece 2, which mask
+    // 0 clips, so it is nested in mask 0. For the pieces mask 1 clips WE draws mask 0 cleared
+    // into _rt_FullAlphaMask, mask 1 cleared into _rt_FullAlphaMaskIntermediate, then
+    // `flattexture` (minimalalpha, g_Alpha 1) over the whole mask with DEST_COLOR /
+    // INV_SRC_ALPHA. Both masks are R8 (sub_1401AADB0 format 9), so the sample's alpha is 1
+    // and the mask becomes mask0.r * mask1.r: 0 wherever either mask is empty.
+    // Pieces (card x, canvas x = 192 + x): 0 red over the whole card (clipped by mask 1),
+    // 1 blue on [-128, 64] (drawn unclipped; mask 0 is drawn from it), 2 blue on [-64, 128]
+    // (clipped by mask 0; mask 1 is drawn from it). Each mask texel is red 128.
+    const auto project = WriteMaskedPuppetFixture(
+        root_ / "puppet-nested-mask",
+        { { -128, 128, 1.f }, { -128, 64, 0.f }, { -64, 128, 0.f } },
+        { { { 2 }, { 1 } }, { { 0 }, { 2 } } });
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "puppet-nested-mask" / "cache", loaded, error)) << error;
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 2, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    // m = 128/255 is stored as 128; the product 0.25197 is stored as 64 (0.25098).
+    const struct { uint32_t x; std::array<int, 3> rgb; const char* where; } cells[] = {
+        { 96, { 0, 0, 255 }, "piece 1 only: mask 1 is empty, the red piece is clipped away" },
+        { 192, { 64, 0, 191 }, "both masks: red at 64/255 over blue" },
+        { 288, { 0, 0, 0 }, "piece 2 only: mask 0 is empty, nothing shows" },
+    };
+    for (const auto& cell : cells) {
+        const auto got = CardColourAt(picture, cell.x);
+        for (std::size_t c = 0; c < 3; ++c) EXPECT_NEAR(got[c], cell.rgb[c], 1) << cell.where << " channel " << c;
+    }
+}
+
+TEST_F(MetalSceneDraw, EachPuppetMaskStartsFromAClearedTarget)
+{
+    // sub_14020D6A0 clears the mask target before every mask it draws (op 1 passes a4 = 1),
+    // so a second mask of the same mesh does not keep the first one's shape. Mask 0 is drawn
+    // from piece 2 (blue, [-128, 64]) and clips piece 0 (green, whole card); mask 1 is drawn
+    // from piece 3 (blue, [-64, 128]) and clips piece 1 (red, whole card). Neither nests.
+    const auto project = WriteMaskedPuppetFixture(
+        root_ / "puppet-two-masks",
+        { { -128, 128, 0.5f }, { -128, 128, 1.f }, { -128, 64, 0.f }, { -64, 128, 0.f } },
+        { { { 0 }, { 2 } }, { { 1 }, { 3 } } });
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "puppet-two-masks" / "cache", loaded, error)) << error;
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 2, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    // a = 128/255 over the blue base: green 128 / blue 127, then red 128 over that.
+    const struct { uint32_t x; std::array<int, 3> rgb; const char* where; } cells[] = {
+        { 96, { 0, 128, 127 }, "mask 0 only: green at half, no red" },
+        { 192, { 128, 64, 63 }, "both masks: green, then red, each at half" },
+        { 288, { 128, 0, 127 }, "mask 1 only: red at half, no green" },
+    };
+    for (const auto& cell : cells) {
+        const auto got = CardColourAt(picture, cell.x);
+        for (std::size_t c = 0; c < 3; ++c) EXPECT_NEAR(got[c], cell.rgb[c], 1) << cell.where << " channel " << c;
+    }
+}
+
+TEST_F(MetalSceneDraw, AMaskWhoseRecordSetsBitOneIsInvertedWhereItDraws)
+{
+    // sub_14020D6A0 (WE 2.8.0.42): `v15 = record[+68] & 2` sets ctx+168 -- clippingmaskimage4's
+    // g_RenderVar0.x -- to 1.0, else 0.0, before the mask is drawn; the shader writes
+    // mix(r, 1 - r, g_RenderVar0.x). The flag word is the u32 after the mask's material path
+    // (sub_140261880). Mask 0 is drawn from piece 1 (blue, [-128, 64]) and clips piece 0 (red,
+    // whole card); its texel is red 64. Where the mask is not drawn the target stays cleared,
+    // inverted or not.
+    for (const uint32_t flags : { 0u, 1u, 2u, 3u }) {
+        SCOPED_TRACE(flags);
+        const bool inverted = (flags & 2u) != 0;
+        const auto dir      = root_ / ("puppet-inverted-mask-" + std::to_string(flags));
+        const auto project  = WriteMaskedPuppetFixture(
+            dir, { { -128, 128, 1.f }, { -128, 64, 0.f } }, { { { 0 }, { 1 }, flags } }, 0xFF000040u);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, dir / "cache", loaded, error)) << error;
+        const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 2, 1.0 / 60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        // The mask reads 64/255; inverted 191/255. The red piece at that alpha over blue.
+        const std::array<int, 3> drawn = inverted ? std::array<int, 3> { 191, 0, 64 }
+                                                  : std::array<int, 3> { 64, 0, 191 };
+        const struct { uint32_t x; std::array<int, 3> rgb; const char* where; } cells[] = {
+            { 96, drawn, "inside the mask's piece" },
+            { 288, { 0, 0, 0 }, "outside the mask's piece: cleared, never inverted" },
+        };
+        for (const auto& cell : cells) {
+            const auto got = CardColourAt(picture, cell.x);
+            for (std::size_t c = 0; c < 3; ++c) EXPECT_NEAR(got[c], cell.rgb[c], 1) << cell.where << " channel " << c;
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, APuppetsTextureChannelPaintsItsPictureWhileItsAnimationWeighsItIn)
+{
+    // A one-bone card over a 4x4 white picture, and a texture channel mesh whose quad covers
+    // pixels 1..2 across and 1..3 up of that picture. The animation (1 fps, looping over 3 s)
+    // weighs channel 0 by 0, 1, 1, 0. The channel shader paints (weight, 0, 1) times the
+    // layer's colour (white) and discards where nothing weighs in, so the card's left middle
+    // turns magenta only while the weight is up, and is white again once it falls back,
+    // effects or none.
+    for (bool effect : { false, true }) {
+        SCOPED_TRACE(effect);
+        const auto directory = root_ / (std::string("puppet-channels-") + (effect ? "effect" : "bare"));
+        const auto project   = WriteFixture(directory);
+        std::string model;
+        const auto put = [&model](auto value) {
+            model.append(reinterpret_cast<const char*>(&value), sizeof(value));
+        };
+        const auto str = [&model](const char* value) { model.append(value, std::strlen(value) + 1); };
+        const auto parts = [&](int vertices) {
+            put(uint8_t(1)); put(uint8_t(1)); put(uint16_t(0)); put(uint8_t(0));
+            put(uint32_t(vertices * 12));
+            for (int i = 0; i < vertices; ++i) { put(0.f); put(0.f); put(uint32_t(0)); }
+            put(uint8_t(1)); put(uint32_t(16));
+            for (uint32_t value : { 1u, 0u, 0u, 6u }) put(value);
+        };
+        // Wallpaper Engine files carry the position bit (0x1) in every mesh's vertex flags.
+        const uint32_t skinned = 0x00000001u | 0x00800000u | 0x01000000u | 0x00000008u;
+        const uint32_t channel = 0x00000001u | 0x00800000u | 0x00000020u;
+        str("MDLV0021");
+        put(skinned); put(uint32_t(1)); put(uint32_t(2));
+        str("materials/tile.json"); put(uint32_t(0));
+        for (float v : { -128.f, -96.f, 0.f, 128.f, 96.f, 0.f }) put(v);
+        put(skinned); put(uint32_t(4 * 52));
+        for (const auto& vertex : std::array<std::array<float, 4>, 4> {{
+                 { -128, -96, 0, 1 }, { 128, -96, 1, 1 }, { 128, 96, 1, 0 }, { -128, 96, 0, 0 } }}) {
+            put(vertex[0]); put(vertex[1]); put(0.f);
+            for (int i = 0; i < 4; ++i) put(uint32_t(0));
+            for (float weight : { 1.f, 0.f, 0.f, 0.f }) put(weight);
+            put(vertex[2]); put(vertex[3]);
+        }
+        put(uint32_t(12));
+        for (uint16_t index : { 0, 1, 2, 0, 2, 3 }) put(index);
+        parts(4);
+        str("materials/channels.json"); put(uint32_t(0));
+        for (float v : { 1.f, 1.f, 0.f, 2.f, 3.f, 0.f }) put(v);
+        put(channel); put(uint32_t(4 * 44));
+        for (const auto& vertex : std::array<std::array<float, 4>, 4> {{
+                 { 1, 1, 0, 1 }, { 2, 1, 1, 1 }, { 2, 3, 1, 0 }, { 1, 3, 0, 0 } }}) {
+            put(vertex[0]); put(vertex[1]); put(0.f);
+            for (int i = 0; i < 4; ++i) put(uint32_t(0));
+            put(vertex[2]); put(vertex[3]);
+            put(vertex[0] / 4.f); put(1.f - vertex[1] / 4.f);
+        }
+        put(uint32_t(12));
+        for (uint16_t index : { 0, 1, 2, 0, 2, 3 }) put(index);
+        parts(4);
+        str("MDLS0001"); put(uint32_t(0)); put(uint16_t(1)); put(uint16_t(0));
+        str("root"); put(int32_t(0)); put(uint32_t(0xFFFFFFFFu)); put(uint32_t(64));
+        for (int col = 0; col < 4; ++col)
+            for (int row = 0; row < 4; ++row) put(row == col ? 1.f : 0.f);
+        str("{}");
+        const std::array<float, 4> weights { 0.f, 1.f, 1.f, 0.f };
+        str("MDLA0006");
+        const std::size_t end = model.size();
+        put(uint32_t(0));
+        put(uint32_t(1));
+        put(int32_t(1)); put(uint32_t(0)); str("blink"); str("loop");
+        put(1.f); put(int32_t(weights.size() - 1)); put(int32_t(0)); put(uint32_t(1));
+        put(int32_t(0)); put(uint32_t(36 * weights.size()));
+        for (std::size_t frame = 0; frame < weights.size(); ++frame)
+            for (float v : { 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 1.f, 1.f, 1.f }) put(v);
+        put(uint32_t(1)); put(uint32_t(0)); put(uint32_t(4 * weights.size()));
+        for (float w : weights) put(w);
+        put(uint8_t(0)); put(uint8_t(0));
+        for (int i = 0; i < 6; ++i) put(0.f);
+        put(uint8_t(0)); put(uint32_t(0));
+        const auto block_end = static_cast<uint32_t>(model.size());
+        std::memcpy(model.data() + end, &block_end, sizeof(block_end));
+        put(uint8_t(0));
+        std::ofstream(directory / "models/card.mdl", std::ios::binary) << model;
+        std::ofstream(directory / "models/tile.json") <<
+            R"({"width":256,"height":192,"material":"materials/tile.json","puppet":"models/card.mdl"})";
+        {
+            std::ofstream texture(directory / "materials/white.tex", std::ios::binary);
+            const auto word = [&texture](uint32_t value) {
+                texture.write(reinterpret_cast<const char*>(&value), sizeof(value));
+            };
+            texture.write("TEXV0005", 9); texture.write("TEXI0001", 9);
+            for (uint32_t value : { 0u, 0u, 4u, 4u, 4u, 4u, 0u }) word(value);
+            texture.write("TEXB0001", 9);
+            for (uint32_t value : { 1u, 1u, 4u, 4u, 64u }) word(value);
+            for (int i = 0; i < 16; ++i) word(0xFFFFFFFFu);
+        }
+        std::ofstream(directory / "shaders/metal_probe.vert") << R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+attribute vec3 a_Position;
+attribute vec2 a_TexCoord;
+varying vec2 v_TexCoord;
+#if SKINNING
+uniform mat4x3 g_Bones[BONECOUNT];
+attribute uvec4 a_BlendIndices;
+#endif
+void main() {
+    vec3 position = a_Position;
+#if SKINNING
+    position = mul(vec4(position, 1.0), g_Bones[a_BlendIndices.x]);
+#endif
+    gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);
+    v_TexCoord = a_TexCoord;
+}
+)";
+        std::ofstream(directory / "shaders/metal_probe.frag") << R"(
+uniform sampler2D g_Texture0;
+varying vec2 v_TexCoord;
+void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }
+)";
+        std::ofstream(directory / "shaders/puppettexturechannels.vert") << R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+uniform vec4 g_BlendMap[BLENDROWCOUNT];
+uniform vec4 g_Texture1Resolution;
+attribute vec3 a_Position;
+attribute vec4 a_TexCoordVec4;
+attribute uvec4 a_BlendIndices;
+varying float v_Weight;
+void main() {
+    gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);
+    // The picture's resolution (4) is read here, as the shipped shader scales by it.
+    v_Weight = g_BlendMap[0].x * g_Texture1Resolution.x / 4.0 +
+               0.0 * (a_TexCoordVec4.x + float(a_BlendIndices.x));
+}
+)";
+        std::ofstream(directory / "shaders/puppettexturechannels.frag") << R"(
+uniform vec4 g_Color4;
+uniform sampler2D g_Texture1;
+varying float v_Weight;
+void main() {
+    if (v_Weight <= 0.001) discard;
+    gl_FragColor = (vec4(v_Weight, 0.0, 1.0, 1.0) + 0.0 * texSample2D(g_Texture1, vec2(0.5, 0.5))) * g_Color4;
+}
+)";
+        std::ofstream(directory / "materials/tile.json") <<
+            R"({"passes":[{"shader":"metal_probe","blending":"translucent","cullmode":"nocull",)"
+            R"("depthtest":"disabled","depthwrite":"disabled","textures":["white"]}]})";
+        std::ofstream(directory / "materials/channels.json") <<
+            R"({"passes":[{"shader":"puppettexturechannels","blending":"normal","cullmode":"nocull",)"
+            R"("depthtest":"disabled","depthwrite":"disabled","combos":{"BLENDROWCOUNT":1},)"
+            R"("textures":["white","white"]}]})";
+        auto layout = nlohmann::json::parse(std::ifstream(directory / "layout.json"));
+        layout["objects"][0]["image"]           = "models/tile.json";
+        layout["objects"][0]["animationlayers"] = nlohmann::json::array({
+            { { "id", 9 }, { "name", "blink" }, { "animation", 1 }, { "rate", 1 }, { "blend", 1 },
+              { "visible", true } } });
+        if (effect) {
+            std::filesystem::create_directories(directory / "effects");
+            std::ofstream(directory / "effects/identity.json") <<
+                R"({"name":"identity","passes":[{"material":"materials/identity.json"}]})";
+            std::ofstream(directory / "materials/identity.json") <<
+                R"({"passes":[{"shader":"metal_probe","blending":"translucent","cullmode":"nocull",)"
+                R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})";
+            layout["objects"][0]["effects"] = nlohmann::json::array({
+                { { "file", "effects/identity.json" }, { "visible", true } } });
+        }
+        std::ofstream(directory / "layout.json") << layout;
+
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        const auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        @autoreleasepool {
+            CAMetalLayer* layer = [CAMetalLayer layer];
+            layer.device = MTLCreateSystemDefaultDevice();
+            if (layer.device == nil) GTEST_SKIP() << "no Metal device; the native draw was not exercised";
+            layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize = CGSizeMake(384, 256);
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            }));
+            ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+            // The weight rises over the first second, holds, falls over the third and loops.
+            for (const double time : { 0.0, 0.5, 1.0, 2.5, 3.0, 3.5 }) {
+                SCOPED_TRACE(time);
+                const double looped  = std::fmod(time, 3.0);
+                const double weight  = looped <= 1.0 ? looped : (looped <= 2.0 ? 1.0 : 3.0 - looped);
+                const bool   painted = weight > 0.001;
+                loaded.scene->elapsingTime = time;
+                loaded.scene->shaderValueUpdater->FrameBegin();
+                // The runtime hands texture channels their weights after it poses the puppets.
+                loaded.scene->shaderValueUpdater->UpdateAttachmentsAfterPose();
+                ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+                std::vector<uint8_t> pixels;
+                uint32_t width = 0, height = 0;
+                ASSERT_TRUE(render.ReadRenderTargetForTests(
+                    loaded.scene->ResolveRenderTargetName(SpecTex_Default), pixels, width, height));
+                ASSERT_EQ(width, 384u);
+                ASSERT_EQ(height, 256u);
+                // RGBA: the quad's middle, then a point of the card outside it.
+                const auto at = [&](uint32_t x, uint32_t y) { return &pixels[(y * width + x) * 4]; };
+                const uint8_t* inside  = at(160, 128);
+                const uint8_t* outside = at(240, 128);
+                EXPECT_NEAR(inside[0], painted ? 255.0 * weight : 255.0, 2.0);
+                EXPECT_NEAR(inside[1], painted ? 0.0 : 255.0, 2.0);
+                EXPECT_NEAR(inside[2], 255.0, 2.0);
+                for (int channel = 0; channel < 3; ++channel) EXPECT_NEAR(outside[channel], 255.0, 2.0);
+            }
+            render.destroy();
         }
     }
 }
@@ -2534,7 +3561,8 @@ TEST_F(MetalSceneDraw, APerspectiveLayerIsSeenFromTheEyeDistanceOfTheScenesField
 std::filesystem::path WriteDepthWriteFixture(const std::filesystem::path& root,
                                              std::string_view blending,
                                              std::string_view depthtest,
-                                             std::string_view depthwrite)
+                                             std::string_view depthwrite,
+                                             std::string_view alpha = "0.5")
 {
     const std::string vertex =
         "uniform mat4 g_ModelViewProjectionMatrix;\n"
@@ -2542,7 +3570,7 @@ std::filesystem::path WriteDepthWriteFixture(const std::filesystem::path& root,
         "attribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n"
         "}\n";
     const auto fragment = [](std::string_view colour) {
@@ -2572,7 +3600,7 @@ std::filesystem::path WriteDepthWriteFixture(const std::filesystem::path& root,
         { "materials/near.json", pass("depth_write_near", blending, depthtest, depthwrite) },
         { "materials/far.json", pass("depth_write_far", "normal", "enabled", "disabled") },
         { "shaders/depth_write_near.vert", vertex },
-        { "shaders/depth_write_near.frag", fragment("1.0, 0.0, 0.0, 0.5") },
+        { "shaders/depth_write_near.frag", fragment("1.0, 0.0, 0.0, " + std::string(alpha)) },
         { "shaders/depth_write_far.vert", vertex },
         { "shaders/depth_write_far.frag", fragment("0.0, 0.0, 1.0, 1.0") },
         { "layout.json",
@@ -2589,15 +3617,21 @@ std::filesystem::path WriteDepthWriteFixture(const std::filesystem::path& root,
     return root / "project.json";
 }
 
-TEST_F(MetalSceneDraw, ADepthWritingDrawHidesLaterDraws)
+TEST_F(MetalSceneDraw, OnlyADrawThatDoesNotBlendWritesDepth)
 {
-    // Wallpaper Engine applies a material's `depthwrite` whatever its blending
-    // -- its own depth-tested font materials are translucent and write depth --
-    // so a translucent or additive layer that asks to write depth hides what
-    // is drawn behind it afterwards, its transparent texels included. As in
-    // Direct3D and OpenGL, a draw that does not depth-test writes no depth, and
-    // only a target with a depth attachment has any. The cases also have to
-    // differ from each other, or the check proves nothing.
+    // Wallpaper Engine's device picks its depth-stencil state from the material's
+    // depth words and the draw's blend mode (`sub_140099F60`): a draw that blends
+    // (translucent, additive) writes no depth whatever its material says, so the
+    // farther card drawn after it shows; a `normal` draw or a covered
+    // `alphatocoverage` fragment that asks to write depth hides it. The opaque
+    // and translucent cases follow the cells of the depth probe
+    // (`artifacts/we-parity/probes/depth-probe`, captured in Wallpaper Engine
+    // 2.8.0.42): a nearer card drawn first, a farther depth-tested card after
+    // it. As in Direct3D and OpenGL, a draw that does not depth-test writes no
+    // depth, and only a target with a depth attachment has any. The cases also
+    // have to differ from each other, or the check proves nothing.
+    // Coverage cases straddle half alpha without relying on the exact boundary:
+    // a rejected fragment writes neither colour nor depth.
     struct Case
     {
         const char* name;
@@ -2606,14 +3640,17 @@ TEST_F(MetalSceneDraw, ADepthWritingDrawHidesLaterDraws)
         const char* depthwrite;
         bool        depth;
         bool        hides;
+        const char* alpha { "0.5" };
     };
     const Case cases[] = {
-        { "translucent", "translucent", "enabled", "enabled", true, true },
-        { "additive", "additive", "enabled", "enabled", true, true },
+        { "translucent", "translucent", "enabled", "enabled", true, false },
+        { "additive", "additive", "enabled", "enabled", true, false },
         { "opaque", "normal", "enabled", "enabled", true, true },
-        { "translucent-no-write", "translucent", "enabled", "disabled", true, false },
-        { "translucent-no-test", "translucent", "disabled", "enabled", true, false },
-        { "translucent-no-depth", "translucent", "enabled", "enabled", false, false },
+        { "alphatocoverage", "alphatocoverage", "enabled", "enabled", true, true, "0.75" },
+        { "alphatocoverage-rejected", "alphatocoverage", "enabled", "enabled", true, false, "0.25" },
+        { "alphatocoverage-no-write", "alphatocoverage", "enabled", "disabled", true, false, "0.75" },
+        { "opaque-no-write", "normal", "enabled", "disabled", true, false },
+        { "opaque-no-test", "normal", "disabled", "enabled", true, false },
         { "opaque-no-depth", "normal", "enabled", "enabled", false, false },
     };
     // The far card is 160 x 128 pixels, half of it behind the near card.
@@ -2627,7 +3664,7 @@ TEST_F(MetalSceneDraw, ADepthWritingDrawHidesLaterDraws)
             const std::string name = std::string(c.name);
             const auto        project = WriteDepthWriteFixture(root_ / ("depth-write-" + name),
                                                                c.blending, c.depthtest,
-                                                               c.depthwrite);
+                                                               c.depthwrite, c.alpha);
             LoadedScene loaded;
             std::string error;
             ASSERT_TRUE(LoadScene(project, root_ / ("depth-write-cache-" + name), loaded, error))
@@ -2709,7 +3746,7 @@ std::filesystem::path WriteEffectDepthFixture(const std::filesystem::path& root,
         "attribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n"
         "}\n";
     const auto flat = [](std::string_view colour) {
@@ -2841,7 +3878,7 @@ std::filesystem::path WriteEffectDepthFixture(const std::filesystem::path& root,
             "uniform sampler2D g_Texture0;\n"
             "varying vec2 v_TexCoord;\n"
             "void main() {\n"
-            "  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n"
+            "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
             "}\n";
         files["materials/identity.json"] =
             pass("effect_depth_through", "normal", effect_test, effect_write,
@@ -2863,23 +3900,19 @@ TEST_F(MetalSceneDraw, ALayerDrawnThroughEffectsKeepsItsOwnDepthTestAndWrite)
     // the layer's own blending, depth test and depth write rather than the
     // pass's (its image object copies them from the layer's material onto
     // that pass). A translucent layer authored `depthtest` enabled is hidden
-    // by a nearer opaque model whether or not effects run over it, and one
-    // authored `depthwrite` enabled hides what is drawn behind it afterwards;
-    // neither follows the effect pass's own state. The solid and composition
-    // layers the editor offers with a depth test are image layers too.
+    // by a nearer opaque model whether or not effects run over it, and a
+    // `normal` one authored `depthwrite` enabled hides what is drawn behind it
+    // afterwards; neither follows the effect pass's own state. The solid and
+    // composition layers the editor offers with a depth test are image layers
+    // too.
     //
-    // The write is the exception for a layer that Wallpaper Engine sorts in a
-    // scene that turns `transparentsorting` on. It draws the layers of such a
-    // scene whose material blends (translucent or additive) back to front, so
-    // what their write could hide is drawn before them; this engine draws them
-    // in scene order, where the write cuts a card-shaped hole out of every
-    // farther layer drawn after it -- another star's glow, a HUD ring. The
-    // last pass of such a layer tests depth and writes none, and the farther
-    // card shows through the layer's transparent texels. A layer whose
-    // material is `normal` or `alphatocoverage` is not sorted: it stays in the
-    // scene-order set drawn first, and its write hides the farther card there
-    // as in any scene. Each case is checked at two
-    // points: over the nearer card (x 150) and over the one behind (x 230).
+    // A layer whose last pass blends (translucent or additive) writes no depth
+    // whatever it authors: Wallpaper Engine's device drops the write for every
+    // blended draw (`sub_140099F60`), so a farther card drawn after it shows
+    // through, in a scene that sorts or not. A layer whose material is `normal`
+    // or `alphatocoverage` keeps its write, and it hides the farther card in
+    // either scene. Each case is checked at two points: over the nearer card
+    // (x 150) and over the one behind (x 230).
     enum class Colour { Green, Red, Blue };
     struct Case
     {
@@ -2897,11 +3930,17 @@ TEST_F(MetalSceneDraw, ALayerDrawnThroughEffectsKeepsItsOwnDepthTestAndWrite)
     };
     const Case cases[] = {
         // The reference: a layer with no effects, where the layer's own state is the draw's.
-        { "card-tests-and-writes", "enabled", "enabled", "", "", Colour::Green, Colour::Red },
+        // A translucent layer tests and writes nothing; a `normal` one writes.
+        { "card-tests-and-writes", "enabled", "enabled", "", "", Colour::Green, Colour::Blue },
+        { "normal-card-tests-and-writes", "enabled", "enabled", "", "", Colour::Green,
+          Colour::Red, DepthLayerKind::Card, DepthFixtureScene::Flat, false, "normal" },
         { "card-neither", "disabled", "disabled", "", "", Colour::Red, Colour::Blue },
         // The same layers behind an effect whose pass authors neither.
         { "effect-tests-and-writes", "enabled", "enabled", "disabled", "disabled", Colour::Green,
-          Colour::Red },
+          Colour::Blue },
+        { "normal-effect-tests-and-writes", "enabled", "enabled", "disabled", "disabled",
+          Colour::Green, Colour::Red, DepthLayerKind::Card, DepthFixtureScene::Flat, false,
+          "normal" },
         { "effect-tests-only", "enabled", "disabled", "disabled", "disabled", Colour::Green,
           Colour::Blue },
         { "effect-neither", "disabled", "disabled", "disabled", "disabled", Colour::Red,
@@ -3006,13 +4045,13 @@ TEST_F(MetalSceneDraw, ALayerDrawnThroughEffectsKeepsItsOwnDepthTestAndWrite)
     }
 }
 
-TEST_F(MetalSceneDraw, ADepthTestedDrawCullsTheFacesItsMaterialAsksFor)
+TEST_F(MetalSceneDraw, ADrawCullsTheFacesItsMaterialAsksForWithOrWithoutDepth)
 {
-    // A material's `cullmode` is honoured for every pass into a depth-attached
-    // target -- models, skyboxes, a planet's ring -- with counter-clockwise
-    // front faces, and nothing is culled elsewhere. Drawing both faces of a
-    // ring put its unlit back over its lit front. The cases also have to differ
-    // from each other, or the check proves nothing.
+    // A material's `cullmode` is honoured for every pass -- models, skyboxes, a
+    // planet's ring, and a 2D canvas without depth, as WE culls there too
+    // (ordinary-cull-v1) -- with counter-clockwise front faces. Drawing both faces
+    // of a ring put its unlit back over its lit front. The cases also have to
+    // differ from each other, or the check proves nothing.
     struct Case
     {
         const char* name;
@@ -3061,11 +4100,11 @@ TEST_F(MetalSceneDraw, ADepthTestedDrawCullsTheFacesItsMaterialAsksFor)
         card_pixels[c.name] = card;
     }
     // One side of the card is culled and the other kept, by either cull mode,
-    // and nothing is culled without culling or without depth.
+    // nothing is culled without culling, and depth makes no difference.
     EXPECT_NE(card_pixels["towards-back"] == 0, card_pixels["away-back"] == 0);
     EXPECT_NE(card_pixels["towards-back"] == 0, card_pixels["towards-front"] == 0);
     EXPECT_GT(card_pixels["away-none"], 1000u);
-    EXPECT_GT(card_pixels["away-back-no-depth"], 1000u);
+    EXPECT_EQ(card_pixels["away-back-no-depth"] == 0, card_pixels["away-back"] == 0);
 }
 
 TEST_F(MetalSceneDraw, ALayerIsLitByScenePointAndDirectionalLights)
@@ -3087,8 +4126,8 @@ TEST_F(MetalSceneDraw, ALayerIsLitByScenePointAndDirectionalLights)
                "varying vec2 v_TexCoord;\n"
                "varying vec3 v_WorldPos;\n"
                "void main() {\n"
-               "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
-               "  v_WorldPos = (g_ModelMatrix * vec4(a_Position, 1.0)).xyz;\n"
+               "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+               "  v_WorldPos = (mul(vec4(a_Position, 1.0), g_ModelMatrix)).xyz;\n"
                "  v_TexCoord = a_TexCoord;\n"
                "}\n";
         std::ofstream(root_ / name / "shaders/common_pbr_2.h")
@@ -3105,16 +4144,16 @@ TEST_F(MetalSceneDraw, ALayerIsLitByScenePointAndDirectionalLights)
                "vec3 PointSegmentDelta(vec3 p, vec3 a, vec3 b) { return a - p; }\n";
         std::ofstream(root_ / name / "shaders/metal_probe.frag")
             << "// [COMBO] {\"material\":\"lighting\",\"combo\":\"LIGHTING\",\"default\":0}\n"
-               "#define CAST3(x) vec3(x)\n"
+               "#define CAST3(x) ((vec3)(x))\n"
                "#include \"common_pbr_2.h\"\n"
                "varying vec2 v_TexCoord;\n"
                "varying vec3 v_WorldPos;\n"
                "#require LightingV1\n"
                "void main() {\n"
-               "  vec3 color = vec3(0.0);\n"
+               "  vec3 color = vec3(0.0, 0.0, 0.0);\n"
                "#if LIGHTING\n"
-               "  color = PerformLighting_V1(v_WorldPos, vec3(1.0), vec3(0.0, 0.0, 1.0),\n"
-               "      vec3(0.0, 0.0, 1.0), vec3(1.0), vec3(0.04), 1.0, 0.0);\n"
+               "  color = PerformLighting_V1(v_WorldPos, vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 1.0),\n"
+               "      vec3(0.0, 0.0, 1.0), vec3(1.0, 1.0, 1.0), vec3(0.04, 0.04, 0.04), 1.0, 0.0);\n"
                "#endif\n"
                "  gl_FragColor = vec4(color, 1.0);\n"
                "}\n";
@@ -3158,6 +4197,108 @@ TEST_F(MetalSceneDraw, ALayerIsLitByScenePointAndDirectionalLights)
     EXPECT_NEAR(right[2], 128, 3) << "the directional light did not reach the layer";
 }
 
+TEST_F(MetalSceneDraw, ALitLayerUnderAnEffectIsLitWhereItSits)
+{
+    // Wallpaper Engine draws a lit card under effects unlit into its card and lights
+    // the chain's result once, in a closing `PRELIGHTING` pass placed by the Alt
+    // matrices (0x140206AE0, 0x140209540). Lit in the card instead, the left of the
+    // card would sit near card-local x = -96, out of the red light's reach.
+    RendererPicture picture;
+    {
+        const std::string name = "lit-effect";
+        const auto project = WriteFixture(root_ / name);
+        std::ofstream(root_ / name / "shaders/metal_probe.vert")
+            << "uniform mat4 g_ModelViewProjectionMatrix;\n"
+               "uniform mat4 g_ModelMatrix;\n"
+               "uniform mat4 g_AltModelMatrix;\n"
+               "attribute vec3 a_Position;\n"
+               "attribute vec2 a_TexCoord;\n"
+               "varying vec2 v_TexCoord;\n"
+               "varying vec3 v_WorldPos;\n"
+               "void main() {\n"
+               "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+               "#if PRELIGHTING\n"
+               "  v_WorldPos = (mul(vec4(a_Position, 1.0), g_AltModelMatrix)).xyz;\n"
+               "#else\n"
+               "  v_WorldPos = (mul(vec4(a_Position, 1.0), g_ModelMatrix)).xyz;\n"
+               "#endif\n"
+               "  v_TexCoord = a_TexCoord;\n"
+               "}\n";
+        std::ofstream(root_ / name / "shaders/common_pbr_2.h")
+            << "vec3 ComputePBRLightShadow(vec3 N, vec3 L, vec3 V, vec3 albedo, vec3 lightColor,\n"
+               "    float radius, float exponent, vec3 specularTint, vec3 f0, float roughness,\n"
+               "    float metallic, float shadowFactor) {\n"
+               "  float falloff = clamp(1.0 - length(L) / radius, 0.0, 1.0);\n"
+               "  return albedo * lightColor * pow(falloff, exponent) * max(dot(N, normalize(L)), 0.0);\n"
+               "}\n"
+               "vec3 ComputePBRLightShadowInfinite(vec3 N, vec3 L, vec3 V, vec3 albedo, vec3 lightColor,\n"
+               "    vec3 specularTint, vec3 f0, float roughness, float metallic, float shadowFactor) {\n"
+               "  return albedo * lightColor * max(dot(N, L), 0.0);\n"
+               "}\n"
+               "vec3 PointSegmentDelta(vec3 p, vec3 a, vec3 b) { return a - p; }\n";
+        std::ofstream(root_ / name / "shaders/metal_probe.frag")
+            << "// [COMBO] {\"material\":\"lighting\",\"combo\":\"LIGHTING\",\"default\":0}\n"
+               "#define CAST3(x) ((vec3)(x))\n"
+               "#include \"common_pbr_2.h\"\n"
+               "varying vec2 v_TexCoord;\n"
+               "varying vec3 v_WorldPos;\n"
+               "#require LightingV1\n"
+               "void main() {\n"
+               "  vec3 color = vec3(0.0, 0.0, 0.0);\n"
+               "#if LIGHTING\n"
+               "  color = PerformLighting_V1(v_WorldPos, vec3(1.0, 1.0, 1.0), vec3(0.0, 0.0, 1.0),\n"
+               "      vec3(0.0, 0.0, 1.0), vec3(1.0, 1.0, 1.0), vec3(0.04, 0.04, 0.04), 1.0, 0.0);\n"
+               "#endif\n"
+               "  gl_FragColor = vec4(color, 1.0);\n"
+               "}\n";
+        std::ofstream(root_ / name / "materials/tile.json")
+            << R"({"passes":[{"shader":"metal_probe","blending":"normal","cullmode":"nocull",)"
+               R"("depthtest":"disabled","depthwrite":"disabled","combos":{"LIGHTING":1}}]})";
+        std::filesystem::create_directories(root_ / name / "effects");
+        std::ofstream(root_ / name / "effects/copy.json")
+            << R"({"name":"copy","passes":[{"material":"materials/copy.json"}]})";
+        std::ofstream(root_ / name / "materials/copy.json")
+            << R"({"passes":[{"shader":"copy","textures":[null],"blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})";
+        std::ofstream(root_ / name / "shaders/copy.vert")
+            << "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
+               "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+               "void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);"
+               " v_TexCoord = a_TexCoord; }\n";
+        std::ofstream(root_ / name / "shaders/copy.frag")
+            << "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+               "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n";
+        std::ofstream(root_ / name / "layout.json")
+            << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+               R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0,0,0],)"
+               R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256},)"
+               R"("lightconfig":{"point":1,"directional":1}},)"
+               R"("objects":[{"id":1,"name":"tile","image":"models/tile.json","origin":[192,128,0],)"
+               R"("scale":[1,1,1],"angles":[0,0,0],"visible":true,"effects":[{"file":"effects/copy.json"}]},)"
+               R"({"id":2,"name":"red","light":"lpoint","origin":"96 128 40","color":"1 0 0",)"
+               R"("intensity":1,"radius":90,"exponent":1},)"
+               R"({"id":3,"name":"sky","light":"ldirectional","origin":"0 0 0","angles":"0 1.5707963 0",)"
+               R"("color":"0 0 1","intensity":0.5,"radius":1}]})";
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, root_ / (name + "-cache"), loaded, error)) << error;
+        const auto selection = SelectSceneBackend(*loaded.scene);
+        ASSERT_FALSE(selection.failed()) << selection.failure_reason;
+
+        picture = DrawWithRenderer(*loaded.scene, 384, 256, 1, 1.0 / 60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+    }
+    const auto& rgb = picture.rgb;
+    ASSERT_EQ(rgb.size(), 384u * 256u * 3u);
+    const auto at = [&rgb](std::size_t x, std::size_t y) {
+        const std::size_t i = (y * 384 + x) * 3;
+        return std::array<int, 3> { rgb[i], rgb[i + 1], rgb[i + 2] };
+    };
+    const auto left = at(96, 128);
+    EXPECT_GT(left[0], 100) << "the point light did not light the layer where it sits";
+    EXPECT_NEAR(left[2], 128, 3) << "the directional light did not reach the layer";
+    EXPECT_LT(at(280, 128)[0], 5) << "the point light lit beyond its radius";
+}
+
 /// The fixture's card in constant red times its `g_Color4`, over a scene
 /// cleared to green 0.25, with `object_fields` added to the card. The
 /// `effectpassthrough` material stands in for Wallpaper Engine's: its
@@ -3186,7 +4327,7 @@ std::filesystem::path WriteColorBlendFixture(const std::filesystem::path& root,
            "varying vec2 v_TexCoord;\n"
            "varying vec3 v_ScreenPos;\n"
            "void main() {\n"
-           "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+           "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
            "  v_TexCoord = a_TexCoord;\n"
            "  v_ScreenPos = gl_Position.xyw;\n"
            "}\n";
@@ -3244,13 +4385,13 @@ std::filesystem::path WriteScriptedEffectFixture(const std::filesystem::path& ro
     const std::string vertex =
         "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
         "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n}\n";
     const auto effect = [&](const std::string& name, const std::string& body) {
         file("shaders/" + name + ".vert", vertex);
         file("shaders/" + name + ".frag",
              "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-             "  vec4 c = texture2D(g_Texture0, v_TexCoord);\n  gl_FragColor = " + body + ";\n}\n");
+             "  vec4 c = texSample2D(g_Texture0, v_TexCoord);\n  gl_FragColor = " + body + ";\n}\n");
         file("materials/" + name + ".json",
              R"({"passes":[{"shader":")" + name + R"(","blending":"normal","cullmode":"nocull",)"
              R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})");
@@ -3420,9 +4561,9 @@ std::filesystem::path WriteMediaWidgetFixture(const std::filesystem::path& root,
     file("shaders/area.vert",
          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
          "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-         "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+         "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
          "  v_TexCoord = a_TexCoord;\n}\n");
-    file("shaders/area.frag", "void main() {\n  gl_FragColor = vec4(0.0);\n}\n");
+    file("shaders/area.frag", "void main() {\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);\n}\n");
     file("materials/area.json",
          R"({"passes":[{"shader":"area","blending":"translucent","cullmode":"nocull",)"
          R"("depthtest":"disabled","depthwrite":"disabled"}]})");
@@ -3454,13 +4595,13 @@ std::array<int, 3> RgbAt(const RendererPicture& picture, std::size_t x, std::siz
     return { picture.rgb[i], picture.rgb[i + 1], picture.rgb[i + 2] };
 }
 
-TEST_F(MetalSceneDraw, AMediaWidgetIsHiddenWhileNothingPlays)
+TEST_F(MetalSceneDraw, AMediaWidgetIsShownWhileNoPlayerReports)
 {
-    // Wallpaper Engine tells a scene when nothing plays, and a widget that
-    // hides itself on `PLAYBACK_STOPPED` is gone from the first frame, the
+    // Wallpaper Engine sends a scene no media event until a player reports
+    // (`sub_140171440` only drains real updates), so a widget that hides
+    // itself on `PLAYBACK_STOPPED` stays as its `init` left it -- shown, the
     // cards parented to it with it. This scene has no player and the setting
-    // off, which is how the app starts every wallpaper: it is still a scene
-    // with nothing playing, not one that has not been told.
+    // off, which is how the app starts every wallpaper.
     RendererPicture picture;
     {
         const std::string name    = "media-idle";
@@ -3477,18 +4618,18 @@ TEST_F(MetalSceneDraw, AMediaWidgetIsHiddenWhileNothingPlays)
         EXPECT_EQ(loaded.scene->runtime->scriptErrorCount(), 0u);
     }
     {
-        EXPECT_EQ(RgbAt(picture, 192, 128), (std::array<int, 3> { 0, 0, 0 }))
-            << "the widget's card stayed on screen though nothing plays";
-        EXPECT_NE(RgbAt(picture, 30, 128), (std::array<int, 3> { 0, 0, 0 }))
-            << "the scene drew nothing at all, so the check above says nothing";
+        const auto centre = RgbAt(picture, 192, 128);
+        EXPECT_NEAR(centre[0], 128, 3) << "the widget hid itself though no player reported";
+        EXPECT_NEAR(centre[1], 128, 3);
+        EXPECT_NEAR(centre[2], 64, 3);
     }
 }
 
 TEST_F(MetalSceneDraw, AMediaWidgetShowsWhileSomethingPlays)
 {
     // The counterpart: with a player that is playing, the same widget is on
-    // screen, so the idle state is a default and not a rule. The event comes
-    // before the first frame, as a replay to a scene that has just attached.
+    // screen and the event decides it. The event comes before the first frame,
+    // as a replay to a scene that has just attached.
     RendererPicture picture;
     {
         const std::string name    = "media-playing";
@@ -3513,34 +4654,45 @@ TEST_F(MetalSceneDraw, AMediaWidgetShowsWhileSomethingPlays)
     }
 }
 
-TEST_F(MetalSceneDraw, ANoMusicPlaceholderShowsWhileNothingPlays)
+TEST_F(MetalSceneDraw, ANoMusicPlaceholderStaysHiddenUntilStopped)
 {
     // The other way round: a group that starts hidden and shows itself on
-    // `PLAYBACK_STOPPED` is a "nothing playing" placeholder. It has to appear
-    // on its own, with no player to tell it, which also means a layer the first
-    // graph left out is brought in by a script that runs after the graph.
+    // `PLAYBACK_STOPPED` stays hidden while no player reported, and appears when
+    // a player reports stopped, which also means a layer the first graph left
+    // out is brought in by a script that runs after the graph.
     const std::string placeholder =
         R"({"value":false,"script":"export function mediaPlaybackChanged(event) { )"
         R"(thisLayer.visible = event.state === MediaPlaybackEvent.PLAYBACK_STOPPED; }"})";
-    RendererPicture picture;
-    {
-        const std::string name    = "media-placeholder";
-        const auto        project = WriteMediaWidgetFixture(root_ / name, placeholder);
-        LoadedScene loaded;
-        std::string error;
-        ASSERT_TRUE(LoadScene(project, root_ / (name + "-cache"), loaded, error)) << error;
-        const auto selection = SelectSceneBackend(*loaded.scene);
-        ASSERT_FALSE(selection.failed()) << selection.failure_reason;
+    for (const bool stopped : { false, true }) {
+        SCOPED_TRACE(stopped ? "a player reported stopped" : "no player");
+        RendererPicture picture;
+        {
+            const std::string name    = std::string("media-placeholder-") + (stopped ? "stopped" : "idle");
+            const auto        project = WriteMediaWidgetFixture(root_ / name, placeholder);
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root_ / (name + "-cache"), loaded, error)) << error;
+            const auto selection = SelectSceneBackend(*loaded.scene);
+            ASSERT_FALSE(selection.failed()) << selection.failure_reason;
 
-        picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
-        ASSERT_TRUE(picture.error.empty()) << picture.error;
-        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
-    }
-    {
+            if (stopped) {
+                loaded.scene->runtime->SetMediaIntegrationEnabled(true);
+                loaded.scene->runtime->DispatchMediaEventJson(R"({"type":"mediaPlaybackChanged","state":0})");
+            }
+            picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+            ASSERT_TRUE(picture.error.empty()) << picture.error;
+            ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        }
         const auto centre = RgbAt(picture, 192, 128);
-        EXPECT_NEAR(centre[0], 128, 3) << "the placeholder never appeared though nothing plays";
-        EXPECT_NEAR(centre[1], 128, 3);
-        EXPECT_NEAR(centre[2], 64, 3);
+        if (stopped) {
+            EXPECT_NEAR(centre[0], 128, 3) << "the placeholder never appeared on a stopped player";
+            EXPECT_NEAR(centre[1], 128, 3);
+            EXPECT_NEAR(centre[2], 64, 3);
+        } else {
+            EXPECT_EQ(centre, (std::array<int, 3> { 0, 0, 0 })) << "the placeholder showed with no player";
+            EXPECT_NE(RgbAt(picture, 30, 128), (std::array<int, 3> { 0, 0, 0 }))
+                << "the scene drew nothing at all, so the check above says nothing";
+        }
     }
 }
 
@@ -3561,9 +4713,9 @@ std::filesystem::path WriteLayerColourFixture(const std::filesystem::path& root,
     file("shaders/marker.vert",
          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
          "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-         "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+         "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
          "  v_TexCoord = a_TexCoord;\n}\n");
-    file("shaders/marker.frag", "void main() {\n  gl_FragColor = vec4(1.0);\n}\n");
+    file("shaders/marker.frag", "void main() {\n  gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);\n}\n");
     file("materials/marker.json",
          R"({"passes":[{"shader":"marker","blending":"translucent","cullmode":"nocull",)"
          R"("depthtest":"disabled","depthwrite":"disabled"}]})");
@@ -3683,13 +4835,13 @@ std::filesystem::path WriteLayerAlphaFixture(const std::filesystem::path& root,
     file("shaders/opacity_probe.vert",
          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
          "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-         "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+         "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
          "  v_TexCoord = a_TexCoord;\n}\n");
     file("shaders/opacity_probe.frag",
          "uniform sampler2D g_Texture0;\n"
          "uniform float g_UserAlpha; // {\"material\":\"alpha\",\"default\":1.0}\n"
          "varying vec2 v_TexCoord;\nvoid main() {\n"
-         "  vec4 c = texture2D(g_Texture0, v_TexCoord);\n"
+         "  vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
          "  gl_FragColor = vec4(c.rgb, c.a * g_UserAlpha);\n}\n");
     file("materials/opacity_probe.json",
          R"({"passes":[{"shader":"opacity_probe","blending":"normal","cullmode":"nocull",)"
@@ -3700,7 +4852,7 @@ std::filesystem::path WriteLayerAlphaFixture(const std::filesystem::path& root,
          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
          "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvarying vec3 v_ScreenPos;\n"
          "void main() {\n"
-         "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+         "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
          "  v_TexCoord = a_TexCoord;\n  v_ScreenPos = gl_Position.xyw;\n}\n");
     file("shaders/blend_probe.frag",
          "uniform sampler2D g_Texture0;\nuniform vec4 g_Color4;\n"
@@ -3726,6 +4878,178 @@ std::filesystem::path WriteLayerAlphaFixture(const std::filesystem::path& root,
              std::string(effects_json) + (object_fields.empty() ? "" : ",") +
              std::string(object_fields) + "}]}");
     return project;
+}
+
+namespace
+{
+
+/// The cells of Wallpaper Engine's alpha probe (artifacts/we-render-re/probes/
+/// tools/make_alpha_probe.py) at half size: 120-unit cards on an opaque black
+/// 960x540 scene. A `readback` effect writes vec4(a, a, a, 1) of the buffer it
+/// reads, so a cell's grey level is the alpha its layer or compose buffer held.
+/// "half" is white at alpha 128/255, translucent. The layer models and materials
+/// use the probe's paths: the stock `models/util/composelayer.json` (a translucent
+/// copy of the scene behind) and the probe's passthrough model over the stock
+/// `CLEARALPHA` variant (normal, alpha 0), which is not a compose layer.
+std::filesystem::path WriteAlphaProbeFixture(const std::filesystem::path& root)
+{
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main(){ gl_Position=mul(vec4(a_Position,1.0),g_ModelViewProjectionMatrix);"
+        "v_TexCoord=a_TexCoord; }\n";
+    const std::string compose_vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\nvarying vec3 v_ScreenCoord;\n"
+        "void main(){ v_ScreenCoord=mul(vec4(a_Position,1.0),g_ModelViewProjectionMatrix).xyw;\n"
+        "vec3 position=vec3(a_TexCoord,0.0);\n"
+        "#ifdef HLSL\nposition.y=1.0-position.y; v_ScreenCoord.y=-v_ScreenCoord.y;\n#endif\n"
+        "position.xy=position.xy*2.0-1.0; gl_Position=vec4(position,1.0); v_TexCoord=a_TexCoord; }\n";
+    const std::string compose_fragment =
+        "varying vec2 v_TexCoord;\nvarying vec3 v_ScreenCoord;\n"
+        "uniform sampler2D g_Texture0; // {\"hidden\":true}\n"
+        "void main(){ vec2 t=v_ScreenCoord.xy/v_ScreenCoord.z*vec2(0.5,0.5)+0.5;\n"
+        "gl_FragColor=texSample2D(g_Texture0,t);\n"
+        "#if CLEARALPHA == 1\ngl_FragColor.a=0.0;\n#endif\n}\n";
+    const auto material = [](const std::string& shader, const std::string& blending,
+                             const std::string& extra = {}) {
+        return R"({"passes":[{"shader":")" + shader + R"(","blending":")" + blending +
+               R"(","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled")" + extra +
+               "}]}";
+    };
+    std::map<std::string, std::string> files {
+        { "project.json",
+          R"({"title":"Alpha probe","type":"scene","file":"layout.json","general":{"properties":{}}})" },
+        { "shaders/probe_fill.vert", vertex },
+        { "shaders/probe_white.frag", "void main(){ gl_FragColor=vec4(1.0,1.0,1.0,1.0); }\n" },
+        { "shaders/probe_white.vert", vertex },
+        { "shaders/probe_half.frag",
+          "void main(){ gl_FragColor=vec4(1.0,1.0,1.0,128.0/255.0); }\n" },
+        { "shaders/probe_half.vert", vertex },
+        { "shaders/probe_readback.vert", vertex },
+        { "shaders/probe_readback.frag",
+          "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0; // {\"hidden\":true}\n"
+          "void main(){ vec4 s=texSample2D(g_Texture0,v_TexCoord);"
+          " gl_FragColor=vec4(s.a,s.a,s.a,1.0); }\n" },
+        { "shaders/composelayer.vert", compose_vertex },
+        { "shaders/composelayer.frag", compose_fragment },
+        { "materials/white_translucent.json", material("probe_white", "translucent") },
+        { "materials/half_translucent.json", material("probe_half", "translucent") },
+        { "materials/half_normal.json", material("probe_half", "normal") },
+        { "materials/readback.json", material("probe_readback", "normal", R"(,"textures":[null])") },
+        { "materials/util/composelayer.json",
+          material("composelayer", "translucent", R"(,"textures":["_rt_FullFrameBuffer"])") },
+        { "materials/util/composelayer_clearalpha.json",
+          material("composelayer", "normal",
+                   R"(,"textures":["_rt_FullFrameBuffer"],"combos":{"CLEARALPHA":1})") },
+        { "effects/readback/effect.json",
+          R"({"name":"readback","passes":[{"material":"materials/readback.json"}]})" },
+        { "models/util/composelayer.json",
+          R"({"passthrough":true,"material":"materials/util/composelayer.json"})" },
+        { "models/probe_compose_clearalpha.json",
+          R"({"passthrough":true,"material":"materials/util/composelayer_clearalpha.json"})" },
+    };
+    for (const char* name : { "white_translucent", "half_translucent", "half_normal" }) {
+        files[std::string("models/") + name + ".json"] =
+            std::string(R"({"width":120,"height":120,"material":"materials/)") + name + R"(.json"})";
+    }
+
+    std::string objects;
+    int         next_id = 10;
+    const auto  readback = std::string(R"([{"file":"effects/readback/effect.json","visible":true}])");
+    const auto  add = [&](const std::string& model, int x, int y, int parent, bool effects,
+                          bool copybackground) {
+        const int   id     = ++next_id;
+        std::string object = R"({"id":)" + std::to_string(id) + R"(,"name":"o)" + std::to_string(id) +
+                             R"(","image":"models/)" + model + R"(.json","visible":true,)" +
+                             R"("size":[120,120],"copybackground":)" +
+                             (copybackground ? "true" : "false");
+        if (parent != 0) object += R"(,"parent":)" + std::to_string(parent) + R"(,"origin":[0,0,0])";
+        else object += R"(,"origin":[)" + std::to_string(x) + "," + std::to_string(y) + ",0]";
+        if (effects) object += R"(,"effects":)" + readback;
+        object += "}";
+        objects += (objects.empty() ? "" : ",") + object;
+        return id;
+    };
+    const int c[5] = { 96, 288, 480, 672, 864 };
+    const int r[3] = { 450, 270, 90 };
+    add("white_translucent", c[0], r[0], 0, false, true);                     // A1
+    add("half_translucent", c[1], r[0], 0, false, true);                      // A2
+    add("half_normal", c[2], r[0], 0, false, true);                           // A3
+    add("half_normal", c[3], r[0], 0, true, true);                            // B2
+    add("white_translucent", c[4], r[0], 0, true, true);                      // B3
+    add("half_translucent", c[0], r[1], 0, true, true);                       // B1
+    int parent = add("util/composelayer", c[2], r[1], 0, true, false);        // C1
+    add("half_translucent", 0, 0, parent, false, true);
+    parent = add("util/composelayer", c[3], r[1], 0, true, false);            // C2
+    add("half_translucent", 0, 0, parent, false, true);
+    add("half_translucent", 0, 0, parent, false, true);
+    add("util/composelayer", c[4], r[1], 0, true, false);                     // E2
+    parent = add("probe_compose_clearalpha", c[0], r[2], 0, true, true);      // D1
+    add("half_translucent", 0, 0, parent, false, true);
+    parent = add("probe_compose_clearalpha", c[1], r[2], 0, true, true);      // D2
+    add("half_translucent", 0, 0, parent, false, true);
+    add("half_translucent", 0, 0, parent, false, true);
+    parent = add("util/composelayer", c[2], r[2], 0, true, true);             // D3
+    add("half_translucent", 0, 0, parent, false, true);
+    add("half_translucent", 0, 0, parent, false, true);
+    add("half_translucent", c[3], r[2], 0, false, true);                      // E1 under
+    add("util/composelayer", c[3], r[2], 0, true, true);                      // E1
+    add("util/composelayer", c[4], r[2], 0, true, true);                      // E0
+    files["layout.json"] =
+        R"({"camera":{"center":[0,0,-1],"eye":[0,0,0],"up":[0,1,0]},)"
+        R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearenabled":true,)"
+        R"("clearcolor":[0,0,0],"bloom":false,"hdr":false,"cameraparallax":false,)"
+        R"("orthogonalprojection":{"width":960,"height":540}},"objects":[)" + objects + "]}";
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return root / "project.json";
+}
+
+} // namespace
+
+// Wallpaper Engine 2.8.0.42 blends a translucent draw's alpha with SRC_ALPHA /
+// INV_SRC_ALPHA and draws the children of a layer without copybackground with
+// alpha MAX (sub_140099F60, sub_1401ECB20). Read off its frame of the alpha probe
+// (artifacts/we-render-re/probe-shots/alpha-1.png): two half children of a
+// no-copybackground compose layer leave 128 (not 192), and the clear-alpha and
+// opaque-background compose layers leave As^2 + Ad(1 - As) per child.
+TEST_F(MetalSceneDraw, AlphaProbeCellsMatchWallpaperEngine)
+{
+    const auto  project = WriteAlphaProbeFixture(root_ / "alpha-probe");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "alpha-probe-cache", loaded, error)) << error;
+    const auto selection = SelectSceneBackend(*loaded.scene);
+    ASSERT_FALSE(selection.failed()) << selection.failure_reason;
+    const auto picture = DrawWithRenderer(*loaded.scene, 960, 540, 2, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 960u * 540u * 3u);
+
+    struct Cell {
+        const char* name;
+        int         x, y, grey;
+    };
+    // Every value is the cell centre of Wallpaper Engine's frame.
+    const Cell cells[] = {
+        { "A1", 96, 450, 255 },  { "A2", 288, 450, 128 }, { "A3", 480, 450, 255 },
+        { "B2", 672, 450, 128 }, { "B3", 864, 450, 255 }, { "B1", 96, 270, 128 },
+        { "C1", 480, 270, 128 }, { "C2", 672, 270, 128 }, { "E2", 864, 270, 0 },
+        { "D1", 96, 90, 64 },    { "D2", 288, 90, 96 },   { "D3", 480, 90, 159 },
+        { "E1", 672, 90, 255 },  { "E0", 864, 90, 255 },
+    };
+    for (const Cell& cell : cells) {
+        const auto rgb = RgbAt(picture, static_cast<std::size_t>(cell.x),
+                               static_cast<std::size_t>(540 - cell.y));
+        for (int channel : rgb)
+            EXPECT_NEAR(channel, cell.grey, 1)
+                << "cell " << cell.name << " is " << rgb[0] << "," << rgb[1] << "," << rgb[2];
+    }
 }
 
 /// `frames` frames of the layer-alpha fixture, 384 x 256. A picture with an
@@ -3954,11 +5278,11 @@ std::filesystem::path WriteComposeAlphaFixture(const std::filesystem::path& root
     file("shaders/compose_sample.vert",
          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
          "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-         "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+         "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
          "  v_TexCoord = a_TexCoord;\n}\n");
     file("shaders/compose_sample.frag",
          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-         "void main() {\n  gl_FragColor = texture(g_Texture0, v_TexCoord);\n}\n");
+         "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
     file("layout.json",
          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0,0.25,0],)"
@@ -4038,30 +5362,30 @@ TEST_F(MetalSceneDraw, ACompositingEffectSeesTheScreenUpright)
         const std::string vertex =
             "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
             "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-            "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+            "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
             "  v_TexCoord = a_TexCoord;\n}\n";
         file("shaders/metal_probe.frag",
              "varying vec2 v_TexCoord;\nvoid main() {\n  gl_FragColor = v_TexCoord.y < 0.5 ? "
              "vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 0.0, 1.0, 1.0);\n}\n");
         file("shaders/clear_probe.vert", vertex);
-        file("shaders/clear_probe.frag", "void main() {\n  gl_FragColor = vec4(0.0);\n}\n");
+        file("shaders/clear_probe.frag", "void main() {\n  gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0);\n}\n");
         file("shaders/through.vert", vertex);
         file("shaders/through.frag",
              "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-             "void main() {\n  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n}\n");
+             "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
         file("shaders/composebg.vert",
              "uniform mat4 g_ModelViewProjectionMatrix;\nuniform mat4 g_EffectModelViewProjectionMatrix;\n"
              "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
              "varying vec3 v_ScreenCoord;\nvoid main() {\n"
-             "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+             "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
              "  v_TexCoord = a_TexCoord;\n"
-             "  v_ScreenCoord = (g_EffectModelViewProjectionMatrix * vec4(a_Position, 1.0)).xyw;\n"
+             "  v_ScreenCoord = (mul(vec4(a_Position, 1.0), g_EffectModelViewProjectionMatrix)).xyw;\n"
              "#if HLSL\n  v_ScreenCoord.y = -v_ScreenCoord.y;\n#endif\n}\n");
         file("shaders/composebg.frag",
              "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\nvarying vec2 v_TexCoord;\n"
-             "varying vec3 v_ScreenCoord;\nvoid main() {\n  vec4 layer = texture2D(g_Texture0, v_TexCoord);\n"
+             "varying vec3 v_ScreenCoord;\nvoid main() {\n  vec4 layer = texSample2D(g_Texture0, v_TexCoord);\n"
              "  vec2 uv = v_ScreenCoord.xy / v_ScreenCoord.z * 0.5 + 0.5;\n"
-             "  gl_FragColor = vec4(mix(texture2D(g_Texture1, uv).rgb, layer.rgb, layer.a), 1.0);\n}\n");
+             "  gl_FragColor = vec4(mix(texSample2D(g_Texture1, uv).rgb, layer.rgb, layer.a), 1.0);\n}\n");
         const std::string pass =
             R"("cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled")";
         file("materials/clear.json",
@@ -4139,7 +5463,7 @@ TEST_F(MetalSceneDraw, AFullscreenLayerCoversTheScreenWhereverItsGroupSits)
             const std::string vertex =
                 "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
                 "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-                "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+                "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
                 "  v_TexCoord = a_TexCoord;\n}\n";
             file("shaders/quadrants.vert", vertex);
             file("shaders/quadrants.frag",
@@ -4150,7 +5474,7 @@ TEST_F(MetalSceneDraw, AFullscreenLayerCoversTheScreenWhereverItsGroupSits)
             file("shaders/through.vert", vertex);
             file("shaders/through.frag",
                  "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                 "void main() {\n  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n}\n");
+                 "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
             const std::string pass =
                 R"("cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled")";
             file("materials/quadrants.json",
@@ -4286,7 +5610,7 @@ TEST_F(MetalSceneDraw, TheChildrenOfAFullscreenLayerAreSavedAgainstItsOwnTransfo
             const std::string vertex =
                 "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
                 "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-                "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+                "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
                 "  v_TexCoord = a_TexCoord;\n}\n";
             file("shaders/quadrants.vert", vertex);
             file("shaders/quadrants.frag",
@@ -4297,7 +5621,7 @@ TEST_F(MetalSceneDraw, TheChildrenOfAFullscreenLayerAreSavedAgainstItsOwnTransfo
             file("shaders/through.vert", vertex);
             file("shaders/through.frag",
                  "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                 "void main() {\n  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n}\n");
+                 "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
             const std::string pass =
                 R"("cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled")";
             file("materials/quadrants.json",
@@ -4389,7 +5713,7 @@ TEST_F(MetalSceneDraw, TheEffectsOfAFullscreenLayerReachItsChildren)
         const std::string vertex =
             "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
             "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-            "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+            "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
             "  v_TexCoord = a_TexCoord;\n}\n";
         file("shaders/quadrants.vert", vertex);
         file("shaders/quadrants.frag",
@@ -4400,7 +5724,7 @@ TEST_F(MetalSceneDraw, TheEffectsOfAFullscreenLayerReachItsChildren)
         file("shaders/redonly.vert", vertex);
         file("shaders/redonly.frag",
              "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-             "void main() {\n  vec4 c = texture2D(g_Texture0, v_TexCoord);\n"
+             "void main() {\n  vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
              "  gl_FragColor = vec4(c.r, 0.0, 0.0, 1.0);\n}\n");
         const std::string pass =
             R"("cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled")";
@@ -4462,7 +5786,7 @@ std::filesystem::path WriteFullscreenTreeFixture(const std::filesystem::path& ro
     const std::string vertex =
         "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
         "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n}\n";
     file("shaders/quadrants.vert", vertex);
     file("shaders/quadrants.frag",
@@ -4473,7 +5797,7 @@ std::filesystem::path WriteFullscreenTreeFixture(const std::filesystem::path& ro
     file("shaders/through.vert", vertex);
     file("shaders/through.frag",
          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-         "void main() {\n  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n}\n");
+         "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
     const std::string pass = R"("cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled")";
     file("materials/quadrants.json",
          R"({"passes":[{"shader":"quadrants","blending":"translucent",)" + pass + "}]}");
@@ -4679,13 +6003,13 @@ TEST_F(MetalSceneDraw, AVertexShaderThatWritesItsInputsStillReadsTheMesh)
                     "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
                     "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n" +
                     std::string(writes ? "  a_Position.xy *= 1.0;\n  a_TexCoord *= 1.0;\n" : "") +
-                    "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+                    "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
                     "  v_TexCoord = a_TexCoord;\n}\n";
                 if (through_effect) {
                     file("shaders/through.vert", vertex);
                     file("shaders/through.frag",
                          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                         "void main() {\n  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n}\n");
+                         "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
                     file("materials/through.json",
                          R"({"passes":[{"shader":"through","blending":"normal","cullmode":"nocull",)"
                          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})");
@@ -4750,7 +6074,7 @@ std::shared_ptr<SceneMesh> MakeMdlQuadMesh(std::shared_ptr<SceneMaterial> materi
                        { 128.0f, 96.0f, 0.0f },   { -128.0f, 96.0f, 0.0f } };
     quad.normals.assign(4, kQuadNormal);
     quad.tangents.assign(4, kQuadSignedTangent);
-    quad.texcoords = { { 0.0f, 0.0f }, { 1.0f, 0.0f }, { 1.0f, 1.0f }, { 0.0f, 1.0f } };
+    quad.SetStream(0x8, 2, { 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f });
     quad.indices   = { { 0, 1, 2 }, { 0, 2, 3 } };
     WPMdl mdl;
     mdl.meshes.push_back(std::move(quad));
@@ -4829,7 +6153,7 @@ TEST_F(MetalSceneDraw, AModelsTangentReachesTheShaderThatDeclaresIt)
                    "varying vec3 v_Normal;\n"
                    "varying vec2 v_TexCoord;\n"
                    "void main() {\n"
-                   "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+                   "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
                    "  v_Tangent = a_Tangent4.xyz;\n"
                    "  v_Bitangent = cross(a_Normal, a_Tangent4.xyz) * a_Tangent4.w;\n"
                    "  v_Normal = a_Normal;\n"
@@ -4899,7 +6223,7 @@ TEST_F(MetalSceneDraw, ABooleanMultipliedIntoAStepMaskClipsIt)
         file("shaders/step_bool.vert",
              "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
              "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-             "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+             "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
              "  v_TexCoord = a_TexCoord;\n}\n");
         file("shaders/step_bool.frag",
              "varying vec2 v_TexCoord;\nvoid main() {\n"
@@ -5073,7 +6397,7 @@ std::filesystem::path WriteLayerBrightnessFixture(const std::filesystem::path& r
         << "uniform vec4 g_Color4;\n"
            "varying vec2 v_TexCoord;\n"
            "void main() {\n"
-           "  gl_FragColor = vec4(vec3(0.8)"
+           "  gl_FragColor = vec4(vec3(0.8, 0.8, 0.8)"
         << (declares_brightness ? " * g_Brightness" : "") << ", 1.0) * g_Color4;\n"
         << "}\n";
     std::ofstream(root / "materials/copyfx.json")
@@ -5247,10 +6571,10 @@ std::filesystem::path WriteFoggedLayerFixture(const std::filesystem::path& root,
         "varying vec4 v_ViewDir;\n"
         "#endif\n"
         "void main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n"
         "#if FOG_COMPUTED && (FOG_DIST || FOG_HEIGHT)\n"
-        "  vec4 worldPos = g_ModelMatrix * vec4(a_Position, 1.0);\n"
+        "  vec4 worldPos = mul(vec4(a_Position, 1.0), g_ModelMatrix);\n"
         "  v_ViewDir = vec4(g_EyePosition - worldPos.xyz, worldPos.y);\n"
         "#endif\n"
         "}\n";
@@ -5286,14 +6610,14 @@ std::filesystem::path WriteFoggedLayerFixture(const std::filesystem::path& root,
                "}\n";
     };
     file("shaders/metal_probe.vert", vertex);
-    file("shaders/metal_probe.frag", fragment("vec4(1.0)"));
+    file("shaders/metal_probe.frag", fragment("vec4(1.0, 1.0, 1.0, 1.0)"));
     file("shaders/fog_through.vert", vertex);
-    file("shaders/fog_through.frag", fragment("texture2D(g_Texture0, v_TexCoord)"));
+    file("shaders/fog_through.frag", fragment("texSample2D(g_Texture0, v_TexCoord)"));
     // An effect that copies what it is given, with no fog of its own.
     file("shaders/copy.vert", vertex);
     file("shaders/copy.frag",
          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-         "  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n}\n");
+         "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n");
     file("materials/copy.json",
          R"({"passes":[{"shader":"copy","blending":"normal","cullmode":"nocull",)"
          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})");
@@ -5304,7 +6628,7 @@ std::filesystem::path WriteFoggedLayerFixture(const std::filesystem::path& root,
     file("shaders/unseen.vert", vertex);
     file("shaders/unseen.frag",
          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-         "  vec4 seen = texture2D(g_Texture0, v_TexCoord);\n"
+         "  vec4 seen = texSample2D(g_Texture0, v_TexCoord);\n"
          "  gl_FragColor = vec4(1.0 - seen.a, 0.0, 0.0, 1.0);\n}\n");
     file("materials/unseen.json",
          R"({"passes":[{"shader":"unseen","blending":"normal","cullmode":"nocull",)"
@@ -5636,7 +6960,7 @@ TEST_F(MetalSceneDraw, AnEffectsSwappedBuffersAccumulateAndItsFloatBuffersKeepTh
             "uniform mat4 g_ModelViewProjectionMatrix;\n"
             "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
             "varying vec2 v_TexCoord;\n"
-            "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+            "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
             "v_TexCoord=a_TexCoord; }\n";
         const auto pass = [](std::string_view shader, std::string_view textures) {
             return std::string(R"({"passes":[{"shader":")") + std::string(shader) +
@@ -5660,7 +6984,7 @@ TEST_F(MetalSceneDraw, AnEffectsSwappedBuffersAccumulateAndItsFloatBuffersKeepTh
             { "shaders/acc_step.vert", vertex },
             { "shaders/acc_step.frag",
               "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-              "void main(){ gl_FragColor=vec4(texture(g_Texture0,v_TexCoord).r+0.25,0.0,0.0,1.0); }\n" },
+              "void main(){ gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).r+0.25,0.0,0.0,1.0); }\n" },
             { "shaders/acc_signed.vert", vertex },
             { "shaders/acc_signed.frag",
               "varying vec2 v_TexCoord;\nvoid main(){ gl_FragColor=vec4(-0.5,0.0,0.0,1.0); }\n" },
@@ -5668,7 +6992,7 @@ TEST_F(MetalSceneDraw, AnEffectsSwappedBuffersAccumulateAndItsFloatBuffersKeepTh
             { "shaders/acc_show.frag",
               "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\n"
               "varying vec2 v_TexCoord;\nvoid main(){\n"
-              "gl_FragColor=vec4(texture(g_Texture0,v_TexCoord).r,-texture(g_Texture1,v_TexCoord).r,0.0,1.0); }\n" },
+              "gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).r,-texSample2D(g_Texture1,v_TexCoord).r,0.0,1.0); }\n" },
             { "layout.json",
               R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
               R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
@@ -5696,6 +7020,111 @@ TEST_F(MetalSceneDraw, AnEffectsSwappedBuffersAccumulateAndItsFloatBuffersKeepTh
     const std::size_t centre = (128u * 384u + 192u) * 3u;
     EXPECT_NEAR(rgb[centre + 0], 191, 3) << "the swapped buffer did not carry last frame's sum";
     EXPECT_NEAR(rgb[centre + 1], 128, 3) << "the float buffer lost its sign";
+}
+
+namespace
+{
+/// The accumulate effect of `AnEffectsSwappedBuffersAccumulate...` with extra fbo keys and a
+/// `functions` block, and a show pass that draws its input buffer's colour as it reads.
+std::filesystem::path WriteEffectKeysFixture(const std::filesystem::path& root, std::string_view fbos,
+                                             std::string_view functions, std::string_view step_colour)
+{
+    const auto        project = WriteFixture(root);
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
+        "v_TexCoord=a_TexCoord; }\n";
+    const auto pass = [](std::string_view shader, std::string_view textures) {
+        return std::string(R"({"passes":[{"shader":")") + std::string(shader) +
+               R"(","blending":"normal","cullmode":"nocull","depthtest":"disabled",)"
+               R"("depthwrite":"disabled","textures":)" + std::string(textures) + "}]}";
+    };
+    const std::map<std::string, std::string> files {
+        { "effects/keys/effect.json",
+          R"({"name":"keys","fbos":[)" + std::string(fbos) + "]," + std::string(functions) +
+              R"("passes":[)"
+              R"({"material":"materials/key_step.json","target":"_rt_Acc2","bind":[{"name":"_rt_Acc1","index":0}]},)"
+              R"({"material":"materials/key_show.json","bind":[{"name":"_rt_Acc2","index":0}]},)"
+              R"({"command":"swap","source":"_rt_Acc1","target":"_rt_Acc2"}]})" },
+        { "materials/key_step.json", pass("key_step", "[null]") },
+        { "materials/key_show.json", pass("key_show", "[null]") },
+        { "shaders/key_step.vert", vertex },
+        { "shaders/key_step.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ gl_FragColor=texSample2D(g_Texture0,v_TexCoord)+vec4(" + std::string(step_colour) + "); }\n" },
+        { "shaders/key_show.vert", vertex },
+        { "shaders/key_show.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).rgb,1.0); }\n" },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+          R"("objects":[{"id":1,"name":"tile","image":"models/tile.json","origin":[192,128,0],)"
+          R"("scale":[1,1,1],"angles":[0,0,0],"visible":true,)"
+          R"("effects":[{"file":"effects/keys/effect.json","visible":true}]}]})" },
+    };
+    for (const auto& [file, contents] : files) {
+        const auto path = root / file;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return project;
+}
+} // namespace
+
+TEST_F(MetalSceneDraw, R8EffectBufferReadsZeroInGreenAndBlue)
+{
+    // An `r8` buffer is a one-channel target (the WE format table's render-target format), so
+    // what a pass writes into it reads back (r, 0, 0): one frame of (0.25, 0.5, 0.75) leaves
+    // red 0.25 and nothing in green or blue (an RGBA8 buffer kept all three).
+    const auto project = WriteEffectKeysFixture(
+        root_ / "r8-buffer",
+        R"({"name":"_rt_Acc1","fit":64,"format":"r8"},{"name":"_rt_Acc2","fit":64,"format":"r8"})", "",
+        "0.25,0.5,0.75,1.0");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "r8-buffer-cache", loaded, error)) << error;
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 1, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    const std::size_t centre = (128u * 384u + 192u) * 3u;
+    EXPECT_NEAR(picture.rgb[centre + 0], 64, 2);
+    EXPECT_EQ(picture.rgb[centre + 1], 0);
+    EXPECT_EQ(picture.rgb[centre + 2], 0);
+}
+
+TEST_F(MetalSceneDraw, AnEffectFunctionClearsItsBuffersBeforeTheNextFrame)
+{
+    // `executeMaterialFunction("reset")` (sub_1401EE3A0) clears the effect's first buffer to its
+    // `clear` colour at once; here the accumulator is reset after two frames, so the third shows
+    // one step (0.25) instead of three (0.75). Its `clear` colour is the creation colour too.
+    const auto project = WriteEffectKeysFixture(
+        root_ / "function-clear",
+        R"({"name":"_rt_Acc1","fit":64,"format":"rgba8888","clear":"0 0 0 0"},)"
+        R"({"name":"_rt_Acc2","fit":64,"format":"rgba8888"})",
+        R"("functions":{"reset":{"action":"clear","fbos":["_rt_Acc1"]}},)", "0.25,0.0,0.0,0.0");
+    for (const bool reset : { false, true }) {
+        SCOPED_TRACE(reset);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, root_ / (reset ? "function-clear-cache-a" : "function-clear-cache-b"),
+                              loaded, error))
+            << error;
+        ASSERT_NE(loaded.scene->runtime, nullptr);
+        auto*      runtime   = loaded.scene->runtime.get();
+        const auto reference = runtime->LayerEffectReference("tile", 0);
+        ASSERT_FALSE(reference.empty());
+        const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0, [&](int frame) {
+            if (reset && frame == 2) EXPECT_TRUE(runtime->RunEffectFunction(reference, "reset"));
+        });
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        const std::size_t centre = (128u * 384u + 192u) * 3u;
+        EXPECT_NEAR(picture.rgb[centre + 0], reset ? 64 : 191, 3);
+    }
 }
 
 TEST_F(MetalSceneDraw, AnIntermediateTargetIsDrawnCopiedAndResampledInOneFrame)
@@ -5790,6 +7219,113 @@ TEST_F(MetalSceneDraw, AnIntermediateTargetIsDrawnCopiedAndResampledInOneFrame)
     }
 }
 
+namespace
+{
+/// Draws the fixture's card depth-only into a 64x64 Depth32F atlas, into its top-right
+/// quarter, with the reversed depth the shadow atlas uses, and reads the atlas back.
+/// `flip_winding` mirrors which faces count as front; `cull` is the card's cull mode.
+std::vector<float> DrawCardDepthIntoAtlasTile(const std::filesystem::path& root, bool flip_winding,
+                                              CullMode cull, std::string& error)
+{
+    const auto  project = WriteFixture(root / "project");
+    LoadedScene loaded;
+    if (! LoadScene(project, root / "cache", loaded, error)) return {};
+    auto* node = FirstDrawableNode(loaded.scene->sceneGraph.get());
+    if (node == nullptr || node->Mesh() == nullptr || node->Mesh()->Material() == nullptr) {
+        error = "the fixture has no card";
+        return {};
+    }
+    node->Mesh()->Material()->cull_mode = cull;
+    loaded.scene->renderTargets["_rt_shadowAtlas"] = SceneRenderTarget {
+        .width    = 64,
+        .height   = 64,
+        .format   = TextureFormat::Depth32F,
+        .unscaled = true,
+    };
+    std::vector<float> depth;
+    @autoreleasepool {
+        id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 384,
+            .height               = 256,
+            .render_width         = 384,
+            .render_height        = 256,
+            .display_scale_factor = 1.0,
+        };
+        if (! render.init(info)) {
+            error = render.lastError();
+            return {};
+        }
+        rg::RenderGraph graph;
+        auto& desc = AddDraw(graph, node, "_rt_shadowAtlas", {});
+        desc.depth_only               = true;
+        desc.clear_depth_on_first_use = true;
+        desc.viewport_uv              = { 0.5f, 0.0f, 0.5f, 0.5f };
+        desc.flip_winding             = flip_winding;
+        desc.depth_override           = SceneDepthState { .test = true, .write = true,
+                                                          .compare = DepthCompare::GreaterEqual };
+        AddDraw(graph, node, std::string(SpecTex_Default), {});
+        if (! render.compileRenderGraph(*loaded.scene, graph) || ! render.drawFrame(*loaded.scene)) {
+            error = render.lastError();
+            return {};
+        }
+        std::vector<uint8_t> rgba;
+        uint32_t             width = 0, height = 0;
+        if (! render.ReadRenderTargetForTests("_rt_shadowAtlas", rgba, width, height, &depth) ||
+            width != 64 || height != 64) {
+            error = "the atlas could not be read back at its own size";
+            depth.clear();
+        }
+        render.destroy();
+    }
+    return depth;
+}
+} // namespace
+
+TEST_F(MetalSceneDraw, ADepthOnlyPassDrawsDepthIntoItsTileOfADepthTarget)
+{
+    // The shadow-atlas shape (Appendix C S2-S4): a depth-only draw into a Depth32F target,
+    // limited to one tile, cleared to 0 (the far plane of reversed depth) on first use.
+    std::string error;
+    const auto  depth = DrawCardDepthIntoAtlasTile(root_ / "tile", false, CullMode::None, error);
+    ASSERT_FALSE(depth.empty()) << error;
+    std::size_t inside = 0, outside = 0;
+    for (uint32_t y = 0; y < 64; ++y) {
+        for (uint32_t x = 0; x < 64; ++x) {
+            const bool in_tile = x >= 32 && y < 32;
+            if (depth[(y * 64 + x) * 4] > 0.0f) ++(in_tile ? inside : outside);
+        }
+    }
+    EXPECT_GT(inside, 100u) << "the card wrote no depth into its tile";
+    EXPECT_EQ(outside, 0u) << "the draw reached past its tile";
+}
+
+TEST_F(MetalSceneDraw, AFlippedWindingCullsTheFacesThatWereFront)
+{
+    // A mirrored view (planar reflection) swaps which winding is front: a back-culled card
+    // is drawn with exactly one of the two windings.
+    const auto written = [&](bool flip) {
+        std::string error;
+        const auto  depth = DrawCardDepthIntoAtlasTile(root_ / (flip ? "flip" : "plain"), flip,
+                                                       CullMode::Back, error);
+        EXPECT_FALSE(depth.empty()) << error;
+        std::size_t count = 0;
+        for (std::size_t i = 0; i < depth.size(); i += 4) count += depth[i] > 0.0f ? 1 : 0;
+        return count;
+    };
+    const auto plain   = written(false);
+    const auto flipped = written(true);
+    EXPECT_TRUE((plain == 0) != (flipped == 0))
+        << "plain " << plain << " flipped " << flipped << ": the winding flip did not swap the culled face";
+}
+
 TEST_F(MetalSceneDraw, ADrawnFrameIsReportedAsPresentedAndLeavesTheFirstFrameFlagAlone)
 {
     // `Scene::first_frame_ok` is the scene handler's, and the handler tells the
@@ -5844,23 +7380,23 @@ TEST_F(MetalSceneDraw, OverbrightRadianceReachesBloomWithoutChangingLdrColor)
         "uniform mat4 g_ModelViewProjectionMatrix;\n"
         "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
-        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1);"
+        "void main(){ gl_Position=mul(vec4(a_Position,1), g_ModelViewProjectionMatrix);"
         "v_TexCoord=a_TexCoord; }\n";
     // Original synthetic shaders: an emitter, thresholded neighboring bloom,
     // and an SDR additive composition. A threshold above one makes clipping
     // before bloom observable rather than merely a different intermediate.
     const std::map<std::string, std::string> fragments {
         { "emitter", "varying vec2 v_TexCoord;\nvoid main(){"
-          "gl_FragColor=vec4(v_TexCoord.x<0.5?vec3(4,0.25,0.5):vec3(0),1);}\n" },
+          "gl_FragColor=vec4(v_TexCoord.x<0.5?vec3(4,0.25,0.5):vec3(0, 0, 0),1);}\n" },
         { "bloom", "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\n"
-          "void main(){ float r=texture(g_Texture0,v_TexCoord+vec2(-0.125,0)).r;"
-          "r+=texture(g_Texture0,v_TexCoord).r;"
-          "r+=texture(g_Texture0,v_TexCoord+vec2(0.125,0)).r;"
+          "void main(){ float r=texSample2D(g_Texture0,v_TexCoord+vec2(-0.125,0)).r;"
+          "r+=texSample2D(g_Texture0,v_TexCoord).r;"
+          "r+=texSample2D(g_Texture0,v_TexCoord+vec2(0.125,0)).r;"
           "gl_FragColor=vec4(max(r/3.0-1.25,0.0)*0.25,0,0,1);}\n" },
         { "compose", "varying vec2 v_TexCoord;\nuniform sampler2D g_Texture0;\n"
           "uniform sampler2D g_Texture1;\nvoid main(){"
-          "gl_FragColor=vec4(clamp(texture(g_Texture0,v_TexCoord).rgb+"
-          "texture(g_Texture1,v_TexCoord).rgb,0.0,1.0),1);}\n" },
+          "gl_FragColor=vec4(clamp(texSample2D(g_Texture0,v_TexCoord).rgb+"
+          "texSample2D(g_Texture1,v_TexCoord).rgb,0.0,1.0),1);}\n" },
     };
     nlohmann::json objects = nlohmann::json::array();
     int id = 0;
@@ -6186,6 +7722,248 @@ TEST_F(MetalSceneDraw, AFrameThatWouldRepeatThePictureTakesNoDrawableAndPresents
 
         render.destroy();
     }
+    RendererCounters::SetEnabled(false);
+}
+
+TEST_F(MetalSceneDraw, AFrameThatCannotBeComposedIsNeitherPresentedNorRememberedAsShown)
+{
+    // A drawable nothing composed into holds whatever it held frames ago, or
+    // nothing when it is new. Presenting it shows that, and remembering the
+    // present as the picture on the layer would then keep it there: a still
+    // scene's next frames match the record and present nothing. The frame has
+    // to fail instead, with nothing presented and nothing remembered, so the
+    // frame after it draws the picture again.
+    const auto  project = WriteFixture(root_ / "project");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+
+    RendererCounters::SetEnabled(true);
+    RendererCounters counters;
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(640, 360);
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 640,
+            .height               = 360,
+            .render_width         = 640,
+            .render_height        = 360,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        render.SetCounters(&counters);
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        const auto requests = [&]() { return counters.Get(OWE_RC_PRESENT_REQUESTS); };
+        bool presented = false;
+        ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        ASSERT_TRUE(presented);
+        ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        ASSERT_FALSE(presented) << "the still scene's second frame repeats the first";
+        ASSERT_EQ(requests(), 1u);
+
+        // Something the composition reads changed, so this frame takes a
+        // drawable and composes; the composition fails.
+        render.InvalidatePresentedFrame();
+        render.RefuseNextCompositionForTests();
+        presented = true;
+        EXPECT_FALSE(render.drawFrame(*loaded.scene, &presented))
+            << "a frame that composed nothing reported success";
+        EXPECT_FALSE(presented) << "a drawable nothing was composed into was presented";
+        EXPECT_EQ(requests(), 1u) << "an uncomposed drawable was counted as a present request";
+        EXPECT_FALSE(render.lastError().empty()) << "the failure carries no reason";
+
+        // Nothing of the failed frame is remembered: the next one draws and
+        // presents the picture, and only the one after that repeats it.
+        EXPECT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        EXPECT_TRUE(presented) << "the failed frame's present was remembered as the picture on the layer";
+        EXPECT_EQ(requests(), 2u);
+        EXPECT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+        EXPECT_FALSE(presented) << "the recovered picture is not recognised as unchanged";
+
+        render.destroy();
+    }
+    RendererCounters::SetEnabled(false);
+}
+
+TEST_F(MetalSceneDraw, APresentHoldsTheFrameOnlyWhilePacing)
+{
+    // The frame clock's hold reaches the present as a minimum time the frame
+    // on screen stays, and only while pacing is on; a zero hold is a plain
+    // present. A layer no window owns shows nothing, so when a held frame was
+    // shown cannot be seen here, only that the present asked for the hold, that
+    // held presents neither stall the next drawable nor lose their reports.
+    const auto  project = WriteFixture(root_ / "project");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+
+    const bool pacing = MetalRender::SetPresentPacingForTests(true);
+    RendererCounters counters;
+    RendererCounters::SetEnabled(true);
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(640, 360);
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 640,
+            .height               = 360,
+            .render_width         = 640,
+            .render_height        = 360,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        render.SetCounters(&counters);
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        const auto present = [&](int frames) {
+            for (int frame = 0; frame < frames; ++frame) {
+                render.InvalidatePresentedFrame();
+                bool presented = false;
+                ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+                ASSERT_TRUE(presented);
+            }
+        };
+
+        present(2);
+        EXPECT_EQ(render.HeldPresentsForTests(), 0u) << "no hold was set";
+        EXPECT_EQ(render.LastPresentHoldForTests(), std::chrono::nanoseconds::zero());
+
+        // 60 fps on a 120 Hz display.
+        const auto hold = std::chrono::nanoseconds(14'583'335);
+        render.SetPresentHold(hold);
+        const auto started = std::chrono::steady_clock::now();
+        present(8);
+        const auto took = std::chrono::steady_clock::now() - started;
+        EXPECT_EQ(render.HeldPresentsForTests(), 8u);
+        EXPECT_EQ(render.LastPresentHoldForTests(), hold);
+        // Eight held frames on a layer that shows none: a drawable a held frame
+        // kept would make each later frame wait a second for the next.
+        EXPECT_LT(took, std::chrono::seconds(2)) << "held presents stalled the drawable queue";
+
+        MetalRender::SetPresentPacingForTests(false);
+        present(2);
+        EXPECT_EQ(render.HeldPresentsForTests(), 8u) << "pacing off still held a present";
+        EXPECT_EQ(render.LastPresentHoldForTests(), std::chrono::nanoseconds::zero());
+        MetalRender::SetPresentPacingForTests(true);
+
+        render.SetPresentHold(std::chrono::nanoseconds::zero());
+        present(1);
+        EXPECT_EQ(render.HeldPresentsForTests(), 8u) << "a zero hold is a plain present";
+
+        // Every present still reports, held or not: here, as dropped.
+        const auto reports = [&]() {
+            return counters.Get(OWE_RC_PRESENTED_FRAMES) + counters.Get(OWE_RC_PRESENTS_DROPPED);
+        };
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (reports() < 13u && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        EXPECT_EQ(reports(), 13u);
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENT_REQUESTS), 13u);
+
+        render.destroy();
+    }
+    RendererCounters::SetEnabled(false);
+    MetalRender::SetPresentPacingForTests(pacing);
+}
+
+TEST_F(MetalSceneDraw, EveryPresentedDrawableReportsWhetherItWasShownOnlyWhileCounting)
+{
+    // Each present asks its drawable to report back: shown, or dropped before
+    // any refresh showed it. A layer no window owns is never shown, so every
+    // report here is a drop, and every requested present reports exactly once.
+    // With counting off nothing is asked for, so frames presented then never
+    // report into a later window.
+    const auto  project = WriteFixture(root_ / "project");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "cache", loaded, error)) << error;
+    ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+
+    RendererCounters counters;
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(640, 360);
+
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer          = (__bridge void*)layer,
+            .width                = 640,
+            .height               = 360,
+            .render_width         = 640,
+            .render_height        = 360,
+            .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        render.SetCounters(&counters);
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+
+        const auto present = [&](int frames) {
+            for (int frame = 0; frame < frames; ++frame) {
+                render.InvalidatePresentedFrame();
+                bool presented = false;
+                ASSERT_TRUE(render.drawFrame(*loaded.scene, &presented)) << render.lastError();
+                ASSERT_TRUE(presented);
+            }
+        };
+        const auto reports = [&]() {
+            return counters.Get(OWE_RC_PRESENTED_FRAMES) + counters.Get(OWE_RC_PRESENTS_DROPPED);
+        };
+        const auto settle = [&](uint64_t expected) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (reports() < expected && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            // Anything beyond the expected count would arrive by now as well.
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        };
+
+        ASSERT_FALSE(RendererCounters::Enabled());
+        present(4);
+        RendererCounters::SetEnabled(true);
+        // Longer than the reports of the frames below take to arrive.
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        EXPECT_EQ(reports(), 0u) << "a frame presented while counting was off reported into the window";
+
+        present(6);
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENT_REQUESTS), 6u);
+        settle(6);
+        EXPECT_EQ(reports(), 6u) << "every requested present reports exactly once";
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENTED_FRAMES), 0u) << "a layer no window owns showed a frame";
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENTS_DROPPED), 6u);
+        // No display: its refresh is unknown, so no gap is guessed.
+        EXPECT_EQ(counters.Get(OWE_RC_VSYNC_PERIOD_MICROS), 0u);
+        EXPECT_EQ(counters.Get(OWE_RC_PRESENT_GAPS_1_VSYNC) + counters.Get(OWE_RC_PRESENT_GAPS_2_VSYNC) +
+                      counters.Get(OWE_RC_PRESENT_GAPS_3PLUS_VSYNC),
+                  0u);
+
+        render.destroy();
+    }
+    // Destroyed with reports possibly still on their way: none may reach the
+    // counters afterwards, and none does with counting off again either.
     RendererCounters::SetEnabled(false);
 }
 
@@ -6717,7 +8495,7 @@ std::filesystem::path WriteVideoFixture(const std::filesystem::path& root, uint3
         "attribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n"
         "}\n";
     // A plain sample of the layer's own texture, which is what the large
@@ -6726,7 +8504,7 @@ std::filesystem::path WriteVideoFixture(const std::filesystem::path& root, uint3
         "uniform sampler2D g_Texture0;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "  gl_FragColor = texture2D(g_Texture0, v_TexCoord);\n"
+        "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
         "}\n";
 
     const std::string width  = std::to_string(canvas_width);
@@ -6799,6 +8577,13 @@ struct VideoScene {
 /// Restores the process-wide switch however a test leaves.
 namespace
 {
+/// Switches the renderer's work counters on for a test and off again however it ends.
+struct CountersOn
+{
+    CountersOn() { RendererCounters::SetEnabled(true); }
+    ~CountersOn() { RendererCounters::SetEnabled(false); }
+};
+
 struct ScopedPlaneSampling {
     explicit ScopedPlaneSampling(bool enabled) { SetMetalVideoPlaneSamplingEnabled(enabled); }
     ~ScopedPlaneSampling() { SetMetalVideoPlaneSamplingEnabled(false); }
@@ -6910,6 +8695,151 @@ TEST_F(MetalSceneDraw, AVideoLayerSamplesTheDecoderPlanesThroughItsOwnShader)
     }
 }
 
+TEST_F(MetalSceneDraw, ASortedVideoKeepsSamplingPlanesWhenACopyChangesItsSampleCount)
+{
+    if (MetalRender::SelectSampleCountForDevice(4) != 4)
+        GTEST_SKIP() << "the device does not support four-sample rendering";
+    const auto directory = root_ / "video-sorted-samples";
+    const auto project = WriteVideoFixture(directory, kVideoWidth, kVideoHeight);
+    if (project.empty())
+        GTEST_SKIP() << "no hardware H.264 encoder here, so no decodable media to parse";
+
+    // Depth changes the owner order, while both cards keep covering the same
+    // pixels. The second owner produces a red effect target and copies it to
+    // scene output: a video after that copy must use a single-sample pipeline.
+    const std::string vertex =
+        "attribute vec3 a_Position; attribute vec2 a_TexCoord; varying vec2 v_TexCoord;\n"
+        "void main(){gl_Position=vec4(a_Position.x/320.0,a_Position.y/180.0,0.0,1.0);"
+        "v_TexCoord=a_TexCoord;}\n";
+    std::ofstream(directory / "shaders/metal_video.vert") << vertex;
+    std::ofstream(directory / "shaders/sorted_copy.vert") << vertex;
+    std::ofstream(directory / "shaders/sorted_copy.frag")
+        << "void main(){gl_FragColor=vec4(1.0,0.0,0.0,1.0);}\n";
+    std::ofstream(directory / "models/sorted_copy.json")
+        << R"({"width":640,"height":360,"material":"materials/sorted_copy.json"})";
+    WriteStandInMaterial(directory, "materials/sorted_copy.json", "sorted_copy",
+                          nlohmann::json::array());
+    nlohmann::json layout;
+    { std::ifstream source(directory / "layout.json"); source >> layout; }
+    layout["objects"][0]["origin"] = { 320, 180, -30 };
+    layout["objects"].push_back({
+        { "id", 2 }, { "name", "copy-owner" }, { "image", "models/sorted_copy.json" },
+        { "origin", { 320, 180, -20 } }, { "scale", { 1, 1, 1 } },
+        { "angles", { 0, 0, 0 } }, { "visible", true },
+    });
+    std::ofstream(directory / "layout.json") << layout;
+
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "video-sorted-samples-cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    ASSERT_NE(scene.runtime, nullptr);
+    std::shared_ptr<SceneNode> video_owner, copy_owner;
+    for (const auto& child : scene.sceneGraph->GetChildren()) {
+        if (child->Name() == "tile") video_owner = child;
+        if (child->Name() == "copy-owner") copy_owner = child;
+    }
+    ASSERT_NE(video_owner, nullptr);
+    ASSERT_NE(copy_owner, nullptr);
+    auto* video_draw = FirstDrawableNode(video_owner.get());
+    auto* copy_draw = FirstDrawableNode(copy_owner.get());
+    ASSERT_NE(video_draw, nullptr);
+    ASSERT_NE(copy_draw, nullptr);
+    const auto* material = video_draw->Mesh()->MaterialForSlot(0);
+    ASSERT_NE(material, nullptr);
+    ASSERT_FALSE(material->textures.empty());
+    video_owner->SetTransparentSort(SceneNode::TransparentSort::Depth);
+    copy_owner->SetTransparentSort(SceneNode::TransparentSort::Depth);
+    scene.transparent_sorting = true;
+    scene.transparent_order = { video_owner, copy_owner };
+    const auto output = scene.ResolveRenderTargetName(SpecTex_Default);
+    const std::string effect = "_rt_sorted_video_copy";
+    scene.renderTargets[output].sample_count = 4;
+    scene.renderTargets[effect] = SceneRenderTarget { .width=kVideoWidth, .height=kVideoHeight };
+    rg::RenderGraph graph;
+    AddDraw(graph, video_draw, output, material->textures).sort_owner = video_owner.get();
+    AddDraw(graph, copy_draw, effect, {}).sort_owner = copy_owner.get();
+    AddCopy(graph, effect, output);
+    for (const auto id : graph.topologicalOrder()) {
+        if (auto* copy = dynamic_cast<rg::CopyPass*>(graph.getPass(id)); copy != nullptr)
+            copy->desc().sort_owner = copy_owner.get();
+    }
+    ASSERT_TRUE(SettleVariantTranslation(scene, &error)) << error;
+    const CountersOn counting;
+    const ScopedPlaneSampling sampling(true);
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize = CGSizeMake(kVideoWidth, kVideoHeight);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        RendererCounters counters;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer=(__bridge void*)layer, .width=kVideoWidth, .height=kVideoHeight,
+            .render_width=kVideoWidth, .render_height=kVideoHeight, .display_scale_factor=1.0,
+        })) << render.lastError();
+        render.SetCounters(&counters);
+        ASSERT_TRUE(render.compileRenderGraph(scene, graph)) << render.lastError();
+        render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+        const bool direct = DrawUntilVideoPath(render, scene, SceneVideoPath::Nv12Direct);
+        if (!direct && render.VideoPath() == SceneVideoPath::Bgra)
+            GTEST_SKIP() << "the decoder produced BGRA, so sorted NV12 sampling was not exercised";
+        ASSERT_TRUE(direct) << "the NV12 variant did not become ready: "
+                            << SceneVideoPathName(render.VideoPath()) << ": " << render.lastError();
+        const auto conversions = counters.Get(OWE_RC_VIDEO_CONVERSIONS);
+        const auto programs = MetalRender::ProgramCompilesForTests();
+        const auto bytes = render.RenderTargetBytesForTests();
+        const auto geometry = render.GeometryBufferBytesForTests();
+        const auto check_draw = [&]() {
+            EXPECT_TRUE(render.drawFrame(scene)) << render.lastError();
+            EXPECT_EQ(render.VideoPath(), SceneVideoPath::Nv12Direct);
+            EXPECT_EQ(counters.Get(OWE_RC_VIDEO_CONVERSIONS), conversions)
+                << "a sample-count change requested a converted video frame";
+            EXPECT_EQ(MetalRender::ProgramCompilesForTests(), programs);
+            EXPECT_EQ(render.RenderTargetBytesForTests(), bytes);
+            EXPECT_EQ(render.GeometryBufferBytesForTests(), geometry);
+            std::vector<uint8_t> pixels;
+            uint32_t width=0, height=0;
+            EXPECT_TRUE(render.ReadRenderTargetForTests(output, pixels, width, height));
+            EXPECT_EQ(width, kVideoWidth);
+            EXPECT_EQ(height, kVideoHeight);
+            return pixels;
+        };
+        const auto red = check_draw();
+        ASSERT_EQ(red.size(), std::size_t(kVideoWidth) * kVideoHeight * 4);
+        for (std::size_t i=0; i<red.size(); i+=4) {
+            ASSERT_EQ(red[i], 255);
+            ASSERT_EQ(red[i+1], 0);
+            ASSERT_EQ(red[i+2], 0);
+        }
+
+        render.SetVideoPlaybackPaused(true);
+        ASSERT_TRUE(scene.runtime->SetNodeTranslate("tile", { 320, 180, -10 }));
+        // The first draw after crossing already has to use its prepared 1x
+        // plane pipeline. Paused decoder frames then settle without advancing
+        // the scene clock; no conversion is allowed during that wait either.
+        std::vector<uint8_t> held;
+        bool settled = false;
+        for (int frame=0; frame<16 && !settled; ++frame) {
+            auto current = check_draw();
+            settled = !held.empty() && held == current;
+            held = std::move(current);
+        }
+        ASSERT_TRUE(settled) << "the paused decoder frame did not settle";
+        std::size_t video_colours = 0;
+        for (std::size_t i=0; i<held.size(); i+=4)
+            if (held[i+1] > 16 || held[i+2] > 16) ++video_colours;
+        ASSERT_GT(video_colours, 1000u) << "the video did not replace the copied red pixels";
+
+        ASSERT_TRUE(scene.runtime->SetNodeTranslate("tile", { 320, 180, -30 }));
+        EXPECT_EQ(check_draw(), red);
+        ASSERT_TRUE(scene.runtime->SetNodeTranslate("tile", { 320, 180, -10 }));
+        EXPECT_EQ(check_draw(), held);
+        render.destroy();
+    }
+}
+
 TEST_F(MetalSceneDraw, AVideoLayerKeepsConvertingWhileTheSettingIsOff)
 {
     const auto project = WriteVideoFixture(root_ / "video-off-project", kVideoWidth, kVideoHeight);
@@ -6980,6 +8910,285 @@ TEST_F(MetalSceneDraw, AVideoLayerKeepsConvertingWhileTheSettingIsOff)
 
         render.destroy();
     }
+}
+
+namespace
+{
+
+/// What one renderer did on one tick of the video comparisons below.
+struct VideoTick
+{
+    bool                 presented { false };
+    uint64_t             executed { 0 };
+    uint64_t             skipped { 0 };
+    uint64_t             imports { 0 };
+    uint64_t             generation { 0 };
+    std::vector<uint8_t> pixels;
+};
+
+/// One video scene on an offscreen layer of its own, with counters of its own.
+struct CountedVideoScene
+{
+    LoadedScene                      loaded;
+    CAMetalLayer*                    layer { nil };
+    /// Ahead of the renderer, which reports into it until it is gone.
+    RendererCounters                 counters;
+    MetalRender                      render;
+    std::unique_ptr<rg::RenderGraph> graph;
+    /// The scene optimisation setting this scene is drawn under. The setting
+    /// is process-wide, so it is set around each of this scene's draws.
+    bool                             optimised { true };
+
+    bool Open(const std::filesystem::path& project, const std::filesystem::path& cache, bool planes,
+              std::string* error)
+    {
+        if (! LoadScene(project, cache, loaded, *error)) return false;
+        if (planes && ! SettleVariantTranslation(*loaded.scene, error)) return false;
+        if (SelectSceneBackend(*loaded.scene).failed()) {
+            *error = "the scene was not given to native Metal";
+            return false;
+        }
+        layer                 = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(kVideoWidth, kVideoHeight);
+        layer.framebufferOnly = NO;
+        if (! render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = kVideoWidth, .height = kVideoHeight,
+                .render_width = kVideoWidth, .render_height = kVideoHeight,
+                .display_scale_factor = 1.0 })) {
+            *error = render.lastError();
+            return false;
+        }
+        render.SetCounters(&counters);
+        graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            *error = render.lastError();
+            return false;
+        }
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        return true;
+    }
+
+    VideoTick Tick()
+    {
+        wallpaper::render::SetSceneOptimizationEnabled(optimised);
+        VideoTick tick;
+        const auto imports = counters.Get(OWE_RC_VIDEO_IMPORTS);
+        const auto before  = wallpaper::render::CurrentSceneOptimizationTotals();
+        EXPECT_TRUE(render.drawFrame(*loaded.scene, &tick.presented)) << render.lastError();
+        const auto after = wallpaper::render::CurrentSceneOptimizationTotals();
+        wallpaper::render::SetSceneOptimizationEnabled(true);
+        tick.executed   = after.executed_passes - before.executed_passes;
+        tick.skipped    = after.skipped_passes - before.skipped_passes;
+        tick.imports    = counters.Get(OWE_RC_VIDEO_IMPORTS) - imports;
+        tick.generation = counters.Get(OWE_RC_VIDEO_SELECTED_GENERATION);
+        tick.pixels     = ReadOutput(render, *loaded.scene);
+        return tick;
+    }
+
+    /// One tick of the scene's clock, in the wallpaper's order: the runtime's
+    /// clocks (a video's among them) before the draw, the frame time after.
+    void Advance()
+    {
+        if (loaded.scene->runtime != nullptr) loaded.scene->runtime->Tick(1.0 / 60.0);
+        loaded.scene->PassFrameTime(1.0 / 60.0);
+    }
+
+    bool DrawUntilPath(SceneVideoPath wanted)
+    {
+        wallpaper::render::SetSceneOptimizationEnabled(optimised);
+        const bool reached = DrawUntilVideoPath(render, *loaded.scene, wanted);
+        wallpaper::render::SetSceneOptimizationEnabled(true);
+        return reached;
+    }
+};
+
+/// A 30 fps clip on a 60 Hz scene clock, drawn by two renderers side by side:
+/// one with scene optimisation on, one with it off. The clip's frames each
+/// differ, and the scene has nothing else that moves.
+///
+/// On every tick that took no video frame, the optimised renderer must draw
+/// nothing and present nothing; on every tick that took one, it must draw and
+/// present. Every picture it holds must be byte for byte the one the other
+/// renderer drew for the same decoded frame.
+void ExpectVideoFramesShownAgainToBeReused(const std::filesystem::path& root, bool planes)
+{
+    const auto directory = root / (planes ? "video-reuse-planes" : "video-reuse-converted");
+    // Three seconds, so the two seconds drawn below never reach the loop.
+    const auto project = WriteVideoFixture(
+        directory, kVideoWidth, kVideoHeight, std::nullopt, [](const std::filesystem::path& media) {
+            return video::testing_media::WriteSyntheticVideo(media, 3, "metal-video-reuse");
+        });
+    if (project.empty()) GTEST_SKIP() << "no hardware H.264 encoder here, so no decodable media";
+
+    const CountersOn          counting;
+    const ScopedPlaneSampling sampling(planes);
+    @autoreleasepool {
+        CountedVideoScene optimised;
+        CountedVideoScene plain;
+        plain.optimised = false;
+        std::string error;
+        ASSERT_TRUE(optimised.Open(project, directory / "cache-optimised", planes, &error)) << error;
+        ASSERT_TRUE(plain.Open(project, directory / "cache-plain", planes, &error)) << error;
+
+        const auto wanted = planes ? SceneVideoPath::Nv12Direct : SceneVideoPath::Nv12Converted;
+        const bool reached = optimised.DrawUntilPath(wanted) && plain.DrawUntilPath(wanted);
+        if (! reached && optimised.render.VideoPath() == SceneVideoPath::Bgra) {
+            GTEST_SKIP() << "the decoder produced BGRA, so the NV12 paths were not exercised";
+        }
+        ASSERT_TRUE(reached) << "the scenes never settled on " << SceneVideoPathName(wanted) << ": "
+                             << SceneVideoPathName(optimised.render.VideoPath());
+
+        auto previous = optimised.Tick();
+        (void)plain.Tick();
+        const auto seeks =
+            optimised.counters.Get(OWE_RC_VIDEO_SEEKS) + plain.counters.Get(OWE_RC_VIDEO_SEEKS);
+        const auto presents_skipped = optimised.counters.Get(OWE_RC_PRESENTS_SKIPPED_UNCHANGED);
+
+        // The decoders run on their own threads; paced at the scene's rate,
+        // each has its next frame ready when the clock reaches it.
+        std::map<uint64_t, std::vector<uint8_t>>               drawn_plain;
+        std::vector<std::pair<uint64_t, std::vector<uint8_t>>> drawn_optimised;
+        uint64_t   reused  = 0;
+        uint64_t   redrawn = 0;
+        const auto start   = std::chrono::steady_clock::now();
+        for (int frame = 1; frame <= 120; ++frame) {
+            std::this_thread::sleep_until(start + std::chrono::microseconds(frame * 1000000 / 60));
+            optimised.Advance();
+            plain.Advance();
+            auto with    = optimised.Tick();
+            auto without = plain.Tick();
+            EXPECT_TRUE(without.presented)
+                << "frame " << frame << ": optimisation off skipped a present";
+            if (with.imports == 0) {
+                ++reused;
+                EXPECT_EQ(with.executed, 0u)
+                    << "frame " << frame << ": a video frame shown again was drawn again";
+                EXPECT_GT(with.skipped, 0u) << "frame " << frame;
+                EXPECT_FALSE(with.presented)
+                    << "frame " << frame << ": a frame that repeats the picture was presented";
+                EXPECT_EQ(with.generation, previous.generation) << "frame " << frame;
+                EXPECT_TRUE(with.pixels == previous.pixels)
+                    << "frame " << frame << ": reuse changed the picture";
+            } else {
+                ++redrawn;
+                EXPECT_GT(with.executed, 0u)
+                    << "frame " << frame << ": a new video frame was not drawn";
+                EXPECT_TRUE(with.presented)
+                    << "frame " << frame << ": a new video frame was not presented";
+            }
+            drawn_plain[without.generation] = std::move(without.pixels);
+            drawn_optimised.emplace_back(with.generation, with.pixels);
+            previous = std::move(with);
+        }
+        EXPECT_GT(reused, 0u) << "no tick repeated a frame of a 30 fps clip on a 60 Hz clock";
+        EXPECT_GT(redrawn, 0u) << "the clip never advanced";
+        EXPECT_EQ(optimised.counters.Get(OWE_RC_PRESENTS_SKIPPED_UNCHANGED) - presents_skipped,
+                  reused)
+            << "every tick that took no video frame repeats the picture and presents nothing";
+
+        // Generations count decoded frames, so the two decoders agree on what
+        // each one is until either seeks, which the pacing is there to avoid.
+        if (optimised.counters.Get(OWE_RC_VIDEO_SEEKS) + plain.counters.Get(OWE_RC_VIDEO_SEEKS) !=
+            seeks) {
+            GTEST_SKIP() << "a decoder fell behind and seeked, so its generations no longer name "
+                            "the same frames as the other's; reuse itself was checked";
+        }
+        std::size_t compared = 0;
+        for (const auto& [generation, pixels] : drawn_optimised) {
+            const auto found = drawn_plain.find(generation);
+            if (found == drawn_plain.end()) continue;
+            ++compared;
+            EXPECT_TRUE(pixels == found->second)
+                << "generation " << generation
+                << " differs from the picture drawn with scene optimisation off";
+        }
+        EXPECT_GT(compared, drawn_optimised.size() / 2)
+            << "too few frames were shown by both renderers to compare them";
+        std::cout << "[ VIDEO REUSE ] ticks=" << drawn_optimised.size() << " reused=" << reused
+                  << " redrawn=" << redrawn << " compared_with_optimisation_off=" << compared
+                  << std::endl;
+
+        optimised.render.destroy();
+        plain.render.destroy();
+    }
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AVideoFrameShownAgainIsReusedAndANewOneRedrawsOnTheConvertedPath)
+{
+    ExpectVideoFramesShownAgainToBeReused(root_, false);
+}
+
+TEST_F(MetalSceneDraw, AVideoFrameShownAgainIsReusedAndANewOneRedrawsOnTheDirectPlanePath)
+{
+    ExpectVideoFramesShownAgainToBeReused(root_, true);
+}
+
+TEST_F(MetalSceneDraw, APausedVideoSceneStopsDrawingOnlyWhileVideoReuseIsOn)
+{
+    // The negative half: with the switch off a pass that samples a video is
+    // redrawn and presented every frame, as before, even with nothing to show
+    // that it has not shown. On, the same paused scene settles at once.
+    const auto directory = root_ / "video-reuse-paused";
+    const auto project   = WriteVideoFixture(directory, kVideoWidth, kVideoHeight);
+    if (project.empty()) GTEST_SKIP() << "no hardware H.264 encoder here, so no decodable media";
+
+    const CountersOn          counting;
+    const ScopedPlaneSampling sampling(false);
+    for (const bool reuse : { false, true }) {
+        SCOPED_TRACE(reuse ? "video reuse on" : "video reuse off");
+        MetalRender::SetVideoReuseForTests(reuse);
+        @autoreleasepool {
+            CountedVideoScene scene;
+            std::string       error;
+            ASSERT_TRUE(scene.Open(project, directory / (reuse ? "cache-on" : "cache-off"), false,
+                                   &error))
+                << error;
+            // Paused, with the video's clock held: once the frames the
+            // decoder had due at the start are taken, none follows.
+            scene.render.SetVideoPlaybackPaused(true);
+            VideoTick held;
+            bool      settled = false;
+            for (int frame = 0; frame < 32 && ! settled; ++frame) {
+                held    = scene.Tick();
+                settled = frame > 0 && held.imports == 0;
+            }
+            ASSERT_TRUE(settled) << "the paused video kept taking frames";
+            for (int frame = 0; frame < 5; ++frame) {
+                scene.loaded.scene->PassFrameTime(1.0 / 60.0);
+                const auto tick = scene.Tick();
+                EXPECT_EQ(tick.imports, 0u) << "a paused video took a frame";
+                EXPECT_TRUE(tick.pixels == held.pixels);
+                if (reuse) {
+                    EXPECT_EQ(tick.executed, 0u) << "frame " << frame;
+                    EXPECT_FALSE(tick.presented) << "frame " << frame;
+                } else {
+                    EXPECT_GT(tick.executed, 0u) << "frame " << frame;
+                    EXPECT_EQ(tick.skipped, 0u) << "frame " << frame;
+                    EXPECT_TRUE(tick.presented) << "frame " << frame;
+                }
+            }
+            // Playing again, the next frame the clock reaches is drawn.
+            scene.render.SetVideoPlaybackPaused(false);
+            bool advanced = false;
+            for (int frame = 0; frame < 30 && ! advanced; ++frame) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                scene.Advance();
+                const auto tick = scene.Tick();
+                if (tick.imports == 0) continue;
+                advanced = true;
+                EXPECT_GT(tick.executed, 0u);
+                EXPECT_TRUE(tick.presented);
+                EXPECT_FALSE(tick.pixels == held.pixels) << "the new frame did not reach the picture";
+            }
+            EXPECT_TRUE(advanced) << "the resumed video never took a frame";
+            scene.render.destroy();
+        }
+    }
+    MetalRender::SetVideoReuseForTests(true);
 }
 
 namespace
@@ -7410,14 +9619,14 @@ std::filesystem::path WriteTextFixture(const std::filesystem::path& root, std::s
           "attribute vec2 a_TexCoord;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
           "  v_TexCoord = a_TexCoord;\n"
           "}\n" },
         { "shaders/probe_copy.frag",
           "uniform sampler2D g_Texture0;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_FragColor = texture(g_Texture0, v_TexCoord);\n"
+          "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
           "}\n" },
         { "layout.json",
           R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
@@ -7478,6 +9687,432 @@ void AdvanceSceneFrame(MetalRender& render, Scene& scene)
 }
 
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Layer-local reuse samples: a moving layer or a shaking camera and a still chain
+
+namespace
+{
+
+constexpr const char* kStillCard =
+    "varying vec2 v_TexCoord;\n"
+    "void main() { gl_FragColor = vec4(v_TexCoord.x, v_TexCoord.y, 0.25, 1.0); }\n";
+constexpr const char* kStillEffect =
+    "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+    "void main() { vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+    "  gl_FragColor = vec4(c.g, c.r, c.b * 2.0, c.a); }\n";
+
+/// A layer under a group, drawn through two effects: its card (`card_fragment`) and the first
+/// effect (`first_fragment`) fill the layer's own buffers, the second effect puts the picture on
+/// the scene where the layer sits. With `shake` the scene camera shakes. With `framed` two plain
+/// cards are drawn straight into the scene's image, one before the layer and one after it.
+std::filesystem::path WriteStillChainFixture(const std::filesystem::path& root, bool shake,
+                                             const std::string& card_fragment,
+                                             const std::string& first_fragment, bool framed = false)
+{
+    const auto        project = WriteFixture(root);
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+        "void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+        "  v_TexCoord = a_TexCoord; }\n";
+    const auto material = [](std::string_view shader) {
+        return R"({"passes":[{"shader":")" + std::string(shader) +
+               R"(","textures":[null],"blending":"normal","cullmode":"nocull",)"
+               R"("depthtest":"disabled","depthwrite":"disabled"}]})";
+    };
+    const std::map<std::string, std::string> files {
+        { "shaders/metal_probe.frag", card_fragment },
+        { "effects/first/effect.json", R"({"name":"first","passes":[{"material":"materials/first.json"}]})" },
+        { "materials/first.json", material("chain_first") },
+        { "shaders/chain_first.vert", vertex },
+        { "shaders/chain_first.frag", first_fragment },
+        { "effects/second/effect.json", R"({"name":"second","passes":[{"material":"materials/second.json"}]})" },
+        { "materials/second.json", material("chain_second") },
+        { "shaders/chain_second.vert", vertex },
+        { "shaders/chain_second.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    if (shake) {
+        layout["general"]["camerashake"]          = true;
+        layout["general"]["camerashakeamplitude"] = 4.0;
+        layout["general"]["camerashakespeed"]     = 3.0;
+        layout["general"]["camerashakeroughness"] = 1.0;
+    }
+    auto card       = layout["objects"][0];
+    card["parent"]  = 2;
+    card["origin"]  = { 0, 0, 0 };
+    card["effects"] = nlohmann::json::array({ { { "file", "effects/first/effect.json" }, { "visible", true } },
+                                              { { "file", "effects/second/effect.json" }, { "visible", true } } });
+    layout["objects"] = nlohmann::json::array(
+        { card, { { "id", 2 }, { "name", "group" }, { "origin", { 192, 128, 0 } } } });
+    if (framed) {
+        // The second card samples the first, plain card's composite, so the scene's objects are
+        // drawn in their own order, and the moving layer's own buffers fall between the two cards'
+        // draws into the scene image, as Wallpaper Engine orders them.
+        const std::map<std::string, std::string> link {
+            { "models/link.json", R"({"width":256,"height":192,"material":"materials/link.json"})" },
+            { "materials/link.json",
+              R"({"passes":[{"shader":"chain_second","blending":"translucent","cullmode":"nocull",)"
+              R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_imageLayerComposite_3_a"]}]})" },
+        };
+        for (const auto& [name, contents] : link) std::ofstream(root / name) << contents;
+        const auto plain = [&layout](int id, std::string_view name, int x) {
+            auto object      = layout["objects"][0];
+            object["id"]     = id;
+            object["name"]   = name;
+            object["origin"] = { x, 128, 0 };
+            object["scale"]  = { 0.5, 0.5, 1 };
+            object.erase("parent");
+            object.erase("effects");
+            return object;
+        };
+        auto after            = plain(4, "after", 264);
+        after["image"]        = "models/link.json";
+        after["dependencies"] = { 3 };
+        layout["objects"].insert(layout["objects"].begin(), plain(3, "before", 120));
+        layout["objects"].push_back(after);
+    }
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+SceneNode* NodeNamed(SceneNode* node, std::string_view name)
+{
+    if (node == nullptr) return nullptr;
+    if (node->Name() == name) return node;
+    for (const auto& child : node->GetChildren()) {
+        if (auto* found = NodeNamed(child.get(), name)) return found;
+    }
+    return nullptr;
+}
+
+/// Every frame of one run of the still chain, how many passes each frame reused, and how many
+/// render passes it encoded into the scene's own image.
+struct ChainRun
+{
+    std::vector<std::vector<uint8_t>> frames;
+    std::vector<uint64_t>             reused;
+    std::vector<uint64_t>             scene_passes;
+};
+
+/// Draws `frames` production frames of `project` with scene optimisation `optimise` and
+/// layer-local samples `layer_local` (unset: as the renderer has them), moving the layer's group a
+/// little every frame when `move_group`. Both switches are put back as they were.
+ChainRun RunStillChain(const std::filesystem::path& project, const std::filesystem::path& cache,
+                       bool optimise, std::optional<bool> layer_local, bool move_group, int frames)
+{
+    ChainRun    run;
+    LoadedScene loaded;
+    std::string error;
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    auto&      scene = *loaded.scene;
+    SceneNode* group = NodeNamed(scene.sceneGraph.get(), "group");
+    EXPECT_NE(group, nullptr);
+    if (group == nullptr) return run;
+    const bool optimised = wallpaper::render::SceneOptimizationEnabled();
+    wallpaper::render::SetSceneOptimizationEnabled(optimise);
+    // The setter answers what the switch was; the run then gets what it asks for, or that.
+    const bool layer_local_before = MetalRender::SetLayerLocalSignaturesForTests(false);
+    MetalRender::SetLayerLocalSignaturesForTests(layer_local.value_or(layer_local_before));
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+        }));
+        const auto graph = sceneToRenderGraph(scene);
+        EXPECT_NE(graph, nullptr);
+        if (graph != nullptr && render.compileRenderGraph(scene, *graph)) {
+            for (int frame = 0; frame < frames; ++frame) {
+                if (move_group) {
+                    group->SetTranslate({ 192.0f + 5.0f * std::sin(0.9f * float(frame)),
+                                          128.0f + 0.5f * float(frame), 0.0f });
+                }
+                const auto before = wallpaper::render::CurrentSceneOptimizationTotals();
+                AdvanceSceneFrame(render, scene);
+                const auto after = wallpaper::render::CurrentSceneOptimizationTotals();
+                run.reused.push_back(after.skipped_passes - before.skipped_passes);
+                run.scene_passes.push_back(render.LastFrameEncodeCountsForTests().scene_output_passes);
+                run.frames.push_back(ReadOutput(render, scene));
+            }
+        } else {
+            ADD_FAILURE() << render.lastError();
+        }
+        render.destroy();
+    }
+    MetalRender::SetLayerLocalSignaturesForTests(layer_local_before);
+    wallpaper::render::SetSceneOptimizationEnabled(optimised);
+    return run;
+}
+
+/// The three runs of one fixture: reuse with layer-local samples, reuse without them, and every
+/// pass drawn every frame. Each frame of the first two must be the third's, byte for byte.
+struct ChainComparison
+{
+    ChainRun local, folded, drawn;
+};
+
+ChainComparison CompareStillChain(const std::filesystem::path& root, bool shake, bool move_group,
+                                  const std::string& card_fragment, const std::string& first_fragment)
+{
+    constexpr int frames  = 24;
+    const auto    project = WriteStillChainFixture(root, shake, card_fragment, first_fragment);
+    ChainComparison runs {
+        .local  = RunStillChain(project, root / "cache-local", true, true, move_group, frames),
+        .folded = RunStillChain(project, root / "cache-folded", true, false, move_group, frames),
+        .drawn  = RunStillChain(project, root / "cache-drawn", false, true, move_group, frames),
+    };
+    for (const auto* run : { &runs.local, &runs.folded, &runs.drawn }) {
+        EXPECT_EQ(run->frames.size(), std::size_t(frames));
+    }
+    if (runs.drawn.frames.size() != std::size_t(frames)) return runs;
+    for (int frame = 0; frame < frames; ++frame) {
+        SCOPED_TRACE("frame " + std::to_string(frame));
+        EXPECT_FALSE(runs.drawn.frames[frame].empty());
+        if (std::size_t(frame) < runs.local.frames.size())
+            EXPECT_TRUE(runs.local.frames[frame] == runs.drawn.frames[frame])
+                << "a reused pass held other pixels than drawing it again gives";
+        if (std::size_t(frame) < runs.folded.frames.size())
+            EXPECT_TRUE(runs.folded.frames[frame] == runs.drawn.frames[frame]);
+    }
+    // The fixture moves: the picture on the scene is not the same every frame.
+    EXPECT_NE(runs.drawn.frames.front(), runs.drawn.frames.back()) << "nothing moved";
+    return runs;
+}
+
+uint64_t ReusedAfterTheFirstFrame(const ChainRun& run)
+{
+    uint64_t reused = 0;
+    for (std::size_t i = 1; i < run.reused.size(); ++i) reused += run.reused[i];
+    return reused;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AStillEffectChainIsReusedWhileTheCameraShakesOrItsLayerMoves)
+{
+    for (const auto [shake, move_group] : { std::pair { true, false }, std::pair { false, true },
+                                            std::pair { true, true } }) {
+        SCOPED_TRACE(std::string(shake ? "camera shake" : "") + (move_group ? " moving group" : ""));
+        const auto runs = CompareStillChain(
+            root_ / ("still-chain" + std::to_string(shake) + std::to_string(move_group)), shake, move_group,
+            kStillCard, kStillEffect);
+        if (HasFailure()) return;
+        // The card and the first effect read nothing that moves: from the second frame on both
+        // are reused every frame, while the second effect follows the layer onto the scene.
+        for (std::size_t frame = 1; frame < runs.local.reused.size(); ++frame) {
+            EXPECT_GE(runs.local.reused[frame], 2u) << "frame " << frame;
+        }
+        // Folding the layer's place and the camera into every sample reused nothing.
+        EXPECT_EQ(ReusedAfterTheFirstFrame(runs.folded), 0u);
+        EXPECT_EQ(ReusedAfterTheFirstFrame(runs.drawn), 0u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AnEffectReadingWhereItsLayerIsIsRedrawnWhenTheCameraShakesOrTheLayerMoves)
+{
+    const std::string effect_mvp =
+        "uniform sampler2D g_Texture0;\nuniform mat4 g_EffectModelViewProjectionMatrix;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main() { vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+        "  vec4 p = mul(vec4(0.25, 0.5, 0.0, 1.0), g_EffectModelViewProjectionMatrix);\n"
+        "  gl_FragColor = vec4(frac(p.x * 3.0), c.g, frac(p.y * 3.0), c.a); }\n";
+    const std::string effect_model =
+        "uniform sampler2D g_Texture0;\nuniform mat4 g_EffectModelMatrix;\nvarying vec2 v_TexCoord;\n"
+        "void main() { vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+        "  vec4 p = mul(vec4(0.0, 0.0, 0.0, 1.0), g_EffectModelMatrix);\n"
+        "  gl_FragColor = vec4(frac(p.x / 7.0), c.g, frac(p.y / 5.0), c.a); }\n";
+    const std::string card_mvp =
+        "uniform mat4 g_EffectModelViewProjectionMatrix;\nvarying vec2 v_TexCoord;\n"
+        "void main() { vec4 p = mul(vec4(0.25, 0.5, 0.0, 1.0), g_EffectModelViewProjectionMatrix);\n"
+        "  gl_FragColor = vec4(v_TexCoord.x, frac(p.x * 3.0), frac(p.y * 3.0), 1.0); }\n";
+    struct Case
+    {
+        const char* name;
+        bool        shake;
+        bool        move_group;
+        std::string card;
+        std::string first;
+        /// Passes the layer-local samples still reuse every frame: the card, or nothing.
+        bool        card_still;
+    };
+    const std::vector<Case> cases {
+        { "effect matrix, shake", true, false, kStillCard, effect_mvp, true },
+        { "effect matrix, moving group", false, true, kStillCard, effect_mvp, true },
+        { "effect model, moving group", false, true, kStillCard, effect_model, true },
+        { "card reading the effect matrix, shake", true, false, card_mvp, kStillEffect, false },
+        { "card reading the effect matrix, moving group", false, true, card_mvp, kStillEffect, false },
+    };
+    // What the same chain reuses when nothing in it reads where the layer is, per motion.
+    std::map<std::pair<bool, bool>, uint64_t> still_reuse;
+    int                                       index = 0;
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        const auto runs = CompareStillChain(root_ / ("moving-reader-" + std::to_string(index++)), c.shake,
+                                            c.move_group, c.card, c.first);
+        if (HasFailure()) return;
+        // The card, when it reads nothing that moves, is still reused...
+        for (std::size_t frame = 1; frame < runs.local.reused.size(); ++frame) {
+            if (c.card_still) EXPECT_GE(runs.local.reused[frame], 1u) << "frame " << frame;
+            else EXPECT_EQ(runs.local.reused[frame], 0u) << "frame " << frame;
+        }
+        // ...but the pass that reads where the layer is, and everything after it, is drawn again.
+        if (c.card_still) {
+            const auto key = std::pair { c.shake, c.move_group };
+            if (! still_reuse.contains(key)) {
+                const auto still = CompareStillChain(root_ / ("moving-reader-still-" + std::to_string(index)),
+                                                     c.shake, c.move_group, kStillCard, kStillEffect);
+                still_reuse[key] = ReusedAfterTheFirstFrame(still.local);
+            }
+            EXPECT_LT(ReusedAfterTheFirstFrame(runs.local), still_reuse[key]);
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses)
+{
+    // The layer's own buffers sit between two draws into the scene's image in the objects'
+    // order. Drawn there, they close the scene's render pass in between. The renderer as shipped
+    // draws them ahead of both cards instead (`WALLPAPER_MACHINE_SCENE_PASS_MERGE`), so the cards
+    // and the layer's last pass share one render pass whether the chain is drawn or reused.
+    // Switched off, it reuses them while the layer moves, which lets the same draws share one
+    // render pass on the frames it does. An Apple GPU can then blend a later draw one level apart
+    // in a texel (an M5 Pro did, in a few frames of a scene with bone-attached layers): accepted
+    // for the GPU time saved. This pins what the shipped renderer does, and that
+    // `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0` encodes the frame as drawing every pass does.
+    if (std::getenv("WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES") != nullptr ||
+        std::getenv("WALLPAPER_MACHINE_SCENE_PASS_MERGE") != nullptr) {
+        GTEST_SKIP() << "an A/B switch chooses the reuse or the order this checks";
+    }
+    struct RestoreMerge
+    {
+        bool was { wallpaper::SetScenePassMergeForTests(true) };
+        ~RestoreMerge() { wallpaper::SetScenePassMergeForTests(was); }
+    } restore;
+    constexpr int frames  = 12;
+    const auto    project = WriteStillChainFixture(root_ / "framed-chain", false, kStillCard, kStillEffect, true);
+    const auto    merged  = RunStillChain(project, root_ / "framed-merged", true, std::nullopt, true, frames);
+    const auto    merged_drawn = RunStillChain(project, root_ / "framed-merged-drawn", false, std::nullopt, true, frames);
+    wallpaper::SetScenePassMergeForTests(false);
+    const auto    shipped = RunStillChain(project, root_ / "framed-shipped", true, std::nullopt, true, frames);
+    const auto    drawn   = RunStillChain(project, root_ / "framed-drawn", false, std::nullopt, true, frames);
+    const auto    off     = RunStillChain(project, root_ / "framed-off", true, false, true, frames);
+    for (const auto* run : { &merged, &merged_drawn, &shipped, &drawn, &off }) {
+        ASSERT_EQ(run->frames.size(), std::size_t(frames));
+        ASSERT_EQ(run->scene_passes.size(), std::size_t(frames));
+    }
+    for (int frame = 1; frame < frames; ++frame) {
+        SCOPED_TRACE("frame " + std::to_string(frame));
+        EXPECT_GE(merged.reused[frame], 2u) << "the still chain of the moving layer was drawn again";
+        EXPECT_EQ(merged.scene_passes[frame], 1u);
+        EXPECT_EQ(merged_drawn.scene_passes[frame], 1u) << "the drawn chain split the scene's render pass";
+        EXPECT_TRUE(merged.frames[frame] == merged_drawn.frames[frame]);
+        // The chain drawn ahead of the cards leaves the picture drawing it between them gives,
+        // at most one level apart in a channel of a few texels.
+        ASSERT_EQ(merged_drawn.frames[frame].size(), drawn.frames[frame].size());
+        std::size_t differing = 0;
+        int         largest   = 0;
+        for (std::size_t i = 0; i < drawn.frames[frame].size(); ++i) {
+            const int delta = std::abs(int(merged_drawn.frames[frame][i]) - int(drawn.frames[frame][i]));
+            differing += delta != 0;
+            largest = std::max(largest, delta);
+        }
+        EXPECT_LE(largest, 1);
+        EXPECT_LE(differing * 10000, drawn.frames[frame].size()) << differing << " channels differ";
+
+        EXPECT_GE(shipped.reused[frame], 2u) << "the still chain of the moving layer was drawn again";
+        EXPECT_LT(shipped.scene_passes[frame], drawn.scene_passes[frame]);
+        // Switched off, the frame is encoded render pass for render pass as drawing every pass.
+        EXPECT_EQ(off.scene_passes[frame], drawn.scene_passes[frame]);
+        EXPECT_TRUE(off.frames[frame] == drawn.frames[frame]);
+    }
+    EXPECT_NE(drawn.frames.front(), drawn.frames.back()) << "nothing moved";
+}
+
+TEST_F(MetalSceneDraw, AFlatLayerBetweenTwoDepthTestedLayersSharesTheirRenderPass)
+{
+    // A green card that depth-tests and writes depth, a red layer that does not depth-test, a
+    // blue card that depth-tests behind the green one. A render pass has one depth attachment
+    // or none, so the red layer used to end the scene's render pass twice, each time storing and
+    // loading back the scene's colour and depth. It now takes the attachment with depth testing
+    // off: one render pass and the same picture. `WALLPAPER_MACHINE_SCENE_PASS_MERGE=0` draws it
+    // as before.
+    if (std::getenv("WALLPAPER_MACHINE_SCENE_PASS_MERGE") != nullptr) {
+        GTEST_SKIP() << "WALLPAPER_MACHINE_SCENE_PASS_MERGE chooses what this compares";
+    }
+    struct Restore
+    {
+        bool merge { wallpaper::SetScenePassMergeForTests(true) };
+        bool optimise { wallpaper::render::SceneOptimizationEnabled() };
+        ~Restore()
+        {
+            wallpaper::SetScenePassMergeForTests(merge);
+            wallpaper::render::SetSceneOptimizationEnabled(optimise);
+        }
+    } restore;
+    // Every frame is drawn in full, so the counts describe the render passes, not reuse.
+    wallpaper::render::SetSceneOptimizationEnabled(false);
+    const auto project = WriteEffectDepthFixture(root_ / "depth-sandwich", "disabled", "disabled", "", "");
+    std::map<int, std::vector<uint8_t>> pixels;
+    std::map<int, uint32_t>             scene_passes;
+    std::map<int, bool>                 shared;
+    // 1: merged; 0: switched off. That a scene sorted by depth shares nothing is
+    // MetalDepthSharing's (`metal_backend_test`).
+    for (const int run : { 1, 0 }) {
+        const bool merge = run == 1;
+        SCOPED_TRACE(merge ? "merged" : "switched off");
+        wallpaper::SetScenePassMergeForTests(merge);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, root_ / ("depth-sandwich-" + std::to_string(run)), loaded, error)) << error;
+        loaded.scene->FindRenderTarget(std::string(SpecTex_Default))->withDepth = true;
+        ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+        @autoreleasepool {
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+            MetalRender render;
+            ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+                .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+            })) << render.lastError();
+            auto graph = sceneToRenderGraph(*loaded.scene);
+            ASSERT_NE(graph, nullptr);
+            std::vector<wallpaper::metal::ScenePassDescription> descriptions;
+            ASSERT_TRUE(wallpaper::metal::BuildScenePassDescriptions(*loaded.scene, *graph, descriptions, &error))
+                << error;
+            shared[run] = std::any_of(descriptions.begin(), descriptions.end(),
+                                      [](const auto& desc) { return desc.shares_depth_attachment; });
+            ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+            for (int frame = 0; frame < 2; ++frame) AdvanceSceneFrame(render, *loaded.scene);
+            scene_passes[run] = render.LastFrameEncodeCountsForTests().scene_output_passes;
+            pixels[run]       = ReadOutput(render, *loaded.scene);
+            render.destroy();
+        }
+    }
+    EXPECT_EQ(scene_passes[1], 1u) << "the layer that does not depth-test split the scene's render pass";
+    EXPECT_EQ(scene_passes[0], 3u);
+    EXPECT_TRUE(shared[1]);
+    EXPECT_FALSE(shared[0]);
+    ASSERT_FALSE(pixels[0].empty());
+    EXPECT_TRUE(pixels[1] == pixels[0]) << "sharing the depth attachment changed the picture";
+}
 
 TEST_F(MetalSceneDraw, ATextLayerWhoseEffectsAreAllOffIsDrawnAsPlainText)
 {
@@ -7572,12 +10207,12 @@ std::filesystem::path WriteTextOverBackdropFixture(const std::filesystem::path& 
         file("shaders/through.vert",
              "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
              "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-             "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+             "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
              "  v_TexCoord = a_TexCoord;\n}\n");
         file("shaders/through.frag",
              "uniform sampler2D g_Texture0;\nuniform vec4 g_Color4;\nvarying vec2 v_TexCoord;\n"
              "void main() {\n"
-             "  gl_FragColor = texture(g_Texture0, v_TexCoord) * g_Color4;\n}\n");
+             "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord) * g_Color4;\n}\n");
         file("materials/util/effectpassthrough.json",
              R"({"passes":[{"shader":"through","blending":"normal","cullmode":"nocull",)"
              R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})");
@@ -7585,7 +10220,7 @@ std::filesystem::path WriteTextOverBackdropFixture(const std::filesystem::path& 
     file("shaders/quadrants.vert",
          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
          "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
-         "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+         "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
          "  v_TexCoord = a_TexCoord;\n}\n");
     file("shaders/quadrants.frag",
          "varying vec2 v_TexCoord;\nvoid main() {\n"
@@ -7958,7 +10593,7 @@ TEST_F(MetalSceneDraw, AnOpaqueBackgroundFillsTheCardAtTheLayersAlpha)
                     if (! through_effect) {
                         expected = fill * (1.0 - stem);
                     } else {
-                        const double composite_alpha = std::pow(stem, kTextCompositeAlphaExponent) + kAlpha * (1.0 - stem);
+                        const double composite_alpha = TranslucentBlendAlpha(float(stem), float(kAlpha));
                         const double rgb = plate * (1.0 - stem);
                         expected = rgb * composite_alpha + quadrant.colour[channel] * (1.0 - composite_alpha);
                     }
@@ -7995,7 +10630,7 @@ TEST_F(MetalSceneDraw, AnOpaqueBackgroundFillsTheCardAndNotTheRoomAStyleNeedsAro
             SCOPED_TRACE(quadrant.name);
             const auto state = loaded.scene->runtime->NodeTextState(std::string("caption ") + quadrant.name);
             ASSERT_TRUE(state.has_value());
-            ASSERT_GE(TextStyleMargin(*state), 6.0f) << "the style has no room around the card to leave unfilled";
+            ASSERT_TRUE(state->style.outline) << "the caption has no style to reach past the card";
             const auto card = CardOfCaption(*loaded.scene, quadrant);
             for (std::size_t channel = 0; channel < 3; ++channel) {
                 const double plate = kPlateColour[channel] * 255.0;
@@ -8182,6 +10817,34 @@ void MakeSceneHdr(const std::filesystem::path& root)
     std::ofstream(layout_path) << layout;
 }
 } // namespace
+
+TEST_F(MetalSceneDraw, ShapedArabicIsDrawnInItsJoinedForms)
+{
+    // Wallpaper Engine shapes text with HarfBuzz (artifacts/we-parity/decompiles/G-F1.md):
+    // in "سلام" seen joins lam and lam joins alef, so the ink splits into at most two
+    // pieces across the width (alef never joins forward, so meem stands apart); drawn as
+    // four isolated letters it splits into four.
+    if (! std::filesystem::exists("/System/Library/Fonts/Supplemental/Arial.ttf")) GTEST_SKIP() << "Arial is not installed";
+    const auto project = WriteTextFixture(root_ / "text-arabic", "\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "text-arabic-cache", loaded, error)) << error;
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    std::vector<bool> inked(picture.width, false);
+    for (uint32_t y = 0; y < picture.height; ++y) {
+        for (uint32_t x = 0; x < picture.width; ++x) {
+            const std::size_t at = (static_cast<std::size_t>(y) * picture.width + x) * 3;
+            if (picture.rgb[at] > 64) inked[x] = true;
+        }
+    }
+    int pieces = 0;
+    for (uint32_t x = 0; x < picture.width; ++x) {
+        if (inked[x] && (x == 0 || ! inked[x - 1])) ++pieces;
+    }
+    EXPECT_GE(pieces, 1);
+    EXPECT_LE(pieces, 2);
+}
 
 TEST_F(MetalSceneDraw, ATextLayersBrightnessDoesNothingOutsideTheHdrPipeline)
 {
@@ -8384,7 +11047,7 @@ TEST_F(MetalSceneDraw, AnEffectsUvOffsetIsAFractionOfTheCard)
             std::string("uniform sampler2D g_Texture0;\n"
                         "varying vec2 v_TexCoord;\n"
                         "void main() {\n"
-                        "  gl_FragColor = texture(g_Texture0, v_TexCoord + vec2(") +
+                        "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord + vec2(") +
             (vertical ? "0.0, 0.25" : "0.25, 0.0") + "));\n}\n";
         {
             SCOPED_TRACE(std::string(vertical ? "vertical, " : "horizontal, "));
@@ -8496,13 +11159,6 @@ int IdentifyBarFrame(const RendererPicture& picture)
     if (left < 0 || best / (width * rows) < 1.5 * (total / (kVideoWidth * rows))) return -1;
     return video::testing_media::LongGopFrameOfColumn(left);
 }
-
-/// Switches the renderer's work counters on for a test and off again however it ends.
-struct CountersOn
-{
-    CountersOn() { RendererCounters::SetEnabled(true); }
-    ~CountersOn() { RendererCounters::SetEnabled(false); }
-};
 
 /// How many video decoders this process has open: a source holds its decoder for as long as it
 /// lives, so this is what tells a video that was closed from one that was set aside.
@@ -8633,6 +11289,169 @@ TEST_F(MetalSceneDraw,
     }
 }
 
+TEST_F(MetalSceneDraw, ScriptedTextMaterialsDrawLikeTheirAuthoredStylesAndKeepTintBindings)
+{
+    using Json = nlohmann::json;
+    const auto plain_project = WriteTextFixture(root_ / "text-members-plain", "Aa", false, {},
+        R"(,"pointsize":16,"padding":0,"alpha":0.75,"color":"0.25 0.8 0.5")");
+    LoadedScene plain;
+    std::string plain_error;
+    ASSERT_TRUE(LoadScene(plain_project, root_ / "text-members-plain-cache", plain, plain_error)) << plain_error;
+    const auto plain_picture = DrawWithRenderer(*plain.scene, 384, 256, 3, 1.0 / 60.0);
+    ASSERT_TRUE(plain_picture.error.empty()) << plain_picture.error;
+    const std::vector<std::pair<std::string, Json>> variants {
+        { "msdf", { { "msdf", true } } },
+        { "outline", { { "outline", true }, { "outlinethickness", 3 }, { "outlinecolor", "1 0 0" } } },
+        { "blur", { { "blur", true }, { "blursize", 2 } } },
+        { "shadow", { { "dropshadow", true }, { "dropshadowsize", 3 },
+                        { "dropshadowoffset", "4 -2" }, { "dropshadowcolor", "0 0 1" }, { "dropshadowopacity", 0.7 } } },
+        { "background", { { "opaquebackground", true }, { "backgroundcolor", "0.1 0.2 0.6" },
+                            { "padding", "8 5" } } },
+        { "combined", { { "msdf", true }, { "outline", true }, { "outlinecolor", "1 0 0" },
+                          { "dropshadow", true }, { "dropshadowcolor", "0 0 1" },
+                          { "opaquebackground", true }, { "backgroundcolor", "0.2 0.1 0.1" } } }
+    };
+    for (const auto& [name, fields] : variants) {
+        SCOPED_TRACE(name);
+        std::array<RendererPicture, 2> pictures;
+        for (int scripted = 0; scripted < 2; ++scripted) {
+            Json options = { { "pointsize", 16 }, { "padding", 0 }, { "alpha", 0.25 }, { "color", "1 0 0" } };
+            if (!scripted) options.update(fields);
+            const auto serialized = options.dump();
+            const auto directory = root_ / ("text-members-" + name + (scripted ? "-script" : "-authored"));
+            const auto project = WriteTextFixture(directory, "Aa", false, {},
+                "," + serialized.substr(1, serialized.size() - 2));
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+            ASSERT_NE(loaded.scene->runtime, nullptr);
+            auto& runtime = *loaded.scene->runtime;
+            if (scripted) {
+                for (const auto& [key, value] : fields.items()) {
+                    const std::string text = value.is_boolean() ? (value.get<bool>() ? "1" : "0")
+                        : value.is_string() ? value.get<std::string>() : value.dump();
+                    ASSERT_TRUE(runtime.SetNodeTextStyle("caption", key, text)) << key;
+                }
+                for (int attempt = 0; attempt < 400 && runtime.NodeTextDirty("caption"); ++attempt) {
+                    runtime.PumpTextLayerCache();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                ASSERT_FALSE(runtime.NodeTextDirty("caption"));
+            }
+            // These bindings were installed before the material replacement. They must
+            // still reach the rendered glyphs and a background first enabled by script.
+            ASSERT_TRUE(runtime.SetNodeColor("caption", linalg::Vector3f(0.25f, 0.8f, 0.5f)));
+            ASSERT_TRUE(runtime.SetNodeAlpha("caption", 0.75f));
+            pictures[scripted] = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+            ASSERT_TRUE(pictures[scripted].error.empty()) << pictures[scripted].error;
+            if (scripted) {
+                for (const char* key : { "msdf", "outline", "blur", "dropshadow", "opaquebackground" })
+                    ASSERT_TRUE(runtime.SetNodeTextStyle("caption", key, "0"));
+                for (int attempt = 0; attempt < 400 && runtime.NodeTextDirty("caption"); ++attempt) {
+                    runtime.PumpTextLayerCache();
+                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                }
+                ASSERT_FALSE(runtime.NodeTextDirty("caption"));
+                const auto restored = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+                ASSERT_TRUE(restored.error.empty()) << restored.error;
+                EXPECT_EQ(restored.rgb, plain_picture.rgb) << "turning the style off must restore plain glyphs";
+            }
+        }
+        EXPECT_GT(std::count_if(pictures[0].rgb.begin(), pictures[0].rgb.end(),
+                               [](uint8_t value) { return value > 20; }), 100);
+        EXPECT_EQ(pictures[1].rgb, pictures[0].rgb) << "the scripted style differs from its authored control";
+    }
+}
+
+TEST_F(MetalSceneDraw, ATextEffectsHalfSizeAndFixedBuffersSurviveTextAndRenderScaleChanges)
+{
+    const auto directory = root_ / "text-scaled-buffers";
+    const auto project = WriteTextFixture(directory, "MMMM", true, {}, R"(,"padding":0)");
+    std::ofstream(directory / "effects" / "probe.json")
+        << R"({"name":"scaled text copy","fbos":[)"
+           R"({"name":"_rt_TextHalf","format":"rgba8888","scale":2},)"
+           R"({"name":"_rt_TextQuarter","format":"rgba8888","scale":4},)"
+           R"({"name":"_rt_TextFixed","format":"rgba8888","width":80,"height":40,"scale":2}],)"
+           R"("passes":[{"material":"materials/copy.json","target":"_rt_TextHalf"},)"
+           R"({"material":"materials/copy.json","target":"_rt_TextQuarter","bind":[{"index":0,"name":"_rt_TextHalf"}]},)"
+           R"({"material":"materials/copy.json","target":"_rt_TextFixed","bind":[{"index":0,"name":"_rt_TextQuarter"}]},)"
+           R"({"material":"materials/copy.json","bind":[{"index":0,"name":"_rt_TextFixed"}]}]})";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    ASSERT_NE(scene.runtime, nullptr);
+    SceneNode* caption = nullptr;
+    for (const auto& child : scene.sceneGraph->GetChildren()) {
+        if (child->Name() == "caption") caption = child.get();
+    }
+    ASSERT_NE(caption, nullptr);
+    const auto camera = scene.cameras.find(caption->Camera());
+    ASSERT_NE(camera, scene.cameras.end());
+    const auto chain = camera->second->GetImgEffect();
+    ASSERT_NE(chain, nullptr);
+    const auto effect = chain->GetEffect(0);
+    ASSERT_NE(effect, nullptr);
+    ASSERT_GE(effect->nodes.size(), 3u);
+    const auto half_key = effect->nodes.front().output;
+    const auto quarter_key = std::next(effect->nodes.begin())->output;
+    const auto fixed_key = std::next(effect->nodes.begin(), 2)->output;
+    // A second-level binding exercises dependency order, not just root-first sizing.
+    auto* quarter = scene.FindRenderTarget(quarter_key);
+    ASSERT_NE(quarter, nullptr);
+    quarter->bind.name = half_key;
+    quarter->bind.scale = 0.5;
+    auto graph = sceneToRenderGraph(scene);
+    ASSERT_NE(graph, nullptr);
+
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize = CGSizeMake(384, 256);
+        MetalRender render;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+        }));
+        ASSERT_TRUE(render.compileRenderGraph(scene, *graph)) << render.lastError();
+        const auto verify = [&](double scale) {
+            ASSERT_TRUE(render.drawFrame(scene)) << render.lastError();
+            std::vector<uint8_t> rgba;
+            uint32_t root_width = 0, root_height = 0, width = 0, height = 0;
+            ASSERT_TRUE(render.ReadRenderTargetForTests(chain->FirstTarget(), rgba, root_width, root_height));
+            ASSERT_TRUE(render.ReadRenderTargetForTests(half_key, rgba, width, height));
+            EXPECT_EQ(width, std::max(4u, (root_width + 1) / 2));
+            EXPECT_EQ(height, std::max(4u, (root_height + 1) / 2));
+            EXPECT_GT(LitPixels(rgba), 0u) << "the half-size target contains the text";
+            const auto half_width = width, half_height = height;
+            ASSERT_TRUE(render.ReadRenderTargetForTests(quarter_key, rgba, width, height));
+            EXPECT_EQ(width, std::max(4u, (half_width + 1) / 2));
+            EXPECT_EQ(height, std::max(4u, (half_height + 1) / 2));
+            EXPECT_GT(LitPixels(rgba), 0u) << "the second-level binding contains the text";
+            ASSERT_TRUE(render.ReadRenderTargetForTests(fixed_key, rgba, width, height));
+            EXPECT_EQ(width, uint32_t(40 * scale));
+            EXPECT_EQ(height, uint32_t(20 * scale));
+            EXPECT_GT(LitPixels(rgba), 0u) << "the fixed target samples the half-size target";
+        };
+        ASSERT_NO_FATAL_FAILURE(verify(1.0));
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 0.5, SceneResolution::Canvas)) << render.lastError();
+        ASSERT_NO_FATAL_FAILURE(verify(0.5));
+        ASSERT_TRUE(scene.runtime->SetNodeText("caption", "MM"));
+        ASSERT_TRUE(scene.runtime->SetNodeTextStyle("caption", "pointsize", "64"));
+        for (int attempt = 0; attempt < 400 && scene.runtime->NodeTextDirty("caption"); ++attempt) {
+            scene.runtime->PumpTextLayerCache();
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        ASSERT_FALSE(scene.runtime->NodeTextDirty("caption"));
+        ASSERT_TRUE(scene.runtime->ConsumeRenderTargetResizeFlag());
+        ASSERT_TRUE(render.ResizeRenderTargets(scene)) << render.lastError();
+        ASSERT_NO_FATAL_FAILURE(verify(0.5));
+        ASSERT_TRUE(render.ApplyRenderScale(scene, *graph, 1.0, SceneResolution::Canvas)) << render.lastError();
+        ASSERT_NO_FATAL_FAILURE(verify(1.0));
+    }
+}
+
 TEST_F(MetalSceneDraw, ATextCardThatChangesSizeResizesTheTargetsAndDrawsWhatARebuildDraws)
 {
     // The buffers an effect on a text layer draws into follow the card's size in texels, and the
@@ -8652,10 +11471,10 @@ TEST_F(MetalSceneDraw, ATextCardThatChangesSizeResizesTheTargetsAndDrawsWhatAReb
            "uniform vec4 g_Texture0Resolution;\n"
            "varying vec2 v_TexCoord;\n"
            "void main() {\n"
-           "  vec2 step = vec2(2.0) / g_Texture0Resolution.xy;\n"
-           "  vec4 a = texture(g_Texture0, v_TexCoord);\n"
-           "  vec4 b = texture(g_Texture0, v_TexCoord + vec2(step.x, 0.0));\n"
-           "  vec4 c = texture(g_Texture0, v_TexCoord - vec2(0.0, step.y));\n"
+           "  vec2 step = vec2(2.0, 2.0) / g_Texture0Resolution.xy;\n"
+           "  vec4 a = texSample2D(g_Texture0, v_TexCoord);\n"
+           "  vec4 b = texSample2D(g_Texture0, v_TexCoord + vec2(step.x, 0.0));\n"
+           "  vec4 c = texSample2D(g_Texture0, v_TexCoord - vec2(0.0, step.y));\n"
            "  gl_FragColor = (a + b + c) / 3.0;\n"
            "}\n";
 
@@ -9210,18 +12029,23 @@ std::size_t PixelsNear(const std::vector<uint8_t>& rgb, std::array<int, 3> expec
 }
 } // namespace
 
-TEST_F(MetalSceneDraw, ATextLayersColourBlendModeAppliesItsColourAndAlphaOnce)
+TEST_F(MetalSceneDraw, ATextLayersColourBlendModeComposesItsTextOverTheSceneBehindIt)
 {
-    // A text layer shares an image layer's colour blend: the text card is drawn
-    // with its colour and alpha, then the passthrough mixes it with the screen and
-    // is handed a white `g_Color4`. White text at half alpha mixes half of white
-    // over green 0.25; taking the alpha a second time would mix a quarter. Mode 31
-    // adds half of white to the scene instead, with no screen read.
+    // A colour blend makes a text layer a composite (`sub_1401E6F50` sets flag 0x10 for a mode
+    // other than 0 and 31) and a composite is seeded with the scene behind it at alpha 0
+    // (`sub_140258900` → composelayer_clearalpha): the glyphs blend into it translucently (the
+    // colour is mixed with the scene by the alpha, the alpha written is the blend's), then the
+    // passthrough mixes that with the screen by the alpha it holds. White text at half alpha
+    // over green 0.25 therefore reaches the screen by `TextCompositeReach(0.5)`. Mode 31 is no
+    // composite: the glyphs add half of white to the scene, with no screen read.
     struct Mode {
-        const char*          fields;
-        std::array<int, 3>   expected;
+        const char*        fields;
+        std::array<int, 3> expected;
     };
-    for (const auto& mode : { Mode { R"("colorBlendMode":2,"alpha":0.5)", { 128, 159, 128 } },
+    const double reach = TextCompositeReach(0.5f);
+    const int    lit   = static_cast<int>(std::lround(255.0 * reach));
+    const int    green = static_cast<int>(std::lround(64.0 + (255.0 - 64.0) * reach));
+    for (const auto& mode : { Mode { R"("colorBlendMode":2,"alpha":0.5)", { lit, green, lit } },
                               Mode { R"("colorBlendMode":31,"alpha":0.5)", { 128, 191, 128 } } }) {
         SCOPED_TRACE(mode.fields);
         RendererPicture picture;
@@ -9242,7 +12066,7 @@ TEST_F(MetalSceneDraw, ATextLayersColourBlendModeAppliesItsColourAndAlphaOnce)
         ASSERT_EQ(rgb.size(), 384u * 256u * 3u);
         // The stem of the "I", well inside the glyph, takes the blended colour.
         EXPECT_GT(PixelsNear(rgb, mode.expected, 3), 200u)
-            << "the text was not blended once with the screen behind it";
+            << "the text was not composed over the screen behind it";
     }
 }
 
@@ -9569,7 +12393,7 @@ std::filesystem::path WriteComposeParallaxFixture(const std::filesystem::path& r
         "uniform mat4 g_ModelViewProjectionMatrix;\n"
         "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
-        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+        "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
         "v_TexCoord=a_TexCoord; }\n";
     const std::map<std::string, std::string> files {
         { "models/backdrop.json", R"({"width":384,"height":256,"material":"materials/tile.json"})" },
@@ -9585,7 +12409,7 @@ std::filesystem::path WriteComposeParallaxFixture(const std::filesystem::path& r
           "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
           "varying vec2 v_TexCoord;\nvarying vec3 v_ScreenCoord;\n"
           "void main() {\n"
-          "  v_ScreenCoord = (g_ModelViewProjectionMatrix * vec4(a_Position, 1.0)).xyw;\n"
+          "  v_ScreenCoord = (mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix)).xyw;\n"
           "  vec3 position = vec3(a_TexCoord, 0.0);\n"
           "#ifdef HLSL\n"
           "  position.y = 1.0 - position.y;\n"
@@ -9600,7 +12424,7 @@ std::filesystem::path WriteComposeParallaxFixture(const std::filesystem::path& r
           "uniform sampler2D g_Texture0;\n"
           "void main() {\n"
           "  vec2 texCoord = v_ScreenCoord.xy / v_ScreenCoord.z * vec2(0.5, 0.5) + 0.5;\n"
-          "  gl_FragColor = texture(g_Texture0, texCoord);\n"
+          "  gl_FragColor = texSample2D(g_Texture0, texCoord);\n"
           "}\n" },
         { "effects/invert_red/effect.json",
           R"({"name":"invert red","passes":[{"material":"materials/invert_red.json"}]})" },
@@ -9611,7 +12435,7 @@ std::filesystem::path WriteComposeParallaxFixture(const std::filesystem::path& r
         { "shaders/invert_red.frag",
           "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  vec4 picture = texture(g_Texture0, v_TexCoord);\n"
+          "  vec4 picture = texSample2D(g_Texture0, v_TexCoord);\n"
           "  gl_FragColor = vec4(1.0 - picture.r, picture.g, picture.b, picture.a);\n"
           "}\n" },
     };
@@ -9765,14 +12589,14 @@ std::filesystem::path WriteMagnifiedEffectLayerFixture(const std::filesystem::pa
           "attribute vec2 a_TexCoord;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
           "  v_TexCoord = a_TexCoord;\n"
           "}\n" },
         { "shaders/probe_copy.frag",
           "uniform sampler2D g_Texture0;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_FragColor = texture(g_Texture0, v_TexCoord);\n"
+          "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
           "}\n" },
     };
     for (const auto& [name, contents] : files) {
@@ -9855,7 +12679,7 @@ std::filesystem::path WriteShapeFixture(const std::filesystem::path& root, std::
           "attribute vec2 a_TexCoord;\n"
           "varying vec2 v_TexCoord;\n"
           "void main() {\n"
-          "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
           "  v_TexCoord = a_TexCoord;\n"
           "}\n" },
         { "shaders/effects/shaft.frag",
@@ -9990,6 +12814,249 @@ TEST_F(MetalSceneDraw, StyledTextIsDrawnWithItsOutlineAndShadowByTheNativeBacken
         EXPECT_GT(outline, 100u) << "no outline in the outline's own colour";
         EXPECT_GT(shadow, 100u) << "no shadow in the shadow's own colour";
         render.destroy();
+    }
+}
+
+namespace
+{
+/// The fogged-layer fixture (`WriteFoggedLayerFixture`, a perspective scene with the eye at z 10)
+/// with `objects_json` as the scene's objects instead of its one card, and the card's material
+/// using an opaque depth-writing pass when `tile_depth` says so.
+std::filesystem::path WriteTextBesideTileFixture(const std::filesystem::path& root, std::string_view fog_json,
+                                                 std::string_view objects_json, bool tile_depth = false)
+{
+    const auto project = WriteFoggedLayerFixture(root, fog_json.empty() ? R"("fogdistance":false)" : fog_json, "[]");
+    if (tile_depth) {
+        std::ofstream(root / "materials/tile.json")
+            << R"({"passes":[{"shader":"metal_probe","blending":"normal","cullmode":"nocull",)"
+               R"("depthtest":"enabled","depthwrite":"enabled","combos":{"FOG":0}}]})";
+    }
+    std::ofstream(root / "layout.json")
+        << R"({"camera":{"center":[0,0,0],"eye":[0,0,10],"up":[0,1,0]},)"
+           R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0,0,0],)"
+           R"("bloom":false,"cameraparallax":false,"orthogonalprojection":null,)"
+           R"("fov":50,"nearz":0.1,"farz":1000,)"
+        << (fog_json.empty() ? R"("fogdistance":false)" : fog_json) << R"(},"objects":)" << objects_json << "}";
+    return project;
+}
+
+RendererPicture DrawProject(const std::filesystem::path& project, const std::filesystem::path& cache)
+{
+    RendererPicture picture;
+    LoadedScene     loaded;
+    if (! LoadScene(project, cache, loaded, picture.error)) return picture;
+    const auto selection = SelectSceneBackend(*loaded.scene);
+    if (selection.failed()) {
+        picture.error = selection.failure_reason;
+        return picture;
+    }
+    return DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+}
+
+/// The brightest red value in the columns [x0, x1) of a 384-wide picture.
+int BrightestRed(const std::vector<uint8_t>& rgb, int x0, int x1)
+{
+    int best = 0;
+    for (int y = 0; y < 256; ++y) {
+        for (int x = x0; x < x1; ++x) best = std::max(best, int(rgb[(std::size_t(y) * 384 + x) * 3]));
+    }
+    return best;
+}
+} // namespace
+
+// WE 2.8.0.42 culls a `cullmode normal` card in every pass, with or without depth (probe
+// ordinary-cull-v1): the card as authored faces the camera, whether its vertex stage writes
+// clip coordinates or goes through the model-view-projection matrix, and a card mirrored in
+// x -- by its vertices or by a negative layer scale -- is culled. The same holds in a
+// perspective scene (reflection-cull-v7's ordinary clip-space pair).
+TEST_F(MetalSceneDraw, CulledCardsShowTheirAuthoredWindingAndHideAMirroredOne)
+{
+    for (const bool perspective : { false, true }) {
+        SCOPED_TRACE(perspective ? "perspective" : "canvas");
+        const auto root    = root_ / (perspective ? "cull-perspective" : "cull-canvas");
+        const auto project = WriteFixture(root);
+        const auto file    = [&](const std::string& path, const std::string& text) {
+            std::filesystem::create_directories((root / path).parent_path());
+            std::ofstream(root / path) << text;
+        };
+        // Four tiles in the quarters of the picture, each red-coded by its own shader.
+        const auto clip = [](const char* xy, const char* centre) {
+            return std::string("attribute vec3 a_Position;\nvoid main() {\n gl_Position=vec4((") + xy +
+                   ") / 128.0 * vec2(0.3, 0.3) + vec2(" + centre + "), 0.0, 1.0);\n}\n";
+        };
+        const std::string world =
+            "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
+            "void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix); }\n";
+        const auto tile = [&](const std::string& name, const std::string& vertex, const char* red) {
+            file("shaders/cull_" + name + ".vert", vertex);
+            file("shaders/cull_" + name + ".frag",
+                 std::string("void main() { gl_FragColor = vec4(") + red + ", 1.0, 1.0, 1.0); }\n");
+            file("materials/" + name + ".json",
+                 R"({"passes":[{"shader":"cull_)" + name +
+                     R"(","blending":"normal","cullmode":"normal","depthtest":"disabled","depthwrite":"disabled"}]})");
+            file("models/" + name + ".json", R"({"width":256,"height":256,"material":"materials/)" + name + R"(.json"})");
+        };
+        tile("clip_authored", clip("a_Position.xy", "-0.5, 0.5"), "0.2");
+        tile("clip_mirrored", clip("vec2(-a_Position.x, a_Position.y)", "0.5, 0.5"), "0.4");
+        tile("world_authored", world, "0.6");
+        tile("world_mirrored", world, "0.8");
+        const std::string objects =
+            perspective
+                ? R"([{"id":1,"name":"a","image":"models/clip_authored.json","origin":[0,0,0],"visible":true},)"
+                  R"({"id":2,"name":"b","image":"models/clip_mirrored.json","origin":[0,0,0],"visible":true},)"
+                  R"({"id":3,"name":"c","image":"models/world_authored.json","origin":[-2,-1,0],"scale":[0.005,0.005,0.005],"visible":true},)"
+                  R"({"id":4,"name":"d","image":"models/world_mirrored.json","origin":[2,-1,0],"scale":[-0.005,0.005,0.005],"visible":true}])"
+                : R"([{"id":1,"name":"a","image":"models/clip_authored.json","origin":[96,192,0],"visible":true},)"
+                  R"({"id":2,"name":"b","image":"models/clip_mirrored.json","origin":[288,192,0],"visible":true},)"
+                  R"({"id":3,"name":"c","image":"models/world_authored.json","origin":[96,64,0],"scale":[0.5,0.5,1],"visible":true},)"
+                  R"({"id":4,"name":"d","image":"models/world_mirrored.json","origin":[288,64,0],"scale":[-0.5,0.5,1],"visible":true}])";
+        file("layout.json",
+             std::string(R"({"camera":{"center":[0,0,0],"eye":[0,0,)") + (perspective ? "10" : "1") +
+                 R"(],"up":[0,1,0]},"general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0,0,0],)"
+                 R"("bloom":false,"cameraparallax":false,)" +
+                 (perspective ? R"("orthogonalprojection":null,"fov":50,"nearz":0.1,"farz":1000)"
+                              : R"("orthogonalprojection":{"width":384,"height":256})") +
+                 R"(},"objects":)" + objects + "}");
+        const auto picture = DrawProject(project, root / "cache");
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        const auto red = [&](int x0, int x1, int y0, int y1) { // the brightest red in a region, rows from the top
+            int best = 0;
+            for (int y = y0; y < y1; ++y)
+                for (int x = x0; x < x1; ++x) best = std::max(best, int(picture.rgb[(std::size_t(y) * 384 + x) * 3]));
+            return best;
+        };
+        EXPECT_NEAR(red(0, 192, 0, 128), 51, 2) << "the clip-space card as authored is drawn";
+        EXPECT_EQ(red(192, 384, 0, 128), 0) << "the clip-space card mirrored in x is culled";
+        EXPECT_NEAR(red(0, 192, 128, 256), 153, 2) << "the card as authored is drawn";
+        EXPECT_EQ(red(192, 384, 128, 256), 0) << "a negative layer scale culls the card";
+    }
+}
+
+TEST_F(MetalSceneDraw, TextInAFoggedSceneTakesTheFogOfItsPlace)
+{
+    // Wallpaper Engine fogs a text layer as it fogs an image layer at the same place (the WE
+    // probe probetext-fog): the glyph passes themselves are unfogged (decompiles/G-F11.md), and
+    // the composite they draw into ends in the fogging passthrough (`effectpassthrough_4`).
+    // White text and a white card at the same distance under black distance fog take the same
+    // grey: a quarter of the way to the fog at 100 units of 200.
+    const std::string fog = kFoggedScenes[0].json;
+    const auto project = WriteTextBesideTileFixture(
+        root_ / "fogged-text", fog,
+        R"([{"id":1,"name":"tile","image":"models/tile.json","origin":[-8,0,-90],"scale":[0.02,0.1,0.1],)"
+        R"("angles":[0,0,0],"visible":true},)"
+        R"({"id":2,"name":"caption","text":"I","font":"Arial","pointsize":60,"origin":[8,0,-90],)"
+        R"("scale":[0.1,0.1,0.1],"angles":[0,0,0],"visible":true}])");
+    const auto picture = DrawProject(project, root_ / "fogged-text-cache");
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    const int card = BrightestRed(picture.rgb, 0, 192);
+    const int text = BrightestRed(picture.rgb, 192, 384);
+    EXPECT_NEAR(card, 191, 4) << "the card was not fogged as the fixture expects";
+    EXPECT_NEAR(text, card, 4) << "the text was not fogged as the card at its distance is";
+}
+
+TEST_F(MetalSceneDraw, ATextDepthSetterChangesOcclusionAndCanBeReversed)
+{
+    const auto project = WriteTextBesideTileFixture(root_ / "script-text-depth", "",
+        R"([{"id":1,"name":"tile","image":"models/tile.json","origin":[0,0,-50],)"
+        R"("scale":[0.1,0.1,0.1],"color":"0 0 1","visible":true},)"
+        R"({"id":2,"name":"caption","text":"I","font":"Arial","pointsize":60,"origin":[0,0,-90],)"
+        R"("scale":[0.1,0.1,0.1],"depthtest":"disabled","visible":true}])", true);
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "script-text-depth-cache", loaded, error)) << error;
+    ASSERT_NE(loaded.scene->runtime, nullptr);
+    for (const auto* depth : { "disabled", "enabled", "disabled" }) {
+        SCOPED_TRACE(depth);
+        ASSERT_TRUE(loaded.scene->runtime->SetNodeTextStyle("caption", "depthtest", depth));
+        const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        const int text = BrightestRed(picture.rgb, 0, 384);
+        if (std::string_view(depth) == "enabled") EXPECT_LT(text, 8);
+        else EXPECT_GT(text, 200);
+    }
+}
+
+TEST_F(MetalSceneDraw, ADepthTestedTextIsHiddenBehindANearerLayer)
+{
+    // In a perspective scene a text layer draws with the `_depth` font materials unless it says
+    // `depthtest disabled` (decompiles/G-F10.md): behind a nearer card that wrote depth it is
+    // hidden even though it is drawn after the card; with the test off it shows over it.
+    for (const bool tested : { true, false }) {
+        SCOPED_TRACE(tested ? "depth tested" : "depthtest disabled");
+        const std::string name = tested ? "depth-text-on" : "depth-text-off";
+        const auto project = WriteTextBesideTileFixture(
+            root_ / name, "",
+            std::string(R"([{"id":1,"name":"tile","image":"models/tile.json","origin":[0,0,-50],)"
+                        R"("scale":[0.1,0.1,0.1],"angles":[0,0,0],"color":"0 0 1","visible":true},)"
+                        R"({"id":2,"name":"caption","text":"I","font":"Arial","pointsize":60,"origin":[0,0,-90],)"
+                        R"("scale":[0.1,0.1,0.1],"angles":[0,0,0],"visible":true)") +
+                (tested ? "" : R"(,"depthtest":"disabled")") + "}]",
+            true);
+        const auto picture = DrawProject(project, root_ / (name + "-cache"));
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        const int text = BrightestRed(picture.rgb, 0, 384);
+        if (tested) {
+            EXPECT_LT(text, 8) << "the text was drawn over the nearer card";
+        } else {
+            EXPECT_GT(text, 200) << "the text with its depth test off was not drawn over the card";
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, APerspectiveTextTurnedAboutXIsForeshortened)
+{
+    // `perspective` puts a text layer of an ortho scene behind the perspective camera, as it
+    // does an image layer's card: turned 60 degrees about x, its far edge is narrower than its
+    // near one. Without the flag the turn only squashes it, both edges as wide.
+    struct Rows {
+        int top_width { 0 }, bottom_width { 0 };
+    };
+    const auto ink_rows = [](const std::vector<uint8_t>& rgb) {
+        const auto width_of = [&](int y) {
+            int left = 384, right = -1;
+            for (int x = 0; x < 384; ++x) {
+                if (rgb[(std::size_t(y) * 384 + x) * 3] > 128) {
+                    left  = std::min(left, x);
+                    right = std::max(right, x);
+                }
+            }
+            return right < left ? 0 : right - left + 1;
+        };
+        int top = -1, bottom = -1;
+        for (int y = 0; y < 256; ++y) {
+            if (width_of(y) > 0) {
+                if (top < 0) top = y;
+                bottom = y;
+            }
+        }
+        Rows rows;
+        if (top < 0) return rows;
+        rows.top_width    = width_of(top + 1);
+        rows.bottom_width = width_of(bottom - 1);
+        return rows;
+    };
+    for (const bool perspective : { true, false }) {
+        SCOPED_TRACE(perspective ? "perspective" : "flat");
+        const std::string name = perspective ? "persp-text" : "flat-text";
+        const auto project = WriteTextFixture(
+            root_ / name, "HHHH", false, {},
+            std::string(R"(,"pointsize":30,"angles":[60,0,0])") + (perspective ? R"(,"perspective":true)" : ""));
+        const auto picture = DrawProject(project, root_ / (name + "-cache"));
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        const auto rows = ink_rows(picture.rgb);
+        ASSERT_GT(rows.top_width, 10);
+        ASSERT_GT(rows.bottom_width, 10);
+        const double ratio = double(std::min(rows.top_width, rows.bottom_width)) /
+                             double(std::max(rows.top_width, rows.bottom_width));
+        if (perspective) {
+            EXPECT_LT(ratio, 0.95) << "the turned text is not foreshortened";
+        } else {
+            EXPECT_GT(ratio, 0.97) << "flat text turned about x changed width along its height";
+        }
     }
 }
 
@@ -10153,7 +13220,7 @@ std::filesystem::path WriteMinifiedMipFixture(const std::filesystem::path& root,
         << "uniform sampler2D g_Texture0;\n"
            "varying vec2 v_TexCoord;\n"
            "void main() {\n"
-           "  gl_FragColor = texture(g_Texture0, v_TexCoord);\n"
+           "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
            "}\n";
     return project;
 }
@@ -10194,6 +13261,198 @@ TEST_F(MetalSceneDraw, ATexturePointSampledByItsHeaderPicksItsMipLevelByPoint)
                 EXPECT_LE(level, 100) << "the ordinary texture lost the blend of its mip levels";
             }
         }
+    }
+}
+
+namespace
+{
+/// A `.tex` of one level of `format`, `flags` and `depth` slices (a volume when `flags` has 0x40).
+void WriteTextureLevel(const std::filesystem::path& path, uint32_t format, uint32_t flags, uint32_t width,
+                       uint32_t height, uint32_t depth, const std::vector<uint8_t>& data)
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream texture(path, std::ios::binary);
+    const auto u32 = [&](uint32_t value) {
+        const char bytes[] { char(value), char(value >> 8), char(value >> 16), char(value >> 24) };
+        texture.write(bytes, sizeof(bytes));
+    };
+    const bool volume = (flags & 0x40u) != 0;
+    texture.write("TEXV0005", 9);
+    texture.write("TEXI0001", 9);
+    u32(format); u32(flags);
+    u32(width); u32(height); u32(width); u32(height);
+    if (volume) u32(depth);
+    u32(0);
+    texture.write("TEXB0002", 9);
+    u32(1); // images
+    u32(1); // mip levels
+    u32(width); u32(height);
+    if (volume) u32(depth);
+    u32(0); u32(0);
+    u32(static_cast<uint32_t>(data.size()));
+    texture.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+}
+
+/// The fixture card showing `texture` through `fragment`.
+std::filesystem::path WriteTextureProbeFixture(const std::filesystem::path& root, std::string_view fragment)
+{
+    const auto project = WriteFixture(root);
+    std::ofstream(root / "materials/tile.json")
+        << R"({"passes":[{"shader":"metal_probe","blending":"translucent","cullmode":"nocull",)"
+           R"("depthtest":"disabled","depthwrite":"disabled","textures":["probe"]}]})";
+    std::ofstream(root / "shaders/metal_probe.frag") << fragment;
+    return project;
+}
+
+std::array<int, 3> DrawCentre(const std::filesystem::path& project, const std::filesystem::path& cache)
+{
+    LoadedScene loaded;
+    std::string error;
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return { -1, -1, -1 };
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 2, 1.0 / 60.0);
+    EXPECT_TRUE(picture.error.empty()) << picture.error;
+    if (picture.rgb.size() != 384u * 256u * 3u) return { -1, -1, -1 };
+    const std::size_t at = (std::size_t(128) * 384 + 192) * 3;
+    return { picture.rgb[at], picture.rgb[at + 1], picture.rgb[at + 2] };
+}
+} // namespace
+
+TEST_F(MetalSceneDraw, AVolumeTextureIsSampledInThreeDimensions)
+{
+    // `.tex` flag 0x40 makes a volume (the colour-grading LUTs ccsimple reads through
+    // `texSample3D`). Slice 0 is red and slice 1 green; a sample at depth 0.75 is green.
+    std::vector<uint8_t> voxels;
+    for (int z = 0; z < 2; ++z) {
+        for (int i = 0; i < 4; ++i) {
+            voxels.insert(voxels.end(), { uint8_t(z == 0 ? 255 : 0), uint8_t(z == 1 ? 255 : 0), 0, 255 });
+        }
+    }
+    const auto root = root_ / "volume";
+    WriteTextureLevel(root / "materials/probe.tex", 0, 0x43, 2, 2, 2, voxels);
+    const auto project = WriteTextureProbeFixture(root,
+                                                  "uniform sampler3D g_Texture0;\n"
+                                                  "varying vec2 v_TexCoord;\n"
+                                                  "void main() {\n"
+                                                  "  gl_FragColor = texSample3D(g_Texture0, vec3(v_TexCoord, 0.75));\n"
+                                                  "}\n");
+    const auto rgb = DrawCentre(project, root_ / "volume-cache");
+    EXPECT_LE(rgb[0], 2);
+    EXPECT_GE(rgb[1], 253);
+}
+
+TEST_F(MetalSceneDraw, AnOrdinaryTwoDimensionalSamplerReadsDepthWithoutComparing)
+{
+    const auto root = root_ / "read-depth";
+    WriteTextureLevel(root / "materials/probe.tex", 0, 1, 1, 1, 1, {255,255,255,255});
+    const auto project = WriteTextureProbeFixture(root,
+        "uniform sampler2D g_Texture0;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main(){float depth=texSample2D(g_Texture0,v_TexCoord).r;"
+        "gl_FragColor=vec4(depth,depth,depth,1.0);}\n");
+    LoadedScene reader, caster;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "read-depth-cache", reader, error)) << error;
+    ASSERT_TRUE(LoadScene(WriteFixture(root_ / "depth-writer"), root_ / "depth-writer-cache", caster, error)) << error;
+    auto* node = FirstDrawableNode(reader.scene->sceneGraph.get());
+    auto* writer = FirstDrawableNode(caster.scene->sceneGraph.get());
+    ASSERT_NE(node, nullptr); ASSERT_NE(writer, nullptr);
+    SceneMaterial depth_material = *writer->Mesh()->Material();
+    depth_material.textures.clear();
+    node->Mesh()->AddMaterial(std::move(depth_material));
+    node->Mesh()->MaterialForSlot(0)->textures = {"_rt_depth_read_probe"};
+    reader.scene->renderTargets["_rt_depth_read_probe"] = SceneRenderTarget{
+        .width=384,.height=256,.format=TextureFormat::Depth32F,.unscaled=true};
+    @autoreleasepool {
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device=MTLCreateSystemDefaultDevice();layer.pixelFormat=MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize=CGSizeMake(384,256);
+        MetalRender render;
+        ASSERT_TRUE(render.init({.metal_layer=(__bridge void*)layer,.width=384,.height=256,
+                                 .render_width=384,.render_height=256,.display_scale_factor=1.0}));
+        rg::RenderGraph graph;
+        auto& depth=AddDraw(graph,node,"_rt_depth_read_probe",{});
+        depth.material_slot=1;depth.depth_only=true;depth.clear_depth_on_first_use=true;
+        depth.depth_override=SceneDepthState{true,true,DepthCompare::GreaterEqual};
+        AddDraw(graph,node,std::string(SpecTex_Default),{"_rt_depth_read_probe"});
+        ASSERT_TRUE(render.compileRenderGraph(*reader.scene,graph))<<render.lastError();
+        ASSERT_TRUE(render.drawFrame(*reader.scene))<<render.lastError();
+        std::vector<uint8_t> pixels,depth_pixels;std::vector<float> depths;
+        uint32_t width=0,height=0;
+        ASSERT_TRUE(render.ReadRenderTargetForTests("_rt_depth_read_probe",depth_pixels,width,height,&depths));
+        const auto at=(128u*384u+192u)*4;
+        ASSERT_GT(depths.at(at),0.1f);
+        ASSERT_TRUE(render.ReadRenderTargetForTests(std::string(SpecTex_Default),pixels,width,height));
+        EXPECT_NEAR(pixels.at(at),depths.at(at)*255.0f,1.0f);
+        render.destroy();
+    }
+}
+
+TEST_F(MetalSceneDraw, ATextureOfAnotherTypeThanTheShaderDeclaresReadsZero)
+{
+    // A 2D picture in a slot the shader declares `sampler3D`, or `sampler2DComparison`: Metal
+    // cannot bind it there, and Direct3D reads zero from a mismatched view. A stand-in of the
+    // declared type is bound instead, so the draw happens and the sample is zero.
+    const std::vector<uint8_t> white { 255, 255, 255, 255 };
+    {
+        const auto root = root_ / "mismatch-3d";
+        WriteTextureLevel(root / "materials/probe.tex", 0, 1, 1, 1, 1, white);
+        const auto project = WriteTextureProbeFixture(root,
+                                                      "uniform sampler3D g_Texture0;\n"
+                                                      "varying vec2 v_TexCoord;\n"
+                                                      "void main() {\n"
+                                                      "  gl_FragColor = vec4(texSample3D(g_Texture0, vec3(v_TexCoord, 0.5)).rgb, 1.0);\n"
+                                                      "}\n");
+        const auto rgb = DrawCentre(project, root_ / "mismatch-3d-cache");
+        EXPECT_EQ(rgb, (std::array<int, 3> { 0, 0, 0 }));
+    }
+    {
+        const auto root = root_ / "mismatch-compare";
+        WriteTextureLevel(root / "materials/probe.tex", 0, 1, 1, 1, 1, white);
+        const auto project = WriteTextureProbeFixture(root,
+                                                      "uniform sampler2DComparison g_Texture0;\n"
+                                                      "varying vec2 v_TexCoord;\n"
+                                                      "void main() {\n"
+                                                      "  float lit = texSample2DCompare(g_Texture0, v_TexCoord, 0.5);\n"
+                                                      "  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0) + vec4(lit, 0.0, 0.0, 0.0) * 0.001;\n"
+                                                      "}\n");
+        const auto rgb = DrawCentre(project, root_ / "mismatch-compare-cache");
+        EXPECT_GE(rgb[1], 250) << "the comparison draw did not happen";
+    }
+}
+
+TEST_F(MetalSceneDraw, WideAndPackedFormatsUploadAndSample)
+{
+    // Formats of Wallpaper Engine's table (`sub_1401E53A0`) beyond RGBA8/DXT/R8/RG8, as one
+    // texel each; the shader shows the sample, so the red channel reads 0.5 or 1.
+    struct Case {
+        const char*          name;
+        uint32_t             code;
+        std::vector<uint8_t> texel;
+        std::array<int, 3>   expected;
+    };
+    const std::vector<Case> cases {
+        { "r16f", 11, { 0x00, 0x38 }, { 128, 0, 0 } },
+        { "rg1616f", 10, { 0x00, 0x3C, 0x00, 0x38 }, { 255, 128, 0 } },
+        { "rgba1010102", 13, { 0xFF, 0x03, 0x00, 0xE0 }, { 255, 0, 128 } },
+        { "rgba16161616", 17, { 0xFF, 0xFF, 0, 0, 0x00, 0x80, 0xFF, 0xFF }, { 255, 0, 128 } },
+        { "rgba16161616S", 19, { 0xFF, 0x7F, 0, 0, 0xFF, 0x3F, 0xFF, 0x7F }, { 255, 0, 128 } },
+        { "rgb888", 1, { 255, 0, 128, 255 }, { 255, 0, 128 } },
+        { "rgba8888s", 21, { 127, 64, 0, 255 }, { 127, 64, 0 } },
+    };
+    for (const auto& k : cases) {
+        SCOPED_TRACE(k.name);
+        const auto root = root_ / (std::string("format-") + k.name);
+        WriteTextureLevel(root / "materials/probe.tex", k.code, 1, 1, 1, 1, k.texel);
+        const auto project = WriteTextureProbeFixture(root,
+                                                      "uniform sampler2D g_Texture0;\n"
+                                                      "varying vec2 v_TexCoord;\n"
+                                                      "void main() {\n"
+                                                      "  vec4 c = texSample2D(g_Texture0, v_TexCoord);\n"
+                                                      "  gl_FragColor = vec4(c.rgb, 1.0);\n"
+                                                      "}\n");
+        const auto rgb = DrawCentre(project, root_ / (std::string("format-") + k.name + "-cache"));
+        for (int ch = 0; ch < 3; ++ch) EXPECT_NEAR(rgb[ch], k.expected[ch], 2) << "channel " << ch;
     }
 }
 
@@ -10250,7 +13509,7 @@ std::filesystem::path WriteCanvasCardMipFixture(const std::filesystem::path& roo
         << "uniform sampler2D g_Texture0;\n"
            "varying vec2 v_TexCoord;\n"
            "void main() {\n"
-           "  gl_FragColor = texture(g_Texture0, v_TexCoord);\n"
+           "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
            "}\n";
     return project;
 }
@@ -10342,14 +13601,14 @@ std::filesystem::path WriteCoverSlotFixture(const std::filesystem::path& root,
         "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoord;\n"
         "}\n";
     const std::string fragment =
         "uniform sampler2D g_Texture0;\n"
         "varying vec2 v_TexCoord;\n"
         "void main() {\n"
-        "  gl_FragColor = texture(g_Texture0, v_TexCoord);\n"
+        "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
         "}\n";
     std::ofstream(root / "shaders/cover_probe.vert") << vertex;
     std::ofstream(root / "shaders/cover_probe.frag") << fragment;
@@ -10451,6 +13710,119 @@ TEST_F(MetalSceneDraw, ACoverSlotShowsItsAuthoredTextureUntilACoverArrives)
                 EXPECT_NEAR(int(rgb[at + channel]), c.expected[channel], 8)
                     << "channel " << channel << " of the cover layer's centre";
             }
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, ALitLayerUnderAnEffectIsLitAsIfItWereItsTexturesSize)
+{
+    // Wallpaper Engine's image mesh spans the picture's pixels and the layer's world matrix
+    // carries no size (0x140207B50), so the PRELIGHTING pass of a lit card under effects
+    // measures lights against the card squeezed to its texture's size around the layer's
+    // origin (probes light-pe4..pe6). Here a 16x16 picture on a 256x192 card: a light just
+    // above the origin lights the card's right part too, and one over the left end lights
+    // nothing.
+    struct Case { const char* name; int light_x; };
+    for (const Case c : { Case { "origin", 192 }, Case { "left", 96 } }) {
+        SCOPED_TRACE(c.name);
+        RendererPicture picture;
+        {
+            const std::string name = std::string("lit-texture-size-") + c.name;
+            const auto project = WriteFixture(root_ / name);
+            WriteSingleLevelTexture(root_ / name / "materials/w16.tex", 0, 16,
+                                    std::vector<uint8_t>(16 * 16 * 4, 255));
+            std::ofstream(root_ / name / "shaders/metal_probe.vert")
+                << "uniform mat4 g_ModelViewProjectionMatrix;\n"
+                   "uniform mat4 g_ModelMatrix;\n"
+                   "uniform mat4 g_AltModelMatrix;\n"
+                   "attribute vec3 a_Position;\n"
+                   "attribute vec2 a_TexCoord;\n"
+                   "varying vec2 v_TexCoord;\n"
+                   "varying vec3 v_WorldPos;\n"
+                   "void main() {\n"
+                   "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+                   "#if PRELIGHTING\n"
+                   "  v_WorldPos = (mul(vec4(a_Position, 1.0), g_AltModelMatrix)).xyz;\n"
+                   "#else\n"
+                   "  v_WorldPos = (mul(vec4(a_Position, 1.0), g_ModelMatrix)).xyz;\n"
+                   "#endif\n"
+                   "  v_TexCoord = a_TexCoord;\n"
+                   "}\n";
+            std::ofstream(root_ / name / "shaders/common_pbr_2.h")
+                << "vec3 ComputePBRLightShadow(vec3 N, vec3 L, vec3 V, vec3 albedo, vec3 lightColor,\n"
+                   "    float radius, float exponent, vec3 specularTint, vec3 f0, float roughness,\n"
+                   "    float metallic, float shadowFactor) {\n"
+                   "  float falloff = clamp(1.0 - length(L) / radius, 0.0, 1.0);\n"
+                   "  return albedo * lightColor * pow(falloff, exponent) * max(dot(N, normalize(L)), 0.0);\n"
+                   "}\n"
+                   "vec3 ComputePBRLightShadowInfinite(vec3 N, vec3 L, vec3 V, vec3 albedo, vec3 lightColor,\n"
+                   "    vec3 specularTint, vec3 f0, float roughness, float metallic, float shadowFactor) {\n"
+                   "  return vec3(0.0, 0.0, 0.0);\n"
+                   "}\n"
+                   "vec3 PointSegmentDelta(vec3 p, vec3 a, vec3 b) { return a - p; }\n";
+            std::ofstream(root_ / name / "shaders/metal_probe.frag")
+                << "// [COMBO] {\"material\":\"lighting\",\"combo\":\"LIGHTING\",\"default\":0}\n"
+                   "#define CAST3(x) ((vec3)(x))\n"
+                   "#include \"common_pbr_2.h\"\n"
+                   "uniform sampler2D g_Texture0;\n"
+                   "varying vec2 v_TexCoord;\n"
+                   "varying vec3 v_WorldPos;\n"
+                   "#require LightingV1\n"
+                   "void main() {\n"
+                   "  vec3 albedo = texSample2D(g_Texture0, v_TexCoord).rgb;\n"
+                   "  vec3 color = vec3(0.0, 0.0, 0.0);\n"
+                   "#if LIGHTING\n"
+                   "  color = PerformLighting_V1(v_WorldPos, albedo, vec3(0.0, 0.0, 1.0),\n"
+                   "      vec3(0.0, 0.0, 1.0), vec3(1.0, 1.0, 1.0), vec3(0.04, 0.04, 0.04), 1.0, 0.0);\n"
+                   "#else\n"
+                   "  color = albedo;\n"
+                   "#endif\n"
+                   "  gl_FragColor = vec4(color, 1.0);\n"
+                   "}\n";
+            std::ofstream(root_ / name / "materials/tile.json")
+                << R"({"passes":[{"shader":"metal_probe","blending":"normal","cullmode":"nocull",)"
+                   R"("depthtest":"disabled","depthwrite":"disabled","textures":["w16"],"combos":{"LIGHTING":1}}]})";
+            std::filesystem::create_directories(root_ / name / "effects");
+            std::ofstream(root_ / name / "effects/copy.json")
+                << R"({"name":"copy","passes":[{"material":"materials/copy.json"}]})";
+            std::ofstream(root_ / name / "materials/copy.json")
+                << R"({"passes":[{"shader":"copy","textures":[null],"blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})";
+            std::ofstream(root_ / name / "shaders/copy.vert")
+                << "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\n"
+                   "attribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+                   "void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);"
+                   " v_TexCoord = a_TexCoord; }\n";
+            std::ofstream(root_ / name / "shaders/copy.frag")
+                << "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+                   "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n";
+            std::ofstream(root_ / name / "layout.json")
+                << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+                   R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0,0,0],)"
+                   R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256},)"
+                   R"("lightconfig":{"point":1}},)"
+                   R"("objects":[{"id":1,"name":"tile","image":"models/tile.json","origin":[192,128,0],)"
+                   R"("scale":[1,1,1],"angles":[0,0,0],"visible":true,"effects":[{"file":"effects/copy.json"}]},)"
+                   R"({"id":2,"name":"red","light":"lpoint","origin":")"
+                << c.light_x
+                << R"( 128 10","color":"1 0 0","intensity":1,"radius":25,"exponent":1}]})";
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root_ / (name + "-cache"), loaded, error)) << error;
+            const auto selection = SelectSceneBackend(*loaded.scene);
+            ASSERT_FALSE(selection.failed()) << selection.failure_reason;
+            picture = DrawWithRenderer(*loaded.scene, 384, 256, 1, 1.0 / 60.0);
+            ASSERT_TRUE(picture.error.empty()) << picture.error;
+        }
+        const auto& rgb = picture.rgb;
+        ASSERT_EQ(rgb.size(), 384u * 256u * 3u);
+        const auto red = [&rgb](std::size_t x, std::size_t y) { return int(rgb[(y * 384 + x) * 3]); };
+        if (std::string(c.name) == "origin") {
+            // 96 px right of the origin is 6 texture pixels away: inside the light's reach.
+            EXPECT_GT(red(192, 128), 100) << "the light over the origin did not light it";
+            EXPECT_GT(red(288, 128), 60) << "the card was lit at its full size, not its texture's";
+        } else {
+            EXPECT_LT(red(96, 128), 5) << "the card was lit at its full size, not its texture's";
+            EXPECT_LT(red(192, 128), 5);
         }
     }
 }
@@ -10683,7 +14055,7 @@ std::filesystem::path WriteOwnBufferFixture(const std::filesystem::path& root,
         "uniform mat4 g_ModelViewProjectionMatrix;\n"
         "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
-        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+        "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
         "v_TexCoord=a_TexCoord; }\n";
     const std::map<std::string, std::string> files {
         { "models/card.json", R"({"width":128,"height":64,"material":"materials/card.json"})" },
@@ -10702,7 +14074,7 @@ std::filesystem::path WriteOwnBufferFixture(const std::filesystem::path& root,
         { "shaders/own_swap.vert", vertex },
         { "shaders/own_swap.frag",
           "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-          "void main(){ vec4 own=texture(g_Texture0,v_TexCoord);"
+          "void main(){ vec4 own=texSample2D(g_Texture0,v_TexCoord);"
           "gl_FragColor=vec4(own.bgr,own.a); }\n" },
         { "layout.json",
           R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
@@ -10929,7 +14301,7 @@ std::filesystem::path WriteSelfHistoryFixture(const std::filesystem::path& root,
         "uniform mat4 g_ModelViewProjectionMatrix;\n"
         "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
         "varying vec2 v_TexCoord;\n"
-        "void main(){ gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);"
+        "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
         "v_TexCoord=a_TexCoord; }\n";
     const std::map<std::string, std::string> files {
         { "models/card.json", R"({"width":128,"height":64,"material":"materials/card.json"})" },
@@ -10939,7 +14311,7 @@ std::filesystem::path WriteSelfHistoryFixture(const std::filesystem::path& root,
         { "shaders/self_accumulate.vert", vertex },
         { "shaders/self_accumulate.frag",
           "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-          "void main(){ vec4 before=texture(g_Texture0,v_TexCoord);"
+          "void main(){ vec4 before=texSample2D(g_Texture0,v_TexCoord);"
           "gl_FragColor=vec4(min(before.r+0.05,1.0),0.5,0.25,1.0); }\n" },
         { "layout.json",
           R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
@@ -11018,6 +14390,125 @@ TEST_F(MetalSceneDraw, ALayerReadingItsOwnCompositeSeesTheFrameBefore)
     }
 }
 
+namespace
+{
+
+std::filesystem::path WriteMutualHistoryFixture(const std::filesystem::path& root)
+{
+    const auto project = WriteFixture(root);
+    const std::string vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main(){ gl_Position=mul(vec4(a_Position,1.0), g_ModelViewProjectionMatrix);"
+        "v_TexCoord=a_TexCoord; }\n";
+    const std::map<std::string, std::string> files {
+        { "models/util/solidlayer.json",
+          R"({"width":384,"height":256,"material":"materials/util/solidlayer.json"})" },
+        { "materials/util/solidlayer.json",
+          R"({"passes":[{"shader":"solid","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled"}]})" },
+        { "materials/util/effectpassthrough.json",
+          R"({"passes":[{"shader":"passthrough","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})" },
+        { "effects/pattern_swap/effect.json",
+          R"({"name":"Canvas Copy","passes":[{"material":"materials/pattern_swap.json"}]})" },
+        { "materials/pattern_swap.json",
+          R"({"passes":[{"shader":"pattern_swap","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null,null]}]})" },
+        { "effects/canvas/effect.json",
+          R"({"name":"canvas","fbos":[{"name":"_u_memoryCanv","format":"rgba8888","scale":1,"unique":true},)"
+          R"({"name":"_u_paintedCanv","format":"rgba8888","scale":1}],)"
+          R"("passes":[{"material":"materials/canvas_paint.json","target":"_u_paintedCanv",)"
+          R"("bind":[{"name":"previous","index":0},{"name":"_u_memoryCanv","index":1}]},)"
+          R"({"material":"materials/passthrough.json","bind":[{"name":"_u_paintedCanv","index":0}]},)"
+          R"({"command":"copy","source":"_u_paintedCanv","target":"_u_memoryCanv"}]})" },
+        { "materials/canvas_paint.json",
+          R"({"passes":[{"shader":"canvas_paint","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null,null,null]}]})" },
+        { "materials/passthrough.json",
+          R"({"passes":[{"shader":"passthrough","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})" },
+        { "shaders/solid.vert", vertex },
+        { "shaders/solid.frag",
+          "varying vec2 v_TexCoord;\n"
+          "void main(){ gl_FragColor=vec4(0.0,0.0,0.0,1.0); }\n" },
+        { "shaders/passthrough.vert", vertex },
+        { "shaders/passthrough.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ gl_FragColor=texSample2D(g_Texture0,v_TexCoord); }\n" },
+        { "shaders/pattern_swap.vert", vertex },
+        { "shaders/pattern_swap.frag",
+          "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\n"
+          "varying vec2 v_TexCoord;\n"
+          "void main(){ vec4 c=texSample2D(g_Texture1,v_TexCoord);"
+          "gl_FragColor=vec4(c.b,0.25,c.r,1.0); }\n" },
+        { "shaders/canvas_paint.vert", vertex },
+        { "shaders/canvas_paint.frag",
+          "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\n"
+          "uniform sampler2D g_Texture2;\n"
+          "uniform float u_cmd; // {\"material\":\"cmd\",\"default\":0}\n"
+          "varying vec2 v_TexCoord;\n"
+          "void main(){\n"
+          "  vec4 next = texSample2D(g_Texture1, v_TexCoord);\n"
+          "  if (u_cmd > 0.5 && u_cmd < 1.5) next = vec4(0.8, 0.0, 0.0, 1.0);\n"
+          "  if (u_cmd > 2.5) next = texSample2D(g_Texture2, v_TexCoord);\n"
+          "  gl_FragColor = next;\n"
+          "}\n" },
+        { "layout.json",
+          R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
+          R"("general":{"ambientcolor":[0,0,0],"skylightcolor":[0,0,0],"clearcolor":[0.0,0.0,0.0],)"
+          R"("cameraparallax":false,"orthogonalprojection":{"width":384,"height":256}},)"
+          R"("objects":[)"
+          R"({"id":288,"name":"Pattern Texture","image":"models/util/solidlayer.json",)"
+          R"("origin":[192,128,0],"size":[384,256],"dependencies":[16],)"
+          R"("visible":{"script":"'use strict';\nvar tick = 0;\nexport function init(value) {\n  for (var i = 0; i < thisLayer.getEffectCount(); ++i) thisLayer.getEffect(i).visible = false;\n  return value;\n}\nexport function update(value) {\n  ++tick;\n  thisLayer.getEffect('Canvas Copy').visible = (tick === 2);\n  return value;\n}\n","value":true},)"
+          R"("effects":[{"file":"effects/pattern_swap/effect.json","id":476,"name":"Canvas Copy",)"
+          R"("visible":false,"passes":[{"textures":[null,"_rt_imageLayerComposite_16_a"]}]}]},)"
+          R"({"id":16,"name":"Canvas","image":"models/util/solidlayer.json",)"
+          R"("origin":[192,128,0],"size":[384,256],"dependencies":[288],)"
+          R"("effects":[{"file":"effects/canvas/effect.json","id":160,"name":"Canvas Shader",)"
+          R"("visible":true,"passes":[{"constantshadervalues":{"cmd":{"script":"'use strict';\nvar tick = 0;\nexport function update(value) {\n  ++tick;\n  if (tick === 1) return 1.0;\n  if (tick === 2) return 3.0;\n  return 0.0;\n}\n","value":1}},)"
+          R"("textures":[null,null,"_rt_imageLayerComposite_288_a"]},{}]}]}]})" },
+    };
+    for (const auto& [name, contents] : files) {
+        const auto path = root / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path) << contents;
+    }
+    return project;
+}
+
+} // namespace
+
+// Two layers that sample each other's composites: the earlier pattern layer
+// switches its copy effect on in frame 2 (reading the canvas composite from
+// frame 1 and swapping red into blue), the canvas blends that pattern composite
+// in the same frame 2, and frame 3 switches the pattern effect off again while
+// keeping the canvas's accumulated buffer across both graph rebuilds.
+TEST_F(MetalSceneDraw, MutualLayerReferencesPreserveCanvasHistoryAcrossEffectSwitches)
+{
+    const auto  project = WriteMutualHistoryFixture(root_ / "mutual-history");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "mutual-history-cache", loaded, error)) << error;
+    EXPECT_TRUE(loaded.scene->layer_texture_error.empty()) << loaded.scene->layer_texture_error;
+    const auto selection = SelectSceneBackend(*loaded.scene);
+    ASSERT_FALSE(selection.failed()) << selection.failure_reason;
+
+    RebuildWatch watch;
+    const auto   picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0,
+                                            {}, 1.0, nullptr, nullptr, &watch);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    EXPECT_GE(watch.rebuilds, 2);
+
+    const auto* centre = picture.rgb.data() + (128 * 384 + 192) * 3;
+    EXPECT_NEAR(centre[0], 0, 3);
+    EXPECT_NEAR(centre[1], 64, 3);
+    EXPECT_NEAR(centre[2], 204, 4);
+}
+
 TEST_F(MetalSceneDraw, TextThatHasNotChangedIsNeitherLaidOutNorUploadedAgain)
 {
     // The round's optimisation, stated as what must NOT happen: the scripts and
@@ -11070,7 +14561,17 @@ TEST_F(MetalSceneDraw, TextThatHasNotChangedIsNeitherLaidOutNorUploadedAgain)
         EXPECT_EQ(ReadOutput(render, *loaded.scene), settled);
 
         // The same layer, a different string: the work that was skipped above
-        // has to happen now, and the picture has to change with it.
+        // has to happen now, and the picture has to change with it. The glyphs are
+        // laid out again and their quads rewritten; the atlas is uploaded only when it
+        // gained a cell, which a glyph it already holds ("1") does not need
+        // (decompiles/G-F16.md: one persistent atlas, cells reused across layouts).
+        SceneNode* node = nullptr;
+        for (const auto& child : loaded.scene->sceneGraph->GetChildren()) {
+            if (child->Name() == "caption") node = child.get();
+        }
+        ASSERT_NE(node, nullptr);
+        ASSERT_NE(node->Mesh(), nullptr);
+        const auto settled_generation = node->Mesh()->DirtyGeneration();
         ASSERT_TRUE(loaded.scene->runtime->SetNodeText("caption", "12:31"));
         std::vector<uint8_t> changed;
         for (int frame = 0; frame < 16; ++frame) {
@@ -11080,7 +14581,8 @@ TEST_F(MetalSceneDraw, TextThatHasNotChangedIsNeitherLaidOutNorUploadedAgain)
         }
         EXPECT_NE(changed, settled) << "a new string never reached the drawn picture";
         const auto changed_uploads = render.RuntimeImageUploadsForTests();
-        EXPECT_GT(changed_uploads, settled_uploads);
+        EXPECT_GE(TextLayerMeasurementCountForTests(), 1u) << "the new string was not laid out";
+        EXPECT_GT(node->Mesh()->DirtyGeneration(), settled_generation) << "the glyph quads were not rewritten";
         // One write per in-flight slot at most: new pixels go into the storage
         // the frame owns, never into an image a queued command buffer reads.
         EXPECT_LE(changed_uploads - settled_uploads, 2u)
@@ -11094,6 +14596,71 @@ TEST_F(MetalSceneDraw, TextThatHasNotChangedIsNeitherLaidOutNorUploadedAgain)
         EXPECT_EQ(render.RuntimeImageUploadsForTests(), quiet_uploads)
             << "a text that had already settled kept uploading";
 
+        render.destroy();
+    }
+}
+
+TEST_F(MetalSceneDraw, AnEmojiIsDrawnInItsOwnColours)
+{
+    // A glyph Arial lacks comes from the next face of Wallpaper Engine's fallback list that has
+    // it (the system colour emoji face standing in for Segoe UI Emoji); a colour glyph is drawn
+    // from the colour atlas through `basefontrgba`, in its own colours whatever the layer's.
+    if (! std::filesystem::exists("/System/Library/Fonts/Apple Color Emoji.ttc")) {
+        GTEST_SKIP() << "no system colour emoji face";
+    }
+    const auto project = WriteTextFixture(root_ / "emoji-text", "\xF0\x9F\x98\x80", false, {}, R"(,"pointsize":40)");
+    const auto picture = DrawProject(project, root_ / "emoji-text-cache");
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+    std::size_t saturated = 0;
+    for (std::size_t i = 0; i + 2 < picture.rgb.size(); i += 3) {
+        const int hi = std::max({ picture.rgb[i], picture.rgb[i + 1], picture.rgb[i + 2] });
+        const int lo = std::min({ picture.rgb[i], picture.rgb[i + 1], picture.rgb[i + 2] });
+        if (hi - lo > 64) ++saturated;
+    }
+    EXPECT_GT(saturated, 50u) << "the emoji was not drawn in its own colours";
+}
+
+TEST_F(MetalSceneDraw, ATextThatGrowsPastItsGlyphCapacityIsDrawnWithoutARebuild)
+{
+    // A text layer's glyph mesh is an event mesh sized for the glyphs it first held (64 at the
+    // least); a text with far more grows its storage in place on the next upload, with no render
+    // graph rebuild, and every glyph is drawn.
+    const auto  project = WriteTextFixture(root_ / "growing-text", "IIIIIIIIII", false, {},
+                                          R"(,"pointsize":6,"maxwidth":10000,"maxrows":1)");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "growing-text-cache", loaded, error)) << error;
+    ASSERT_FALSE(SelectSceneBackend(*loaded.scene).failed());
+    @autoreleasepool {
+        id<MTLDevice> device  = MTLCreateSystemDefaultDevice();
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = device;
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender         render;
+        MetalRenderInitInfo info {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0,
+        };
+        ASSERT_TRUE(render.init(info)) << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        ASSERT_NE(graph, nullptr);
+        ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < 4; ++frame) AdvanceSceneFrame(render, *loaded.scene);
+        const auto short_lit = LitPixels(ReadOutput(render, *loaded.scene));
+        (void)loaded.scene->runtime->ConsumeSceneGraphMutationFlag();
+
+        ASSERT_TRUE(loaded.scene->runtime->SetNodeText("caption", std::string(200, 'I')));
+        for (int frame = 0; frame < 16; ++frame) {
+            AdvanceSceneFrame(render, *loaded.scene);
+            ASSERT_TRUE(render.lastError().empty()) << render.lastError();
+        }
+        EXPECT_FALSE(loaded.scene->runtime->ConsumeSceneGraphMutationFlag()) << "the growth rebuilt the graph";
+        const auto long_lit = LitPixels(ReadOutput(render, *loaded.scene));
+        EXPECT_GT(long_lit, short_lit * 5) << "the glyphs past the first capacity were not drawn";
         render.destroy();
     }
 }
@@ -12202,7 +15769,7 @@ TEST_F(MetalSceneDraw, ARopeLayoutMeshReachesTheTarget)
         "void main() {\n"
         "  vec3 position = mix(a_PositionVec4.xyz, a_TexCoordVec4.xyz, a_TexCoordC3.y) + "
         "vec3(0.0, (a_TexCoordC3.x * 2.0 - 1.0) * a_PositionVec4.w, 0.0);\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(position, 1.0);\n"
+        "  gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoordC3;\n"
         "}\n";
     const auto  project = WriteShaderFixture(root_ / "rope-project", "metal_rope_probe", vertex);
@@ -12333,7 +15900,7 @@ TEST_F(MetalSceneDraw, ASpriteTrailMeshReachesTheTarget)
         "  vec3 position = a_Position + vec3((a_TexCoordVec4.x - 0.5) * 2.0 * a_TexCoordVec4.w, "
         "(a_TexCoordVec4.y - 0.5) * 2.0 * a_TexCoordVec4.w, 0.0) + "
         "a_TexCoordVec4C1.xyz * a_TexCoordVec4.y;\n"
-        "  gl_Position = g_ModelViewProjectionMatrix * vec4(position, 1.0);\n"
+        "  gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);\n"
         "  v_TexCoord = a_TexCoordVec4.xy;\n"
         "}\n";
     const auto  project = WriteShaderFixture(root_ / "trail-project", "metal_trail_probe", vertex);
@@ -12889,7 +16456,7 @@ std::string PerFrameMeshLayout(const SceneMesh& mesh)
 }
 
 /// A scene's states that the native backend has no way to draw, or that an earlier
-/// version of its admission gate refused a scene for on sight: a multisampled target, a
+/// version of its admission gate refused a scene for on sight: an unexpected MS target, a
 /// target that is only a depth buffer (the one kind a pass could sample as "a depth
 /// texture"), and a per-frame mesh whose storage the draw path cannot size. Read from
 /// the scene as the parser built it and again from the render graph's lowering, which
@@ -12898,29 +16465,41 @@ std::vector<std::string> StatesTheDrawPathCannotAllocate(Scene& scene)
 {
     std::vector<std::string> found;
     for (const auto& [name, target] : scene.renderTargets) {
-        if (target.sample_count != 1) found.push_back("multisampled target " + name);
+        const bool scene_ms = name == scene.ResolveRenderTargetName(SpecTex_Default) &&
+            (target.sample_count == 2 || target.sample_count == 4 || target.sample_count == 8);
+        if (target.sample_count != 1 && !scene_ms) found.push_back("multisampled target " + name);
         // A depth attachment belongs to a colour target of its own size.
         if (target.withDepth && target.width <= 0) found.push_back("depth-only target " + name);
     }
     ForEachPerFrameMesh(scene, [&found](const std::string& where, SceneMesh& mesh) {
-        // The card a text layer rewrites, a sprite and a rope all come out of the
-        // parser as one material over one submesh with one vertex stream and at most
-        // one index stream, sized for the emitter's maximum.
-        if (mesh.MaterialSlots().size() != 1 || mesh.Submeshes().size() != 1) {
-            found.push_back(where + ": a per-frame mesh with several materials or submeshes");
+        // A sprite and a rope come out of the parser as one material over one submesh; a text
+        // layer's glyph mesh as three (the background or seed quad, the glyphs, the colour
+        // glyphs), each with its own material slot. Every submesh has one vertex stream and at
+        // most one index stream, sized for what it holds; an event mesh grows them in place.
+        if (mesh.Submeshes().empty() || mesh.MaterialSlots().size() < mesh.Submeshes().size()) {
+            found.push_back(where + ": a per-frame mesh with a submesh and no material slot for it");
             return;
         }
-        const auto& submesh = mesh.Submeshes().front();
-        if (submesh.VertexCount() != 1 || submesh.IndexCount() > 1) {
-            found.push_back(where + ": a per-frame mesh with several vertex or index streams");
+        if (! mesh.UpdatesOnEvent() && mesh.Submeshes().size() != 1) {
+            found.push_back(where + ": a per-frame mesh with several submeshes");
             return;
         }
-        const auto& vertices = submesh.GetVertexArray(0);
-        if (vertices.CapacitySizeOf() == 0 || vertices.OneSizeOf() == 0) {
-            found.push_back(where + ": a per-frame mesh with no vertex storage");
-        }
-        if (submesh.IndexCount() == 1 && submesh.GetIndexArray(0).CapacitySizeof() == 0) {
-            found.push_back(where + ": a per-frame mesh with no index storage");
+        for (const auto& submesh : mesh.Submeshes()) {
+            if (submesh.material_slot >= mesh.MaterialSlots().size()) {
+                found.push_back(where + ": a submesh names a material slot that does not exist");
+                return;
+            }
+            if (submesh.VertexCount() != 1 || submesh.IndexCount() > 1) {
+                found.push_back(where + ": a per-frame mesh with several vertex or index streams");
+                return;
+            }
+            const auto& vertices = submesh.GetVertexArray(0);
+            if (vertices.CapacitySizeOf() == 0 || vertices.OneSizeOf() == 0) {
+                found.push_back(where + ": a per-frame mesh with no vertex storage");
+            }
+            if (submesh.IndexCount() == 1 && submesh.GetIndexArray(0).CapacitySizeof() == 0) {
+                found.push_back(where + ": a per-frame mesh with no index storage");
+            }
         }
     });
     return found;
@@ -12986,12 +16565,11 @@ void main() { gl_FragColor = v_Color; }
 
 TEST_F(MetalSceneDraw, ParserBuildsOnlyTargetsTheDrawPathCanAllocate)
 {
-    // The native backend allocates single-sample colour targets, a depth buffer only as
-    // an attachment, and per-frame storage sized from the mesh's own capacity. It used to
-    // refuse a scene that held anything else, and no scene could: nothing the parser
-    // builds is multisampled, a depth buffer is only ever the default target's own
-    // attachment and is never named as a texture, and every per-frame mesh is one
-    // material over one vertex stream. This builds every kind of scene that reaches those
+    // The native backend allocates resolved colour targets, optional MS attachments
+    // for the scene output, and storage sized from each mesh's own capacity. This
+    // checks the parser's target and mesh shapes through the supported scene kinds:
+    // ordinary depth belongs to a color target, and the shadow atlas has its own
+    // depth format. This builds every kind of scene that reaches those
     // states -- plain cards, effect chains, history and feedback reads, text, and each
     // particle layout the parser writes -- and states the invariant; a parser change that
     // starts producing one of them fails here, before a frame is drawn.
@@ -13070,7 +16648,13 @@ TEST_F(MetalSceneDraw, TheCheckForStatesTheDrawPathCannotAllocateSeesEachOfThem)
 
     auto& targets = loaded.scene->renderTargets;
     ASSERT_FALSE(targets.empty());
-    auto& target = targets.begin()->second;
+    auto* output = loaded.scene->FindRenderTarget(SpecTex_Default);
+    ASSERT_NE(output, nullptr);
+    output->sample_count = 4;
+    EXPECT_TRUE(StatesTheDrawPathCannotAllocate(*loaded.scene).empty());
+    output->sample_count = 1;
+    auto& target = targets["_rt_unsupported_msaa_control"];
+    target.width = target.height = 32;
     target.sample_count = 4;
     EXPECT_EQ(StatesTheDrawPathCannotAllocate(*loaded.scene).size(), 1u);
     target.sample_count = 1;
@@ -13096,6 +16680,138 @@ uint16_t PackageVersionOf(const std::string& path)
     return code == std::errc {} && end == stamp.data() + stamp.size()
                ? version
                : SceneParseRequest::kUnknownPkgVersion;
+}
+
+/// Requested quality for a native local/compare probe, read as the energy test
+/// reads it. The parser and device still decide which pipeline and sample count
+/// can be drawn.
+SceneQuality QualityFromEnvironment()
+{
+    return tests::SceneQualityFromEnvironment();
+}
+
+/// `WE_TEST_METAL_RENDER_SCALE` / `WE_TEST_COMPARE_RENDER_SCALE`: the render
+/// scale the host would push, clamped as the scene wallpaper clamps it. Unset is
+/// 1, the full raster.
+double RenderScaleFromEnvironment(const char* name)
+{
+    const char* text = std::getenv(name);
+    if (text == nullptr) return 1.0;
+    char*        end   = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end != '\0' || ! std::isfinite(value) || value <= 0.0) {
+        throw std::runtime_error(std::string(name) + " must be a number above 0");
+    }
+    return std::clamp(value, render::kMinRenderScale, 1.0);
+}
+
+/// The draws the poster harness hashes: `WE_TEST_COMPARE_HASH_FRAMES`, a JSON
+/// array of draw indices, and `WE_TEST_COMPARE_HASH_EVERY=<k>`, every k-th draw
+/// counting from one (draws k-1, 2k-1, ...). Empty when neither is set.
+std::set<int> HashFramesFromEnvironment(int frame_count)
+{
+    std::set<int> frames;
+    if (const char* text = std::getenv("WE_TEST_COMPARE_HASH_FRAMES")) {
+        const auto parsed = nlohmann::json::parse(text, nullptr, false);
+        if (! parsed.is_array()) {
+            throw std::runtime_error("WE_TEST_COMPARE_HASH_FRAMES must be a JSON array of draws");
+        }
+        for (const auto& value : parsed) {
+            if (! value.is_number_integer() || value.get<int>() < 0 ||
+                value.get<int>() >= frame_count) {
+                throw std::runtime_error("WE_TEST_COMPARE_HASH_FRAMES names a draw outside 0.." +
+                                         std::to_string(frame_count - 1));
+            }
+            frames.insert(value.get<int>());
+        }
+    }
+    if (const char* text = std::getenv("WE_TEST_COMPARE_HASH_EVERY")) {
+        char*      end   = nullptr;
+        const long every = std::strtol(text, &end, 10);
+        if (end == text || *end != '\0' || every < 1 || every > 3600) {
+            throw std::runtime_error("WE_TEST_COMPARE_HASH_EVERY must be 1..3600");
+        }
+        for (long frame = every - 1; frame < frame_count; frame += every) {
+            frames.insert(static_cast<int>(frame));
+        }
+    }
+    return frames;
+}
+
+/// `WE_TEST_COMPARE_SCALING` (or another variable): the scaling mode the host pushes,
+/// `fallback` when unset.
+WallpaperScalingMode CompareScalingFromEnvironment(
+    const char* variable = "WE_TEST_COMPARE_SCALING",
+    WallpaperScalingMode fallback = WallpaperScalingMode::FILL)
+{
+    const char* text = std::getenv(variable);
+    if (text == nullptr) return fallback;
+    const std::map<std::string_view, WallpaperScalingMode> modes {
+        { "none", WallpaperScalingMode::NONE },
+        { "stretch", WallpaperScalingMode::STRETCH },
+        { "fit", WallpaperScalingMode::FIT },
+        { "fill", WallpaperScalingMode::FILL },
+        { "fit_blurred", WallpaperScalingMode::FIT_BLURRED },
+    };
+    const auto found = modes.find(text);
+    if (found == modes.end()) {
+        throw std::runtime_error(std::string(variable) + " has no mode " + text);
+    }
+    return found->second;
+}
+
+/// SHA-256 of a picture's bytes, in lowercase hex.
+std::string Sha256Hex(const std::vector<uint8_t>& bytes)
+{
+    std::array<unsigned char, CC_SHA256_DIGEST_LENGTH> digest {};
+    CC_SHA256(bytes.data(), static_cast<CC_LONG>(bytes.size()), digest.data());
+    std::string hex;
+    hex.reserve(digest.size() * 2);
+    constexpr char kDigits[] = "0123456789abcdef";
+    for (const unsigned char byte : digest) {
+        hex.push_back(kDigits[byte >> 4]);
+        hex.push_back(kDigits[byte & 15]);
+    }
+    return hex;
+}
+
+void WritePpm(const std::filesystem::path& path, const RendererPicture& picture)
+{
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream image(path, std::ios::binary);
+    image << "P6\n" << picture.width << " " << picture.height << "\n255\n";
+    image.write(reinterpret_cast<const char*>(picture.rgb.data()),
+                std::streamsize(picture.rgb.size()));
+}
+
+/// Wallpaper Engine's per-wallpaper options for a local or compare run, from
+/// `WE_TEST_USER_OPTIONS`: a JSON object in WE's own property names (`wec_e`, `wec_brs`,
+/// `wec_con`, `wec_sa`, `wec_hue`, `wcc_v`, `wcc_amt`, `alignmentfliph`, `cameraparallax`,
+/// `rate`), so a frame can be compared with Wallpaper Engine set to the same values.
+WeUserOptions UserOptionsFromEnvironment()
+{
+    WeUserOptions options;
+    const char*   text = std::getenv("WE_TEST_USER_OPTIONS");
+    if (text == nullptr) return options;
+    const auto json = nlohmann::json::parse(text, nullptr, false);
+    if (! json.is_object()) return options;
+    const auto number = [&](const char* key, float& out) {
+        if (const auto it = json.find(key); it != json.end() && it->is_number()) out = it->get<float>();
+    };
+    const auto flag = [&](const char* key, bool& out) {
+        if (const auto it = json.find(key); it != json.end() && it->is_boolean()) out = it->get<bool>();
+    };
+    flag("wec_e", options.color_enabled);
+    number("wec_brs", options.brightness);
+    number("wec_con", options.contrast);
+    number("wec_sa", options.saturation);
+    number("wec_hue", options.hue);
+    if (const auto it = json.find("wcc_v"); it != json.end() && it->is_string()) options.lut = it->get<std::string>();
+    number("wcc_amt", options.lut_strength);
+    flag("alignmentfliph", options.flip_horizontal);
+    flag("cameraparallax", options.mouse_parallax);
+    number("rate", options.playback_rate);
+    return options;
 }
 
 } // namespace
@@ -13158,6 +16874,27 @@ double ThreadCpuMilliseconds()
     timespec now {};
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
     return double(now.tv_sec) * 1000.0 + double(now.tv_nsec) / 1.0e6;
+}
+
+/// One frame's synthetic audio (`WE_TEST_AUDIO_HZ` at `hz`, or what `controls` plays instead):
+/// one analysis window submitted through the service the desktop tap feeds, waited for until
+/// its spectrum is published, so the frame drawn next reads it. False with `error` filled when
+/// the service refused it.
+bool SubmitProbeAudioFrame(tests::SceneProbeControls& controls, double hz, std::string* error)
+{
+    std::array<float, audio::kAudioResponseWindowFrames> pcm {};
+    for (std::size_t i = 0; i < pcm.size(); ++i) pcm[i] = controls.audioSample(i, hz);
+    const auto generation = audio::CurrentAudioSpectrumSnapshot().generation;
+    if (! audio::SubmitMonoAudioFrames(audio::kAudioResponseSampleRate, uint32_t(pcm.size()),
+                                       pcm.data(), error)) {
+        return false;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (audio::CurrentAudioSpectrumSnapshot().generation <= generation &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
 }
 } // namespace
 
@@ -13251,6 +16988,9 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                                         .project_path       = project,
                                         .project_properties = &loaded.properties,
                                         .pkg_version        = PackageVersionOf(paths.pkg_path),
+                                        .quality            = QualityFromEnvironment(),
+                                        .user_options       = UserOptionsFromEnvironment(),
+                                        .select_msaa_samples = MetalRender::SelectSampleCountForDevice,
                                     },
                                     source->ReadAllStr(), loaded.vfs, loaded.sound);
         ASSERT_NE(loaded.scene, nullptr);
@@ -13307,8 +17047,28 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             scale_factor = std::strtod(value, nullptr);
             ASSERT_TRUE(scale_factor >= 1.0 && scale_factor <= 4.0) << value;
         }
+        // The render scale the host pushes, set where the scene wallpaper sets it:
+        // before the graph is built, so targets are allocated at the size they keep.
+        loaded.scene->render_scale = RenderScaleFromEnvironment("WE_TEST_METAL_RENDER_SCALE");
+        // `WE_TEST_METAL_TIMING`: each draw's command buffers are timed on the GPU from
+        // their own start and end, and one `[ COST     ]` line reports them. The draws
+        // run back to back, so the GPU stays near its top clock: a work figure, not a
+        // paced energy one.
+        const bool timing = std::getenv("WE_TEST_METAL_TIMING") != nullptr &&
+                            std::string_view(std::getenv("WE_TEST_METAL_TIMING")) != "0";
         @autoreleasepool {
             id<MTLDevice> device       = MTLCreateSystemDefaultDevice();
+            if (timing) {
+                ASSERT_TRUE(tests::CountCommandBufferGpuTime(device))
+                    << "this GPU's command buffers could not be timed";
+                auto& gpu = tests::GpuTimeCounters();
+                gpu.tag   = -1;
+                ASSERT_TRUE(gpu.WaitForCompletion(std::chrono::seconds(10)));
+                std::scoped_lock lock(gpu.tagged_mutex);
+                gpu.tagged_ns.clear();
+                gpu.tagged_buffers.clear();
+                gpu.tagged_spans.clear();
+            }
             CAMetalLayer* layer        = [CAMetalLayer layer];
             layer.device               = device;
             layer.pixelFormat          = MTLPixelFormatBGRA8Unorm;
@@ -13325,6 +17085,10 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                 .display_scale_factor = scale_factor,
             };
             ASSERT_TRUE(render.init(info)) << render.lastError();
+            // `WE_TEST_METAL_SCALING`: the scaling mode the host would push before the graph
+            // is built (`fill`, `fit`, ...); unset, the renderer's own default, original size.
+            render.SetWallpaperScalingMode(
+                CompareScalingFromEnvironment("WE_TEST_METAL_SCALING", WallpaperScalingMode::NONE));
             auto graph = sceneToRenderGraph(*loaded.scene);
             ASSERT_NE(graph, nullptr);
             // Layers that read a composite before the frame has made it: a nonzero count is a
@@ -13375,31 +17139,25 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             int                                     rebuilds    = 0;
             int                                     resizes     = 0;
             double                                  rebuild_ms  = 0.0;
+            MetalRender::DynamicUploadBytesForTests  uploads_before;
+            wallpaper::render::SceneOptimizationTotals passes_before;
             for (int frame = 0; frame < frame_count; ++frame) {
+                if (frame == 1) {
+                    ScriptEngine::ResetCallCounts();
+                    uploads_before = render.DynamicGeometryUploadBytesForTests();
+                    passes_before  = wallpaper::render::CurrentSceneOptimizationTotals();
+                }
                 if (audio_hz != nullptr) {
                     // Synthetic PCM only, analysed by the same service the
                     // desktop tap feeds.
-                    std::array<float, audio::kAudioResponseWindowFrames> pcm {};
-                    const double hz = std::strtod(audio_hz, nullptr);
-                    for (std::size_t i = 0; i < pcm.size(); ++i) {
-                        pcm[i] = controls.audioSample(i, hz);
-                    }
-                    const auto generation = audio::CurrentAudioSpectrumSnapshot().generation;
                     std::string audio_error;
-                    ASSERT_TRUE(audio::SubmitMonoAudioFrames(audio::kAudioResponseSampleRate,
-                                                             uint32_t(pcm.size()),
-                                                             pcm.data(),
-                                                             &audio_error))
+                    ASSERT_TRUE(SubmitProbeAudioFrame(controls, std::strtod(audio_hz, nullptr),
+                                                      &audio_error))
                         << audio_error;
-                    const auto deadline =
-                        std::chrono::steady_clock::now() + std::chrono::seconds(2);
-                    while (audio::CurrentAudioSpectrumSnapshot().generation <= generation &&
-                           std::chrono::steady_clock::now() < deadline) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    }
                 }
                 if (controls.hasInput())
                     controls.input(*loaded.scene, frame, render.CursorMapping(*loaded.scene));
+                loaded.scene->targetFps = static_cast<uint32_t>(std::lround(1.0 / frame_step));
                 loaded.scene->paritileSys->Emitt();
                 if (loaded.scene->runtime != nullptr) {
                     loaded.scene->runtime->Tick(frame_step);
@@ -13420,15 +17178,27 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
                 if (loaded.scene->shaderValueUpdater != nullptr) {
                     loaded.scene->shaderValueUpdater->FrameBegin();
                 }
+                if (timing) tests::GpuTimeCounters().tag = frame;
                 const double cpu_before = ThreadCpuMilliseconds();
-                ASSERT_TRUE(render.drawFrame(*loaded.scene))
-                    << "frame " << frame << ": " << render.lastError();
+                const bool   drew       = render.drawFrame(*loaded.scene);
                 const double cpu_after = ThreadCpuMilliseconds();
+                if (timing) tests::GpuTimeCounters().tag = -1;
+                ASSERT_TRUE(drew) << "frame " << frame << ": " << render.lastError();
                 if (frame > 0) {
                     const auto counts = render.LastFrameEncodeCountsForTests();
                     encodes.render_passes += counts.render_passes;
                     encodes.scene_output_passes += counts.scene_output_passes;
                     encodes.blit_passes += counts.blit_passes;
+                    encodes.loaded_passes += counts.loaded_passes;
+                    encodes.loaded_bytes += counts.loaded_bytes;
+                    encodes.opening_copies += counts.opening_copies;
+                    encodes.stored_depth_attachments += counts.stored_depth_attachments;
+                    encodes.stored_multisample_attachments += counts.stored_multisample_attachments;
+                    encodes.copied_bytes += counts.copied_bytes;
+                    encodes.traded_copies += counts.traded_copies;
+                    encodes.noop_draws += counts.noop_draws;
+                    encodes.skipped_clears += counts.skipped_clears;
+                    encodes.skipped_copies += counts.skipped_copies;
                     draw_cpu_ms += cpu_after - cpu_before;
                     ++measured;
                 }
@@ -13444,14 +17214,48 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             std::cout << "[ LOCAL    ] " << paths.scene_id << ": Native Metal, " << frame_count << " frames drawn, "
                       << DifferingBytes(first, last) << " bytes differ between the first and the last"
                       << std::endl;
-            char encode_line[256];
+            char encode_line[576];
             std::snprintf(encode_line, sizeof(encode_line),
-                          "%.1f render passes/frame (%.1f on the scene output), %.1f blits/frame, "
+                          "%.1f render passes/frame (%.1f on the scene output, %.1f loading their target "
+                          "(%.1f MB), %.1f opening with a copy; %.1f storing depth, %.1f storing samples), "
+                          "%.1f blits/frame, %.1f MB copied/frame, %.1f copies traded/frame, "
+                          "%.1f draws left out as no-ops/frame, %.1f unread clears and %.1f unread copies "
+                          "left out/frame, "
                           "%.2f ms CPU per drawFrame",
                           double(encodes.render_passes) / measured,
                           double(encodes.scene_output_passes) / measured,
-                          double(encodes.blit_passes) / measured, draw_cpu_ms / measured);
+                          double(encodes.loaded_passes) / measured,
+                          double(encodes.loaded_bytes) / measured / 1e6,
+                          double(encodes.opening_copies) / measured,
+                          double(encodes.stored_depth_attachments) / measured,
+                          double(encodes.stored_multisample_attachments) / measured,
+                          double(encodes.blit_passes) / measured,
+                          double(encodes.copied_bytes) / measured / 1e6,
+                          double(encodes.traded_copies) / measured,
+                          double(encodes.noop_draws) / measured,
+                          double(encodes.skipped_clears) / measured,
+                          double(encodes.skipped_copies) / measured, draw_cpu_ms / measured);
             std::cout << "[ LOCAL    ] " << paths.scene_id << ": " << encode_line << std::endl;
+            // Work on the scene thread that is the same in every run of the same scene and
+            // clock: crossings into the scripts, and rewritten geometry copied for the GPU.
+            {
+                const auto calls   = ScriptEngine::GetCallCounts();
+                const auto uploads = render.DynamicGeometryUploadBytesForTests();
+                const auto passes  = wallpaper::render::CurrentSceneOptimizationTotals();
+                char work_line[416];
+                std::snprintf(work_line, sizeof(work_line),
+                              "%.1f script calls/frame, %.1f calls from scripts/frame, %.1f idle "
+                              "program frames left out/frame; %.0f vertex + %.0f index bytes of "
+                              "rewritten geometry copied/frame; %.1f passes drawn + %.1f reused/frame",
+                              double(calls.library_calls) / measured,
+                              double(calls.native_calls) / measured,
+                              double(calls.skipped_evaluations) / measured,
+                              double(uploads.vertex - uploads_before.vertex) / measured,
+                              double(uploads.index - uploads_before.index) / measured,
+                              double(passes.executed_passes - passes_before.executed_passes) / measured,
+                              double(passes.skipped_passes - passes_before.skipped_passes) / measured);
+                std::cout << "[ LOCAL    ] " << paths.scene_id << ": " << work_line << std::endl;
+            }
             // How often the host would have built the render graph again, and which kind of
             // change asked for it: a scene that rebuilds every few draws repeats its texture
             // decodes and uploads each time.
@@ -13483,6 +17287,72 @@ TEST_F(MetalSceneDraw, LocalProjectsNamedByTheEnvironmentRunThroughTheNativeBack
             std::cout << "[ LOCAL    ] " << paths.scene_id
                       << ": render target bytes=" << render.RenderTargetBytesForTests()
                       << " device allocated bytes=" << device.currentAllocatedSize << std::endl;
+            if (timing) {
+                // Every draw after the first, which compiles and uploads; a draw's GPU time
+                // is the sum over the command buffers committed while it ran, and a draw
+                // that committed none (nothing changed) cost the GPU nothing.
+                auto& gpu = tests::GpuTimeCounters();
+                ASSERT_TRUE(gpu.WaitForCompletion(std::chrono::seconds(10)))
+                    << "the GPU did not finish the draws";
+                std::vector<double> gpu_ms;
+                uint64_t            buffers = 0;
+                // The time the GPU was busy with any of those buffers: the union of their
+                // spans, which counts once what two draws' buffers ran at the same time.
+                double busy_ms = 0.0;
+                {
+                    std::scoped_lock lock(gpu.tagged_mutex);
+                    for (std::size_t frame = 1; frame < std::size_t(frame_count); ++frame) {
+                        const bool seen = frame < gpu.tagged_ns.size();
+                        gpu_ms.push_back(seen ? double(gpu.tagged_ns[frame]) / 1e6 : 0.0);
+                        buffers += seen ? gpu.tagged_buffers[frame] : 0;
+                    }
+                    std::vector<std::pair<double, double>> spans;
+                    for (const auto& span : gpu.tagged_spans)
+                        if (span.tag >= 1 && span.tag < frame_count) spans.emplace_back(span.start, span.end);
+                    std::sort(spans.begin(), spans.end());
+                    double covered_until = -1.0;
+                    for (const auto& [start, end] : spans) {
+                        const double from = std::max(start, covered_until);
+                        if (end > from) busy_ms += (end - from) * 1e3;
+                        covered_until = std::max(covered_until, end);
+                    }
+                }
+                double total = 0.0;
+                for (const double value : gpu_ms) total += value;
+                std::sort(gpu_ms.begin(), gpu_ms.end());
+                const auto quantile = [&](double p) {
+                    const auto rank = std::size_t(std::ceil(p * double(gpu_ms.size())));
+                    return gpu_ms[std::min(gpu_ms.size() - 1, rank == 0 ? 0 : rank - 1)];
+                };
+                std::printf("[ COST     ] %s {\"surface\":\"%ux%u@%g\",\"render_scale\":%g,"
+                            "\"resolution\":\"%s\",\"draws\":%zu,\"gpu_ms_p50\":%.4f,"
+                            "\"gpu_ms_p95\":%.4f,\"gpu_ms_mean\":%.4f,\"gpu_busy_ms_mean\":%.4f,\"cpu_ms_mean\":%.4f,"
+                            "\"command_buffers_per_draw\":%.3f,\"render_passes_per_draw\":%.3f,"
+                            "\"scene_output_passes_per_draw\":%.3f,\"blits_per_draw\":%.3f,"
+                            "\"copied_bytes_per_draw\":%.0f,\"traded_copies_per_draw\":%.3f,"
+                            "\"noop_draws_per_draw\":%.3f,\"skipped_clears_per_draw\":%.3f,"
+                            "\"skipped_copies_per_draw\":%.3f,"
+                            "\"render_target_bytes\":%llu,\"device_allocated_bytes\":%llu}\n",
+                            paths.scene_id.c_str(), surface_width, surface_height, scale_factor,
+                            loaded.scene->render_scale,
+                            loaded.scene->resolution == SceneResolution::Display ? "display"
+                                                                                 : "canvas",
+                            gpu_ms.size(), quantile(0.5), quantile(0.95),
+                            total / double(gpu_ms.size()), busy_ms / double(gpu_ms.size()),
+                            draw_cpu_ms / measured,
+                            double(buffers) / double(gpu_ms.size()),
+                            double(encodes.render_passes) / measured,
+                            double(encodes.scene_output_passes) / measured,
+                            double(encodes.blit_passes) / measured,
+                            double(encodes.copied_bytes) / measured,
+                            double(encodes.traded_copies) / measured,
+                            double(encodes.noop_draws) / measured,
+                            double(encodes.skipped_clears) / measured,
+                            double(encodes.skipped_copies) / measured,
+                            (unsigned long long)render.RenderTargetBytesForTests(),
+                            (unsigned long long)device.currentAllocatedSize);
+                std::fflush(stdout);
+            }
 
             capture("metal-" + label + ".ppm");
 
@@ -13595,7 +17465,13 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
     // `WE_TEST_COMPARE_REBUILD_AT=<k>` builds the graph again before draw `k`
     // whether or not the scene asked: the picture is then what a rebuild leaves
     // behind, whenever it comes, and the draw it came before is printed so a run
-    // that did not rebuild can be drawn to the same time.
+    // that did not rebuild can be drawn to the same time. `WE_TEST_COMPARE_COUNTERS`
+    // (set, not `0`) turns the renderer counters on for the run, the way a
+    // diagnostics window does, so the picture is drawn through the counted
+    // paths, and prints the present counts. `WE_TEST_AUDIO_HZ` (with
+    // `WE_TEST_AUDIO_AMPLITUDE`, `WE_TEST_AUDIO_NOISE` and `WE_TEST_AUDIO_FILE`)
+    // turns audio response on and submits one window of synthetic sound before
+    // every draw, as the local-project run does; unset, the scene hears nothing.
     const char* listed = std::getenv("WE_TEST_COMPARE_PROJECTS");
     const auto  assets = LocalSceneAssetsRoot();
     if (listed == nullptr || *listed == '\0' || assets.empty() ||
@@ -13644,6 +17520,25 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
         scale_factor = std::strtod(value, nullptr);
         ASSERT_TRUE(scale_factor >= 1.0 && scale_factor <= 4.0);
     }
+    // The render scale the host pushes (`WE_TEST_COMPARE_RENDER_SCALE`), the scaling
+    // mode (`WE_TEST_COMPARE_SCALING`), and the draws whose final composition is
+    // hashed (`WE_TEST_COMPARE_HASH_FRAMES`, `WE_TEST_COMPARE_HASH_EVERY`): each
+    // prints `[ HASH     ] <scene> <W>x<H> frame=<n> sha256=<hex>`, the last draw
+    // too, and is written as `<scene>-frame-<n>.ppm` only under `WE_TEST_OUTPUT`.
+    const double               render_scale = RenderScaleFromEnvironment("WE_TEST_COMPARE_RENDER_SCALE");
+    const WallpaperScalingMode scaling      = CompareScalingFromEnvironment();
+    const std::set<int>        hash_frames  = HashFramesFromEnvironment(frame_count);
+    const bool                 hashing      = std::getenv("WE_TEST_COMPARE_HASH_FRAMES") != nullptr ||
+                                std::getenv("WE_TEST_COMPARE_HASH_EVERY") != nullptr;
+    const bool counted = [] {
+        const char* value = std::getenv("WE_TEST_COMPARE_COUNTERS");
+        return value != nullptr && std::string_view(value) != "0";
+    }();
+    struct CountersOff
+    {
+        ~CountersOff() { RendererCounters::SetEnabled(false); }
+    } counters_off;
+    if (counted) RendererCounters::SetEnabled(true);
 
     std::vector<std::string> projects;
     for (std::string_view rest = listed; ! rest.empty();) {
@@ -13689,6 +17584,9 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
                                             .project_path       = project,
                                             .project_properties = &loaded.properties,
                                             .pkg_version        = PackageVersionOf(paths.pkg_path),
+                                            .quality            = QualityFromEnvironment(),
+                                            .user_options       = UserOptionsFromEnvironment(),
+                                            .select_msaa_samples = MetalRender::SelectSampleCountForDevice,
                                         },
                                         source->ReadAllStr(), loaded.vfs, loaded.sound);
             ASSERT_NE(loaded.scene, nullptr);
@@ -13702,6 +17600,9 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
 
             auto& scene = *loaded.scene;
             scene.resolution = resolution;
+            // What the scene wallpaper sets before it compiles: targets are
+            // allocated once, at the size they keep.
+            scene.render_scale = render_scale;
             if (scene.runtime != nullptr) {
                 for (int tick = 0; tick < warmup; ++tick) {
                     scene.runtime->Tick(1.0 / 60.0);
@@ -13713,8 +17614,17 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
             }
 
             tests::SceneProbeControls input;
+            const char* audio_hz = std::getenv("WE_TEST_AUDIO_HZ");
+            if (audio_hz != nullptr && scene.runtime != nullptr) {
+                scene.runtime->SetAudioResponseEnabled(true);
+            }
+            std::string audio_error;
             const auto start = std::chrono::steady_clock::now();
             const auto pace  = [&](int frame) {
+                if (audio_hz != nullptr && audio_error.empty() &&
+                    ! SubmitProbeAudioFrame(input, std::strtod(audio_hz, nullptr), &audio_error)) {
+                    ADD_FAILURE() << "synthetic audio was refused: " << audio_error;
+                }
                 if (! realtime) return;
                 std::this_thread::sleep_until(
                     start + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -13724,8 +17634,49 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
             watch.stop_after = stop_after_rebuild;
             watch.from       = rebuild_from;
             watch.force_at   = rebuild_at;
+            if (hashing) {
+                watch.sample_at = [&](int frame) { return hash_frames.contains(frame); };
+                watch.sampled   = [&](int frame, const RendererPicture& seen) {
+                    std::printf("[ HASH     ] %s %ux%u frame=%d sha256=%s\n", scene_id.c_str(),
+                                seen.width, seen.height, frame, Sha256Hex(seen.rgb).c_str());
+                    if (output != nullptr && *output != '\0') {
+                        WritePpm(std::filesystem::path(output) /
+                                     (scene_id + "-frame-" + std::to_string(frame) + ".ppm"),
+                                 seen);
+                    }
+                };
+            }
+            const uint64_t uploads_before   = MetalRender::ImageUploadsForTests();
+            const uint64_t optimized_before = MetalRender::ImagesOptimizedForTests();
+            RendererCounters counters;
             auto picture = DrawWithRenderer(scene, width, height, frame_count, frame_step,
-                                            pace, scale_factor, &input, nullptr, &watch);
+                                            pace, scale_factor, &input,
+                                            counted ? &counters : nullptr, &watch, scaling);
+            if (hashing && picture.error.empty() && ! picture.rgb.empty() &&
+                ! hash_frames.contains(watch.last_draw)) {
+                std::printf("[ HASH     ] %s %ux%u frame=%d sha256=%s\n", scene_id.c_str(),
+                            picture.width, picture.height, watch.last_draw,
+                            Sha256Hex(picture.rgb).c_str());
+            }
+            // What loading the pictures cost the GPU besides the draws: one blit for each
+            // picture rearranged for sampling (`WALLPAPER_MACHINE_OPTIMIZE_IMAGES`).
+            std::printf("[ COMPARE  ] %s: %llu picture upload(s), %llu optimized for sampling\n",
+                        scene_id.c_str(),
+                        static_cast<unsigned long long>(MetalRender::ImageUploadsForTests() - uploads_before),
+                        static_cast<unsigned long long>(MetalRender::ImagesOptimizedForTests() -
+                                                        optimized_before));
+            std::fflush(stdout);
+            if (counted) {
+                // Reports still on their way when the renderer closed are not
+                // counted, so the reported total can trail the requests.
+                std::printf("[ COUNTERS ] %s: present_requests=%llu presents_skipped_unchanged=%llu "
+                            "presents_reported=%llu\n",
+                            scene_id.c_str(),
+                            (unsigned long long)counters.Get(OWE_RC_PRESENT_REQUESTS),
+                            (unsigned long long)counters.Get(OWE_RC_PRESENTS_SKIPPED_UNCHANGED),
+                            (unsigned long long)(counters.Get(OWE_RC_PRESENTED_FRAMES) +
+                                                 counters.Get(OWE_RC_PRESENTS_DROPPED)));
+            }
             if (stop_after_rebuild >= 0) {
                 const std::string rebuilt =
                     watch.rebuilt_at < 0
@@ -13743,12 +17694,7 @@ TEST_F(MetalSceneDraw, LocalProjectsDrawAPosterPicture)
         }
         if (drawn.rgb.empty()) continue;
         if (output != nullptr && *output != '\0') {
-            std::filesystem::create_directories(output);
-            std::ofstream image(std::filesystem::path(output) / (scene_id + ".ppm"),
-                                std::ios::binary);
-            image << "P6\n" << drawn.width << " " << drawn.height << "\n255\n";
-            image.write(reinterpret_cast<const char*>(drawn.rgb.data()),
-                        std::streamsize(drawn.rgb.size()));
+            WritePpm(std::filesystem::path(output) / (scene_id + ".ppm"), drawn);
         }
     }
 }
@@ -13867,13 +17813,13 @@ TEST_F(MetalSceneDraw, ALayerItsPropertiesHideHoldsNoImagesUntilAScriptShowsIt)
                "attribute vec2 a_TexCoord;\n"
                "varying vec2 v_TexCoord;\n"
                "void main() {\n"
-               "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+               "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
                "  v_TexCoord = a_TexCoord;\n"
                "}\n";
         std::ofstream(directory / "shaders/identity_effect.frag")
             << "uniform sampler2D g_Texture0;\n"
                "varying vec2 v_TexCoord;\n"
-               "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n";
+               "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n";
         auto layout = nlohmann::json::parse(std::ifstream(directory / "layout.json"));
         layout["objects"][1]["effects"] = nlohmann::json::array({
             { { "file", "effects/identity.json" }, { "visible", true } },
@@ -13963,13 +17909,13 @@ std::filesystem::path WritePropertyPreviewFixture(const std::filesystem::path& d
            "attribute vec2 a_TexCoord;\n"
            "varying vec2 v_TexCoord;\n"
            "void main() {\n"
-           "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+           "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
            "  v_TexCoord = a_TexCoord;\n"
            "}\n";
     std::ofstream(directory / "shaders/identity_effect.frag")
         << "uniform sampler2D g_Texture0;\n"
            "varying vec2 v_TexCoord;\n"
-           "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n";
+           "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n";
     // Every card carries the alpha the slider writes; a card nothing binds keeps
     // the full alpha the shader declares as its default.
     std::ofstream(directory / "shaders/metal_probe.frag")
@@ -14279,14 +18225,14 @@ TEST_F(MetalSceneDraw, AStepSamplingAnImageNothingProducesIsSkipped)
            "attribute vec2 a_TexCoord;\n"
            "varying vec2 v_TexCoord;\n"
            "void main() {\n"
-           "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+           "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
            "  v_TexCoord = a_TexCoord;\n"
            "}\n";
     std::ofstream(root_ / "unproduced/shaders/overlay_sample.frag")
         << "uniform sampler2D g_Texture0;\n"
            "varying vec2 v_TexCoord;\n"
            "void main() {\n"
-           "  gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0) - texture(g_Texture0, v_TexCoord) * 0.0;\n"
+           "  gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0) - texSample2D(g_Texture0, v_TexCoord) * 0.0;\n"
            "}\n";
     std::ofstream(root_ / "unproduced/layout.json")
         << R"({"camera":{"center":[0,0,0],"eye":[0,0,1],"up":[0,1,0]},)"
@@ -14535,14 +18481,14 @@ TEST_F(MetalSceneDraw, TargetsThatAreNeverAliveTogetherShareImagesAndDrawTheSame
                "attribute vec2 a_TexCoord;\n"
                "varying vec2 v_TexCoord;\n"
                "void main() {\n"
-               "  gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0);\n"
+               "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
                "  v_TexCoord = a_TexCoord;\n"
                "}\n";
         std::ofstream(root / "shaders/halve_green.frag")
             << "uniform sampler2D g_Texture0;\n"
                "varying vec2 v_TexCoord;\n"
                "void main() {\n"
-               "  gl_FragColor = texture(g_Texture0, v_TexCoord) * vec4(1.0, 0.5, 1.0, 1.0);\n"
+               "  gl_FragColor = texSample2D(g_Texture0, v_TexCoord) * vec4(1.0, 0.5, 1.0, 1.0);\n"
                "}\n";
         const std::string effects =
             R"("effects":[{"file":"effects/halve.json","visible":true},{"file":"effects/halve.json","visible":true}])";
@@ -14704,6 +18650,2359 @@ TEST_F(MetalSceneDraw, InterleavedFeedbackCopiesPreserveEachReadersImage)
                 }
             }
             render.destroy();
+        }
+    }
+}
+
+// A pass whose shader stage cannot be compiled is drawn as Wallpaper Engine draws it: that stage
+// is replaced by its `dx11fallback` stage (`sub_1400D5070`), the rest of the pass is kept. Probe
+// T9 (artifacts/we-parity/probes/texshader2): a broken fragment draws (0.5, 0, 0, 1) with the
+// pass's blending; a broken vertex under a fragment that writes green draws green.
+TEST_F(MetalSceneDraw, AStageThatCannotBeTranslatedIsReplacedByTheFallbackStage)
+{
+    const std::string good_vertex =
+        "uniform mat4 g_ModelViewProjectionMatrix;\n"
+        "attribute vec3 a_Position;\n"
+        "attribute vec2 a_TexCoord;\n"
+        "varying vec2 v_TexCoord;\n"
+        "void main() {\n"
+        "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n"
+        "  v_TexCoord = a_TexCoord;\n"
+        "}\n";
+    struct Case {
+        const char* name;
+        std::string vertex;
+        std::string fragment;
+        std::array<int, 3> centre;
+    };
+    const std::vector<Case> cases {
+        { "broken fragment", good_vertex,
+          "varying vec2 v_TexCoord;\nvoid main() {\n  gl_FragColor = vec4(no_such_value, 0.0, 0.0, 1.0);\n}\n",
+          { 128, 0, 0 } },
+        { "broken vertex", "attribute vec3 a_Position;\nvoid main() {\n  gl_Position = vec4(a_Position, no_such_w);\n}\n",
+          "void main() {\n  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);\n}\n", { 0, 255, 0 } },
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        const auto directory = root_ / (std::string("fallback-stage-") + (c.centre[1] != 0 ? "vertex" : "fragment"));
+        const auto project   = WriteFixture(directory);
+        std::ofstream(directory / "shaders/metal_probe.vert") << c.vertex;
+        std::ofstream(directory / "shaders/metal_probe.frag") << c.fragment;
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+        ASSERT_EQ(loaded.scene->shader_fallbacks.size(), 1u) << "the failure is not reported";
+        EXPECT_NE(loaded.scene->shader_fallbacks.front().find("metal_probe"), std::string::npos)
+            << loaded.scene->shader_fallbacks.front();
+        const auto selection = SelectSceneBackend(*loaded.scene);
+        ASSERT_FALSE(selection.failed()) << selection.failure_reason;
+
+        const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        const auto centre = PixelAt(picture, 192, 128);
+        for (int channel = 0; channel < 3; ++channel) EXPECT_NEAR(centre[channel], c.centre[channel], 2) << channel;
+        const auto outside = PixelAt(picture, 20, 20);
+        EXPECT_EQ(outside, (std::array<int, 3> { 0, 0, 0 })) << "the card is drawn where it is, no larger";
+    }
+}
+
+// A translated program the Metal compiler itself refuses is drawn with the fallback shader too,
+// instead of failing the graph.
+TEST_F(MetalSceneDraw, AProgramMetalCannotCompileIsDrawnWithTheFallbackShader)
+{
+    const auto project = WriteFixture(root_ / "metal-refused", "0.3125");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "metal-refused-cache", loaded, error)) << error;
+    auto* material = FirstMaterial(loaded.scene->sceneGraph.get());
+    ASSERT_NE(material, nullptr);
+    ASSERT_NE(material->customShader.shader, nullptr);
+    ASSERT_NE(material->customShader.shader->metal_program, nullptr);
+    auto broken = std::make_shared<SceneMetalProgram>();
+    broken->stages          = material->customShader.shader->metal_program->stages;
+    broken->reflection_json = material->customShader.shader->metal_program->reflection_json;
+    for (auto& stage : broken->stages) {
+        if (stage.kind == SceneMetalStageKind::Fragment) stage.source += "\nthis is not Metal;\n";
+    }
+    material->customShader.shader->metal_program = broken;
+
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    const auto centre = PixelAt(picture, 192, 128);
+    EXPECT_NEAR(centre[0], 128, 2);
+    EXPECT_NEAR(centre[1], 0, 2);
+    EXPECT_NEAR(centre[2], 0, 2);
+}
+
+// A slot that names an `_alias_*` texture reads its target through Wallpaper Engine's alias wrapper
+// (`sub_14009ACD0`, artifacts/we-parity/decompiles/E-D6-D7.md): transparent black outside 0..1,
+// the target as it is inside. A slot naming the same image directly keeps the image's own wrap.
+TEST_F(MetalSceneDraw, AnAliasSlotReadsTransparentBlackOutsideItsTarget)
+{
+    const auto directory = root_ / "alias-border";
+    const auto project   = WriteFixture(directory);
+    WriteSingleLevelTexture(directory / "materials/white4.tex", 0, 4, std::vector<uint8_t>(4 * 4 * 4, 255));
+    std::ofstream(directory / "materials/tile.json")
+        << R"({"passes":[{"shader":"metal_probe","blending":"translucent","cullmode":"nocull",)"
+        << R"("depthtest":"disabled","depthwrite":"disabled","textures":["white4","_alias_lightCookie"]}]})";
+    std::ofstream(directory / "shaders/metal_probe.frag")
+        << "varying vec2 v_TexCoord;\n"
+           "uniform sampler2D g_Texture0;\n"
+           "uniform sampler2D g_Texture1;\n"
+           "void main() {\n"
+           "  gl_FragColor = vec4(texSample2D(g_Texture1, vec2(1.25, 0.5)).r,\n"
+           "                      texSample2D(g_Texture0, vec2(1.25, 0.5)).g,\n"
+           "                      texSample2D(g_Texture1, vec2(0.5, 0.5)).b, 1.0);\n"
+           "}\n";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+    auto* material = FirstMaterial(loaded.scene->sceneGraph.get());
+    ASSERT_NE(material, nullptr);
+    ASSERT_EQ(material->textures.size(), 2u);
+    ASSERT_EQ(material->textures[1], "_alias_lightCookie");
+    // The alias stands for the white image here, so the slot has something to read inside 0..1.
+    loaded.scene->renderTargetAliases["_alias_lightCookie"] = material->textures[0];
+
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    const auto centre = PixelAt(picture, 192, 128);
+    EXPECT_NEAR(centre[0], 0, 2) << "the alias slot outside its target reads the border";
+    EXPECT_NEAR(centre[1], 255, 2) << "the image's own slot keeps its wrap";
+    EXPECT_NEAR(centre[2], 255, 2) << "the alias slot inside its target reads the target";
+}
+
+namespace {
+std::filesystem::path WriteSpotShadowFixture(const std::filesystem::path& root, bool casts,
+                                              bool reverse_winding = false)
+{
+    const auto project = WriteFixture(root);
+    mdltest::MeshSpec mesh;
+    mesh.material = "materials/caster.json";
+    mesh.flag = mdltest::kPosition;
+    mesh.vertices = 4;
+    mesh.indices = { 0, 1, 2, 2, 1, 3 };
+    if (reverse_winding) mesh.indices = { 0, 2, 1, 2, 3, 1 };
+    mesh.boxMin = { -24, -24, 0 };
+    mesh.boxMax = { 24, 24, 0 };
+    mdltest::Marks marks;
+    auto bytes = mdltest::mdlFile(23, { mesh }, std::nullopt, &marks);
+    const std::array<std::array<float, 3>, 4> points {{
+        { -24, -24, 0 }, { 24, -24, 0 }, { -24, 24, 0 }, { 24, 24, 0 }
+    }};
+    std::memcpy(bytes.data().data() + marks.vertexStart, points.data(), sizeof(points));
+    std::ofstream model(root / "models/caster.mdl", std::ios::binary);
+    model.write(reinterpret_cast<const char*>(bytes.data().data()), bytes.size());
+    model.close();
+    std::filesystem::create_directories(root / "materials/util");
+    std::ofstream(root / "materials/util/shadowcaster.json") << R"({"passes":[{"shader":"shadowcaster","cullmode":"nocull","depthtest":"enabled","depthwrite":"enabled"}]})";
+    std::ofstream(root / "shaders/shadowcaster.vert") << R"(
+uniform mat4 g_ModelMatrix;
+uniform mat4 g_ViewportViewProjectionMatrices[6];
+attribute vec3 a_Position;
+void main() { gl_Position = mul(mul(vec4(a_Position, 1.0), g_ModelMatrix), g_ViewportViewProjectionMatrices[0]); }
+)";
+    std::ofstream(root / "shaders/shadowcaster.frag") << "void main() {}\n";
+    std::ofstream(root / "materials/caster.json") << R"({"passes":[{"shader":"caster","blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})";
+    std::ofstream(root / "shaders/caster.vert") << R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+attribute vec3 a_Position;
+void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix); }
+)";
+    std::ofstream(root / "shaders/caster.frag") << "void main() { gl_FragColor = vec4(0.5,0.0,0.0,1.0); }\n";
+    std::ofstream(root / "materials/tile.json") << R"({"passes":[{"shader":"receiver","blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","combos":{"LIGHTING":1}}]})";
+    std::ofstream(root / "models/tile.json") << R"({"width":384,"height":256,"material":"materials/tile.json"})";
+    std::ofstream(root / "shaders/receiver.vert") << R"(
+uniform mat4 g_ModelMatrix;
+uniform mat4 g_ViewProjectionMatrix;
+attribute vec3 a_Position;
+varying vec3 v_World;
+void main() { vec4 world = mul(vec4(a_Position,1.0),g_ModelMatrix); v_World = world.xyz; gl_Position = mul(world,g_ViewProjectionMatrix); }
+)";
+    std::ofstream(root / "shaders/receiver.frag") << R"(
+varying vec3 v_World;
+#if LIGHTS_SHADOW_MAPPING
+uniform sampler2DComparison g_Texture6; // {"default":"_rt_shadowAtlas"}
+uniform mat4 g_LFeature_ShadowProjection[LIGHTS_SPOT_SHADOW];
+uniform vec4 g_LFeature_ShadowProjectionTransform[LIGHTS_SPOT_SHADOW];
+#endif
+void main() {
+    float light = 1.0;
+#if LIGHTS_SHADOW_MAPPING
+    vec4 clip = mul(vec4(v_World,1.0),g_LFeature_ShadowProjection[0]);
+    vec3 q = clip.xyz / clip.w;
+    vec4 tile = g_LFeature_ShadowProjectionTransform[0];
+    vec2 uv = (q.xy * vec2(0.5,-0.5) + 0.5) * tile.zw + tile.xy;
+    light = texSample2DCompare(g_Texture6,uv,q.z);
+#endif
+    gl_FragColor = vec4(CAST3(0.05 + 0.95 * light),1.0);
+}
+)";
+    auto document = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    document["general"]["bloom"] = false;
+    document["general"]["lightconfig"] = { { "spot", 1 }, { "spotshadow", 1 } };
+    document["objects"].push_back({ { "id", 2 }, { "name", "caster" }, { "model", "models/caster.mdl" },
+        { "origin", { 192, 128, 150 } }, { "scale", { 1, 1, 1 } }, { "angles", { 0, 0, 0 } },
+        { "visible", true }, { "castshadow", casts } });
+    document["objects"].push_back({ { "id", 3 }, { "name", "light" }, { "light", "lspot" },
+        { "origin", { 300, 128, 300 } }, { "angles", { 0.0, std::atan2(300.0, -216.0), 0.0 } },
+        { "scale", { 1, 1, 1 } }, { "visible", true }, { "castshadow", true }, { "radius", 2000 },
+        { "outercone", 50 }, { "innercone", 40 } });
+    std::ofstream(root / "layout.json") << document;
+    return project;
+}
+}
+
+TEST_F(MetalSceneDraw, ASpotLightCastsAShadowOfAModelOntoALitCard)
+{
+    for (const bool casts : { true, false }) {
+        SCOPED_TRACE(casts);
+        const auto root = root_ / (casts ? "spot-shadow" : "spot-no-caster");
+        const auto project = WriteSpotShadowFixture(root, casts);
+        LoadedScene loaded;
+        std::string error;
+        ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error)) << error;
+        EXPECT_EQ(loaded.scene->HasRenderTarget("_rt_shadowAtlas"), casts);
+        const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+        const auto centre = picture.rgb[(128u * 384u + 84u) * 3u];
+        const auto beside = picture.rgb[(128u * 384u + 320u) * 3u];
+        EXPECT_GT(beside, 240u);
+        if (casts) EXPECT_LT(centre, beside * 0.2);
+        else EXPECT_NEAR(centre, beside, 2);
+    }
+}
+
+
+TEST_F(MetalSceneDraw, AShadowCanStartAndStopWithoutReloadingOrRecompilingEveryFrame)
+{
+    const auto root = root_ / "dynamic-shadow";
+    const auto project = WriteSpotShadowFixture(root, false);
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    auto* receiver = FirstDrawableNode(scene.sceneGraph.get())->Mesh()->MaterialForSlot(0);
+    ASSERT_NE(receiver, nullptr);
+    const auto variants = receiver->shadow_variants;
+    ASSERT_NE(variants, nullptr);
+    EXPECT_FALSE(scene.HasRenderTarget("_rt_shadowAtlas"));
+    std::vector<int> samples;
+    RebuildWatch watch;
+    watch.shown = [&](const RendererPicture& picture) {
+        samples.push_back(PixelAt(picture, 84, 128)[0]);
+        return false;
+    };
+    const auto picture = DrawWithRenderer(scene, 384, 256, 7, 1.0 / 60.0, [&](int frame) {
+        // Each value is written twice; only the three transitions rebuild.
+        const bool casts = (frame >= 2 && frame < 4) || frame >= 6;
+        ASSERT_TRUE(scene.runtime->SetModelFlag("caster", "castshadow", casts));
+        ASSERT_TRUE(scene.runtime->SetModelFlag("caster", "castshadow", casts));
+        watch.look_from = ((frame + 1) / 2) * 2;
+    }, 1.0, nullptr, nullptr, &watch);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(samples.size(), 4u);
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        if (i % 2 == 1) EXPECT_LT(samples[i], 40) << i;
+        else EXPECT_GT(samples[i], 240) << i;
+    }
+    EXPECT_EQ(watch.rebuilds, 3);
+    EXPECT_TRUE(scene.HasRenderTarget("_rt_shadowAtlas"));
+    ASSERT_NE(variants->versions[0].material, nullptr);
+    ASSERT_NE(variants->versions[1].material, nullptr);
+    EXPECT_EQ(receiver->customShader.shader, variants->versions[1].material->customShader.shader);
+}
+
+TEST_F(MetalSceneDraw, ShadowsOffDrawsTheUnoccludedCardWithoutAnAtlas)
+{
+    const auto root = root_ / "off-shadow";
+    const auto project = WriteSpotShadowFixture(root, true);
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error, {},
+                         SceneQuality { .shadows = static_cast<int>(QualityLevel::Off) })) << error;
+    auto& scene = *loaded.scene;
+    EXPECT_FALSE(scene.HasRenderTarget("_rt_shadowAtlas"));
+    EXPECT_TRUE(scene.shadows.casters.empty());
+    const auto picture = DrawWithRenderer(scene, 384, 256, 3, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    EXPECT_GT(PixelAt(picture, 84, 128)[0], 240);
+}
+
+
+TEST_F(MetalSceneDraw, ShadowVariantsReplaceOldLightCountsAndQuality)
+{
+    const auto root = root_ / "shadow-variants";
+    const auto project = WriteSpotShadowFixture(root, true);
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    auto* receiver = FirstDrawableNode(scene.sceneGraph.get())->Mesh()->MaterialForSlot(0);
+    ASSERT_NE(receiver, nullptr);
+    ASSERT_NE(receiver->shadow_variants, nullptr);
+    const auto variants = receiver->shadow_variants;
+    const auto expect_count = [&](uint32_t count) {
+        const auto program = receiver->customShader.shader->metal_program;
+        ASSERT_NE(program, nullptr);
+        ASSERT_TRUE(program->ok()) << program->error;
+        metal::MetalShaderReflection reflection;
+        std::string reason;
+        ASSERT_TRUE(metal::ParseMetalShaderReflection(program->reflection_json, reflection, &reason)) << reason;
+        const auto* member = reflection.member("g_LFeature_ShadowProjection");
+        ASSERT_NE(member, nullptr);
+        EXPECT_EQ(member->array_count, count);
+    };
+    expect_count(1);
+    for (const uint32_t count : { 2u, 3u, 1u }) {
+        std::weak_ptr<SceneShader> retired = receiver->customShader.shader;
+        scene.light_config.spot = count;
+        scene.light_config.spot_shadow = count;
+        scene.quality.shadows = count == 3 ? static_cast<int>(QualityLevel::High)
+                                          : static_cast<int>(QualityLevel::Medium);
+        scene.runtime->InvalidateShadowTopology();
+        auto graph = sceneToRenderGraph(scene);
+        ASSERT_NE(graph, nullptr);
+        expect_count(count);
+        EXPECT_EQ(variants->versions[1].key, SceneShadowVariantKey(scene));
+        EXPECT_TRUE(retired.expired());
+        ASSERT_TRUE(scene.runtime->SetModelFlag("caster", "castshadow", false));
+        graph = sceneToRenderGraph(scene);
+        EXPECT_FALSE(scene.HasRenderTarget("_rt_shadowAtlas"));
+        EXPECT_EQ(variants->versions[0].key, SceneShadowVariantKey(scene));
+        ASSERT_TRUE(scene.runtime->SetModelFlag("caster", "castshadow", true));
+        graph = sceneToRenderGraph(scene);
+        expect_count(count);
+    }
+    const auto picture = DrawWithRenderer(scene, 384, 256, 3, 1.0 / 60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    EXPECT_LT(PixelAt(picture, 84, 128)[0], 40);
+}
+
+
+TEST_F(MetalSceneDraw, BothModelWindingsCastShadowsRegardlessOfTheVisibleCullMode)
+{
+    for (const bool two_sided : { false, true }) {
+        for (const bool reverse : { false, true }) {
+            SCOPED_TRACE(::testing::Message() << "visible nocull=" << two_sided
+                                             << ", reverse winding=" << reverse);
+            const auto root = root_ / (std::string("caster-faces-") +
+                (two_sided ? "both-" : "back-") + (reverse ? "cw" : "ccw"));
+            const auto project = WriteSpotShadowFixture(root, true, reverse);
+            auto material = nlohmann::json::parse(std::ifstream(root / "materials/caster.json"));
+            material["passes"][0]["cullmode"] = two_sided ? "nocull" : "normal";
+            std::ofstream(root / "materials/caster.json") << material;
+            // The shipped caster material leaves culling unspecified. A model's
+            // shadow draws both faces independently of that visible material.
+            std::ofstream(root / "materials/util/shadowcaster.json")
+                << R"({"passes":[{"shader":"shadowcaster"}]})";
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error)) << error;
+            const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 3, 1.0 / 60.0);
+            ASSERT_TRUE(picture.error.empty()) << picture.error;
+            EXPECT_LT(PixelAt(picture, 84, 128)[0], 40);
+            EXPECT_GT(PixelAt(picture, 320, 128)[0], 240);
+        }
+    }
+}
+
+
+namespace {
+std::filesystem::path WriteMsaaFixture(const std::filesystem::path& root)
+{
+    const auto project = WriteFixture(root);
+    auto document = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    document["general"]["bloom"] = false;
+    std::ofstream(root / "layout.json") << document;
+    return project;
+}
+}
+
+TEST_F(MetalSceneDraw, MultisamplingResolvesCoverageBeforeCopies)
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil) GTEST_SKIP() << "no Metal device";
+    const uint32_t samples = [device supportsTextureSampleCount:4] ? 4u
+        : [device supportsTextureSampleCount:2] ? 2u : 0u;
+    if (samples == 0) GTEST_SKIP() << "the device supports no multisampling";
+    for (const bool through_copy : { false, true }) {
+        for (const uint32_t requested : { 1u, samples }) {
+            SCOPED_TRACE(::testing::Message() << "samples=" << requested << ", copy=" << through_copy);
+            const auto root = root_ / (std::string("msaa-edge-") +
+                std::to_string(requested) + (through_copy ? "-copy" : "-direct"));
+            const auto project = WriteMsaaFixture(root);
+            std::ofstream(root / "shaders/metal_probe.frag")
+                << "void main() { gl_FragColor=vec4(1.0,0.0,0.0,1.0); }\n";
+            auto source = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+            source["general"]["bloom"] = false;
+            source["general"]["clearcolor"] = { 0.0, 0.0, 1.0 };
+            source["objects"][0]["angles"] = { 0.0, 0.0, 0.31 };
+            std::ofstream(root / "layout.json") << source;
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error)) << error;
+            auto& scene = *loaded.scene;
+            scene.renderTargets[std::string(SpecTex_Default)].sample_count = requested;
+            if (through_copy) {
+                auto post = std::make_shared<ScenePostProcess>();
+                post->name = "msaa-copy-control";
+                post->steps.emplace_back(ScenePostProcessCopy { std::string(SpecTex_Default), "_rt_msaa_probe_copy" });
+                post->steps.emplace_back(ScenePostProcessCopy { "_rt_msaa_probe_copy", std::string(SpecTex_Default) });
+                scene.post_processes.push_back(std::move(post));
+            }
+            const auto picture = DrawWithRenderer(scene, 384, 256, 3, 1.0 / 60.0);
+            ASSERT_TRUE(picture.error.empty()) << picture.error;
+            ASSERT_EQ(picture.rgb.size(), 384u * 256u * 3u);
+            std::size_t covered_partially = 0;
+            for (std::size_t p = 0; p < picture.rgb.size(); p += 3)
+                if (picture.rgb[p] > 5 && picture.rgb[p] < 250) ++covered_partially;
+            if (requested == 1) EXPECT_EQ(covered_partially, 0u);
+            else EXPECT_GT(covered_partially, 20u);
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, APostCopyThenFadeKeepsTheProcessedSingleSampleImage)
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil || ![device supportsTextureSampleCount:4]) GTEST_SKIP() << "4x MSAA unavailable";
+    const auto project = WriteMsaaFixture(root_ / "msaa-post-main");
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root_ / "msaa-post-main-cache", loaded, error)) << error;
+    auto& scene = *loaded.scene;
+    scene.renderTargets[std::string(SpecTex_Default)].sample_count = 4;
+
+    const auto flat_pass = [&](const std::string& name, const std::string& color) {
+        const auto dir = root_ / name;
+        const auto file = WriteMsaaFixture(dir);
+        std::ofstream(dir / "shaders/metal_probe.vert")
+            << "attribute vec3 a_Position; void main() { gl_Position=vec4(a_Position.x/128.0,a_Position.y/96.0,0.0,1.0); }\n";
+        std::ofstream(dir / "shaders/metal_probe.frag")
+            << "void main() { gl_FragColor=" << color << "; }\n";
+        LoadedScene material_scene;
+        std::string failure;
+        if (!LoadScene(file, dir / "cache", material_scene, failure)) {
+            ADD_FAILURE() << failure;
+            return std::shared_ptr<SceneNode>();
+        }
+        auto* source = FirstDrawableNode(material_scene.scene->sceneGraph.get());
+        auto node = std::make_shared<SceneNode>();
+        node->SetName(name);
+        auto mesh = std::make_shared<SceneMesh>();
+        mesh->ChangeMeshDataFrom(*source->Mesh());
+        mesh->AddMaterial(SceneMaterial(*source->Mesh()->MaterialForSlot(0)));
+        node->AddMesh(mesh);
+        return node;
+    };
+    auto process = flat_pass("msaa-post-green", "vec4(0.0,1.0,0.0,1.0)");
+    auto fade = flat_pass("msaa-post-fade", "vec4(0.0,0.0,0.0,0.5)");
+    ASSERT_NE(process, nullptr);
+    ASSERT_NE(fade, nullptr);
+    scene.renderTargets["_rt_msaa_processed"] = SceneRenderTarget { .width=384, .height=256 };
+    auto post = std::make_shared<ScenePostProcess>();
+    post->name = "processed-then-faded";
+    post->steps.emplace_back(ScenePostProcessPass { process, "_rt_msaa_processed", 0 });
+    post->steps.emplace_back(ScenePostProcessCopy { "_rt_msaa_processed", std::string(SpecTex_Default) });
+    post->steps.emplace_back(ScenePostProcessPass { fade, std::string(SpecTex_Default), 0 });
+    scene.post_processes.push_back(std::move(post));
+    const auto picture = DrawWithRenderer(scene, 384, 256, 3, 1.0/60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    const auto pixel = PixelAt(picture, 192, 128);
+    EXPECT_NEAR(pixel[0], 0, 2);
+    EXPECT_NEAR(pixel[1], 128, 2);
+    EXPECT_NEAR(pixel[2], 0, 2);
+}
+
+TEST_F(MetalSceneDraw, MultisampleStorageMatchesTheDeviceAndIsAbsentWhenOff)
+{
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (device == nil) GTEST_SKIP() << "no Metal device";
+        uint32_t supported = 1;
+        for (const uint32_t count : { 2u, 4u, 8u })
+            if ([device supportsTextureSampleCount:count]) supported |= count;
+        const uint32_t expected = SelectSceneSampleCount(8, supported);
+        if (expected == 1) GTEST_SKIP() << "no multisampling";
+        CAMetalLayer* layer = [CAMetalLayer layer];
+        layer.device = device;
+        layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        ASSERT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width=384, .height=256,
+            .render_width=384, .render_height=256, .display_scale_factor=1.0 })) << render.lastError();
+        uint64_t off_bytes = 0;
+        for (const int requested : { 0, 8, 0 }) {
+            SCOPED_TRACE(requested);
+            const auto root = root_ / ("msaa-storage-" + std::to_string(requested));
+            const auto project = WriteSpotShadowFixture(root, false);
+            auto material = nlohmann::json::parse(std::ifstream(root / "materials/caster.json"));
+            material["passes"][0]["depthtest"] = "enabled";
+            material["passes"][0]["depthwrite"] = "enabled";
+            std::ofstream(root / "materials/caster.json") << material;
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error, {},
+                                 SceneQuality { .msaa=requested })) << error;
+            auto graph = sceneToRenderGraph(*loaded.scene);
+            ASSERT_NE(graph, nullptr);
+            ASSERT_TRUE(render.clearLastRenderGraph());
+            ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+            const auto counts = render.MultisampleCountsForTests();
+            if (requested == 0) {
+                EXPECT_TRUE(counts.empty());
+                EXPECT_EQ(loaded.scene->effective_msaa, 0u);
+                if (off_bytes == 0) off_bytes = render.RenderTargetBytesForTests();
+                else EXPECT_EQ(render.RenderTargetBytesForTests(), off_bytes);
+            } else {
+                ASSERT_EQ(counts.size(), 2u) << "color and matching depth";
+                for (const auto count : counts) EXPECT_EQ(count, expected);
+                EXPECT_EQ(loaded.scene->effective_msaa, expected);
+                EXPECT_GT(render.RenderTargetBytesForTests(), off_bytes);
+                loaded.scene->shaderValueUpdater->FrameBegin();
+                ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+                std::vector<uint8_t> before;
+                uint32_t width=0, height=0;
+                ASSERT_TRUE(render.ReadRenderTargetForTests(std::string(SpecTex_Default), before, width, height));
+                EXPECT_EQ(width, 384u);
+                EXPECT_EQ(height, 256u);
+                ASSERT_TRUE(render.clearLastRenderGraphForRebuild());
+                graph = sceneToRenderGraph(*loaded.scene);
+                ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+                for (const auto count : render.MultisampleCountsForTests()) EXPECT_EQ(count, expected);
+                loaded.scene->shaderValueUpdater->FrameBegin();
+                ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+                std::vector<uint8_t> rebuilt;
+                ASSERT_TRUE(render.ReadRenderTargetForTests(std::string(SpecTex_Default), rebuilt, width, height));
+                EXPECT_EQ(rebuilt, before);
+                loaded.scene->render_scale = 0.5;
+                ASSERT_TRUE(render.ResizeRenderTargets(*loaded.scene)) << render.lastError();
+                for (const auto count : render.MultisampleCountsForTests()) EXPECT_EQ(count, expected);
+                loaded.scene->shaderValueUpdater->FrameBegin();
+                ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+                std::vector<uint8_t> resized;
+                ASSERT_TRUE(render.ReadRenderTargetForTests(std::string(SpecTex_Default), resized, width, height));
+                EXPECT_EQ(width, 192u);
+                EXPECT_EQ(height, 128u);
+            }
+            loaded.scene->shaderValueUpdater->FrameBegin();
+            ASSERT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+            ASSERT_TRUE(render.clearLastRenderGraph());
+        }
+        render.destroy();
+    }
+}
+
+TEST_F(MetalSceneDraw, MultisampleFeedbackPreservesReadersAcrossTextureTrades)
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil || ![device supportsTextureSampleCount:4]) GTEST_SKIP() << "4x MSAA unavailable";
+    struct RestoreSwitches {
+        bool optimise { wallpaper::render::SceneOptimizationEnabled() };
+        ~RestoreSwitches() {
+            wallpaper::render::SetSceneOptimizationEnabled(optimise);
+            MetalRender::SetTargetSharingForTests(true);
+        }
+    } restore;
+    std::vector<std::vector<uint8_t>> reference;
+    for (const bool optimise : { false, true }) {
+        for (const bool share : { false, true }) {
+            SCOPED_TRACE(::testing::Message() << "optimise=" << optimise << ", share=" << share);
+            wallpaper::render::SetSceneOptimizationEnabled(optimise);
+            MetalRender::SetTargetSharingForTests(share);
+            const auto root = root_ / ("msaa-feedback-" + std::to_string(optimise) + std::to_string(share));
+            const auto project = WriteFeedbackFixture(root);
+            auto document = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+            document["general"]["bloom"] = false;
+            document["objects"][0]["angles"] = { 0.0, 0.0, 0.31 };
+            std::ofstream(root / "layout.json") << document;
+            LoadedScene loaded;
+            std::string error;
+            ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error)) << error;
+            loaded.scene->renderTargets[std::string(SpecTex_Default)].sample_count = 4;
+            @autoreleasepool {
+                CAMetalLayer* layer = [CAMetalLayer layer];
+                layer.device = device;
+                layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+                layer.drawableSize = CGSizeMake(384, 256);
+                layer.framebufferOnly = NO;
+                MetalRender render;
+                ASSERT_TRUE(render.init(MetalRenderInitInfo {
+                    .metal_layer=(__bridge void*)layer, .width=384, .height=256,
+                    .render_width=384, .render_height=256, .display_scale_factor=1.0 })) << render.lastError();
+                auto graph = sceneToRenderGraph(*loaded.scene);
+                ASSERT_NE(graph, nullptr);
+                ASSERT_TRUE(render.compileRenderGraph(*loaded.scene, *graph)) << render.lastError();
+                render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+                ASSERT_EQ(loaded.scene->effective_msaa, 4u);
+                for (std::size_t frame=0; frame<4; ++frame) {
+                    AdvanceSceneFrame(render, *loaded.scene);
+                    const auto drawn = ReadOutput(render, *loaded.scene);
+                    ASSERT_FALSE(drawn.empty());
+                    if (!optimise && !share) reference.push_back(drawn);
+                    else EXPECT_EQ(drawn, reference[frame]) << "frame " << frame;
+                    EXPECT_EQ(render.LastFrameEncodeCountsForTests().blit_passes, optimise ? 0u : 2u);
+                    std::size_t lensed=0;
+                    for (std::size_t i=0; i+3<drawn.size(); i+=4)
+                        if (drawn[i+2]>=185 && drawn[i+2]<=197) ++lensed;
+                    EXPECT_GT(lensed, 500u) << "no lens sees the resolved card";
+                }
+                render.destroy();
+            }
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, AMultisampleScreenReadBeforeGeometrySeesTheBackgroundEveryFrame)
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil || ![device supportsTextureSampleCount:4]) GTEST_SKIP() << "4x MSAA unavailable";
+    const auto root = root_ / "msaa-first-read";
+    const auto project = WriteMsaaFixture(root);
+    std::ofstream(root / "shaders/metal_probe.frag")
+        << "uniform sampler2D g_Texture0; // {\"hidden\":true,\"default\":\"_rt_FullFrameBuffer\"}\n"
+           "varying vec2 v_TexCoord;\n"
+           "void main() {\n"
+           "  vec4 screen=texSample2D(g_Texture0,v_TexCoord);\n"
+           "  gl_FragColor=vec4(screen.rgb+vec3(0.25,0.0,0.0),1.0);\n"
+           "}\n";
+    auto document = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    document["general"]["clearcolor"] = { 0.0, 0.25, 0.0 };
+    std::ofstream(root / "layout.json") << document;
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error)) << error;
+    loaded.scene->renderTargets[std::string(SpecTex_Default)].sample_count = 4;
+    for (const std::size_t frames : { 1u, 4u }) {
+        const auto picture=DrawWithRenderer(*loaded.scene,384,256,frames,1.0/60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        const auto pixel=PixelAt(picture,192,128);
+        EXPECT_NEAR(pixel[0],64,2);
+        EXPECT_NEAR(pixel[1],64,2);
+        EXPECT_NEAR(pixel[2],0,2);
+        EXPECT_EQ(loaded.scene->effective_msaa,4u);
+    }
+}
+
+TEST_F(MetalSceneDraw, MultisampleAlphaCoverageUsesShaderAlphaWithoutBlendingItTwice)
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil || ![device supportsTextureSampleCount:4]) GTEST_SKIP() << "4x MSAA unavailable";
+    for (const uint32_t samples : { 1u, 4u }) {
+        for (const float alpha : { 0.25f, 0.75f }) {
+            for (const bool sharpen : { false, true }) {
+                SCOPED_TRACE(::testing::Message() << "samples=" << samples << ", alpha=" << alpha << ", sharpen=" << sharpen);
+                const auto root=root_/("msaa-alpha-"+std::to_string(samples)+"-"+std::to_string(alpha)+"-"+std::to_string(sharpen));
+                const auto project=WriteMsaaFixture(root);
+                std::ofstream(root/"shaders/metal_probe.frag")
+                    << "void main() {\n  vec4 color=vec4(1.0,0.0,0.0," << alpha << ");\n  gl_FragColor=color;\n"
+                    << (sharpen ? "  gl_FragColor.a=saturate((gl_FragColor.a-0.5)/max(fwidth(gl_FragColor.a),0.0001)+0.5);\n" : "")
+                    << "}\n";
+                auto material=nlohmann::json::parse(std::ifstream(root/"materials/tile.json"));
+                material["passes"][0]["blending"]="alphatocoverage";
+                std::ofstream(root/"materials/tile.json") << material;
+                auto document=nlohmann::json::parse(std::ifstream(root/"layout.json"));
+                document["general"]["clearcolor"]={0.0,0.0,1.0};
+                std::ofstream(root/"layout.json") << document;
+                LoadedScene loaded;
+                std::string error;
+                ASSERT_TRUE(LoadScene(project,root/"cache",loaded,error)) << error;
+                loaded.scene->renderTargets[std::string(SpecTex_Default)].sample_count=samples;
+                const auto picture=DrawWithRenderer(*loaded.scene,384,256,3,1.0/60.0);
+                ASSERT_TRUE(picture.error.empty()) << picture.error;
+                const auto pixel=PixelAt(picture,192,128);
+                const float covered=samples==1 || sharpen ? (alpha>0.5f ? 1.0f : 0.0f) : alpha;
+                EXPECT_NEAR(pixel[0],std::lround(255.0f*covered),2);
+                EXPECT_NEAR(pixel[1],0,2);
+                EXPECT_NEAR(pixel[2],std::lround(255.0f*(1.0f-covered)),2);
+            }
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, MultisampleBackbufferReadsResolvedTexelsAndReportsTheActualMode)
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil || ![device supportsTextureSampleCount:4]) GTEST_SKIP() << "4x MSAA unavailable";
+    struct Case { bool model; int requested; bool fallback; };
+    for (const Case c : { Case{true,4,false}, Case{false,4,false}, Case{true,4,true}, Case{true,0,false} }) {
+        SCOPED_TRACE(::testing::Message() << "model=" << c.model << ", request=" << c.requested
+                                         << ", fallback=" << c.fallback);
+        const auto root = root_ / ("msaa-backbuffer-" + std::to_string(c.model) +
+            std::to_string(c.requested) + std::to_string(c.fallback));
+        const auto project = WriteMsaaFixture(root);
+        std::ofstream(root / "shaders/metal_probe.frag")
+            << "void main() { gl_FragColor=vec4(1.0,0.0,0.0,0.25); }\n";
+        auto material = nlohmann::json::parse(std::ifstream(root / "materials/tile.json"));
+        material["passes"][0]["blending"] = "alphatocoverage";
+        std::ofstream(root / "materials/tile.json") << material;
+        std::filesystem::copy_file(root / "shaders/metal_probe.vert", root / "shaders/back.vert",
+                                   std::filesystem::copy_options::overwrite_existing);
+        std::ofstream(root / "shaders/back.frag")
+            << "uniform sampler2DBackBuffer g_Texture0; // {\"hidden\":true,\"default\":\"_rt_FullFrameBuffer\"}\n"
+               "uniform vec4 g_Texture0Resolution;\n"
+               "varying vec2 v_TexCoord;\n"
+               "void main() {\n"
+               "  if(v_TexCoord.y<0.15) {\n"
+               "#if BACKBUFFER_MS\n"
+               "    gl_FragColor=vec4(0.0,1.0,0.0,1.0);\n"
+               "#else\n"
+               "    gl_FragColor=vec4(1.0,0.0,0.0,1.0);\n"
+               "#endif\n"
+               "  } else {\n"
+               "    vec2 uv=vec2(64.25,128.25)/g_Texture0Resolution.xy;\n"
+               "    vec4 pixel=texSample2DBackBuffer(g_Texture0,uv,g_Texture0Resolution.xy);\n"
+               "    gl_FragColor=vec4(pixel.rgb,1.0);\n"
+               "  }\n"
+               "}\n";
+        std::ofstream(root / "models/back.json")
+            << R"({"width":128,"height":96,"material":"materials/back.json"})";
+        std::ofstream(root / "materials/back.json")
+            << R"({"passes":[{"shader":"back","blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})";
+        auto document = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        document["general"]["clearcolor"] = { 0.0, 0.0, 1.0 };
+        document["objects"].push_back({ {"id",2}, {"name","back"}, {"image","models/back.json"},
+            {"origin",{192,128,0}}, {"scale",{1,1,1}}, {"angles",{0,0,0}}, {"visible",true} });
+        if (c.model) {
+            mdltest::MeshSpec model;
+            model.material = "materials/tile.json";
+            model.flag = mdltest::kPosition;
+            model.vertices = 3;
+            model.indices = {0,1,2};
+            const auto bytes = mdltest::mdlFile(23, {model});
+            std::ofstream file(root / "models/hidden.mdl", std::ios::binary);
+            file.write(reinterpret_cast<const char*>(bytes.data().data()), bytes.size());
+            file.close();
+            // The model comes after both images, so shader setup must see the
+            // scene's device mode before it builds the first image material.
+            document["objects"].push_back({ {"id",3}, {"name","model"}, {"model","models/hidden.mdl"},
+                {"origin",{0,0,0}}, {"scale",{1,1,1}}, {"angles",{0,0,0}}, {"visible",false} });
+        }
+        std::ofstream(root / "layout.json") << document;
+        LoadedScene loaded;
+        std::string error;
+        int selections = 0;
+        ASSERT_TRUE(LoadScene(project, root / "cache", loaded, error, {}, SceneQuality{.msaa=c.requested},
+            [&](uint32_t requested) { ++selections; return c.fallback ? 1u : requested; })) << error;
+        const bool enabled = c.model && c.requested > 1 && !c.fallback;
+        EXPECT_EQ(selections, c.model && c.requested > 1 ? 1 : 0);
+        const auto picture = DrawWithRenderer(*loaded.scene,384,256,3,1.0/60.0);
+        ASSERT_TRUE(picture.error.empty()) << picture.error;
+        const auto value = PixelAt(picture,192,128);
+        EXPECT_NEAR(value[0],enabled ? 64 : 0,2);
+        EXPECT_NEAR(value[1],0,2);
+        EXPECT_NEAR(value[2],enabled ? 191 : 255,2);
+        const auto mode = PixelAt(picture,192,84);
+        EXPECT_NEAR(mode[0],enabled ? 0 : 255,2);
+        EXPECT_NEAR(mode[1],enabled ? 255 : 0,2);
+        EXPECT_NEAR(mode[2],0,2);
+        EXPECT_EQ(loaded.scene->effective_msaa, enabled ? 4u : 0u);
+    }
+}
+
+
+// Particle scripts run after the ordinary simulation/mesh generation. Their
+// stop/emit commands must invalidate geometry before this very frame is drawn.
+TEST_F(MetalSceneDraw, ParticleScriptControlsReachTheSameFrame)
+{
+    const auto directory = root_ / "particle-script-controls";
+    const auto project = WriteParticleKindFixture(directory, R"([{"name":"sprite"}])", 8);
+    // Expand the packed sprite corners, as the shipped genericparticle shader does.
+    std::ofstream(directory / "shaders/metal_probe.vert") << R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+attribute vec3 a_Position;
+attribute vec4 a_TexCoordVec4;
+attribute vec4 a_Color;
+varying vec4 v_Color;
+void main() {
+    vec3 position = a_Position + vec3(
+        (a_TexCoordVec4.x - 0.5) * a_TexCoordVec4.w,
+        -(a_TexCoordVec4.y - 0.5) * a_TexCoordVec4.w, 0.0);
+    gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);
+    v_Color = a_Color;
+}
+)";
+    auto particle = nlohmann::json::parse(std::ifstream(directory / "particles/kind.json"));
+    particle["emitter"] = nlohmann::json::array({
+        {{"name", "boxrandom"}, {"id", 1}, {"rate", 0}, {"instantaneous", 1},
+         {"distancemin", {0,0,0}}, {"distancemax", {0,0,0}}, {"speedmin", 0}, {"speedmax", 0}}
+    });
+    particle["initializer"] = nlohmann::json::array({
+        {{"name", "lifetimerandom"}, {"min", 100}, {"max", 100}},
+        {{"name", "sizerandom"}, {"min", 48}, {"max", 48}},
+        {{"name", "colorrandom"}, {"min", {255,255,255}}, {"max", {255,255,255}}}
+    });
+    std::ofstream(directory / "particles/stop.json") << particle;
+    particle["emitter"][0]["instantaneous"] = 0;
+    std::ofstream(directory / "particles/emit.json") << particle;
+    auto layout = nlohmann::json::parse(std::ifstream(directory / "layout.json"));
+    layout["general"]["bloom"] = false;
+    layout["objects"] = nlohmann::json::array();
+    const char* commands[] = {
+        "thisLayer.stop();",
+        "thisLayer.instance.colorn=new Vec3(1,0,0); thisLayer.emitParticles(0);",
+        "thisLayer.pause(); thisLayer.stop(); thisLayer.instance.colorn=new Vec3(0,0,1); thisLayer.emitParticles(1);"
+    };
+    for (int index = 0; index < 3; ++index) {
+        const int center = 64 + 128 * index;
+        layout["objects"].push_back({{"id", index+1}, {"name", "particle-"+std::to_string(index)},
+            {"particle", index == 0 ? "particles/stop.json" : "particles/emit.json"},
+            {"origin", {{"value", {center,128,0}}, {"script", std::string(
+                "let count=0; export function update(value) { if(++count===2){")+commands[index]+"} return value; }"}}},
+            {"scale", {1,1,1}}, {"angles", {0,0,0}}, {"visible", true}});
+    }
+    std::ofstream(directory / "layout.json") << layout;
+    LoadedScene initial;
+    std::string initial_error;
+    ASSERT_TRUE(LoadScene(project, directory / "initial-cache", initial, initial_error)) << initial_error;
+    const auto before = DrawWithRenderer(*initial.scene, 384, 256, 1, 1.0/60.0);
+    ASSERT_TRUE(before.error.empty()) << before.error;
+    ASSERT_EQ(before.rgb.size(), 384u*256u*3u);
+    EXPECT_GE(before.rgb[(128u*384u+64u)*3u], 253) << "the stop control begins with a visible sprite";
+    EXPECT_LE(before.rgb[(128u*384u+192u)*3u], 2) << "the manual emitter begins empty";
+    LoadedScene loaded;
+    std::string error;
+    ASSERT_TRUE(LoadScene(project, directory / "cache", loaded, error)) << error;
+    const auto picture = DrawWithRenderer(*loaded.scene, 384, 256, 2, 1.0/60.0);
+    ASSERT_TRUE(picture.error.empty()) << picture.error;
+    ASSERT_EQ(picture.rgb.size(), 384u*256u*3u);
+    EXPECT_EQ(loaded.scene->runtime->scriptErrorCount(), 0u);
+    for (int index = 0; index < 3; ++index) {
+        const auto at = (128u*384u + static_cast<unsigned>(64+index*128))*3;
+        SCOPED_TRACE(index);
+        // Instance writes bind at the next simulation step. Both manual sprites
+        // are already visible, but still have the old white tint in this frame.
+        for (std::size_t channel = 0; channel < 3; ++channel)
+            EXPECT_NEAR(picture.rgb[at+channel], index == 0 ? 0 : 255, 2);
+    }
+}
+
+TEST_F(MetalSceneDraw, ParticleRendererAxesChooseTheBillboardPlane)
+{
+    const auto directory=root_/"particle-orientation-plane";
+    const auto project=WriteParticleKindFixture(directory,R"([{"name":"sprite"}])",1);
+    std::ofstream(directory/"shaders/metal_probe.vert") << R"(
+uniform mat4 g_ModelViewProjectionMatrix;
+uniform vec3 g_OrientationRight;
+uniform vec3 g_OrientationUp;
+attribute vec3 a_Position;
+attribute vec4 a_TexCoordVec4;
+attribute vec4 a_Color;
+varying vec4 v_Color;
+void main() {
+    vec3 position=a_Position+a_TexCoordVec4.w*(g_OrientationRight*(a_TexCoordVec4.x-0.5)-g_OrientationUp*(a_TexCoordVec4.y-0.5));
+    gl_Position=mul(vec4(position,1.0),g_ModelViewProjectionMatrix);
+    v_Color=a_Color;
+}
+)";
+    auto particle=nlohmann::json::parse(std::ifstream(directory/"particles/kind.json"));
+    particle["emitter"]=nlohmann::json::array({{{"name","boxrandom"},{"rate",1},{"instantaneous",0},
+        {"distancemin","0 0 0"},{"distancemax","0 0 0"},{"speedmin",0},{"speedmax",0}}});
+    particle["starttime"]=2;
+    particle["initializer"]=nlohmann::json::array({
+        {{"name","lifetimerandom"},{"min",1000},{"max",1000}},
+        {{"name","sizerandom"},{"min",96},{"max",96}},
+        {{"name","colorrandom"},{"min","0 255 0"},{"max","0 255 0"}}});
+    auto layout=nlohmann::json::parse(std::ifstream(directory/"layout.json"));
+    layout["general"]["bloom"]=false;
+    layout["objects"]=nlohmann::json::array();
+    for(int index=0;index<3;++index) {
+        particle["renderer"]=nlohmann::json::array({{{"name","sprite"},
+            {"orientation",index==0?"screen":"fixed"},{"axis","0 1 0"},{"flags",index==2?1:0}}});
+        const auto file="particles/plane-"+std::to_string(index)+".json";
+        std::ofstream(directory/file)<<particle;
+        layout["objects"].push_back({{"id",index+1},{"name","plane-"+std::to_string(index)},
+            {"particle",file},{"origin",{64+128*index,128,0}},{"scale",{1,1,1}},
+            {"angles",index==0?"0 0 0":"1.5707963267948966 0 0"},{"visible",true}});
+    }
+    std::ofstream(directory/"layout.json")<<layout;
+    LoadedScene loaded;std::string error;
+    ASSERT_TRUE(LoadScene(project,directory/"cache",loaded,error))<<error;
+    const auto picture=DrawWithRenderer(*loaded.scene,384,256,2,1.0/60.0);
+    ASSERT_TRUE(picture.error.empty())<<picture.error;
+    ASSERT_EQ(picture.rgb.size(),384u*256u*3u);
+    for(int index=0;index<3;++index) {
+        const auto pixel=PixelAt(picture,64+128*index,128);
+        EXPECT_LE(pixel[0],2);EXPECT_LE(pixel[2],2);
+        EXPECT_NEAR(pixel[1],index==2?0:255,2)<<index;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Render passes that need not load or store what no draw reads
+
+namespace
+{
+
+/// Restores both attachment switches, whatever a test set them to.
+struct RestoreAttachmentSwitches
+{
+    ~RestoreAttachmentSwitches()
+    {
+        MetalRender::SetOverwriteLoadElisionForTests(true);
+        MetalRender::SetAttachmentStoreElisionForTests(true);
+    }
+};
+
+/// Every frame's scene output of one run and its last frame's encode counts.
+struct AttachmentRun
+{
+    std::vector<std::vector<uint8_t>>      frames;
+    MetalRender::FrameEncodeCountsForTests counts;
+};
+
+/// Draws `frames` production frames of `project` with the two switches as given, on a fresh
+/// parse and renderer, so two runs differ only by the switches.
+AttachmentRun DrawWithAttachmentSwitches(const std::filesystem::path& project, const std::filesystem::path& cache,
+                                         bool elide_loads, bool elide_stores, int frames,
+                                         const std::function<void(Scene&)>& adjust = {})
+{
+    MetalRender::SetOverwriteLoadElisionForTests(elide_loads);
+    MetalRender::SetAttachmentStoreElisionForTests(elide_stores);
+    AttachmentRun run;
+    LoadedScene   loaded;
+    std::string   error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    if (adjust) adjust(*loaded.scene);
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < frames; ++frame) {
+            AdvanceSceneFrame(render, *loaded.scene);
+            run.frames.push_back(ReadOutput(render, *loaded.scene));
+        }
+        run.counts = render.LastFrameEncodeCountsForTests();
+        render.destroy();
+    }
+    return run;
+}
+
+/// Draws a fixture with one switch off and then on, and checks that every frame is the same.
+void ExpectSameFramesEitherWay(const std::filesystem::path& project, const std::filesystem::path& root,
+                               bool stores, AttachmentRun& off, AttachmentRun& on,
+                               const std::function<void(Scene&)>& adjust = {})
+{
+    constexpr int kFrames = 3;
+    off = DrawWithAttachmentSwitches(project, root / "cache-off", stores, ! stores, kFrames, adjust);
+    on  = DrawWithAttachmentSwitches(project, root / "cache-on", true, true, kFrames, adjust);
+    ASSERT_EQ(off.frames.size(), std::size_t(kFrames));
+    ASSERT_EQ(on.frames.size(), std::size_t(kFrames));
+    for (int frame = 0; frame < kFrames; ++frame) {
+        ASSERT_FALSE(off.frames[frame].empty());
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the elision";
+    }
+    EXPECT_NE(off.frames.front(), off.frames.back()) << "the scene did not animate";
+}
+
+/// One effect of a chain: how its vertex shader places the card, a statement its fragment
+/// shader runs before writing, and the keys of its material's pass after the shader.
+struct ChainEffect
+{
+    std::string position { "gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);" };
+    std::string before_write;
+    std::string material_keys { R"("blending":"normal","cullmode":"nocull")" };
+};
+
+/// The fixture's card through a chain of one-pass effects, each of which changes every channel
+/// of what it reads by the scene time, so each frame redraws the chain and a texel a pass
+/// leaves alone shows another colour than one it writes.
+std::filesystem::path WriteEffectChainFixture(const std::filesystem::path& root,
+                                              const std::vector<ChainEffect>& chain)
+{
+    const auto project = WriteFixture(root);
+    auto       layout  = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    auto effects = nlohmann::json::array();
+    std::filesystem::create_directories(root / "effects");
+    for (std::size_t k = 0; k < chain.size(); ++k) {
+        const auto name = "fx" + std::to_string(k);
+        std::ofstream(root / ("effects/" + name + ".json"))
+            << R"({"name":")" << name << R"(","passes":[{"material":"materials/)" << name << R"(.json"}]})";
+        std::ofstream(root / ("materials/" + name + ".json"))
+            << R"({"passes":[{"shader":")" << name << R"(","textures":[null],)" << chain[k].material_keys
+            << R"(,"depthtest":"disabled","depthwrite":"disabled"}]})";
+        std::ofstream(root / ("shaders/" + name + ".vert"))
+            << "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+               "varying vec2 v_TexCoord;\nvoid main() {\n  "
+            << chain[k].position << "\n  v_TexCoord = a_TexCoord;\n}\n";
+        std::ofstream(root / ("shaders/" + name + ".frag"))
+            << "uniform sampler2D g_Texture0;\nuniform float g_Time;\nvarying vec2 v_TexCoord;\nvoid main() {\n"
+               "  vec4 c = texSample2D(g_Texture0, v_TexCoord);\n  "
+            << chain[k].before_write << "\n  gl_FragColor = vec4(frac(c.g + 0.13 * " << (k + 1)
+            << ".0 + g_Time), frac(c.b + 0.07), frac(c.r + 0.29), 1.0);\n}\n";
+        effects.push_back({ { "file", "effects/" + name + ".json" }, { "visible", true } });
+    }
+    layout["objects"][0]["effects"] = effects;
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+void WriteFiles(const std::filesystem::path& root, const std::map<std::string, std::string>& files)
+{
+    for (const auto& [file, contents] : files) {
+        std::filesystem::create_directories((root / file).parent_path());
+        std::ofstream(root / file) << contents;
+    }
+}
+
+constexpr const char* kTimedCopyVertex =
+    "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+    "varying vec2 v_TexCoord;\nvoid main(){ gl_Position=mul(vec4(a_Position,1.0),g_ModelViewProjectionMatrix);"
+    " v_TexCoord=a_TexCoord; }\n";
+
+std::string TimedFragment(const std::string& colour)
+{
+    return "uniform sampler2D g_Texture0;\nuniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+           "void main(){ vec4 c=texSample2D(g_Texture0,v_TexCoord); gl_FragColor=" + colour + "; }\n";
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AnEffectChainThatOverwritesItsBuffersOpensThemWithAClearAndDrawsTheSamePicture)
+{
+    // The card drawn into one buffer, then four effects that alternate between two: the second
+    // and third write a buffer that already holds this frame's picture, so the graph asks to
+    // load it. Each draws the whole card unmoved (through the matrix, as given, through a copy
+    // of the input) and never discards, so nothing loaded can show: the loads become clears.
+    RestoreAttachmentSwitches restore;
+    const auto root    = root_ / "overwrite-chain";
+    const auto project = WriteEffectChainFixture(root, {
+        ChainEffect {},
+        ChainEffect { .position = "gl_Position = vec4(a_Position, 1.0);" },
+        ChainEffect { .position = "vec3 position = a_Position;\n  gl_Position = mul(vec4(position, 1.0), g_ModelViewProjectionMatrix);" },
+        ChainEffect {},
+    });
+    AttachmentRun off, on;
+    ExpectSameFramesEitherWay(project, root, false, off, on);
+    EXPECT_GE(off.counts.loaded_passes, 2u) << "the chain's later buffer writes were expected to load";
+    EXPECT_EQ(on.counts.loaded_passes + 2u, off.counts.loaded_passes)
+        << "the two overwriting effect passes still load their buffers";
+    EXPECT_LT(on.counts.loaded_bytes, off.counts.loaded_bytes);
+    EXPECT_EQ(on.counts.render_passes, off.counts.render_passes) << "the elision changed how passes share render passes";
+}
+
+TEST_F(MetalSceneDraw, AnEffectPassThatMayLeaveTexelsAloneKeepsLoadingItsBuffer)
+{
+    // The second effect of the chain cannot be proven to write every texel, or to write every
+    // channel of one as its fragment says: it keeps its load, and the texels and channels it
+    // leaves keep what the buffer held. The third effect still clears.
+    RestoreAttachmentSwitches restore;
+    const std::vector<std::pair<std::string, ChainEffect>> cases {
+        { "scaled", ChainEffect { .position = "gl_Position = mul(vec4(a_Position * 0.5, 1.0), g_ModelViewProjectionMatrix);" } },
+        { "moved", ChainEffect { .position = "vec3 position = a_Position;\n  position.x += 0.25;\n  gl_Position = vec4(position, 1.0);" } },
+        { "discards", ChainEffect { .before_write = "if (v_TexCoord.x < 0.3) discard;" } },
+        { "clips", ChainEffect { .before_write = "clip(v_TexCoord.y - 0.4);" } },
+        { "culls", ChainEffect { .material_keys = R"("blending":"normal","cullmode":"normal")" } },
+        { "keeps-alpha", ChainEffect { .material_keys = R"("blending":"normal","cullmode":"nocull","alphawriting":"disabled")" } },
+    };
+    for (const auto& [name, second] : cases) {
+        SCOPED_TRACE(name);
+        const auto root    = root_ / ("overwrite-negative-" + name);
+        const auto project = WriteEffectChainFixture(root, { ChainEffect {}, second, ChainEffect {}, ChainEffect {} });
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, false, off, on);
+        EXPECT_GE(off.counts.loaded_passes, 2u);
+        EXPECT_EQ(on.counts.loaded_passes + 1u, off.counts.loaded_passes) << "only the third effect may skip its load";
+    }
+}
+
+TEST_F(MetalSceneDraw, ABlendedOverwriteOfAFloatBufferKeepsItsLoad)
+{
+    // An effect writes its own buffer, reads it into another, and writes it again, so the
+    // second write starts a render pass that loads it. `normal` blending multiplies what the buffer held by
+    // zero, which cancels it only when it is finite: an 8-bit buffer is cleared instead, a
+    // half-float one (which can hold an infinity) keeps its load.
+    RestoreAttachmentSwitches restore;
+    std::map<std::string, uint32_t> cleared;
+    for (const std::string format : { "rgba8888", "rgba16161616f" }) {
+        SCOPED_TRACE(format);
+        const auto root    = root_ / ("overwrite-format-" + format);
+        const auto project = WriteFixture(root);
+        const auto pass    = [](const std::string& shader) {
+            return R"({"passes":[{"shader":")" + shader +
+                   R"(","textures":[null],"blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})";
+        };
+        WriteFiles(root, {
+            { "effects/twice.json",
+              R"({"name":"twice","fbos":[{"name":"_rt_Twice","fit":64,"format":")" + format +
+                  R"("},{"name":"_rt_Between","fit":64,"format":"rgba8888"}],"passes":[)"
+                  R"({"material":"materials/twice_a.json","target":"_rt_Twice"},)"
+                  R"({"material":"materials/twice_b.json","target":"_rt_Between","bind":[{"name":"_rt_Twice","index":0}]},)"
+                  R"({"material":"materials/twice_c.json","target":"_rt_Twice","bind":[{"name":"_rt_Between","index":0}]},)"
+                  R"({"material":"materials/twice_show.json","bind":[{"name":"_rt_Twice","index":0}]}]})" },
+            { "materials/twice_a.json", pass("twice_a") },
+            { "materials/twice_b.json", pass("twice_b") },
+            { "materials/twice_c.json", pass("twice_c") },
+            { "materials/twice_show.json", pass("twice_show") },
+            { "shaders/twice_a.vert", kTimedCopyVertex },
+            { "shaders/twice_b.vert", kTimedCopyVertex },
+            { "shaders/twice_c.vert", kTimedCopyVertex },
+            { "shaders/twice_show.vert", kTimedCopyVertex },
+            { "shaders/twice_a.frag", TimedFragment("vec4(c.g, c.r, frac(g_Time), 1.0)") },
+            { "shaders/twice_b.frag", TimedFragment("vec4(frac(c.b + g_Time), c.g, c.r, 1.0)") },
+            { "shaders/twice_c.frag", TimedFragment("vec4(c.r, frac(c.g + 0.5), c.b, 1.0)") },
+            { "shaders/twice_show.frag", TimedFragment("vec4(c.rgb, 1.0)") },
+        });
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        layout["general"]["bloom"] = false;
+        layout["objects"][0]["effects"] = { { { "file", "effects/twice.json" }, { "visible", true } } };
+        std::ofstream(root / "layout.json") << layout;
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, false, off, on);
+        EXPECT_GE(off.counts.loaded_passes, 1u);
+        ASSERT_GE(off.counts.loaded_passes, on.counts.loaded_passes);
+        cleared[format] = off.counts.loaded_passes - on.counts.loaded_passes;
+    }
+    EXPECT_EQ(cleared["rgba8888"], cleared["rgba16161616f"] + 1u)
+        << "the second write of the 8-bit buffer, and only that, was expected to clear instead of load";
+}
+
+TEST_F(MetalSceneDraw, ATradedReaderThatOverwritesTheSceneNeedsNoOpeningCopy)
+{
+    // A layer as large as the canvas reads the scene beneath it and writes every texel of it,
+    // alpha included. Its copy of the scene trades textures with the scene (scene optimisation
+    // on), so its render pass opened with a copy of the image; it needs neither that nor a load.
+    RestoreAttachmentSwitches restore;
+    const auto root    = root_ / "overwrite-feedback";
+    const auto project = WriteFixture(root);
+    WriteFiles(root, {
+        { "models/cover.json", R"({"width":384,"height":256,"material":"materials/cover.json"})" },
+        { "materials/cover.json",
+          R"({"passes":[{"shader":"cover","blending":"normal","alphawriting":"enabled","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":["_rt_FullFrameBuffer"]}]})" },
+        { "shaders/cover.vert", kTimedCopyVertex },
+        { "shaders/cover.frag", TimedFragment("vec4(1.0 - c.r, frac(c.g + g_Time), 1.0 - c.b, 1.0)") },
+    });
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    layout["objects"].push_back({ { "id", 2 }, { "name", "cover" }, { "image", "models/cover.json" },
+                                  { "origin", { 192, 128, 0 } }, { "scale", { 1, 1, 1 } },
+                                  { "angles", { 0, 0, 0 } }, { "visible", true } });
+    std::ofstream(root / "layout.json") << layout;
+    AttachmentRun off, on;
+    ExpectSameFramesEitherWay(project, root, false, off, on);
+    EXPECT_EQ(off.counts.blit_passes, 0u) << "the copy was expected to trade textures, not blit";
+    EXPECT_EQ(off.counts.opening_copies, 1u);
+    EXPECT_EQ(on.counts.opening_copies, 0u) << "the overwriting reader still opened with a copy";
+}
+
+TEST_F(MetalSceneDraw, AttachmentsNothingReadsAgainAreLeftUnstoredAndDrawTheSamePicture)
+{
+    // Depth: two depth-tested models with a card drawn between them, so the second model's
+    // render pass loads the depth the first left; only that first render pass stores it.
+    // Multisampled colour: lenses that read the scene split its render passes; every one but
+    // the last keeps its samples for the next, the last (whose samples the next frame clears)
+    // only resolves. Every frame must be the same with the stores elided or not.
+    RestoreAttachmentSwitches restore;
+    {
+        SCOPED_TRACE("depth");
+        const auto root    = root_ / "store-depth";
+        const auto project = WriteSpotShadowFixture(root, false);
+        auto material = nlohmann::json::parse(std::ifstream(root / "materials/caster.json"));
+        material["passes"][0]["depthtest"]  = "enabled";
+        material["passes"][0]["depthwrite"] = "enabled";
+        std::ofstream(root / "materials/caster.json") << material;
+        std::ofstream(root / "shaders/caster.frag")
+            << "uniform float g_Time;\nvoid main() { gl_FragColor = vec4(0.5, frac(g_Time), 0.0, 1.0); }\n";
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        auto first  = layout["objects"][1];
+        auto second = first;
+        first["origin"]  = { 160, 128, 150 };
+        second["id"]     = 4;
+        second["name"]   = "far caster";
+        second["origin"] = { 176, 128, 100 };
+        // The card between the two models has no depth, so the second starts a render pass: with
+        // `WALLPAPER_MACHINE_SCENE_PASS_MERGE` the card takes the models' depth attachment and
+        // the three share one render pass, so the merge is off here.
+        layout["objects"] = nlohmann::json::array({ first, layout["objects"][0], second, layout["objects"][2] });
+        std::ofstream(root / "layout.json") << layout;
+        struct RestoreMerge
+        {
+            bool was { wallpaper::SetScenePassMergeForTests(false) };
+            ~RestoreMerge() { wallpaper::SetScenePassMergeForTests(was); }
+        } unmerged;
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, true, off, on);
+        EXPECT_EQ(off.counts.stored_depth_attachments, 2u);
+        EXPECT_EQ(on.counts.stored_depth_attachments, 1u)
+            << "the first model's depth is read by the second and must be stored; the second's is read by nothing";
+        EXPECT_EQ(on.counts.render_passes, off.counts.render_passes);
+    }
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device == nil || ! [device supportsTextureSampleCount:4]) GTEST_SKIP() << "4x MSAA unavailable";
+    {
+        SCOPED_TRACE("multisampled colour");
+        const auto root    = root_ / "store-msaa";
+        const auto project = WriteFeedbackFixture(root);
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        layout["general"]["bloom"] = false;
+        std::ofstream(root / "layout.json") << layout;
+        std::ofstream(root / "shaders/feedback_lens.frag")
+            << TimedFragment("vec4(1.0 - c.r, frac(c.g + g_Time), 1.0 - c.b, 1.0)");
+        const auto multisample = [](Scene& scene) {
+            scene.renderTargets[std::string(SpecTex_Default)].sample_count = 4;
+        };
+        AttachmentRun off, on;
+        ExpectSameFramesEitherWay(project, root, true, off, on, multisample);
+        ASSERT_GE(off.counts.stored_multisample_attachments, 2u) << "the lenses were expected to split the scene's render passes";
+        EXPECT_EQ(off.counts.stored_multisample_attachments, off.counts.scene_output_passes);
+        EXPECT_EQ(on.counts.stored_multisample_attachments + 1u, off.counts.stored_multisample_attachments)
+            << "only the scene's last render pass may leave its samples unstored";
+    }
+}
+
+TEST_F(MetalSceneDraw, ParticleGeometryCopiesOnlyWhatTheFrameDrawsAndTheSlotLacks)
+{
+    // A burst of sprites that die over a few frames: the mesh's high-water mark stays at the
+    // burst while fewer and then no quads are drawn, and the index pattern stops growing.
+    const auto directory = root_ / "particle-upload-delta";
+    const auto project   = WriteParticleKindFixture(directory, R"([{"name":"sprite"}])", 32);
+    auto particle = nlohmann::json::parse(std::ifstream(directory / "particles/kind.json"));
+    particle["emitter"] = nlohmann::json::array({
+        {{"name", "boxrandom"}, {"id", 1}, {"rate", 0}, {"instantaneous", 24},
+         {"distancemin", {-120, -80, 0}}, {"distancemax", {120, 80, 0}},
+         {"speedmin", 0}, {"speedmax", 0}}});
+    particle["initializer"] = nlohmann::json::array({
+        {{"name", "lifetimerandom"}, {"min", 0.05}, {"max", 0.3}},
+        {{"name", "sizerandom"}, {"min", 12}, {"max", 12}},
+        {{"name", "colorrandom"}, {"min", {255, 255, 255}}, {"max", {255, 255, 255}}}});
+    std::ofstream(directory / "particles/kind.json") << particle;
+
+    constexpr int kFrames = 24;
+    struct Run
+    {
+        std::vector<std::vector<uint8_t>> pictures;
+        std::vector<uint64_t>             vertex, index;              // copied in each frame
+        std::vector<uint64_t>             drawn, filled, index_bytes; // what the mesh held
+    };
+    const auto run = [&](bool delta, const char* cache) {
+        const bool previous = MetalRender::SetDynamicUploadDeltaForTests(delta);
+        Run         out;
+        LoadedScene loaded;
+        std::string error;
+        Random::seed(1);
+        EXPECT_TRUE(LoadScene(project, directory / cache, loaded, error)) << error;
+        if (loaded.scene == nullptr) return out;
+        @autoreleasepool {
+            CAMetalLayer* layer   = [CAMetalLayer layer];
+            layer.device          = MTLCreateSystemDefaultDevice();
+            layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+            layer.drawableSize    = CGSizeMake(384, 256);
+            layer.framebufferOnly = NO;
+            MetalRender         render;
+            MetalRenderInitInfo info {
+                .metal_layer          = (__bridge void*)layer,
+                .width                = 384,
+                .height               = 256,
+                .render_width         = 384,
+                .render_height        = 256,
+                .display_scale_factor = 1.0,
+            };
+            EXPECT_TRUE(render.init(info)) << render.lastError();
+            auto graph = sceneToRenderGraph(*loaded.scene);
+            EXPECT_NE(graph, nullptr);
+            EXPECT_TRUE(graph != nullptr && render.compileRenderGraph(*loaded.scene, *graph))
+                << render.lastError();
+            SceneMesh* mesh = nullptr;
+            ForEachPerFrameMesh(*loaded.scene,
+                                [&mesh](const std::string&, SceneMesh& found) { mesh = &found; });
+            EXPECT_NE(mesh, nullptr);
+            for (int frame = 0; frame < kFrames && mesh != nullptr; ++frame) {
+                loaded.scene->targetFps = 60;
+                loaded.scene->paritileSys->Emitt();
+                if (loaded.scene->runtime != nullptr) loaded.scene->runtime->Tick(1.0 / 60.0);
+                const auto& vertices = mesh->GetVertexArray(0);
+                out.drawn.push_back(vertices.DrawnSizeOf());
+                out.filled.push_back(vertices.DataSizeOf());
+                out.index_bytes.push_back(mesh->GetIndexArray(0).DrawIndexBytes());
+                const auto before = render.DynamicGeometryUploadBytesForTests();
+                EXPECT_TRUE(render.drawFrame(*loaded.scene)) << render.lastError();
+                const auto after = render.DynamicGeometryUploadBytesForTests();
+                out.vertex.push_back(after.vertex - before.vertex);
+                out.index.push_back(after.index - before.index);
+                out.pictures.push_back(ReadOutput(render, *loaded.scene));
+                loaded.scene->PassFrameTime(1.0 / 60.0);
+            }
+            render.destroy();
+        }
+        MetalRender::SetDynamicUploadDeltaForTests(previous);
+        return out;
+    };
+    const Run on  = run(true, "cache-on");
+    const Run off = run(false, "cache-off");
+    ASSERT_EQ(on.vertex.size(), std::size_t(kFrames));
+    ASSERT_EQ(off.vertex.size(), std::size_t(kFrames));
+
+    bool fewer_than_peak = false, none_left = false;
+    for (int frame = 0; frame < kFrames; ++frame) {
+        SCOPED_TRACE(frame);
+        EXPECT_EQ(on.pictures[frame], off.pictures[frame]) << "the copies differ in what is drawn";
+        EXPECT_EQ(on.drawn[frame], off.drawn[frame]);
+        // Off: the high-water mark of the vertices and every drawn index, every frame.
+        EXPECT_EQ(off.vertex[frame], off.filled[frame]);
+        EXPECT_EQ(off.index[frame], off.index_bytes[frame]);
+        // On: only the vertices this frame wrote.
+        EXPECT_EQ(on.vertex[frame], on.drawn[frame]);
+        fewer_than_peak = fewer_than_peak || (on.drawn[frame] > 0 && on.drawn[frame] < on.filled[frame]);
+        none_left       = none_left || (on.drawn[frame] == 0 && on.filled[frame] > 0);
+        // Each frame slot takes the burst's pattern once; a pattern that only shrinks after
+        // that is never copied again.
+        if (frame >= 4) EXPECT_EQ(on.index[frame], 0u);
+    }
+    EXPECT_GT(on.index[0], 0u) << "the first frame copies the pattern it draws";
+    EXPECT_TRUE(fewer_than_peak) << "the burst never thinned out; the fixture tests nothing";
+    EXPECT_TRUE(none_left) << "the burst never died out; the fixture tests nothing";
+}
+
+// ---------------------------------------------------------------------------
+// GPU labels for Metal System Trace
+
+namespace
+{
+
+/// The labels Metal sees on every command buffer committed and every render and blit encoder
+/// ended while recording: `endEncoding` and `commit` of the device's classes are wrapped for
+/// the life of this object and restored afterwards.
+class GpuLabelRecorder
+{
+public:
+    explicit GpuLabelRecorder(id<MTLDevice> device)
+    {
+        @autoreleasepool {
+            id<MTLCommandQueue>   queue      = [device newCommandQueue];
+            id<MTLCommandBuffer>  command    = [queue commandBuffer];
+            MTLTextureDescriptor* descriptor =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                   width:4
+                                                                  height:4
+                                                               mipmapped:NO];
+            descriptor.usage       = MTLTextureUsageRenderTarget;
+            descriptor.storageMode = MTLStorageModePrivate;
+            MTLRenderPassDescriptor* pass        = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture     = [device newTextureWithDescriptor:descriptor];
+            pass.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+            pass.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+            id<MTLRenderCommandEncoder> render = [command renderCommandEncoderWithDescriptor:pass];
+            Wrap([render class], @selector(endEncoding), reinterpret_cast<IMP>(&Ended));
+            [render endEncoding];
+            id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+            Wrap([blit class], @selector(endEncoding), reinterpret_cast<IMP>(&Ended));
+            [blit endEncoding];
+            Wrap([command class], @selector(commit), reinterpret_cast<IMP>(&Committed));
+        }
+    }
+    ~GpuLabelRecorder()
+    {
+        State().recording = false;
+        for (const auto& [method, original] : State().originals) method_setImplementation(method, original);
+        State().originals.clear();
+    }
+    GpuLabelRecorder(const GpuLabelRecorder&)            = delete;
+    GpuLabelRecorder& operator=(const GpuLabelRecorder&) = delete;
+
+    /// Starts recording from nothing.
+    void Start()
+    {
+        std::scoped_lock lock(State().mutex);
+        State().encoders.clear();
+        State().command_buffers.clear();
+        State().recording = true;
+    }
+    void Stop() { State().recording = false; }
+    std::vector<std::string> Encoders() const
+    {
+        std::scoped_lock lock(State().mutex);
+        return State().encoders;
+    }
+    std::vector<std::string> CommandBuffers() const
+    {
+        std::scoped_lock lock(State().mutex);
+        return State().command_buffers;
+    }
+
+private:
+    struct Shared
+    {
+        std::mutex               mutex;
+        std::atomic<bool>        recording { false };
+        std::map<Method, IMP>    originals;
+        std::vector<std::string> encoders;
+        std::vector<std::string> command_buffers;
+    };
+    static Shared& State()
+    {
+        static Shared state;
+        return state;
+    }
+    static std::string Text(NSString* label) { return label != nil ? std::string(label.UTF8String) : std::string(); }
+    static IMP Original(id self, SEL command)
+    {
+        return State().originals.at(class_getInstanceMethod(object_getClass(self), command));
+    }
+    static void Ended(id self, SEL command)
+    {
+        if (State().recording) {
+            std::scoped_lock lock(State().mutex);
+            State().encoders.push_back(Text([(id<MTLCommandEncoder>)self label]));
+        }
+        reinterpret_cast<void (*)(id, SEL)>(Original(self, command))(self, command);
+    }
+    static void Committed(id self, SEL command)
+    {
+        if (State().recording) {
+            std::scoped_lock lock(State().mutex);
+            State().command_buffers.push_back(Text([(id<MTLCommandBuffer>)self label]));
+        }
+        reinterpret_cast<void (*)(id, SEL)>(Original(self, command))(self, command);
+    }
+    static void Wrap(Class cls, SEL selector, IMP replacement)
+    {
+        Method method = class_getInstanceMethod(cls, selector);
+        if (method == nullptr || State().originals.contains(method)) return;
+        State().originals.emplace(method, method_setImplementation(method, replacement));
+    }
+};
+
+/// Restores the GPU labels to off, whatever a test set them to.
+struct RestoreGpuLabels
+{
+    ~RestoreGpuLabels() { MetalRender::SetGpuLabelsForTests(0); }
+};
+
+/// What one run with the labels in `mode` drew and labelled: the first frame's scene output,
+/// its encode counts, the pass labels and what Metal saw labelled while that frame was drawn.
+struct LabelledRun
+{
+    std::vector<uint8_t>                   picture;
+    MetalRender::FrameEncodeCountsForTests counts;
+    std::vector<std::string>               pass_labels;
+    std::vector<std::string>               encoders;
+    std::vector<std::string>               command_buffers;
+};
+
+LabelledRun DrawWithGpuLabels(const std::filesystem::path& project, const std::filesystem::path& cache, int mode)
+{
+    MetalRender::SetGpuLabelsForTests(mode);
+    LabelledRun run;
+    LoadedScene loaded;
+    std::string error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    @autoreleasepool {
+        id<MTLDevice>    device = MTLCreateSystemDefaultDevice();
+        GpuLabelRecorder recorder(device);
+        CAMetalLayer*    layer  = [CAMetalLayer layer];
+        layer.device            = device;
+        layer.pixelFormat       = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize      = CGSizeMake(384, 256);
+        layer.framebufferOnly   = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        // The first frame, which draws every pass: a later one may reuse what did not change.
+        recorder.Start();
+        AdvanceSceneFrame(render, *loaded.scene);
+        recorder.Stop();
+        run.picture         = ReadOutput(render, *loaded.scene);
+        run.counts          = render.LastFrameEncodeCountsForTests();
+        run.pass_labels     = render.GpuPassLabelsForTests();
+        run.encoders        = recorder.Encoders();
+        run.command_buffers = recorder.CommandBuffers();
+        render.destroy();
+    }
+    return run;
+}
+
+bool AnyContains(const std::vector<std::string>& labels, std::string_view text)
+{
+    return std::any_of(labels.begin(), labels.end(),
+                       [text](const std::string& label) { return label.find(text) != std::string::npos; });
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, GpuLabelsNameEachPassItsTargetAndItsLayerOnlyWhenAskedFor)
+{
+    // The card through two effects: the card and the effects into the chain's buffers, the
+    // chain's last pass onto the scene, and the composition onto the surface.
+    RestoreGpuLabels restore;
+    const auto root    = root_ / "gpu-labels";
+    const auto project = WriteEffectChainFixture(root, { ChainEffect {}, ChainEffect {} });
+
+    const auto on = DrawWithGpuLabels(project, root / "cache-on", 1);
+    ASSERT_FALSE(on.picture.empty());
+    ASSERT_FALSE(on.pass_labels.empty());
+    ASSERT_EQ(on.command_buffers.size(), 1u) << "one frame commits one command buffer";
+    EXPECT_EQ(on.command_buffers.front().rfind("scene frame 384x256 on 384x256", 0), 0u)
+        << on.command_buffers.front();
+    // Every encoder of the frame says what it runs.
+    ASSERT_FALSE(on.encoders.empty());
+    for (const auto& label : on.encoders) EXPECT_FALSE(label.empty()) << "an encoder of the frame has no label";
+    EXPECT_TRUE(AnyContains(on.encoders, "fx0 -> _rt_effect_pingpong_")) << "the first effect's pass is not named";
+    EXPECT_TRUE(AnyContains(on.encoders, "fx1 -> " + std::string(SpecTex_Default) + " 384x256 rgba8 [tile #1]"))
+        << "the chain's last pass, onto the scene, is not named";
+    for (const auto& label : on.encoders) {
+        if (label.rfind("fx0 -> ", 0) != 0) continue;
+        EXPECT_NE(label.find(" rgba8 [tile #1] {"), std::string::npos) << label;
+    }
+    EXPECT_TRUE(AnyContains(on.encoders, "composition 384x256 -> 384x256 bgra8"));
+
+    // Off: Metal sees no label at all, and no label was ever built.
+    const auto off = DrawWithGpuLabels(project, root / "cache-off", 0);
+    ASSERT_FALSE(off.encoders.empty());
+    for (const auto& label : off.encoders) EXPECT_TRUE(label.empty()) << label;
+    for (const auto& label : off.command_buffers) EXPECT_TRUE(label.empty()) << label;
+    EXPECT_TRUE(off.pass_labels.empty());
+    EXPECT_EQ(off.picture, on.picture) << "the labels changed the picture";
+    EXPECT_EQ(off.counts.render_passes, on.counts.render_passes);
+}
+
+TEST_F(MetalSceneDraw, GpuLabelsSplitTheDrawsThatShareARenderPassWithoutChangingThePicture)
+{
+    // Twelve cards with long names, all drawn straight onto the scene: one render pass, whose
+    // label names the first card in full and counts the rest within the length Instruments
+    // keeps. `split` gives each its own render pass, and its own label.
+    RestoreGpuLabels restore;
+    const auto root    = root_ / "gpu-labels-split";
+    const auto project = WriteFixture(root);
+    auto       layout  = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["objects"]  = nlohmann::json::array();
+    constexpr int kCards = 12;
+    for (int index = 0; index < kCards; ++index) {
+        layout["objects"].push_back({ { "id", index + 1 },
+                                      { "name", "a card whose name is long enough to matter " + std::to_string(index) },
+                                      { "image", "models/tile.json" },
+                                      { "origin", { 60 + 24 * index, 128, 0 } },
+                                      { "scale", { 0.2, 0.2, 1 } },
+                                      { "angles", { 0, 0, 0 } },
+                                      { "visible", true } });
+    }
+    // A name outside ASCII, which Instruments would not record.
+    layout["objects"][1]["name"] = "\xE7\xBD\xAE\xE4\xBA\x8E/before";
+    std::ofstream(root / "layout.json") << layout;
+
+    const auto joined = DrawWithGpuLabels(project, root / "cache-joined", 1);
+    const auto split  = DrawWithGpuLabels(project, root / "cache-split", 2);
+    ASSERT_FALSE(joined.picture.empty());
+    EXPECT_EQ(split.picture, joined.picture) << "splitting the render pass changed the picture";
+    EXPECT_EQ(split.counts.render_passes, joined.counts.render_passes + kCards - 1);
+
+    const std::string scene_prefix = "metal_probe -> " + std::string(SpecTex_Default);
+    const auto shared = std::find_if(joined.encoders.begin(), joined.encoders.end(), [&](const std::string& label) {
+        return label.rfind("[12 passes] " + scene_prefix, 0) == 0;
+    });
+    ASSERT_NE(shared, joined.encoders.end()) << "no label counts the twelve draws of one render pass";
+    EXPECT_NE(shared->find("[a card whose name is long enough to matter 0 #1]"), std::string::npos) << *shared;
+    EXPECT_NE(shared->find(" more"), std::string::npos) << "the label was not cut: " << *shared;
+    EXPECT_LE(shared->size(), 270u) << *shared;
+    for (const auto& label : joined.encoders) {
+        for (const unsigned char c : label) EXPECT_LT(c, 0x80) << label;
+    }
+
+    int own = 0;
+    for (const auto& label : split.encoders) {
+        if (label.rfind(scene_prefix, 0) == 0) ++own;
+        EXPECT_EQ(label.find("passes]"), std::string::npos) << label;
+    }
+    EXPECT_EQ(own, kCards) << "each card should have a render pass of its own";
+    EXPECT_TRUE(AnyContains(split.encoders, "[?/before #2]")) << "the name outside ASCII was not replaced";
+}
+
+namespace
+{
+
+struct RestoreCopyTrades
+{
+    ~RestoreCopyTrades() { MetalRender::SetCopyTradesForTests(true); }
+};
+
+/// Every frame's scene output of one run and each frame's encode counts.
+struct CopyTradeRun
+{
+    std::vector<std::vector<uint8_t>>                   frames;
+    std::vector<MetalRender::FrameEncodeCountsForTests> counts;
+};
+
+/// Draws `frames` production frames of `project` with copy trades on or off, on a fresh parse and
+/// renderer, so two runs differ only by the switch. `before(frame, scene)` runs ahead of each
+/// frame; when it answers false that frame's composition is refused, so the frame is abandoned
+/// after every pass of it has been encoded.
+CopyTradeRun DrawWithCopyTrades(const std::filesystem::path& project, const std::filesystem::path& cache,
+                                bool trades, int frames, const WeUserOptions& options = {},
+                                const std::function<void(Scene&)>&      adjust = {},
+                                const std::function<bool(int, Scene&)>& before = {})
+{
+    MetalRender::SetCopyTradesForTests(trades);
+    CopyTradeRun run;
+    LoadedScene  loaded;
+    std::string  error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error, options)) << error;
+    if (loaded.scene == nullptr) return run;
+    if (adjust) adjust(*loaded.scene);
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto graph = sceneToRenderGraph(*loaded.scene);
+        if (graph == nullptr || ! render.compileRenderGraph(*loaded.scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        render.UpdateCameraFillMode(*loaded.scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < frames; ++frame) {
+            auto& scene = *loaded.scene;
+            if (before && ! before(frame, scene)) {
+                if (scene.runtime != nullptr) scene.runtime->Tick(1.0 / 60.0);
+                if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
+                render.RefuseNextCompositionForTests();
+                EXPECT_FALSE(render.drawFrame(scene)) << "frame " << frame << " was expected to be abandoned";
+                scene.PassFrameTime(1.0 / 60.0);
+            } else {
+                AdvanceSceneFrame(render, scene);
+            }
+            EXPECT_FALSE(scene.runtime != nullptr && scene.runtime->ConsumeSceneGraphMutationFlag())
+                << "frame " << frame << " asked for a new graph";
+            run.frames.push_back(ReadOutput(render, scene));
+            run.counts.push_back(render.LastFrameEncodeCountsForTests());
+        }
+        render.destroy();
+    }
+    return run;
+}
+
+std::string DescribePixelDifference(const std::vector<uint8_t>& on, const std::vector<uint8_t>& off)
+{
+    if (on == off) return {};
+    std::ostringstream message;
+    std::size_t changed = 0;
+    int maximum = 0;
+    for (std::size_t i = 0; i < std::min(on.size(), off.size()); ++i) {
+        if (on[i] == off[i]) continue;
+        if (changed < 8) message << " (" << (i / 4) % 384 << ',' << (i / 4) / 384 << ",c" << i % 4
+                                 << ":" << int(off[i]) << "->" << int(on[i]) << ')';
+        ++changed;
+        maximum = std::max(maximum, std::abs(int(on[i]) - int(off[i])));
+    }
+    message << "; changed bytes=" << changed << ", maximum difference=" << maximum;
+    return message.str();
+}
+
+/// Both runs drew every frame alike.
+void ExpectSameFrames(const CopyTradeRun& off, const CopyTradeRun& on, std::size_t frames)
+{
+    ASSERT_EQ(off.frames.size(), frames);
+    ASSERT_EQ(on.frames.size(), frames);
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        ASSERT_FALSE(off.frames[frame].empty());
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the copy trades"
+            << DescribePixelDifference(on.frames[frame], off.frames[frame]);
+    }
+    EXPECT_NE(off.frames.front(), off.frames.back()) << "the scene did not animate";
+}
+
+/// A motion blur of the shape Wallpaper Engine's has (an original stand-in): accumulate the
+/// layer's picture with its history into `_rt_FullCompoBuffer2`, copy that to the history
+/// `_rt_FullCompoBuffer1` (the effect's own), and draw the layer from `_rt_FullCompoBuffer2`.
+/// Every frame moves each channel of the picture, so the history shows in every frame after the
+/// first. `before_write` runs in the accumulation before it writes.
+void WriteHistoryEffect(const std::filesystem::path& root, const std::string& name,
+                        const std::string& before_write = {})
+{
+    WriteFiles(root, {
+        { "effects/" + name + ".json",
+          R"({"name":")" + name + R"(","passes":[)"
+          R"({"material":"materials/)" + name + R"(_accumulate.json","target":"_rt_FullCompoBuffer2",)"
+          R"("bind":[{"name":"previous","index":0},{"name":"_rt_FullCompoBuffer1","index":1}]},)"
+          R"({"command":"copy","target":"_rt_FullCompoBuffer1","source":"_rt_FullCompoBuffer2"},)"
+          R"({"material":"materials/)" + name + R"(_combine.json","bind":[{"name":"_rt_FullCompoBuffer2","index":0}]}],)"
+          R"("fbos":[{"name":"_rt_FullCompoBuffer1","scale":1,"format":"rgba_backbuffer","unique":true},)"
+          R"({"name":"_rt_FullCompoBuffer2","scale":1,"format":"rgba_backbuffer"}]})" },
+        { "materials/" + name + "_accumulate.json",
+          R"({"passes":[{"shader":")" + name +
+              R"(_accumulate","blending":"normal","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","textures":[null,null]}]})" },
+        { "materials/" + name + "_combine.json",
+          R"({"passes":[{"shader":")" + name + R"(_combine","blending":"normal","cullmode":"nocull",)"
+          R"("depthtest":"disabled","depthwrite":"disabled","textures":[null]}]})" },
+        { "shaders/" + name + "_accumulate.vert",
+          "attribute vec3 a_Position;\nattribute vec2 a_TexCoord;\nvarying vec2 v_TexCoord;\n"
+          "void main(){ gl_Position=vec4(a_Position,1.0); v_TexCoord=a_TexCoord; }\n" },
+        { "shaders/" + name + "_accumulate.frag",
+          "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\nuniform float g_Time;\n"
+          "varying vec2 v_TexCoord;\nvoid main(){ vec4 albedo=texSample2D(g_Texture0,v_TexCoord);"
+          " albedo.rgb=frac(albedo.rgb+g_Time*vec3(3.7,5.3,7.1)); " + before_write +
+          " gl_FragColor=mix(texSample2D(g_Texture1,v_TexCoord),albedo,0.5); }\n" },
+        { "shaders/" + name + "_combine.vert", kTimedCopyVertex },
+        { "shaders/" + name + "_combine.frag", TimedFragment("c") },
+    });
+}
+
+/// One card of the fixture's size per entry of `effects`, side by side, each through the effect
+/// named there, so the cards share the effects' `_rt_FullCompoBuffer2`.
+std::filesystem::path WriteHistoryFixture(const std::filesystem::path& root, const std::vector<std::string>& effects)
+{
+    const auto project = WriteFixture(root);
+    WriteHistoryEffect(root, "history");
+    WriteHistoryEffect(root, "history_partial", "if (v_TexCoord.x < 0.25) discard;");
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    auto objects = nlohmann::json::array();
+    for (std::size_t k = 0; k < effects.size(); ++k) {
+        auto card       = layout["objects"][0];
+        card["id"]      = int(k + 1);
+        card["name"]    = "card" + std::to_string(k);
+        card["origin"]  = { 96 + 96 * int(k), 128, 0 };
+        card["effects"] = { { { "file", "effects/" + effects[k] + ".json" }, { "visible", true } } };
+        objects.push_back(card);
+    }
+    layout["objects"] = objects;
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AHistoryCopyIsTradedAndDrawsTheSamePicture)
+{
+    // A motion blur copies its accumulation into its history every frame, then draws the layer
+    // from the accumulation. With the copy trades on, the copy is left out and the two buffers
+    // trade textures after the draw that reads the accumulation: the history then holds this
+    // frame's accumulation and the accumulation a stale image, which the next accumulation
+    // replaces. Cards of one size share the accumulation, so the next one to replace it is the
+    // next card's, later in the frame (which loads it: proven to write every texel, or opened
+    // with the copy when it may leave some alone), or the first card's in the next frame.
+    RestoreCopyTrades restore;
+    struct Case
+    {
+        std::string              name;
+        std::vector<std::string> effects;
+        uint32_t                 opening_copies;
+    };
+    for (const auto& item : { Case { "one card", { "history" }, 0 },
+                              Case { "two cards sharing a buffer", { "history", "history" }, 0 },
+                              Case { "a second accumulation that leaves texels", { "history", "history_partial" }, 1 },
+                              Case { "three cards", { "history", "history", "history" }, 0 } }) {
+        SCOPED_TRACE(item.name);
+        const auto root    = root_ / ("history-" + std::to_string(item.effects.size()) + "-" + item.effects.back());
+        const auto project = WriteHistoryFixture(root, item.effects);
+        constexpr int kFrames = 6;
+        const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames);
+        const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames);
+        ExpectSameFrames(off, on, kFrames);
+        const auto copies = uint32_t(item.effects.size());
+        for (int frame = 1; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            EXPECT_EQ(off.counts[frame].blit_passes, copies) << "the fixture no longer copies its history";
+            EXPECT_GT(off.counts[frame].copied_bytes, 0u);
+            EXPECT_EQ(on.counts[frame].blit_passes, 0u) << "a history copy was still made";
+            EXPECT_EQ(on.counts[frame].copied_bytes, 0u);
+            EXPECT_EQ(on.counts[frame].traded_copies, off.counts[frame].traded_copies + copies);
+            EXPECT_EQ(on.counts[frame].opening_copies, off.counts[frame].opening_copies + item.opening_copies);
+            EXPECT_EQ(on.counts[frame].render_passes, off.counts[frame].render_passes);
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, AHiddenOrAbandonedHistoryKeepsItsPictureAcrossCopyTrades)
+{
+    // The first card's accumulation is left stale by its trade until the next frame's first
+    // accumulation replaces it. While that card is hidden nothing does: the accumulation gets
+    // its picture back from the history before anything reads it, so the history is the one it
+    // had when the card comes back. A frame abandoned after its trades were made moves the names
+    // back, and the frame after it draws what it would have.
+    RestoreCopyTrades restore;
+    const auto root    = root_ / "history-hidden";
+    const auto project = WriteHistoryFixture(root, { "history", "history" });
+    constexpr int kFrames = 12;
+    const auto before = [](int frame, Scene& scene) {
+        if (frame == 3) EXPECT_TRUE(scene.runtime->SetNodeVisible("card0", false));
+        if (frame == 6) EXPECT_TRUE(scene.runtime->SetNodeVisible("card0", true));
+        return frame != 5 && frame != 9;
+    };
+    const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames, {}, {}, before);
+    const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames, {}, {}, before);
+    ExpectSameFrames(off, on, kFrames);
+    for (const int frame : { 3, 4 }) {
+        SCOPED_TRACE(frame);
+        // The hidden card's copy and the shown card's: one restore of the shared accumulation
+        // takes their place, before the shown card's accumulation, which then loads it.
+        EXPECT_EQ(off.counts[frame].blit_passes, 2u);
+        EXPECT_EQ(on.counts[frame].blit_passes, 1u) << "the stale accumulation was not restored";
+    }
+    for (const int frame : { 7, 8, 10, 11 }) {
+        SCOPED_TRACE(frame);
+        EXPECT_EQ(on.counts[frame].blit_passes, 0u);
+        EXPECT_EQ(on.counts[frame].traded_copies, off.counts[frame].traded_copies + 2u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AHistoryCopyWhoseImageIsReadBeforeItsSourceIsDoneStaysACopy)
+{
+    // The layer's draw reads the history as well as the accumulation after the copy: deferring
+    // the copy to after that draw would show it the history from before the copy. It stays a
+    // copy, and the picture is the same either way.
+    RestoreCopyTrades restore;
+    const auto root    = root_ / "history-read-early";
+    const auto project = WriteHistoryFixture(root, { "history" });
+    auto effect = nlohmann::json::parse(std::ifstream(root / "effects/history.json"));
+    effect["passes"][2]["bind"].push_back({ { "name", "_rt_FullCompoBuffer1" }, { "index", 1 } });
+    std::ofstream(root / "effects/history.json") << effect;
+    auto material = nlohmann::json::parse(std::ifstream(root / "materials/history_combine.json"));
+    material["passes"][0]["textures"] = { nullptr, nullptr };
+    std::ofstream(root / "materials/history_combine.json") << material;
+    std::ofstream(root / "shaders/history_combine.frag")
+        << "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\nvarying vec2 v_TexCoord;\n"
+           "void main(){ gl_FragColor=vec4(texSample2D(g_Texture0,v_TexCoord).rg,"
+           "texSample2D(g_Texture1,v_TexCoord).b,1.0); }\n";
+    constexpr int kFrames = 4;
+    const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames);
+    const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames);
+    ExpectSameFrames(off, on, kFrames);
+    EXPECT_EQ(off.counts.back().blit_passes, 1u);
+    EXPECT_EQ(on.counts.back().blit_passes, 1u) << "a copy whose destination is read before the trade was traded";
+    EXPECT_EQ(on.counts.back().traded_copies, off.counts.back().traded_copies);
+}
+
+TEST_F(MetalSceneDraw, APostProcessResultCopiedIntoTheSceneTradesTexturesAndDrawsTheSamePicture)
+{
+    // Bloom's combine and the colour options each draw into a buffer of the scene's size and
+    // copy it back into the scene's image. Nothing reads the buffer after the copy, and its next
+    // writer, the next frame's combine, clears it, so the two names trade textures instead. Also
+    // with the scene not cleared between frames (it starts from what the copy left), with layers
+    // that copy the scene to read it (the scene's image is then a pooled trade's source), and
+    // multisampled.
+    RestoreCopyTrades restore;
+    WeUserOptions colour;
+    colour.color_enabled = true;
+    colour.brightness    = 60.0f;
+    struct Case
+    {
+        std::string name;
+        bool        bloom { true };
+        bool        hdr { false };
+        bool        clear { true };
+        bool        lenses { false };
+        bool        colour { false };
+        uint32_t    samples { 1 };
+        uint32_t    copies { 1 };
+    };
+    std::vector<Case> cases {
+        { .name = "bloom" },
+        { .name = "bloom, not cleared", .clear = false },
+        { .name = "bloom and colour options", .colour = true, .copies = 2 },
+        { .name = "colour options", .bloom = false, .colour = true },
+        { .name = "hdr bloom", .hdr = true },
+        { .name = "bloom over lenses", .lenses = true },
+    };
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (device != nil && [device supportsTextureSampleCount:4])
+        cases.push_back({ .name = "bloom, multisampled", .samples = 4 });
+    for (std::size_t index = 0; index < cases.size(); ++index) {
+        const auto& item = cases[index];
+        SCOPED_TRACE(item.name);
+        const auto root    = root_ / ("post-trade-" + std::to_string(index));
+        const auto project = item.lenses ? WriteFeedbackFixture(root) : WriteFixture(root);
+        WriteBloomStandIns(root);
+        std::ofstream(root / "shaders/ccsimple_standin.vert") << kStandInVertexShader;
+        std::ofstream(root / "shaders/ccsimple_standin.frag") << kCcsimpleStandIn;
+        WriteStandInMaterial(root, "materials/util/ccsimple.json", "ccsimple_standin", { "_rt_FullFrameBuffer" });
+        std::ofstream(root / "shaders/metal_probe.frag")
+            << "uniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+               "void main(){ gl_FragColor=vec4(v_TexCoord.x,frac(g_Time*3.1),0.75,0.5); }\n";
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        layout["general"]["bloom"]          = item.bloom;
+        layout["general"]["hdr"]            = item.hdr;
+        layout["general"]["bloomstrength"]  = 1.0;
+        layout["general"]["bloomthreshold"] = 0.25;
+        layout["general"]["clearenabled"]   = item.clear;
+        std::ofstream(root / "layout.json") << layout;
+        const auto adjust = [&item](Scene& scene) {
+            if (item.samples > 1) scene.renderTargets[std::string(SpecTex_Default)].sample_count = item.samples;
+        };
+        constexpr int kFrames = 5;
+        const auto options = item.colour ? colour : WeUserOptions {};
+        const auto off = DrawWithCopyTrades(project, root / "cache-off", false, kFrames, options, adjust);
+        const auto on  = DrawWithCopyTrades(project, root / "cache-on", true, kFrames, options, adjust);
+        ExpectSameFrames(off, on, kFrames);
+        for (int frame = 1; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            EXPECT_EQ(off.counts[frame].blit_passes, item.copies) << "the fixture no longer copies its result back";
+            EXPECT_EQ(on.counts[frame].blit_passes, 0u) << "a result was still copied into the scene";
+            EXPECT_EQ(on.counts[frame].copied_bytes, 0u);
+            EXPECT_EQ(on.counts[frame].traded_copies, off.counts[frame].traded_copies + item.copies);
+        }
+        if (item.lenses) EXPECT_GE(off.counts.back().traded_copies, 2u) << "the lenses' copies were expected to trade";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Work nothing visible can see: a draw that leaves its target as it is, and a clear only hidden
+// passes would read
+
+namespace
+{
+
+/// Restores both switches and target sharing, whatever a test set them to.
+struct RestoreInvisibleWorkSwitches
+{
+    ~RestoreInvisibleWorkSwitches()
+    {
+        MetalRender::SetSkipNoopDrawsForTests(true);
+        MetalRender::SetHiddenLayerWorkForTests(true);
+        MetalRender::SetTargetSharingForTests(true);
+    }
+};
+
+struct InvisibleWorkRun
+{
+    std::vector<std::vector<uint8_t>>                   frames;
+    std::vector<MetalRender::FrameEncodeCountsForTests> counts;
+    /// The targets whose names contain the inspected text, read right after the forced graph
+    /// rebuild, before any frame draws into the new graph.
+    std::map<std::string, std::vector<uint8_t>>         held;
+};
+
+/// Draws `frames` frames of `project` with the switches as given, on a fresh parse and renderer,
+/// the way the wallpaper's own draw runs them: the tick, a new graph if the tick asked for one,
+/// then the frame. With `rebuild_at` >= 0 the graph is built again before that frame whatever the
+/// scene asked, as the host does for any change of it, and the targets whose names contain
+/// `inspect` are read back right after. `refuse` frames have their composition refused, so they
+/// are abandoned.
+InvisibleWorkRun DrawWithInvisibleWorkSwitches(const std::filesystem::path& project, const std::filesystem::path& cache,
+                                               bool skip_noop, bool hidden_work, int frames, int rebuild_at = -1,
+                                               const std::string& inspect = {}, const std::set<int>& refuse = {})
+{
+    MetalRender::SetSkipNoopDrawsForTests(skip_noop);
+    MetalRender::SetHiddenLayerWorkForTests(hidden_work);
+    InvisibleWorkRun run;
+    LoadedScene      loaded;
+    std::string      error;
+    std::filesystem::remove_all(cache);
+    EXPECT_TRUE(LoadScene(project, cache, loaded, error)) << error;
+    if (loaded.scene == nullptr) return run;
+    @autoreleasepool {
+        CAMetalLayer* layer   = [CAMetalLayer layer];
+        layer.device          = MTLCreateSystemDefaultDevice();
+        layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+        layer.drawableSize    = CGSizeMake(384, 256);
+        layer.framebufferOnly = NO;
+        MetalRender render;
+        EXPECT_TRUE(render.init(MetalRenderInitInfo {
+            .metal_layer = (__bridge void*)layer, .width = 384, .height = 256,
+            .render_width = 384, .render_height = 256, .display_scale_factor = 1.0 }))
+            << render.lastError();
+        auto& scene = *loaded.scene;
+        auto  graph = sceneToRenderGraph(scene);
+        if (graph == nullptr || ! render.compileRenderGraph(scene, *graph)) {
+            ADD_FAILURE() << render.lastError();
+            return run;
+        }
+        render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+        for (int frame = 0; frame < frames; ++frame) {
+            if (scene.runtime != nullptr) {
+                scene.runtime->Tick(1.0 / 60.0);
+                scene.runtime->PumpTextLayerCache();
+                std::string change_error;
+                (void)tests::ApplyRuntimeSceneChanges(render, scene, graph, false, &change_error);
+                EXPECT_TRUE(change_error.empty()) << change_error;
+            }
+            if (frame == rebuild_at) {
+                EXPECT_TRUE(render.clearLastRenderGraphForRebuild());
+                graph = sceneToRenderGraph(scene);
+                EXPECT_TRUE(graph != nullptr && render.compileRenderGraph(scene, *graph)) << render.lastError();
+                render.UpdateCameraFillMode(scene, FillMode::ASPECTFIT);
+                for (const auto& [name, target] : scene.renderTargets) {
+                    (void)target;
+                    if (inspect.empty() || name.find(inspect) == std::string::npos) continue;
+                    std::vector<uint8_t> pixels;
+                    uint32_t             width = 0, height = 0;
+                    if (render.ReadRenderTargetForTests(name, pixels, width, height)) run.held[name] = pixels;
+                }
+            }
+            if (scene.shaderValueUpdater != nullptr) scene.shaderValueUpdater->FrameBegin();
+            if (refuse.contains(frame)) {
+                render.RefuseNextCompositionForTests();
+                EXPECT_FALSE(render.drawFrame(scene)) << "frame " << frame << " was expected to be abandoned";
+            } else {
+                EXPECT_TRUE(render.drawFrame(scene)) << render.lastError();
+            }
+            scene.PassFrameTime(1.0 / 60.0);
+            run.frames.push_back(ReadOutput(render, scene));
+            run.counts.push_back(render.LastFrameEncodeCountsForTests());
+        }
+        render.destroy();
+    }
+    return run;
+}
+
+void ExpectSameFrames(const InvisibleWorkRun& off, const InvisibleWorkRun& on, std::size_t frames)
+{
+    ASSERT_EQ(off.frames.size(), frames);
+    ASSERT_EQ(on.frames.size(), frames);
+    for (std::size_t frame = 0; frame < frames; ++frame) {
+        ASSERT_FALSE(off.frames[frame].empty());
+        EXPECT_EQ(on.frames[frame], off.frames[frame]) << "frame " << frame << " changed with the work left out"
+            << DescribePixelDifference(on.frames[frame], off.frames[frame]);
+    }
+}
+
+/// The fixture's card under a screen-filling layer of the solid layer's shape: `fragment` writes
+/// its colour from `g_Color` and `g_Alpha` (Wallpaper Engine's `flat.frag` is
+/// `vec4(g_Color, g_Alpha)`), blended as `blending`, coloured `color`, its alpha following
+/// `alpha_script` (an `update` that returns it), so the layer fades out and back in.
+std::filesystem::path WriteFadeFixture(const std::filesystem::path& root, const std::string& fragment,
+                                       const std::string& blending, const std::string& color,
+                                       const std::string& alpha_script)
+{
+    const auto project = WriteFixture(root);
+    WriteFiles(root, {
+        { "models/screen.json", R"({"width":384,"height":256,"material":"materials/screen.json"})" },
+        { "materials/screen.json",
+          R"({"passes":[{"shader":"fade","blending":")" + blending +
+              R"(","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled"}]})" },
+        { "shaders/fade.vert",
+          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+          "varying vec2 v_TexCoord;\nvoid main() {\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n  v_TexCoord = a_TexCoord;\n}\n" },
+        { "shaders/fade.frag",
+          "uniform float g_Alpha;\nuniform vec3 g_Color;\nvarying vec2 v_TexCoord;\nvoid main() {\n  gl_FragColor = " +
+              fragment + ";\n}\n" },
+    });
+    // The card behind moves with the scene time, so each frame is drawn afresh.
+    std::ofstream(root / "shaders/metal_probe.frag")
+        << "uniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+           "void main() { gl_FragColor = vec4(v_TexCoord.x, frac(v_TexCoord.y + g_Time), 0.25, 1.0); }\n";
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["general"]["bloom"] = false;
+    layout["objects"].push_back({ { "id", 2 }, { "name", "black screen" }, { "image", "models/screen.json" },
+                                  { "origin", { 192, 128, 0 } }, { "scale", { 1, 1, 1 } }, { "angles", { 0, 0, 0 } },
+                                  { "color", color }, { "visible", true },
+                                  { "alpha", { { "value", 1.0 }, { "script", alpha_script } } } });
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+/// Alpha 1 for frames 0 and 1, `faded` for frames 2 and 3, 1 again from frame 4 on (the tick
+/// before frame k leaves `engine.runtime` at (k + 1) / 60 s).
+std::string FadeScript(const std::string& faded)
+{
+    return "export function update(value) { return engine.runtime > 0.04 && engine.runtime < 0.075 ? " + faded +
+           " : 1.0; }";
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, ALayerFadedOutToNothingIsLeftOutAndEveryFrameStaysTheSame)
+{
+    // A black screen that fades out after an intro is Wallpaper Engine's common fade pattern;
+    // at alpha 0 its source-over blend leaves every texel as it was, so the draw is left out,
+    // and it is drawn again the frame its alpha is no longer 0. Additive blending keeps the
+    // texel at alpha 0 as well.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 6;
+    for (const std::string blending : { "translucent", "additive" }) {
+        SCOPED_TRACE(blending);
+        const auto root    = root_ / ("fade-" + blending);
+        const auto project = WriteFadeFixture(root, "vec4(g_Color, g_Alpha)", blending, "0.2 0.4 0.6", FadeScript("0.0"));
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", false, true, kFrames);
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames);
+        ExpectSameFrames(off, on, kFrames);
+        ASSERT_EQ(on.counts.size(), std::size_t(kFrames));
+        EXPECT_NE(off.frames[1], off.frames[2]) << "the faded frame looks like the covered one";
+        for (int frame = 0; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            const bool faded = frame == 2 || frame == 3;
+            EXPECT_EQ(on.counts[frame].noop_draws, faded ? 1u : 0u);
+            EXPECT_EQ(off.counts[frame].noop_draws, 0u);
+        }
+    }
+}
+
+TEST_F(MetalSceneDraw, ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn)
+{
+    // None of these finite variants is proven to preserve its destination, so every one is
+    // drawn and the frames are identical with the optimization enabled or disabled.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 4;
+    struct Variant
+    {
+        std::string name, fragment, blending, color, faded;
+    };
+    const Variant variants[] = {
+        { "half alpha", "vec4(g_Color, g_Alpha)", "translucent", "0.2 0.4 0.6", "0.5" },
+        { "replacing blend", "vec4(g_Color, g_Alpha)", "normal", "0.2 0.4 0.6", "0.0" },
+        { "multiplying blend", "vec4(g_Color, g_Alpha)", "multiply", "0.2 0.4 0.6", "0.0" },
+        { "colour from a varying", "vec4(g_Color * v_TexCoord.x, g_Alpha)", "translucent", "0.2 0.4 0.6", "0.0" },
+        { "alpha from a varying", "vec4(g_Color, g_Alpha * v_TexCoord.y)", "translucent", "0.2 0.4 0.6", "0.0" },
+    };
+    for (std::size_t k = 0; k < std::size(variants); ++k) {
+        const auto& variant = variants[k];
+        SCOPED_TRACE(variant.name);
+        const auto root    = root_ / ("unproven-fade-" + std::to_string(k));
+        const auto project = WriteFadeFixture(root, variant.fragment, variant.blending, variant.color,
+                                              FadeScript(variant.faded));
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", false, true, kFrames);
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames);
+        ExpectSameFrames(off, on, kFrames);
+        for (const auto& counts : on.counts) EXPECT_EQ(counts.noop_draws, 0u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AnOverflowingColourAtZeroAlphaIsNotSkipped)
+{
+    // The product is not finite, so the CPU must decline to omit its draw. Production Metal
+    // fast math does not promise a stable pixel value for Inf/NaN: check draw admission here,
+    // and keep exact pixel comparisons in the finite cases below.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int frames = 4;
+    const auto root = root_ / "overflow-product-fade";
+    const auto project = WriteFadeFixture(root, "vec4(g_Color * g_Color, g_Alpha)",
+        "translucent", "1e30 1e30 1e30", FadeScript("0.0"));
+    const auto on = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, frames);
+    ASSERT_EQ(on.frames.size(), std::size_t(frames));
+    ASSERT_EQ(on.counts.size(), std::size_t(frames));
+    for (int frame = 0; frame < frames; ++frame) {
+        SCOPED_TRACE(frame);
+        EXPECT_FALSE(on.frames[frame].empty());
+        EXPECT_EQ(on.counts[frame].noop_draws, 0u);
+        EXPECT_GT(on.counts[frame].scene_output_passes, 0u);
+    }
+}
+
+TEST_F(MetalSceneDraw, AFiniteColourProductAtZeroAlphaIsSkippedAndKeepsEveryFrame)
+{
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int frames = 6;
+    const auto root = root_ / "finite-product-fade";
+    const auto project = WriteFadeFixture(root, "vec4(g_Color * g_Color, g_Alpha)",
+        "translucent", "1 1 1", FadeScript("0.0"));
+    const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", false, true, frames);
+    const auto on = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, frames);
+    ExpectSameFrames(off, on, frames);
+    ASSERT_EQ(on.counts.size(), std::size_t(frames));
+    for (int frame = 0; frame < frames; ++frame) {
+        EXPECT_EQ(on.counts[frame].noop_draws, frame == 2 || frame == 3 ? 1u : 0u);
+        EXPECT_EQ(off.counts[frame].noop_draws, 0u);
+    }
+}
+
+namespace
+{
+
+/// The fixture's card and, beside it, a panel through a chain of two effects that move with the
+/// scene time, whose visibility a script decides: shown for frames 0 and 1, hidden for frames 2
+/// to 5, shown again from frame 6 (the tick before frame k leaves `engine.runtime` at
+/// (k + 1) / 60 s). A layer whose visibility a script writes stays in the graph, so while it is
+/// hidden its chain's clears are all that runs of it.
+std::filesystem::path WriteHiddenChainFixture(const std::filesystem::path& root)
+{
+    const auto project = WriteEffectChainFixture(root, { ChainEffect {}, ChainEffect {} });
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    auto panel  = layout["objects"][0];
+    panel["id"]      = 2;
+    panel["name"]    = "panel";
+    panel["origin"]  = { 288, 128, 0 };
+    panel["scale"]   = { 0.5, 0.5, 1 };
+    panel["visible"] = { { "value", true },
+                         { "script", "export function update(value) { return !(engine.runtime > 0.04 && "
+                                     "engine.runtime < 0.11); }" } };
+    layout["objects"][0].erase("effects");
+    layout["objects"][0]["origin"] = { 96, 128, 0 };
+    layout["objects"][0]["scale"]  = { 0.5, 0.5, 1 };
+    layout["objects"].push_back(panel);
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AHiddenLayersClearsAreLeftOutAndItsPictureComesBackAsItWas)
+{
+    // While the panel is hidden nothing that draws reads its effect buffers before they are
+    // cleared again, so their clears are left out, with the render passes they opened. The
+    // frames are the same either way, the first one shown again included, and a frame
+    // abandoned while it is hidden leaves nothing behind either.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 8;
+    for (const bool sharing : { true, false }) {
+        SCOPED_TRACE(sharing ? "targets shared" : "targets of their own");
+        MetalRender::SetTargetSharingForTests(sharing);
+        const auto root    = root_ / (std::string("hidden-chain-") + (sharing ? "shared" : "own"));
+        const auto project = WriteHiddenChainFixture(root);
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", true, false, kFrames, -1, {}, { 4 });
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames, -1, {}, { 4 });
+        ExpectSameFrames(off, on, kFrames);
+        EXPECT_NE(off.frames[1], off.frames[2]) << "hiding the panel changed nothing";
+        for (int frame = 0; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            const bool hidden = frame >= 2 && frame <= 5;
+            EXPECT_EQ(off.counts[frame].skipped_clears, 0u);
+            if (frame == 4) continue;
+            if (hidden) {
+                // The effect's buffer at least; the card's own is pinned for reuse, and one the
+                // reuse table holds keeps its clear.
+                EXPECT_GE(on.counts[frame].skipped_clears, 1u) << "the hidden chain's clears still ran";
+                EXPECT_EQ(on.counts[frame].render_passes + on.counts[frame].skipped_clears,
+                          off.counts[frame].render_passes)
+                    << "a left-out clear did not take its render pass with it";
+            } else {
+                EXPECT_EQ(on.counts[frame].skipped_clears, 0u);
+                EXPECT_EQ(on.counts[frame].render_passes, off.counts[frame].render_passes);
+            }
+        }
+    }
+}
+
+namespace
+{
+
+/// A small solid layer another layer samples: the viewer covers the canvas with the source's
+/// composite. The source fades out to nothing from frame 2 on; the viewer is shown for frames 0
+/// and 1, hidden for frames 2 to 5 and shown again from frame 6. While both are hidden the
+/// source's composite is cleared for nobody: the source draws nothing into it and the viewer
+/// draws nothing out of it.
+std::filesystem::path WriteFadedSourceFixture(const std::filesystem::path& root)
+{
+    // Its alpha follows the scene time as well, so the reuse table cannot keep its composite.
+    const auto project = WriteFadeFixture(root, "vec4(g_Color, g_Alpha * (g_Time * 30.0))", "translucent", "0.2 0.4 0.6",
+                                          "export function update(value) { return engine.runtime > 0.04 ? 0.0 : 1.0; }");
+    std::ofstream(root / "shaders/fade.frag")
+        << "uniform float g_Alpha;\nuniform float g_Time;\nuniform vec3 g_Color;\nvoid main() {\n"
+           "  gl_FragColor = vec4(g_Color, g_Alpha * (g_Time * 30.0));\n}\n";
+    WriteFiles(root, {
+        { "models/viewer.json", R"({"width":384,"height":256,"material":"materials/viewer.json"})" },
+        { "materials/viewer.json",
+          R"({"passes":[{"shader":"viewer","blending":"translucent","cullmode":"nocull","depthtest":"disabled",)"
+          R"("depthwrite":"disabled","textures":["_rt_imageLayerComposite_2_a"]}]})" },
+        { "shaders/viewer.vert",
+          "uniform mat4 g_ModelViewProjectionMatrix;\nattribute vec3 a_Position;\nattribute vec2 a_TexCoord;\n"
+          "varying vec2 v_TexCoord;\nvoid main() {\n"
+          "  gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix);\n  v_TexCoord = a_TexCoord;\n}\n" },
+        { "shaders/viewer.frag",
+          "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
+          "void main() { gl_FragColor = vec4(texSample2D(g_Texture0, v_TexCoord).rgb, 1.0); }\n" },
+    });
+    auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+    layout["objects"][1]["scale"] = { 0.25, 0.25, 1 };
+    layout["objects"].push_back(
+        { { "id", 3 }, { "name", "viewer" }, { "image", "models/viewer.json" }, { "origin", { 192, 128, 0 } },
+          { "scale", { 1, 1, 1 } }, { "angles", { 0, 0, 0 } }, { "dependencies", { 2 } },
+          { "visible", { { "value", true },
+                         { "script", "export function update(value) { return !(engine.runtime > 0.04 && "
+                                     "engine.runtime < 0.11); }" } } } });
+    std::ofstream(root / "layout.json") << layout;
+    return project;
+}
+
+} // namespace
+
+TEST_F(MetalSceneDraw, AClearALayerShownAgainReadsRunsAndANewGraphGetsWhatTheClearsLeft)
+{
+    // While the viewer is hidden the source's composite is cleared for nobody, and the clear is
+    // left out; the frame the viewer is shown again, it reads the composite, so the clear runs
+    // again and the viewer shows what it would have. A graph built again while both are hidden
+    // takes over the composite as it is: the left-out clear's colour is put into it first, so
+    // the new graph starts from what the run that kept the clears holds.
+    RestoreInvisibleWorkSwitches restore;
+    MetalRender::SetTargetSharingForTests(false);
+    constexpr int kFrames = 8;
+    for (const int rebuild_at : { -1, 4 }) {
+        SCOPED_TRACE(rebuild_at < 0 ? "one graph" : "graph built again while hidden");
+        const auto root    = root_ / ("faded-source-" + std::to_string(rebuild_at + 1));
+        const auto project = WriteFadedSourceFixture(root);
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", true, false, kFrames, rebuild_at,
+                                                       "_rt_imageLayerComposite_");
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames, rebuild_at,
+                                                       "_rt_imageLayerComposite_");
+        ExpectSameFrames(off, on, kFrames);
+        EXPECT_NE(off.frames[1], off.frames[2]) << "hiding the viewer changed nothing";
+        EXPECT_NE(off.frames[1], off.frames[6]) << "the viewer shown again shows the faded source as it was";
+        ASSERT_EQ(on.counts.size(), std::size_t(kFrames));
+        for (const int frame : { 2, 3, 5 }) {
+            EXPECT_GE(on.counts[frame].skipped_clears, 1u) << "frame " << frame << ": no clear was left out";
+            EXPECT_GE(on.counts[frame].noop_draws, 1u) << "frame " << frame;
+        }
+        for (const int frame : { 6, 7 }) EXPECT_EQ(on.counts[frame].skipped_clears, 0u) << "frame " << frame;
+        if (rebuild_at < 0) continue;
+        ASSERT_FALSE(off.held.empty()) << "the fixture has no composite to carry over";
+        EXPECT_EQ(on.held, off.held) << "a composite carried into the new graph kept what a left-out clear left";
+    }
+}
+
+TEST_F(MetalSceneDraw, ACopyOfTheSceneForAHiddenLensIsLeftOutUntilTheLensIsShownAgain)
+{
+    // A lens reads the scene beneath it through a copy the graph makes for it alone. While a
+    // script hides the lens nothing reads that copy, so it is not made; the frame the lens is
+    // shown again its copy is made first, and every frame looks the same either way. With a
+    // second lens shown all along, the two copies share their images, and the one left out takes
+    // none from the set nor gives one back.
+    RestoreInvisibleWorkSwitches restore;
+    constexpr int kFrames = 8;
+    for (const bool both : { false, true }) {
+        SCOPED_TRACE(both ? "a second lens shown" : "one lens");
+        const auto root    = root_ / (std::string("hidden-lens-") + (both ? "two" : "one"));
+        const auto project = WriteFeedbackFixture(root);
+        std::ofstream(root / "shaders/metal_probe.frag")
+            << "uniform float g_Time;\nvarying vec2 v_TexCoord;\n"
+               "void main() { gl_FragColor = vec4(v_TexCoord.x, frac(v_TexCoord.y + g_Time), 0.25, 1.0); }\n";
+        auto layout = nlohmann::json::parse(std::ifstream(root / "layout.json"));
+        if (! both) layout["objects"].erase(2);
+        layout["objects"][1]["visible"] = {
+            { "value", true },
+            { "script", "export function update(value) { return !(engine.runtime > 0.04 && engine.runtime < 0.11); }" }
+        };
+        std::ofstream(root / "layout.json") << layout;
+        const auto off = DrawWithInvisibleWorkSwitches(project, root / "cache-off", true, false, kFrames, -1, {}, { 4 });
+        const auto on  = DrawWithInvisibleWorkSwitches(project, root / "cache-on", true, true, kFrames, -1, {}, { 4 });
+        ExpectSameFrames(off, on, kFrames);
+        EXPECT_NE(off.frames[1], off.frames[2]) << "hiding the lens changed nothing";
+        ASSERT_EQ(on.counts.size(), std::size_t(kFrames));
+        for (int frame = 0; frame < kFrames; ++frame) {
+            SCOPED_TRACE(frame);
+            const bool hidden = frame >= 2 && frame <= 5;
+            EXPECT_EQ(off.counts[frame].skipped_copies, 0u);
+            if (frame == 4) continue;
+            EXPECT_EQ(on.counts[frame].skipped_copies, hidden ? 1u : 0u);
+            if (hidden) {
+                EXPECT_GT(off.counts[frame].blit_passes + off.counts[frame].traded_copies,
+                          on.counts[frame].blit_passes + on.counts[frame].traded_copies)
+                    << "the hidden lens's copy was still made";
+            }
         }
     }
 }

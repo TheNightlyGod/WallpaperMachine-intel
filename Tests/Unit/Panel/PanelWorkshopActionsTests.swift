@@ -62,6 +62,54 @@ final class PanelWorkshopActionsTests: MediaPanelTestCase {
     XCTAssertFalse(controller.workshopBrowse.source.canGoBack, "choosing a list starts the history over")
   }
 
+  func testAnInstalledWallpapersAuthorOpensInDiscoverFromItsWorkshopDetails() async throws {
+    let panel = try makePanel()
+    let controller = panel.controller
+    for id in ["", "My folder", String(repeating: "9", count: 21)] {
+      do {
+        try await controller.openInstalledWorkshopAuthor(id: id)
+        XCTFail("\(id) is not a Workshop wallpaper")
+      } catch is InvalidControlValue {}
+      do {
+        try await controller.setInstalledWorkshopSubscribed(true, id: id)
+        XCTFail("\(id) is not a Workshop wallpaper")
+      } catch is InvalidControlValue {}
+    }
+
+    // The library keeps no author: Steam's details of the item name them.
+    try await controller.openInstalledWorkshopAuthor(id: OfflineProtocol.itemID)
+    let source = controller.workshopBrowse.source
+    XCTAssertEqual(source.source.key, "creator")
+    XCTAssertEqual(source.source.id, "76561198000000001")
+    XCTAssertTrue(source.canGoBack, "Back returns to the list Discover showed")
+    XCTAssertEqual(controller.navigation.selection, .workshop)
+
+    do {
+      try await controller.openInstalledWorkshopAuthor(id: "1")
+      XCTFail("Steam serves no item 1, so no author is known")
+    } catch is WorkshopFailure {}
+  }
+
+  func testSubscribingAnInstalledWallpaperNeedsASteamSignIn() async throws {
+    let panel = try makePanel()
+    do {
+      try await panel.controller.setInstalledWorkshopSubscribed(true, id: OfflineProtocol.itemID)
+      XCTFail("signed out, nothing can be subscribed")
+    } catch {}
+    XCTAssertFalse(panel.workshop.subscribedIDs.contains(OfflineProtocol.itemID))
+    XCTAssertFalse(panel.workshop.subscriptionsKnown, "signed out, no subscriptions are known")
+
+    panel.controller.signInToSteamWeb = {
+      WebSignInCookies(session: "76561198000000001%7C%7C0123456789abcdef0123")
+    }
+    try await panel.controller.steamWebSignIn()
+    await panel.controller.steamWebSignInTask?.value
+    XCTAssertNotNil(panel.workshop.steamWebSession)
+    XCTAssertFalse(
+      panel.workshop.subscriptionsKnown,
+      "Steam never answered the read, so a wallpaper without a mark may be subscribed after all")
+  }
+
   func testSubscriptionsSignInThroughSteamsPageAndSignOutForgetsTheSession() async throws {
     let panel = try makePanel()
     let controller = panel.controller
@@ -141,6 +189,32 @@ final class PanelWorkshopActionsTests: MediaPanelTestCase {
     XCTAssertTrue(browse.items.isEmpty)
     XCTAssertNotNil(browse.errorMessage, "the failed open says why, in the page and not the banner")
     XCTAssertNil(controller.errors.message)
+  }
+
+  /// Installed's **Show in Steam Workshop** for an item that is not installed: Discover's wallpapers
+  /// list with that item, whatever list was on show, and its id in the search field.
+  func testInstalledShowsAnItemThatIsNotInstalledOnTheWallpapersList() async throws {
+    let panel = try makePanel()
+    let controller = panel.controller
+    for id in ["12345", "0\(OfflineProtocol.itemID)", "https://steamcommunity.com/sharedfiles/filedetails/?id=1"] {
+      do {
+        try await controller.lookUpWorkshopItem(id: id)
+        XCTFail("\(id) is not a Workshop id as Steam writes it")
+      } catch is InvalidControlValue {}
+    }
+    try await controller.openWorkshopAuthor(id: "76561198000000001", name: "Fixture Author")
+    controller.workshopBrowser.edit(text: "night")
+
+    await controller.workshopBrowser.lookUp(itemID: OfflineProtocol.itemID).value
+    try await waitFor { !panel.workshop.isLoading && panel.workshop.hasLoaded }
+    XCTAssertEqual(controller.navigation.selection, .workshop)
+    let browse = controller.workshopBrowse
+    XCTAssertEqual(browse.source.source, .browse, "the item is looked up on the wallpapers list")
+    XCTAssertFalse(browse.source.canGoBack)
+    XCTAssertTrue(browse.isLookup)
+    XCTAssertEqual(browse.items.map(\.id), [OfflineProtocol.itemID])
+    XCTAssertEqual(controller.workshopBrowser.text, OfflineProtocol.itemID, "the field shows what is on show")
+    XCTAssertFalse(controller.workshopBrowser.hasPendingSearch, "the typing that waited is superseded")
   }
 
   /// The page says a list may be incomplete only while the grid shows one found from the links of a

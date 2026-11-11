@@ -339,6 +339,20 @@ impl EngineState {
             .ok_or_else(|| Self::not_active(handle))
     }
 
+    /// Accepts audio capability reports for live and parked renderers, including
+    /// unvisited preloads. Command lookup remains restricted to active handles.
+    pub(super) fn scene_for_audio_report_mut(&mut self, handle: SceneHandle) -> Option<&mut SceneRuntime> {
+        for record in &mut self.display_records {
+            if record.handle == Some(handle) {
+                return record.runtime.as_mut();
+            }
+            if let Some(parked) = record.parked.iter_mut().find(|parked| parked.handle == handle) {
+                return Some(&mut parked.runtime);
+            }
+        }
+        None
+    }
+
     /// Notes that the scene behind `handle` is open and what it looks like
     /// now: the slot keeps its handle, remembers the state and descriptor,
     /// and a direct assignment follows the live descriptor.

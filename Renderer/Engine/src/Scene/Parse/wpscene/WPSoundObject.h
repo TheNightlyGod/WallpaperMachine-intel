@@ -25,6 +25,11 @@ struct WPSoundObject {
     bool                     muted { false };
     bool                     startsilent { false };
     bool                     visible { true };
+    // Script-visible members nothing plays with here (no spatial audio, no editor).
+    float                    attenuation { 0.0f };
+    float                    mindistance { 0.0f };
+    bool                     muteineditor { false };
+    bool                     spatialization { false };
     std::string              name;
     /// Project property this sound's volume follows, when the user bound one.
     std::string              volume_user;
@@ -52,6 +57,10 @@ struct WPSoundObject {
         if (json.contains("maxtime")) ReadNumberSetting(json.at("maxtime"), maxtime);
         if (json.contains("muted")) ReadFlagSetting(json.at("muted"), muted);
         if (json.contains("startsilent")) ReadFlagSetting(json.at("startsilent"), startsilent);
+        if (json.contains("attenuation")) ReadNumberSetting(json.at("attenuation"), attenuation);
+        if (json.contains("mindistance")) ReadNumberSetting(json.at("mindistance"), mindistance);
+        if (json.contains("muteineditor")) ReadFlagSetting(json.at("muteineditor"), muteineditor);
+        if (json.contains("spatialization")) ReadFlagSetting(json.at("spatialization"), spatialization);
         // A sound follows no visibility binding: only the authored value counts.
         if (json.contains("visible")) ReadFlagSetting(json.at("visible"), visible);
         if (const auto level = json.find("volume"); level != json.end()) {

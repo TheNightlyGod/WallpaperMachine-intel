@@ -4,6 +4,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <memory>
 #include <vector>
@@ -113,7 +114,7 @@ TEST(FrameTimerTest, LongDeliveryGapDoesNotCatchUpSuspendedTime) {
 TEST(FrameTimerTest, ContentThatChangesLessOftenLowersTheTickRate) {
     FrameTimer timer;
     timer.SetRequiredFps(60);
-    EXPECT_EQ(timer.TickInterval(), 16666us) << "no demand keeps the configured cadence";
+    EXPECT_EQ(timer.TickInterval(), 16'666'667ns) << "no demand keeps the configured cadence";
 
     // A 30 fps video behind a 60 fps ceiling: rendering 60 times a second would
     // present every decoded frame twice.
@@ -132,11 +133,11 @@ TEST(FrameTimerTest, TheConfiguredFpsStaysTheCeiling) {
     // A 60 fps video must not make a 30 fps wallpaper render at 60: the user's
     // and the display's limit wins.
     timer.SetFrameDemand({ .content_period = 16666us });
-    EXPECT_EQ(timer.TickInterval(), 33333us);
+    EXPECT_EQ(timer.TickInterval(), 33'333'334ns);
 
     // A period equal to the ideal frame time changes nothing either.
     timer.SetFrameDemand({ .content_period = 33333us });
-    EXPECT_EQ(timer.TickInterval(), 33333us);
+    EXPECT_EQ(timer.TickInterval(), 33'333'334ns);
 }
 
 TEST(FrameTimerTest, AnUnknownOrAbsurdPeriodCannotStallTheScene) {
@@ -145,9 +146,9 @@ TEST(FrameTimerTest, AnUnknownOrAbsurdPeriodCannotStallTheScene) {
 
     // Zero is how a source says it does not know its own rate.
     timer.SetFrameDemand({ .content_period = 0us });
-    EXPECT_EQ(timer.TickInterval(), 33333us);
+    EXPECT_EQ(timer.TickInterval(), 33'333'334ns);
     timer.SetFrameDemand({ .content_period = -5s });
-    EXPECT_EQ(timer.TickInterval(), 33333us) << "a negative period is not a licence to stop";
+    EXPECT_EQ(timer.TickInterval(), 33'333'334ns) << "a negative period is not a licence to stop";
 
     // A wildly long period is clamped to the longest gap the frame clock still
     // treats as continuous playback, so the scene keeps a heartbeat.
@@ -164,7 +165,49 @@ TEST(FrameTimerTest, DroppingTheDemandRestoresTheFixedCadence) {
     // Switching to a scene that cannot prove its rate must go back to ticking
     // at the configured rate rather than inheriting the previous scene's.
     timer.SetFrameDemand({});
-    EXPECT_EQ(timer.TickInterval(), 16666us);
+    EXPECT_EQ(timer.TickInterval(), 16'666'667ns);
+}
+
+// The period of the required FPS, to the nanosecond and never shorter. In whole microseconds a
+// ceiling of 60 ticked every 16 666 us, 60.0024 times a second: one frame more than a 60 Hz
+// display shows every seven minutes, after which the drawable queue ahead of it stayed full.
+TEST(FrameTimerTest, TheCadenceIsTheExactPeriodOfTheRequiredFps) {
+    FrameTimer timer;
+    for (const u16 fps : { 24, 30, 48, 60, 75, 90, 120, 144, 240 }) {
+        timer.SetRequiredFps(fps);
+        const auto tick = timer.TickInterval();
+        EXPECT_GE(tick * fps, 1s) << fps << " fps ticks faster than asked";
+        EXPECT_LT(tick * fps, 1s + std::chrono::nanoseconds(fps)) << fps << " fps rounds by more than a nanosecond";
+        EXPECT_EQ(timer.m_timer.m_min_interval, tick) << fps << " fps: the ceiling is not the same period";
+    }
+}
+
+// A 59.94 Hz display is a 60 Hz one wherever a whole number of hertz is wanted, so its ceiling
+// reads 60. The display's own period is the floor: frames made 60 times a second would outrun
+// it. A display faster than the ceiling, or one of unknown rate, leaves the ceiling alone.
+TEST(FrameTimerTest, TheCadenceNeverOutrunsTheDisplay) {
+    FrameTimer timer;
+    timer.SetRequiredFps(60);
+    timer.SetDisplayRefreshPeriod(16'683'351ns);
+    EXPECT_EQ(timer.TickInterval(), 16'683'351ns);
+    EXPECT_EQ(timer.m_timer.m_min_interval, 16'683'351ns);
+
+    timer.SetRequiredFps(30);
+    EXPECT_EQ(timer.TickInterval(), 33'333'334ns) << "a ceiling below the display's rate is kept";
+    timer.SetRequiredFps(60);
+    EXPECT_EQ(timer.TickInterval(), 16'683'351ns) << "a new ceiling forgot the display";
+
+    timer.SetDisplayRefreshPeriod(8'333'334ns);
+    EXPECT_EQ(timer.TickInterval(), 16'666'667ns) << "a 120 Hz display slowed a 60 fps ceiling";
+    timer.SetDisplayRefreshPeriod(0ns);
+    EXPECT_EQ(timer.TickInterval(), 16'666'667ns);
+    timer.SetDisplayRefreshPeriod(-1s);
+    EXPECT_EQ(timer.TickInterval(), 16'666'667ns) << "a negative period is not a display";
+
+    // Content pacing still lengthens the cadence past the display's period.
+    timer.SetDisplayRefreshPeriod(16'683'351ns);
+    timer.SetFrameDemand({ .content_period = 33333us });
+    EXPECT_EQ(timer.TickInterval(), 33333us);
 }
 
 TEST(FrameTimerTest, ContentPacingKeepsTheSingleDrawInFlightLimit) {
@@ -877,6 +920,72 @@ TEST(ThreadTimerTest, RequestsAfterALongWaitStillRespectTheCeiling) {
 
     EXPECT_LE(during, 50 / 10 + 1) << during << " ticks in 50 ms under a 10 ms ceiling";
     EXPECT_GE(during, 3) << "requests must still be answered at the ceiling";
+}
+
+// A tick that stops its own timer cannot join its own thread. Detached, its loop went on after
+// the tick returned and found the timer running again when another thread had started it
+// meanwhile, so two loops ticked side by side; a later start waits for it to end instead.
+TEST(ThreadTimerTest, AStopFromItsOwnTickLeavesOneLoopAfterAStart) {
+    std::mutex                      mutex;
+    std::condition_variable         changed;
+    bool                            stopped_itself = false;
+    std::set<std::thread::id>       tickers;
+    std::atomic<bool>               restarted { false };
+    ThreadTimer*                    self = nullptr;
+    ThreadTimer timer([&] {
+        if (! restarted.load()) {
+            if (stopped_itself) return;
+            self->Stop();
+            {
+                std::lock_guard lock(mutex);
+                stopped_itself = true;
+            }
+            changed.notify_all();
+            // The start below comes while this tick is still running.
+            std::this_thread::sleep_for(200ms);
+            return;
+        }
+        std::lock_guard lock(mutex);
+        tickers.insert(std::this_thread::get_id());
+    });
+    self = &timer;
+    timer.SetInterval(5ms);
+    timer.Start();
+    {
+        std::unique_lock lock(mutex);
+        ASSERT_TRUE(changed.wait_for(lock, 2s, [&] { return stopped_itself; }));
+    }
+    restarted.store(true);
+    timer.Start();
+    std::this_thread::sleep_for(400ms);
+    timer.Stop();
+    std::lock_guard lock(mutex);
+    EXPECT_EQ(tickers.size(), 1u) << "after a stop from its own tick and a start, " << tickers.size()
+                                  << " loops ticked";
+}
+
+// A tick that stops its timer and starts it again keeps the one loop it runs on.
+TEST(ThreadTimerTest, AStopAndStartFromItsOwnTickKeepsItsLoop) {
+    std::mutex                mutex;
+    std::set<std::thread::id> tickers;
+    std::atomic<int>          ticks { 0 };
+    ThreadTimer*              self = nullptr;
+    ThreadTimer timer([&] {
+        if (ticks.fetch_add(1) == 0) {
+            self->Stop();
+            self->Start();
+        }
+        std::lock_guard lock(mutex);
+        tickers.insert(std::this_thread::get_id());
+    });
+    self = &timer;
+    timer.SetInterval(5ms);
+    timer.Start();
+    std::this_thread::sleep_for(200ms);
+    timer.Stop();
+    EXPECT_GT(ticks.load(), 5) << "the restarted timer stopped ticking";
+    std::lock_guard lock(mutex);
+    EXPECT_EQ(tickers.size(), 1u) << tickers.size() << " loops ticked";
 }
 
 

@@ -8,6 +8,9 @@ struct PanelEmptyState<Actions: View>: View {
   private let detail: Text?
   private let actions: Actions
   private var selectsText = false
+  private var art: SeasonalArt?
+
+  @Environment(\.panelTheme) private var theme
 
   /// For fixed wording, which is looked up in the catalog.
   init(
@@ -40,6 +43,14 @@ struct PanelEmptyState<Actions: View>: View {
     return copy
   }
 
+  /// Lets a seasonal look draw its picture of `art` in place of the symbol while it is on. Only for
+  /// a state that means "nothing here"; an error keeps its symbol whatever the season.
+  func seasonalArt(_ art: SeasonalArt) -> Self {
+    var copy = self
+    copy.art = art
+    return copy
+  }
+
   var body: some View {
     // `ContentUnavailableView` asks for about 260 points of width whatever it is given, which in a
     // page beside an open inspector would make the window wider than it is. Reading the width the
@@ -49,7 +60,11 @@ struct PanelEmptyState<Actions: View>: View {
         Label {
           title.modifier(EmptyStateSelection(isEnabled: selectsText))
         } icon: {
-          Image(systemName: systemImage)
+          if let art, let season = theme.season {
+            SeasonalArtwork(name: art.imageName(in: season))
+          } else {
+            Image(systemName: systemImage)
+          }
         }
       } description: {
         detail.modifier(EmptyStateSelection(isEnabled: selectsText))
@@ -58,6 +73,55 @@ struct PanelEmptyState<Actions: View>: View {
       }
       .frame(width: proxy.size.width, height: proxy.size.height)
     }
+  }
+}
+
+/// What an empty state is about, for a season to draw a picture of.
+enum SeasonalArt {
+  /// Nothing in the library yet.
+  case emptyLibrary
+  /// A search or filters that match nothing.
+  case noResults
+
+  /// The asset catalog image set of the silhouette in `season`.
+  func imageName(in season: Season) -> String {
+    switch (season, self) {
+    case (.halloween, .emptyLibrary): "HalloweenFrame"
+    case (.halloween, .noResults): "HalloweenCat"
+    }
+  }
+}
+
+/// A papercut cameo: the season's silhouette on a strip of ground in front of the full moon, cut out
+/// in a ring of the horizon's ink. The moon carries it on either appearance.
+private struct SeasonalArtwork: View {
+  let name: String
+
+  var body: some View {
+    let ink = SeasonHorizon.ink.color
+    ZStack(alignment: .bottom) {
+      SeasonHorizon.moon.color
+      ink.frame(height: 22)
+      Image(name)
+        .resizable()
+        .interpolation(.high)
+        .scaledToFit()
+        .frame(height: 96)
+        .padding(.bottom, 16)
+    }
+    .frame(width: 132, height: 132)
+    .clipShape(Circle())
+    .padding(4)
+    .overlay { Circle().strokeBorder(ink, lineWidth: 2) }
+    .background {
+      Circle()
+        .fill(
+          RadialGradient(
+            colors: [SeasonHorizon.moon.color.opacity(0.3), SeasonHorizon.moon.color.opacity(0)],
+            center: .center, startRadius: 66, endRadius: 100))
+        .frame(width: 200, height: 200)
+    }
+    .accessibilityHidden(true)
   }
 }
 

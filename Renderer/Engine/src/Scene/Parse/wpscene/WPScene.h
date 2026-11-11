@@ -2,6 +2,8 @@
 #include <array>
 #include <cstdint>
 #include <unordered_map>
+#include <string>
+#include <vector>
 #include <cstdint>
 #include "WPJson.hpp"
 #include <nlohmann/json.hpp>
@@ -26,6 +28,7 @@ public:
     std::array<float, 3> center { 0.0f, 0.0f, 0.0f };
     std::array<float, 3> eye { 0.0f, 0.0f, 1.0f };
     std::array<float, 3> up { 0.0f, 1.0f, 0.0f };
+    std::vector<std::string> paths;
 };
 
 class WPSceneGeneral {
@@ -38,6 +41,7 @@ public:
     nlohmann::json       clearcolor_setting;
     bool                 dynamic_clearcolor { false };
     bool                 clearenabled { true };
+    bool                 camerafade { true };
     bool                 camerashake { false };
     float                camerashakeamplitude { 0.5f };
     float                camerashakespeed { 3.0f };
@@ -65,7 +69,7 @@ public:
     float                zoom { 1.0f };
     nlohmann::json       zoom_setting;
     float                fov { 50.0f };
-    float                nearz { 0.01f };
+    float                nearz { 0.1f }; // WE sub_140186C90 +332
     float                farz { 10000.0f };
     // Black, as Wallpaper Engine leaves them when a scene omits them.
     std::array<float, 3> ambientcolor { 0.0f, 0.0f, 0.0f };
@@ -98,14 +102,19 @@ public:
 
     float perspectiveoverridefov { 0.0f };
 
-    // Forces particles feel. Gravity pulls down (-y) and wind blows along +z unless told otherwise.
+    // Wind and gravity, with Wallpaper Engine's defaults (sub_140186C90 +992..+1024).
     bool                 windenabled { false };
-    std::array<float, 3> winddirection { 0.0f, 0.0f, 1.0f };
-    float                windstrength { 0.0f };
+    std::array<float, 3> winddirection { 0.70710677f, 0.70710677f, 0.0f };
+    float                windstrength { 1.0f };
     std::array<float, 3> gravitydirection { 0.0f, -1.0f, 0.0f };
-    float                gravitystrength { 0.0f };
+    float                gravitystrength { 1.0f };
+    // Retain only driven force members; ordinary/default scenes add no driver work.
+    nlohmann::json force_settings;
 
     bool transparentsorting { false };
+    // Layers are drawn in the order of their `sortorder` (kept for the draw-order work; the
+    // script member `sortorder` rebuilds the graph only when this is on).
+    bool customsortorder { false };
 
     // Distance fog is off unless the scene file turns it on; the settings below keep their own
     // defaults either way.
@@ -122,8 +131,8 @@ public:
     float                fogheightenddensity { 1.0f };
     std::array<float, 3> fogheightcolor { 0.0f, 0.0f, 0.0f };
     nlohmann::json       lightconfig;
-    // The settings the lighting and the height fog read from, whole, for the ones a user
-    // property may be bound to. The scene reads the property once, as it loads.
+    // The settings the lighting and the fog read from, whole, for the ones a script or a user
+    // property drives: the scene follows them every frame (`SceneRuntimeContext::RegisterSceneUniform`).
     nlohmann::json       ambientcolor_setting;
     nlohmann::json       skylightcolor_setting;
     nlohmann::json       fogheightstart_setting;
@@ -131,6 +140,11 @@ public:
     nlohmann::json       fogheightstartdensity_setting;
     nlohmann::json       fogheightenddensity_setting;
     nlohmann::json       fogheightcolor_setting;
+    nlohmann::json       fogdistancestart_setting;
+    nlohmann::json       fogdistanceend_setting;
+    nlohmann::json       fogdistancestartdensity_setting;
+    nlohmann::json       fogdistanceenddensity_setting;
+    nlohmann::json       fogdistancecolor_setting;
 };
 
 class WPScene {

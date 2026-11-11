@@ -74,6 +74,7 @@ void Step(const std::vector<json>& operators, const ParticleParseContext& ctx,
     info.particles = particles;
     info.time      = 0.0;
     info.time_pass = 0.0;
+    info.time_pass_scaled = 0.0;
     for (const auto& record : operators)
         WPParticleParser::genParticleOperatorOp(record, ctx)(info);
 }

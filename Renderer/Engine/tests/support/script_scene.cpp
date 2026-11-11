@@ -87,6 +87,9 @@ struct ScriptScene::Impl {
         request.project_path                = project_file;
         request.project_properties          = &merged;
         request.authored_project_properties = &authored;
+        request.storage_directory           = options.storage_directory;
+        request.storage_screen_key          = options.storage_screen_key;
+        request.storage_read_only           = options.storage_read_only;
 
         Random::seed(1);
         WPSceneParser parser;
@@ -215,13 +218,15 @@ std::vector<bool> ScriptScene::EffectVisibility()
     return flags;
 }
 
-std::vector<float> ScriptScene::EffectConstant(std::size_t effect, const std::string& uniform)
+std::vector<float> ScriptScene::EffectConstant(std::size_t effect, const std::string& uniform, std::size_t pass)
 {
     for (auto* chain : impl_->Chains()) {
         if (chain->EffectCount() <= effect) continue;
         const auto& held = chain->GetEffect(effect);
-        if (held == nullptr || held->nodes.empty()) continue;
-        auto* node = held->nodes.front().sceneNode.get();
+        if (held == nullptr || pass >= held->nodes.size()) continue;
+        auto position = held->nodes.begin();
+        std::advance(position, static_cast<std::ptrdiff_t>(pass));
+        auto* node = position->sceneNode.get();
         if (node == nullptr || node->Mesh() == nullptr) continue;
         const auto material = node->Mesh()->MaterialSlotPtr(0);
         if (material == nullptr) continue;

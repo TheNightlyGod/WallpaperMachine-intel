@@ -50,6 +50,10 @@ struct DisplayPlaylist: Codable, Equatable, Sendable {
     /// Minutes between changes; one of `intervals` or a custom value in `intervalRange`.
     /// An `unlock` rotation keeps it, so choosing a time again shows the last one.
     var interval = 30
+    /// Whether a timed change that falls due while a video plays on the display waits for the
+    /// clip to reach its end, so it is never cut mid-scene. Off for a playlist saved before it
+    /// existed.
+    var waitsForClipEnd = false
     var wallpaperIDs: [String] = []
     var collectionID: String?
     /// Saved plan identity; an actual manual edit detaches the display's copy.
@@ -71,6 +75,7 @@ struct DisplayPlaylist: Codable, Equatable, Sendable {
         trigger = (try? container.decodeIfPresent(PlaylistTrigger.self, forKey: .trigger)) ?? fallback.trigger
         let interval = (try? container.decodeIfPresent(Int.self, forKey: .interval)) ?? fallback.interval
         self.interval = Self.intervalRange.contains(interval) ? interval : fallback.interval
+        waitsForClipEnd = (try? container.decodeIfPresent(Bool.self, forKey: .waitsForClipEnd)) ?? fallback.waitsForClipEnd
         wallpaperIDs = (try? container.decodeIfPresent([String].self, forKey: .wallpaperIDs)) ?? []
         collectionID = try? container.decodeIfPresent(String.self, forKey: .collectionID)
         planID = try? container.decodeIfPresent(String.self, forKey: .planID)

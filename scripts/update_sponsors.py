@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Rewrite the READMEs' Supporter list from the website's sponsor wall.
+"""Rewrite the READMEs' Supporter list from the website's thank-you wall.
 
-The website lists every Supporter who turned the listing on in their account and
-still holds a purchase that was not refunded, earliest first, and counts the ones
-who stay private (https://www.wallpapermachine.app/#sponsors). It serves the same
+The website lists every Priority Support member who turned the listing on in their
+account and still holds a purchase that was not refunded, earliest first, and counts
+the ones who stay private (https://www.wallpapermachine.app/#sponsors). It serves the same
 list, names and months only, at /api/sponsors, with a version that changes whenever
 the wall does, and draws the wall as one picture at /sponsors/wall: its portraits,
 names and months on the brand wallpaper. This reads the list and rewrites the block
 between the `supporters:start` and `supporters:end` markers under README.md's
-"Thank you. To every Supporter." heading, and under its translation's in
-README.zh-CN.md: the picture, linked to the wall, at /sponsors/wall?v=<version>, so
+"Thank you. To every Priority Support member." heading, and under its translations' in
+README.zh-CN.md, README.pt-BR.md and README.ko.md: the picture, linked to the wall, at /sponsors/wall?v=<version>, so
 GitHub's image proxy fetches it again when the wall changes, with every listed name
-and the count in its alt text. A Supporter who turns the listing on, off, renames it
+and the count in its alt text. A member who turns the listing on, off, renames it
 or changes their picture is followed here too. Nothing outside the markers changes.
 
     python3 scripts/update_sponsors.py                       # read the live wall, rewrite the list
@@ -40,8 +40,8 @@ from lib.glyphs import markers
 from lib.paths import ROOT
 
 MARK = markers()
-# Every README that carries the list: the English page and its translation.
-READMES = (ROOT / "README.md", ROOT / "README.zh-CN.md")
+# Every README that carries the list: the English page and its translations.
+READMES = (ROOT / "README.md", ROOT / "README.zh-CN.md", ROOT / "README.pt-BR.md", ROOT / "README.ko.md")
 SOURCE = "https://www.wallpapermachine.app/api/sponsors"
 # The picture and the wall it links to, on the same site as the list.
 PICTURE_PATH = "/sponsors/wall"
@@ -50,11 +50,11 @@ VERSION = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 USER_AGENT = "WallpaperMachine/1.0 (README Supporter list; scripts/update_sponsors.py)"
 TIMEOUT_SECONDS = 30
 
-START = "<!-- supporters:start: written by scripts/update_sponsors.py from the website's sponsor wall; edits here are overwritten -->"
+START = "<!-- supporters:start: written by scripts/update_sponsors.py from the website's thank-you wall; edits here are overwritten -->"
 END = "<!-- supporters:end -->"
 BLOCK = re.compile(r"<!-- supporters:start\b.*?-->.*?<!-- supporters:end -->", re.DOTALL)
 
-# Characters HTML or Markdown give a meaning. Names are the Supporters' own words, so
+# Characters HTML or Markdown give a meaning. Names are the members' own words, so
 # none of them may become a tag, a link, an image or one of the markers above.
 SIGNIFICANT = re.compile(r"[&<>\"'`*_\[\]()\\~|#!]")
 # Control and format characters, which the website already drops from names.
@@ -62,7 +62,7 @@ INVISIBLE = re.compile(r"[\x00-\x1f\x7f-\x9f\u200b\u200e\u200f\u202a-\u202e\u206
 
 
 class Wall(NamedTuple):
-    """The sponsor wall: listed names, earliest first, the private count and the
+    """The thank-you wall: listed names, earliest first, the private count and the
     version the website gives the wall's current state."""
 
     names: tuple[str, ...]
@@ -126,20 +126,20 @@ def count_line(wall: Wall) -> str:
     """The count, as the website words it over the wall and in the picture."""
     shown = len(wall.names)
     if shown:
-        line = f"{plural(shown, 'Supporter', 'Supporters')} on the wall."
+        line = f"{plural(shown, 'Priority Support member', 'Priority Support members')} on the wall."
         if wall.hidden:
-            line += f" {plural(wall.hidden, 'more supports', 'more support')} privately."
+            line += f" {plural(wall.hidden, 'more stays', 'more stay')} private."
         return line
     if wall.hidden:
-        return f"{plural(wall.hidden, 'Supporter', 'Supporters')} so far, all private."
+        return f"{plural(wall.hidden, 'Priority Support member', 'Priority Support members')} so far, all private."
     return "No one is on the wall yet."
 
 
 def alt_text(wall: Wall) -> str:
     """What the picture shows, in words: every listed name, then the count."""
     if wall.names:
-        return f"WallpaperMachine Supporters: {', '.join(wall.names)}. {count_line(wall)}"
-    return f"WallpaperMachine Supporters. {count_line(wall)}"
+        return f"WallpaperMachine Priority Support members: {', '.join(wall.names)}. {count_line(wall)}"
+    return f"WallpaperMachine Priority Support members. {count_line(wall)}"
 
 
 def render(wall: Wall, source: str = SOURCE) -> str:
@@ -167,7 +167,7 @@ def rewrite(text: str, wall: Wall, source: str = SOURCE) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--source", default=SOURCE, help=f"the sponsor wall's JSON (default {SOURCE})")
+    parser.add_argument("--source", default=SOURCE, help=f"the thank-you wall's JSON (default {SOURCE})")
     parser.add_argument("--input", type=Path, help="read the wall from this JSON file instead of --source")
     parser.add_argument("--check", action="store_true", help="change nothing; exit 1 when a README is out of date")
     args = parser.parse_args()
@@ -192,7 +192,7 @@ def main() -> int:
         print(f"{MARK.missing} Could not update the Supporter list: {error}", file=sys.stderr)
         return 1
 
-    summary = f"{plural(len(wall.names), 'Supporter', 'Supporters')} listed, {wall.hidden:,} private"
+    summary = f"{plural(len(wall.names), 'member', 'members')} listed, {wall.hidden:,} private"
     names = ", ".join(readme.name for readme, _ in changes)
     if not changes:
         print(f"{MARK.ok} The READMEs are up to date: {summary}.")

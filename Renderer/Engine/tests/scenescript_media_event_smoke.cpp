@@ -36,106 +36,36 @@ RuntimeWithProbeNodes CreateRuntimeWithProbeNodes() {
     return fixture;
 }
 
-// A desktop with no player is not a desktop with no state: Wallpaper Engine's
-// media widgets hide themselves on `PLAYBACK_STOPPED`, so a scene that is never
-// told nothing plays keeps them on screen. The app's default, and any machine
-// without a player, is exactly that scene.
-TEST(SceneScriptMediaEventSmoke, ASceneNoPlayerFeedsIsToldNothingIsPlayingOnItsFirstTick) {
+// Wallpaper Engine tells a scene's scripts about media only when the media
+// integration queued a real update (`sub_140171440` drains that queue and calls
+// `sub_140177AD0` per changed field; an empty queue sends nothing). A desktop with no
+// player therefore hears no media event at all, and a widget that counts what it
+// heard -- 3662790108's time readout prints "0:00 / 0:00" until a handler runs --
+// keeps its initial state.
+TEST(SceneScriptMediaEventSmoke, ASceneWithNoPlayerHearsNoMediaEvent) {
     auto fixture = CreateRuntimeWithProbeNodes();
     ASSERT_NE(fixture.runtime, nullptr);
 
     fixture.runtime->RegisterSceneScript(
         R"JS(
-var playbackCalls = 0;
-function mediaPlaybackChanged(event) {
-  playbackCalls++;
-  scene.getObject('exportedProbe').visible =
-      playbackCalls === 1 && event.state === MediaPlaybackEvent.PLAYBACK_STOPPED;
-}
-
-scene.on('mediaPropertiesChanged', function(event) {
-  scene.getObject('callbackProbe').visible = event.title === '' && event.artist === '';
-});
+var n = 0;
+function mediaPlaybackChanged() { n++; }
+function mediaPropertiesChanged() { n++; }
+function mediaStatusChanged() { n++; }
+function mediaThumbnailChanged() { n++; }
+function mediaTimelineChanged() { n++; }
+function update() { scene.getObject('exportedProbe').visible = n === 0; }
 )JS",
         "");
     ASSERT_EQ(fixture.runtime->sceneScriptCount(), 1u);
-    ASSERT_FALSE(fixture.runtime->MediaIntegrationEnabled());
-    EXPECT_FALSE(fixture.runtime->NodeVisible("exportedProbe")) << "told before the scene ran";
 
     fixture.runtime->Tick(1.0 / 60.0);
-    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe")) << "never told that nothing plays";
-    EXPECT_TRUE(fixture.runtime->NodeVisible("callbackProbe")) << "never told there is no track";
-
-    // Said once: a second frame is not a second change of state.
     fixture.runtime->Tick(1.0 / 60.0);
-    fixture.runtime->Tick(1.0 / 60.0);
-    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe")) << "told again on a later frame";
-
-    // It is the scene's own idle, not the user's consent: what a player really
-    // reports is still dropped while the setting is off.
-    fixture.runtime->DispatchMediaEventJson(R"({"type":"mediaPlaybackChanged","state":1})");
-    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe")) << "a real event got past the setting";
+    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe")) << "a media event arrived with no player";
     EXPECT_EQ(fixture.runtime->scriptErrorCount(), 0u);
 }
 
-TEST(SceneScriptMediaEventSmoke, ARealStateTheSceneHeardBeforeItsFirstTickIsNotRepeatedAsIdle) {
-    auto fixture = CreateRuntimeWithProbeNodes();
-    ASSERT_NE(fixture.runtime, nullptr);
-
-    fixture.runtime->RegisterSceneScript(
-        R"JS(
-var playbackCalls = 0;
-function mediaPlaybackChanged(event) {
-  playbackCalls++;
-  scene.getObject('exportedProbe').visible =
-      playbackCalls === 1 && event.state === MediaPlaybackEvent.PLAYBACK_PLAYING;
-}
-
-var titleCalls = 0;
-scene.on('mediaPropertiesChanged', function(event) {
-  titleCalls++;
-  scene.getObject('callbackProbe').visible = titleCalls === 1 && event.title === 'Real';
-});
-)JS",
-        "");
-    fixture.runtime->SetMediaIntegrationEnabled(true);
-    fixture.runtime->DispatchMediaEventJson(R"({"type":"mediaPlaybackChanged","state":1})");
-    fixture.runtime->DispatchMediaEventJson(R"({"type":"mediaPropertiesChanged","title":"Real"})");
-
-    fixture.runtime->Tick(1.0 / 60.0);
-    fixture.runtime->Tick(1.0 / 60.0);
-    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe"))
-        << "the idle state was sent over a player that was already playing";
-    EXPECT_TRUE(fixture.runtime->NodeVisible("callbackProbe"))
-        << "the idle state was sent over a track that was already known";
-    EXPECT_EQ(fixture.runtime->scriptErrorCount(), 0u);
-}
-
-TEST(SceneScriptMediaEventSmoke, TheIdleStateFillsInOnlyWhatNoRealEventSaid) {
-    auto fixture = CreateRuntimeWithProbeNodes();
-    ASSERT_NE(fixture.runtime, nullptr);
-
-    fixture.runtime->RegisterSceneScript(
-        R"JS(
-function mediaPlaybackChanged(event) {
-  scene.getObject('exportedProbe').visible = event.state === MediaPlaybackEvent.PLAYBACK_STOPPED;
-}
-
-scene.on('mediaPropertiesChanged', function(event) {
-  scene.getObject('callbackProbe').visible = event.title === 'Real';
-});
-)JS",
-        "");
-    fixture.runtime->SetMediaIntegrationEnabled(true);
-    // A host that knew the track but not yet whether it plays.
-    fixture.runtime->DispatchMediaEventJson(R"({"type":"mediaPropertiesChanged","title":"Real"})");
-
-    fixture.runtime->Tick(1.0 / 60.0);
-    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe")) << "the unknown state was left unsaid";
-    EXPECT_TRUE(fixture.runtime->NodeVisible("callbackProbe")) << "the known track was blanked";
-}
-
-TEST(SceneScriptMediaEventSmoke, ARealEventAfterTheIdleStateIsDeliveredLikeAnyOther) {
+TEST(SceneScriptMediaEventSmoke, ARealEventIsDeliveredOnceTheSettingIsOn) {
     auto fixture = CreateRuntimeWithProbeNodes();
     ASSERT_NE(fixture.runtime, nullptr);
 
@@ -148,14 +78,15 @@ function mediaPlaybackChanged(event) {
 )JS",
         "");
     fixture.runtime->Tick(1.0 / 60.0);
-    EXPECT_FALSE(fixture.runtime->NodeVisible("exportedProbe"));
-    EXPECT_TRUE(fixture.runtime->NodeVisible("callbackProbe")) << "the idle state did not arrive";
+    // What a player reports is dropped while the setting is off.
+    fixture.runtime->DispatchMediaEventJson(R"({"type":"mediaPlaybackChanged","state":1})");
+    EXPECT_FALSE(fixture.runtime->NodeVisible("exportedProbe")) << "a real event got past the setting";
 
     // The user turns the setting on while the scene runs and a player reports.
     fixture.runtime->SetMediaIntegrationEnabled(true);
     fixture.runtime->DispatchMediaEventJson(R"({"type":"mediaPlaybackChanged","state":1})");
     fixture.runtime->Tick(1.0 / 60.0);
-    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe")) << "the idle state kept the real one out";
+    EXPECT_TRUE(fixture.runtime->NodeVisible("exportedProbe"));
     EXPECT_FALSE(fixture.runtime->NodeVisible("callbackProbe"));
 }
 

@@ -1,16 +1,17 @@
-# Keep the release build's caches alive between releases.
+# Keep the release build's caches current between releases.
 #
-# GitHub evicts a cache entry nobody has read for seven days, and a release after a
-# quiet week would then rebuild the C++ scene engine and the renderer from
-# nothing. This builds the renderer through the same setup Build uses, which reads
-# every entry and refreshes the C++ object cache. Scheduled runs use main, whose
-# caches every ref, including release tags, can read. It publishes nothing.
+# The release build only restores its caches, so they come from here: this builds the
+# renderer through the same setup Build uses and saves a new renderer build and C++
+# object cache for each macOS. A release then rebuilds only the renderer sources that
+# changed since the last of these runs (scripts/source_times.py). GitHub also evicts an
+# entry nobody has read for seven days. Scheduled runs use main, whose caches every ref,
+# including release tags, can read. It publishes nothing.
 name: Warm caches
 
 on:
   schedule:
-    # Twice a week keeps every entry well inside the seven-day window.
-    - cron: "17 3 * * 1,4"
+    # Daily, so a release's renderer build is at most a day behind main.
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -34,6 +35,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/prepare-build
+        with:
+          save-renderer-cache: "true"
+          reuse-renderer-build: "true"
 
       - name: Build the renderer and bridge
         run: python3 scripts/build.py --renderer-only

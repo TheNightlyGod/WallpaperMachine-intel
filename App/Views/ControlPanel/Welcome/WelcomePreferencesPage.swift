@@ -23,6 +23,9 @@ struct WelcomePreferencesPage: View {
         batteryRow(shown: shown, locked: isCommitting)
         keepWindowsRow(shown: shown, locked: isCommitting)
         performanceDataRow(shown: shown)
+        WelcomePreferenceRow(symbol: "arrow.down.circle", color: .blue, title: Text("Update mode")) {
+          note(Text(verbatim: controller.updater.mode.explanation))
+        } control: { UpdateModePicker() }
         lockScreenRow(lock: lock, row: lockRow)
       }
       .welcomeSurface()

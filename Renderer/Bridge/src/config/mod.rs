@@ -5,12 +5,14 @@ pub mod writer;
 
 pub use app::{
     AppConfig, BatteryModeCfg, FilterCfg, GeneralCfg, MonitorCfg, MonitorSettingsCfg, PowerCfg,
-    QualityCfg, QualityInForce, QualityProfileCfg, SceneResolutionCfg, SerializedSelector, UiCfg,
+    MsaaCfg, PostProcessingCfg, QualityCfg, QualityInForce, QualityLevelCfg, QualityProfileCfg,
+    SceneQualityCfg, SceneResolutionCfg, SerializedSelector, UiCfg,
     WindowGeom, clamp_render_scale,
 };
 pub use store::{ConfigLoad, ConfigStore};
 pub use wallpaper::{
-    AudioCfg, FramingCfg, MEDIA_INTEGRATION_DEFAULT, MonitorRender, WallpaperConfig,
+    AudioCfg, EngineOptionId, EngineOptionsCfg, FramingCfg, MEDIA_INTEGRATION_DEFAULT,
+    MonitorRender, WallpaperConfig, is_image_filter_name,
 };
 
 pub(crate) fn resolve_frame_rate(frame_rate: Option<u32>, refresh_hz: u32) -> u32 {

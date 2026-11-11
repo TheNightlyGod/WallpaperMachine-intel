@@ -10,8 +10,8 @@ enum SidebarSelection: String {
 
 /// The Settings sections, in the order of Settings' section list.
 enum SettingsSection: String, CaseIterable {
-  case quick, general, appearance, desktop, playback, performance, displays, shortcuts, library,
-    storage, about
+  case quick, general, appearance, desktop, widgets, playback, performance, displays, shortcuts,
+    library, storage, about
 }
 
 /// What the panel remembers across a closed window: the section on show, the target display and
@@ -27,6 +27,9 @@ final class ControlPanelNavigation: ObservableObject {
   /// window when the panel is reopened. Memory only, and not `@Published`: nothing in SwiftUI
   /// reads it, the window writes it as the person types and scrolls.
   var viewState: PanelViewState?
+  /// The open panel, which View › Zoom In, Zoom Out and Actual Size act on; nil while no panel is
+  /// open, which leaves those items disabled. Set by `PanelController.start()`, cleared by `stop()`.
+  weak var tileZoomTarget: PanelController?
   /// The Settings reveal a panel last acted on, so a window opened afterwards starts on Quick
   /// Settings instead of repeating it. Not `@Published`: only `SettingsModel.adoptReveal` uses it.
   var handledSettingsRevealToken: UInt64 = 0
@@ -40,9 +43,9 @@ final class ControlPanelNavigation: ObservableObject {
 }
 
 /// The panel's root: creates the controller for the window's lifetime and shows the panel. The six
-/// store arguments are what `AppDelegate` builds it with; `defaults` and `appLanguage` are the
-/// seams a test passes so the panel never touches the installed app's preferences and can be
-/// rendered in any language.
+/// store arguments are what `AppDelegate` builds it with; `defaults`, `appLanguage` and
+/// `searchTranslation` are the seams a test passes so the panel never touches the installed app's
+/// preferences or this Mac's Translation framework and can be rendered in any language.
 ///
 /// The window gives the controller its life: it starts when the view appears and stops when the
 /// window closes. Everything the panel draws is `PanelRootView` and what it hosts.
@@ -52,13 +55,14 @@ struct ControlPanelView: View {
   init(
     store: BridgeStore, navigation: ControlPanelNavigation, workshop: WorkshopStore,
     pixiv: PixivStore, updater: AppUpdateStore, imports: LibraryImportStore,
-    defaults: UserDefaults = ClientPreferences.defaults, appLanguage: AppLanguageStore? = nil
+    defaults: UserDefaults = ClientPreferences.defaults, appLanguage: AppLanguageStore? = nil,
+    searchTranslation: WorkshopSearchTranslator? = nil
   ) {
     let controller = PanelController(
       store: store, navigation: navigation, workshop: workshop, pixiv: pixiv, updater: updater,
       imports: imports, defaults: defaults, appLanguage: appLanguage, automations: .shared,
       solarLocationTracker: .shared,
-      displayLayouts: .shared, spaces: .shared)
+      displayLayouts: .shared, spaces: .shared, searchTranslation: searchTranslation)
     // The panel's strings follow the language of the store the controller was built over.
     PanelLocale.shared.bind(to: controller.appLanguage)
     _controller = State(initialValue: controller)
@@ -69,6 +73,7 @@ struct ControlPanelView: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .environment(controller)
       .environment(\.panelImages, controller.images)
+      .environment(\.panelTileWidth, TileGridLayout.preferredWidth(zoom: controller.tileZoom))
       .background(WindowObserver { controller.presentation.attach(to: $0) })
       .onAppear { controller.start() }
       .onDisappear { controller.stop() }

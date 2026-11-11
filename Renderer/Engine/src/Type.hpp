@@ -49,11 +49,18 @@ enum class TextureFormat
     BC1,
     BC2,
     BC3,
-    RGB8,
     RGBA8,
     RG8,
     R8,
-    RGBA16F
+    RGBA16F,
+    RG16F,
+    R16F,
+    BC7,
+    RGB10A2,
+    RGBA16,
+    RGBA16S,
+    /// A depth render target the scene samples (the shadow atlas): 32-bit float depth.
+    Depth32F
 };
 /// Decodes diagnostic readback samples without a platform half-float ABI.
 float HalfFloatToFloat(uint16_t bits);
@@ -64,7 +71,35 @@ enum class BlendMode
     Translucent,
     Additive,
     Normal,
-    AlphaToCoverage
+    AlphaToCoverage,
+    /// Wallpaper Engine's translucent blend with device flag 0x100 (`sub_14009B100`):
+    /// colour DEST_COLOR / INV_SRC_ALPHA, alpha ONE / ONE. Never authored; a puppet's
+    /// nested clipping masks are multiplied together with it (`sub_14020D6A0`).
+    Multiply
+};
+
+/// How a blended draw combines its alpha with the target's (Wallpaper Engine 2.8.0.42,
+/// `sub_140099F60`). The colour factors always come from the material's `BlendMode`.
+enum class AlphaBlendRule : uint8_t
+{
+    /// The material's own alpha factors: translucent is SRC_ALPHA / INV_SRC_ALPHA, so a
+    /// translucent draw leaves `As*As + Ad*(1-As)`.
+    Material,
+    /// ONE / INV_SRC_ALPHA: `As + Ad*(1-As)`. A layer's own picture into its composite,
+    /// which Wallpaper Engine draws like the first pass of an effect chain (`sub_1401EA500`).
+    SourceOver,
+    /// BlendOpAlpha MAX with ONE / ONE: the children of a layer whose `copybackground` is off
+    /// (`sub_1401ECB20`, `sub_140207B50`). Only blended modes are affected.
+    Max,
+};
+
+/// A material pass's `alphawriting` (`sub_1401577E0`: default 0, enabled 1, disabled 2; an
+/// unknown or differently cased word is the default).
+enum class AlphaWriting : uint8_t
+{
+    Default,
+    Enabled,
+    Disabled,
 };
 
 enum class CullMode
@@ -102,7 +137,9 @@ enum class FillMode
 enum class TextureWrap
 {
     CLAMP_TO_EDGE,
-    REPEAT
+    REPEAT,
+    // Outside [0,1] reads transparent black (D3D BORDER with colour 0,0,0,0).
+    CLAMP_TO_BORDER
 };
 
 enum class TextureFilter
@@ -122,6 +159,10 @@ struct TextureSample {
     // sample that merely has both filters on NEAREST (the default, or a target
     // made for one reason or another) is not that request.
     TextureFilter mipFilter { TextureFilter::LINEAR };
+    // 1 = no anisotropic filtering.
+    uint8_t maxAnisotropy { 1 };
+    // A comparison sampler (shadow maps): D3D func 5, GREATER.
+    enum class Compare : uint8_t { None, Greater } compare { Compare::None };
 };
 
 enum class VertexType

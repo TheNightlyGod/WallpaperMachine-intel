@@ -146,34 +146,17 @@ struct WorkshopEmptyStateView: View {
     let model = controller.workshopBrowser
     switch state {
     case .signInToSeeSubscriptions(let isSigningIn):
-      PanelEmptyState(
-        verbatim: L("Sign in to see your subscriptions"), systemImage: "person.crop.circle",
+      signIn(
+        title: L("Sign in to see your subscriptions"),
         description: L(
           "Steam shows the wallpapers you subscribe to only to you. You sign in on Steam’s own page; WallpaperMachine keeps the session only until it quits, and uses it only to read this list."
-        )
-      ) {
-        VStack(spacing: 12) {
-          Text("This is separate from the SteamCMD sign-in in Settings, which only downloads wallpapers.")
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-          if isSigningIn {
-            Button {
-              model.signInToSteam()
-            } label: {
-              Label("Show sign-in window", systemImage: "person.crop.circle.badge.checkmark")
-            }
-            .buttonStyle(.panelSecondary)
-          } else {
-            Button {
-              model.signInToSteam()
-            } label: {
-              Label("Sign in to Steam…", systemImage: "person.crop.circle.badge.checkmark")
-            }
-            .buttonStyle(.panelPrimary)
-          }
-        }
-      }
+        ), isSigningIn: isSigningIn, model: model)
+    case .signInToSeeFavorites(let isSigningIn):
+      signIn(
+        title: L("Sign in to see your favorites"),
+        description: L(
+          "Your favorites are read from your own Steam account. You sign in on Steam’s own page, and WallpaperMachine uses the session only to read your lists."
+        ), isSigningIn: isSigningIn, model: model)
     case .loading:
       PanelEmptyState(
         verbatim: L("Loading Workshop"), systemImage: "storefront",
@@ -198,6 +181,36 @@ struct WorkshopEmptyStateView: View {
     }
   }
 
+  /// A personal list with no Steam session: why it needs one, and the sign-in.
+  @ViewBuilder
+  private func signIn(
+    title: String, description: String, isSigningIn: Bool, model: WorkshopBrowserModel
+  ) -> some View {
+    PanelEmptyState(verbatim: title, systemImage: "person.crop.circle", description: description) {
+      VStack(spacing: 12) {
+        Text("This is separate from the SteamCMD sign-in in Settings, which only downloads wallpapers.")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+        if isSigningIn {
+          Button {
+            model.signInToSteam()
+          } label: {
+            Label("Show sign-in window", systemImage: "person.crop.circle.badge.checkmark")
+          }
+          .buttonStyle(.panelSecondary)
+        } else {
+          Button {
+            model.signInToSteam()
+          } label: {
+            Label("Sign in to Steam…", systemImage: "person.crop.circle.badge.checkmark")
+          }
+          .buttonStyle(.panelPrimary)
+        }
+      }
+    }
+  }
+
   @ViewBuilder
   private func noResults(_ recovery: WorkshopEmptyState.Recovery, model: WorkshopBrowserModel)
     -> some View
@@ -211,6 +224,7 @@ struct WorkshopEmptyStateView: View {
         Button("Clear search and filters") { model.clearSearchAndFilters() }
           .buttonStyle(.panelSecondary)
       }
+      .seasonalArt(.noResults)
     case .clearSearch:
       PanelEmptyState(
         verbatim: L("No wallpapers found"), systemImage: "magnifyingglass",
@@ -219,6 +233,7 @@ struct WorkshopEmptyStateView: View {
         Button("Clear search") { model.clearSearchAndFilters() }
           .buttonStyle(.panelSecondary)
       }
+      .seasonalArt(.noResults)
     case .clearFilters(let count):
       PanelEmptyState(
         verbatim: L("No wallpapers found"), systemImage: "line.3.horizontal.decrease.circle",
@@ -234,6 +249,7 @@ struct WorkshopEmptyStateView: View {
         }
         .buttonStyle(.panelSecondary)
       }
+      .seasonalArt(.noResults)
     case .screened(let isCollections, let nextPage):
       PanelEmptyState(
         verbatim: L("No wallpapers found"), systemImage: "line.3.horizontal.decrease.circle",
@@ -259,6 +275,14 @@ struct WorkshopEmptyStateView: View {
       PanelEmptyState(
         verbatim: L("No wallpapers found"), systemImage: "bookmark",
         description: L("Wallpapers you subscribe to on the Steam Workshop appear here.")
+      ) {
+        Button("Browse Workshop") { model.open(.browse) }
+          .buttonStyle(.panelPrimary)
+      }
+    case .browseWorkshopForFavorites:
+      PanelEmptyState(
+        verbatim: L("No wallpapers found"), systemImage: "heart",
+        description: L("Wallpapers you favorite on the Steam Workshop appear here.")
       ) {
         Button("Browse Workshop") { model.open(.browse) }
           .buttonStyle(.panelPrimary)

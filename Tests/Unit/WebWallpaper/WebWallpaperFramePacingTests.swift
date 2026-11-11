@@ -466,27 +466,6 @@ final class WebWallpaperFramePacingTests: XCTestCase {
       "neither cancelled callback may run, and the one left alone does")
   }
 
-  /// The screen saver's readiness check waits on `requestAnimationFrame` in the
-  /// page world and nothing there can be verified on a desktop, so its script
-  /// must never carry the wrappers, whatever it is told.
-  func testTheScreenSaverScriptNeverPacesFrames() async throws {
-    let configuration = WKWebViewConfiguration()
-    for script in WebWallpaperProtocol.userScripts() { configuration.userContentController.addUserScript(script) }
-    let webView = WKWebView(frame: .zero, configuration: configuration)
-    webView.loadHTMLString("<!doctype html><html><body></body></html>", baseURL: nil)
-    let deadline = Date().addingTimeInterval(10)
-    while webView.isLoading && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
-    let value = try await webView.callAsyncJavaScript(
-      """
-      window.__mweWallpaperHost.setFrameLimit(10);
-      const id = requestAnimationFrame(() => {});
-      cancelAnimationFrame(id);
-      return { id };
-      """, arguments: [:], in: nil, contentWorld: .page)
-    let id = try XCTUnwrap((value as? [String: Any])?["id"] as? Double)
-    XCTAssertLessThan(id, 1_073_741_824)
-  }
-
   // MARK: - helpers
 
   @discardableResult

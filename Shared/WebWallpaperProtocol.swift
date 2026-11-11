@@ -26,20 +26,118 @@ enum WebWallpaperProtocol {
     /// tagged object, so there is exactly one place that has to distrust the page.
     static let messageHandlerName = "mweWallpaper"
 
+    /// A message the page posts on `messageHandlerName`, parsed and checked here, once, for
+    /// every surface that hosts a page. The page is untrusted: `parse` drops anything that is
+    /// not a tagged object with well-formed fields.
+    enum PageMessage {
+        /// The `type` tag of each message, as the host script posts it.
+        enum Kind: String {
+            case audioSubscribed, audioUnsubscribed, mediaSubscribed, mediaUnsubscribed
+            case pageDiagnostic, randomFileRequest
+        }
+
+        /// Why `parse` dropped a message.
+        enum Rejection: Error, Equatable {
+            /// Not an object with a string `type`.
+            case malformed
+            case unknownKind(String)
+            /// A `randomFileRequest` whose ids are missing, empty or too long.
+            case malformedRandomFileRequest
+        }
+
+        /// The page's ids are its own (`r1`, `r2`, …) and its property names come from the
+        /// project, so anything longer is not a request the host script made.
+        static let maximumRequestIDLength = 128
+        static let maximumPropertyIDLength = 256
+
+        case audioSubscribed
+        case audioUnsubscribed
+        case mediaSubscribed
+        case mediaUnsubscribed
+        /// The whole payload; `WebWallpaperPageDiagnostics` reads and bounds its fields.
+        case pageDiagnostic([String: Any])
+        case randomFileRequest(requestID: String, propertyID: String)
+
+        static func parse(_ body: Any) -> Result<PageMessage, Rejection> {
+            guard let payload = body as? [String: Any], let type = payload["type"] as? String else {
+                return .failure(.malformed)
+            }
+            guard let kind = Kind(rawValue: type) else { return .failure(.unknownKind(type)) }
+            switch kind {
+            case .audioSubscribed: return .success(.audioSubscribed)
+            case .audioUnsubscribed: return .success(.audioUnsubscribed)
+            case .mediaSubscribed: return .success(.mediaSubscribed)
+            case .mediaUnsubscribed: return .success(.mediaUnsubscribed)
+            case .pageDiagnostic: return .success(.pageDiagnostic(payload))
+            case .randomFileRequest:
+                guard let requestID = payload["requestId"] as? String, !requestID.isEmpty,
+                      requestID.count <= maximumRequestIDLength,
+                      let propertyID = payload["propertyId"] as? String, !propertyID.isEmpty,
+                      propertyID.count <= maximumPropertyIDLength
+                else { return .failure(.malformedRandomFileRequest) }
+                return .success(.randomFileRequest(requestID: requestID, propertyID: propertyID))
+            }
+        }
+    }
+
+    /// The object the host script puts on the page's `window`; the host calls into the page
+    /// only through its functions.
+    static let hostObject = "window.__mweWallpaperHost"
+
+    /// A function of `hostObject`, named as `hostScriptSource` defines it.
+    enum HostFunction: String, CaseIterable {
+        case applyUserProperties, applyGeneralProperties, setFrameLimit, setRenderScale, setScreenScale
+        case setPaused, deliverAudio, deliverMedia, deliverRandomFile
+        case userDirectoryFilesAddedOrChanged, userDirectoryFilesRemoved
+    }
+
+    /// The script expression calling `function` with `arguments`, each itself an expression,
+    /// usually the name of a `callAsyncJavaScript` argument.
+    static func hostCall(_ function: HostFunction, _ arguments: String...) -> String {
+        "\(hostObject).\(function.rawValue)(\(arguments.joined(separator: ", ")))"
+    }
+
+    /// Hands the page one audio frame, the `callAsyncJavaScript` argument `bins`, and returns
+    /// whether a listener took it. Built once: it runs for every audio frame.
+    static let deliverAudioScript = "return " + hostCall(.deliverAudio, "bins")
+
     /// What a page's document-start script needs to know before any page script
     /// runs. The frame-rate limit has to be known by the page's very first
     /// `requestAnimationFrame` call and the render scale by its very first read
     /// of `devicePixelRatio`, so both are baked into the script of each document
     /// instead of being delivered once the document has loaded.
     struct Seed: Equatable {
-        /// Wraps `requestAnimationFrame` so the limit can be enforced (desktop
-        /// and preview pages). The screen saver keeps the native function.
+        /// Wraps `requestAnimationFrame` so the limit can be enforced (desktop,
+        /// preview, lock-screen and screen-saver pages). Off, the page keeps the native function.
         var framePacing = false
         /// Callbacks per second, or 0 for none; `frameLimit(forFPS:)` derives it.
         var frameLimit = 0
         /// Multiplies `window.devicePixelRatio`; see `clampedRenderScale`. At 1
         /// the page keeps WebKit's own property.
         var renderScale = 1.0
+        /// Device pixels per point of the display the page is on, by which the page's
+        /// `screen` size is reported; see `pageZoom(forBackingScale:)`. At 1 the page
+        /// keeps WebKit's own properties.
+        var screenScale = 1.0
+    }
+
+    /// Wallpaper Engine starts its Chromium with `force-device-scale-factor=1`, so a web
+    /// wallpaper is laid out in the display's device pixels: `devicePixelRatio` is 1 and
+    /// `innerWidth` is the display's width in pixels, whatever the system's scaling. WebKit
+    /// lays a page out in points instead, which on a Retina display gives the page half the
+    /// CSS pixels across, so everything sized in CSS pixels (text, panels, a visualiser's
+    /// radius) came out twice the size Wallpaper Engine draws it at, and cropped. Zooming
+    /// the page out by the display's backing scale gives it the same layout: one CSS pixel
+    /// per device pixel, `devicePixelRatio` 1, and still one rendered pixel per device
+    /// pixel, so nothing is drawn softer.
+    static func pageZoom(forBackingScale scale: Double) -> Double {
+        1 / clampedScreenScale(scale)
+    }
+
+    /// A backing scale as the page's screen scale: 1 for anything that is not a number of
+    /// device pixels per point of at least 1.
+    static func clampedScreenScale(_ scale: Double) -> Double {
+        scale.isFinite && scale >= 1 ? scale : 1
     }
 
     /// The range a web page's internal render scale is held to. The bridge
@@ -165,14 +263,14 @@ enum WebWallpaperProtocol {
     static func makeHostScript(seed: Seed) -> String {
         """
         \(hostScriptSource)({ framePacing: \(seed.framePacing), frameLimit: \(seed.frameLimit), \
-        renderScale: \(clampedRenderScale(seed.renderScale)) })
+        renderScale: \(clampedRenderScale(seed.renderScale)), screenScale: \(clampedScreenScale(seed.screenScale)) })
         """
     }
 
     /// A function expression taking the seed; `makeHostScript` calls it.
     private static let hostScriptSource = """
     (seed => {
-      if (window.__mweWallpaperHost) return;
+      if (\(hostObject)) return;
       // Frame-rate limit. WebKit gives a page no frame-rate control, so a limit
       // below the ceiling is enforced on requestAnimationFrame itself: callbacks
       // are held back to the limit and run on the native frame that follows, with
@@ -245,10 +343,84 @@ enum WebWallpaperProtocol {
         return true;
       };
       setScale(seed.renderScale);
+      // Screen size in device pixels. The page is zoomed out by the display's backing
+      // scale so that it is laid out in device pixels as under Wallpaper Engine
+      // (WebWallpaperProtocol.pageZoom), which WebKit applies to the viewport but not
+      // to window.screen; a page that sizes its canvas from screen.width would cover
+      // only part of the display. The four sizes are reported in device pixels while
+      // the scale is above 1 and are WebKit's own at 1.
+      const screenSizes = ["width", "height", "availWidth", "availHeight"];
+      const nativeScreen = {};
+      for (const name of screenSizes) {
+        const descriptor = typeof Screen === "function" && Object.getOwnPropertyDescriptor(Screen.prototype, name);
+        if (descriptor && typeof descriptor.get === "function") nativeScreen[name] = descriptor.get;
+      }
+      let screenScale = 1;
+      const setScreenScale = value => {
+        const next = Number.isFinite(value) && value >= 1 ? value : 1;
+        if (next === screenScale || !window.screen) return false;
+        screenScale = next;
+        for (const name of screenSizes) {
+          const native = nativeScreen[name];
+          if (!native) continue;
+          if (next === 1) { delete window.screen[name]; continue; }
+          Object.defineProperty(window.screen, name, {
+            configurable: true, enumerable: true, get() { return Math.round(native.call(this) * screenScale); },
+          });
+        }
+        return true;
+      };
+      setScreenScale(seed.screenScale);
+      const nativeConsoleError = console.error;
       const post = message => {
         try { window.webkit.messageHandlers.\(WebWallpaperProtocol.messageHandlerName).postMessage(message); }
-        catch (error) { console.error("wallpaper host channel unavailable", error); }
+        catch (error) { nativeConsoleError.call(console, "wallpaper host channel unavailable", error); }
       };
+      // The page's own errors and warnings go to the app's log too, so a wallpaper
+      // that shows nothing can be diagnosed from a diagnostics report and not only
+      // through Web Inspector: console.error and console.warn, uncaught errors,
+      // unhandled promise rejections and elements that failed to load. At most
+      // eight a second leave the page, a repeat of the last one is dropped, and the
+      // host caps each document again. The project folder's own URL is cut from the
+      // text, which is otherwise the page's and stays untrusted.
+      const projectBase = String(location.href).replace(/[^/]*([?#].*)?$/, "");
+      let reportSecond = 0, reportsThisSecond = 0, lastReport = "";
+      const describe = value => {
+        try {
+          if (value instanceof Error) return value.name + ": " + value.message;
+          if (typeof value === "string") return value;
+          const json = JSON.stringify(value);
+          return json === undefined ? String(value) : json;
+        } catch (unreadable) { return Object.prototype.toString.call(value); }
+      };
+      const report = (kind, text) => {
+        const now = Date.now();
+        if (now - reportSecond >= 1000) { reportSecond = now; reportsThisSecond = 0; }
+        const line = String(text).split(projectBase).join("").slice(0, 600);
+        if (line === lastReport || ++reportsThisSecond > 8) return;
+        lastReport = line;
+        post({ type: "\(PageMessage.Kind.pageDiagnostic.rawValue)", kind, text: line });
+      };
+      for (const [level, kind] of [["error", "error"], ["warn", "warning"]]) {
+        const original = console[level];
+        if (typeof original !== "function") continue;
+        console[level] = function () {
+          report(kind, Array.from(arguments, describe).join(" "));
+          return original.apply(this, arguments);
+        };
+      }
+      window.addEventListener("error", event => {
+        if (event instanceof ErrorEvent) {
+          const where = event.filename ? " (" + event.filename + ":" + event.lineno + ")" : "";
+          report("uncaught", (event.error !== undefined && event.error !== null ? describe(event.error) : event.message) + where);
+          return;
+        }
+        const element = event.target;
+        if (!element || element === window || typeof element.tagName !== "string") return;
+        const source = element.currentSrc || element.src || element.href || "";
+        report("resource", element.tagName.toLowerCase() + " failed to load " + source);
+      }, true);
+      window.addEventListener("unhandledrejection", event => report("rejection", describe(event.reason)));
       let listener = null;
       let lastPaused = null;
       // The pause state the page last took in.
@@ -381,7 +553,7 @@ enum WebWallpaperProtocol {
         const next = typeof value === "function" ? value : null;
         const had = audioListener !== null;
         audioListener = next;
-        if ((next !== null) !== had) post({ type: next ? "audioSubscribed" : "audioUnsubscribed" });
+        if ((next !== null) !== had) post({ type: next ? "\(PageMessage.Kind.audioSubscribed.rawValue)" : "\(PageMessage.Kind.audioUnsubscribed.rawValue)" });
       };
 
       const MEDIA_SLOTS = ["status", "properties", "thumbnail", "playback", "timeline"];
@@ -404,8 +576,8 @@ enum WebWallpaperProtocol {
           const before = mediaCount();
           mediaListeners[slot] = next;
           const after = mediaCount();
-          if (before === 0 && after > 0) post({ type: "mediaSubscribed" });
-          else if (before > 0 && after === 0) post({ type: "mediaUnsubscribed" });
+          if (before === 0 && after > 0) post({ type: "\(PageMessage.Kind.mediaSubscribed.rawValue)" });
+          else if (before > 0 && after === 0) post({ type: "\(PageMessage.Kind.mediaUnsubscribed.rawValue)" });
           if (next && mediaValue[slot] !== null) fireMedia(slot, mediaValue[slot]);
         };
       }
@@ -422,10 +594,10 @@ enum WebWallpaperProtocol {
         if (typeof property !== "string" || property === "" || typeof callback !== "function") return;
         const requestId = "r" + (++randomFileSequence);
         randomFileCallbacks.set(requestId, callback);
-        post({ type: "randomFileRequest", requestId, propertyId: property });
+        post({ type: "\(PageMessage.Kind.randomFileRequest.rawValue)", requestId, propertyId: property });
       };
 
-      window.__mweWallpaperHost = Object.freeze({
+      \(hostObject) = Object.freeze({
         applyUserProperties(properties, restaged) { deliverProperties("applyUserProperties", properties, restaged); },
         applyGeneralProperties(properties) { deliverProperties("applyGeneralProperties", properties); },
         // Takes effect on the next frame, and only where the seed asked for pacing.
@@ -436,6 +608,8 @@ enum WebWallpaperProtocol {
           resizePending = true;
           queueMicrotask(() => { resizePending = false; nativeDispatch.call(window, new NativeEvent("resize")); });
         },
+        // The page's zoom changes with it, and WebKit raises the resize event for that.
+        setScreenScale(scale) { setScreenScale(scale); },
         setPaused(paused) { lastPaused = !!paused; deliverPaused(); },
         deliverAudio(bins) {
           if (!audioListener) return false;

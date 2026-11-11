@@ -5,7 +5,7 @@ import Foundation
 enum SettingsRegistry {
   static let items: [SettingsItem] =
     QuickSettingsSection.items + GeneralSettingsSection.items + AppearanceSettingsSection.items
-    + DesktopSettingsSection.items + PlaybackSettingsSection.items
+    + DesktopSettingsSection.items + WidgetsSettingsSection.items + PlaybackSettingsSection.items
     + PerformanceSettingsSection.items + DisplaysSettingsSection.items
     + ShortcutsSettingsSection.items + LibrarySettingsSection.items + StorageSettingsSection.items
     + AboutSettingsSection.items
@@ -23,6 +23,8 @@ enum SettingsRegistry {
     QuickSettingsSection.unofferedItems(controller)
       .union(PlaybackSettingsSection.unofferedItems(controller))
       .union(PerformanceSettingsSection.unofferedItems(controller))
+      .union(AboutSettingsSection.unofferedItems(controller))
+      .union(WidgetsSettingsSection.unofferedItems(controller))
   }
 
   /// What is wrong with a list of items, one line per problem; empty when it is sound. Ids are

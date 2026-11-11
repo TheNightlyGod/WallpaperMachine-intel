@@ -39,6 +39,9 @@ final class WebWallpaperHost {
     }
     private var descriptors: [UInt32: BridgeWebWallpaper] = [:]
     private var posterObserver: NSObjectProtocol?
+    /// Poster requests that reached a window before its page had loaded, by content layer: the
+    /// contexts they asked in, answered once the page has loaded.
+    private var deferredPosterRequests: [ObjectIdentifier: [String?]] = [:]
     private var inspectionObserver: NSObjectProtocol?
     /// Whether pages may be attached to Safari's Web Inspector, read when a page
     /// is made and again whenever the preference changes.
@@ -62,10 +65,14 @@ final class WebWallpaperHost {
     /// Keeps the picture of the wallpaper a switch replaces on screen until the new page has
     /// loaded and painted. `nil` for a host that never holds one, as in most of the tests.
     private let switchHold: WallpaperSwitchHold?
-    /// How long after a page reports it has loaded the held picture stays. `didFinish` comes
-    /// before the first meaningful paint (see `scheduleSurfaceChange`, which reads the poster
-    /// again two seconds later), so taking the picture away at once could show the empty page.
-    /// A fade over a page that has painted anyway hides what is left of the lag.
+    /// How long after a page has loaded the held picture waits for WebKit to commit a frame of
+    /// it. `didFinish` comes before the first paint, so taking the picture away at once could
+    /// show the empty page; a page that holds its main thread through its first frame (a large
+    /// WebGL build) is shown when this runs out, as is one on a display that draws nothing.
+    static let firstFrameLimit = Duration.seconds(3)
+    /// How long after a page has loaded the held picture stays when WebKit cannot say whether
+    /// a frame was committed. A fade over a page that has painted anyway hides what is left of
+    /// the lag.
     static let firstPaintSettle = Duration.milliseconds(500)
     /// Distinguishes surfaces that reused one display id across a wallpaper
     /// switch, so their counters are not merged.
@@ -84,8 +91,9 @@ final class WebWallpaperHost {
     /// runs on from there when that desktop comes back instead of loading again.
     private struct KeptPage {
         let window: any WebWallpaperSurface
-        let descriptor: BridgeWebWallpaper
+        var descriptor: BridgeWebWallpaper
         let projectRevision: String
+        var ready = true
     }
     private var kept: [UInt32: [String: KeptPage]] = [:]
     private var surfaceChangePending = false
@@ -170,8 +178,8 @@ final class WebWallpaperHost {
         self.inspectionEnabled = inspectionEnabled
         self.audioClock = audioClock
         self.contentRevision = contentRevision
-        self.screens = screens ?? { Self.systemScreens() }
-        self.refreshRate = refreshRate ?? { Self.systemRefreshRate(displayID: $0) }
+        self.screens = screens ?? { SystemDisplays.screens() }
+        self.refreshRate = refreshRate ?? { SystemDisplays.refreshRate(of: $0) }
         self.frameCenter = frameCenter
         self.counters = counters ?? .shared
         self.audioPump = audioPump ?? WebWallpaperAudioPump(read: { nil })
@@ -201,19 +209,6 @@ final class WebWallpaperHost {
             mediaProvider: mediaRelay == nil ? AdapterSystemMediaProvider() : nil,
             assetStore: { UserAssetStore(projectURL: $0, wallpaperId: $1) }, contentRevision: contentRevision,
             switchHold: switchHold)
-    }
-
-    static func systemScreens() -> [(id: UInt32, frame: NSRect)] {
-        NSScreen.screens.compactMap { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
-            return (number.uint32Value, screen.frame)
-        }
-    }
-
-    static func systemRefreshRate(displayID: UInt32) -> Int {
-        NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
-        }?.maximumFramesPerSecond ?? 0
     }
 
     /// WebKit offers a page two cadences: near 60 fps, or the display's full
@@ -384,7 +379,95 @@ final class WebWallpaperHost {
     var keptWindowNumbers: Set<Int> { Set(kept.values.flatMap(\.values).map(\.window.windowNumber)) }
 
     /// The wallpapers the display keeps suspended for its other desktops.
-    func keptWallpapers(on displayID: UInt32) -> Set<String> { Set((kept[displayID] ?? [:]).keys) }
+    func keptWallpapers(on displayID: UInt32) -> Set<String> {
+        Set((kept[displayID] ?? [:]).filter { $0.value.ready }.keys)
+    }
+
+    func containsWallpaper(_ wallpaper: String, on display: UInt32) -> Bool {
+        descriptors[display]?.wallpaperId == wallpaper || kept[display]?[wallpaper] != nil
+    }
+
+    func wallpaperIsReady(_ wallpaper: String, on display: UInt32) -> Bool {
+        if descriptors[display]?.wallpaperId == wallpaper { return windows[display]?.page.isLoaded == true }
+        return kept[display]?[wallpaper]?.ready == true
+    }
+
+    func discardUnreadyWallpaper(_ wallpaper: String, on display: UInt32) {
+        guard let page = kept[display]?[wallpaper], !page.ready else { return }
+        kept[display]?[wallpaper] = nil
+        retire(page.window)
+    }
+
+    func preload(_ wallpaper: BridgeWebWallpaper) async throws {
+        let display = wallpaper.displayId
+        guard !stopped, keepPlan[display]?.contains(wallpaper.wallpaperId) == true,
+              !containsWallpaper(wallpaper.wallpaperId, on: display),
+              let frame = screens().first(where: { $0.id == display })?.frame else { return }
+        let project = URL(fileURLWithPath: wallpaper.projectPath, isDirectory: true)
+        guard WebWallpaperProtocol.canonicalEntryURL(projectURL: project, entryFile: wallpaper.entryFile) != nil else {
+            throw CocoaError(.fileReadInvalidFileName)
+        }
+        _ = try await imagePlacement.prepare(wallpaperID: wallpaper.wallpaperId)
+        let revision = try await projectRevisions.fingerprint(project, revision: contentRevision())
+        let staged = await stageAssets(for: wallpaper)
+        let json = imagePlacement.generatedImage(wallpaperID: wallpaper.wallpaperId) == nil
+            ? staged.json
+            : try imagePlacement.effectivePropertiesJSON(staged.json, wallpaperID: wallpaper.wallpaperId, displayID: wallpaper.displayKey)
+        try Task.checkCancellation()
+        guard !stopped, keepPlan[display]?.contains(wallpaper.wallpaperId) == true,
+              !containsWallpaper(wallpaper.wallpaperId, on: display) else { return }
+        surfaceGeneration += 1
+        let surface = RuntimeSurfaceKey(kind: .desktopWeb, displayID: display, generation: surfaceGeneration)
+        let page = WebWallpaperPage(projectURL: project, entryFile: wallpaper.entryFile, surface: surface,
+            counters: counters, inspectable: inspectionEnabled(),
+            rendersAtDisplayRefresh: Self.rendersAtDisplayRefresh(fps: wallpaper.fps, refreshRate: refreshRate(display)), timing: pageTiming)
+        let window = makeSurface(frame, page)
+        var preparing = wallpaper
+        preparing.paused = false
+        preparing.muted = true
+        kept[display, default: [:]][wallpaper.wallpaperId] = KeptPage(
+            window: window, descriptor: preparing, projectRevision: revision, ready: false)
+        counters.record(.webPageCreated, for: surface)
+        page.applyDisplayRefreshRate(refreshRate(display))
+        page.applyGeneralProperties(fps: wallpaper.fps)
+        page.applyRenderScale(wallpaper.renderScale)
+        page.setAudioResponseEnabled(false)
+        page.setMediaIntegrationEnabled(false)
+        page.applyAudioOutput(volume: wallpaper.volume, muted: true)
+        page.applyUserProperties(json: json, restaged: staged.restagedFiles)
+        page.onRandomFileRequest = { [weak self, weak page] request, property in
+            guard let self, let page else { return }
+            self.answerRandomFile(requestId: request, propertyId: property, page: page)
+        }
+        page.onFailure = { [weak self, weak page] message in
+            guard let self, let page, self.kept[display]?[wallpaper.wallpaperId]?.window.page === page else { return }
+            guard let window = self.kept[display]?[wallpaper.wallpaperId]?.window else { return }
+            self.kept[display]?[wallpaper.wallpaperId] = nil
+            self.retire(window)
+            AppLog.warn("space preload: web wallpaper \(wallpaper.wallpaperId) failed: \(message)")
+            self.onSurfacesChanged?()
+        }
+        page.onLoaded = { [weak self, weak page] in
+            guard let self, let page, self.kept[display]?[wallpaper.wallpaperId]?.window.page === page else { return }
+            self.replayDirectories(into: page)
+            page.confirmFrame(within: Self.firstFrameLimit) { [weak self, weak page] result in
+                guard let self, let page, self.kept[display]?[wallpaper.wallpaperId]?.window.page === page else { return }
+                guard result == .committed else {
+                    self.discardUnreadyWallpaper(wallpaper.wallpaperId, on: display)
+                    return
+                }
+                self.kept[display]?[wallpaper.wallpaperId]?.ready = true
+                self.kept[display]?[wallpaper.wallpaperId]?.descriptor.paused = true
+                page.setPaused(true)
+                page.setPresentationSuspended(true)
+                self.onSurfacesChanged?()
+            }
+        }
+        // Publish ownership before ordering in; the app pins this window to its assigned Spaces.
+        onSurfacesChanged?()
+        page.load()
+        window.present()
+    }
 
     /// The wallpaper each of this host's windows shows, live and kept, by window number.
     var windowWallpapers: [Int: String] {
@@ -478,6 +561,7 @@ final class WebWallpaperHost {
                 kept[displayID]?[wallpaper.wallpaperId] = nil
                 if kept[displayID]?.isEmpty == true { kept[displayID] = nil }
                 windows[displayID] = page.window
+                installCallbacks(on: page.window.page, wallpaper: wallpaper, displayID: displayID, load: page.window.page.logLoad)
                 loadedProjectRevisions[displayID] = projectRevision
                 if page.window.frame != frame { page.window.setScreenFrame(frame) }
                 page.window.page.applyDisplayRefreshRate(displayRefreshRate)
@@ -503,58 +587,7 @@ final class WebWallpaperHost {
                     """)
                 page.logLoad = load
                 counters.record(.webPageCreated, for: surface)
-                page.onLoading = { [weak self, weak page] in
-                    guard let self, let page, self.windows[displayID]?.page === page,
-                          let current = self.descriptors[displayID] else { return }
-                    self.recordState(current, phase: .loading)
-                }
-                page.onFailure = { [weak self, weak page] message in
-                    guard let self, let page, self.windows[displayID]?.page === page,
-                          let current = self.descriptors[displayID] else { return }
-                    AppLog.error("web wallpaper \(wallpaper.wallpaperId) on display \(displayID): \(message)", load: load)
-                    self.recordState(current, phase: .failed, message: message, canRetry: true)
-                    self.onError?(String(localized: "Web wallpaper “\(wallpaper.title)” could not load: \(message)"))
-                    // Nothing is coming to replace the held picture with: the failed page, and
-                    // the retry that is offered, belong on screen and not behind it.
-                    self.switchHold?.contentReady(displayID: displayID)
-                }
-                page.onLoaded = { [weak self, weak page] in
-                    guard let self, let page, self.windows[displayID]?.page === page,
-                          let current = self.descriptors[displayID] else { return }
-                    self.recordState(current, phase: .ready)
-                    self.switchHold?.contentReady(displayID: displayID, after: Self.firstPaintSettle)
-                    self.replayDirectories(displayID: displayID)
-                    self.scheduleSurfaceChange()
-                    self.refreshAudioOutputs()
-                    self.refreshPointerMonitor()
-                }
-                // The first-frame grace expires without any host call, so the
-                // pointer monitor and the audio owners would otherwise never
-                // learn that a paused page has just been detached.
-                page.onHostSuspensionChanged = { [weak self, weak page] in
-                    guard let self, let page, self.windows[displayID]?.page === page else { return }
-                    self.refreshPointerMonitor()
-                    self.refreshAudioOutputs()
-                }
-                // An edit shown to a paused page has been drawn and the page is
-                // detached again, so its Space posters are read from the new frame.
-                page.onSuspensionPosterRefreshed = { [weak self, weak page] in
-                    guard let self, let page, !self.stopped,
-                          self.windows[displayID]?.page === page else { return }
-                    self.onSurfacesChanged?()
-                }
-                page.onAudioDemandChanged = { [weak self, weak page] subscribed in
-                    guard let self, let page else { return }
-                    self.setAudioDemand(subscribed, page: page, displayID: displayID)
-                }
-                page.onMediaDemandChanged = { [weak self, weak page] demand in
-                    guard let self, let page else { return }
-                    self.setMediaDemand(demand, page: page, displayID: displayID)
-                }
-                page.onRandomFileRequest = { [weak self, weak page] requestId, propertyId in
-                    guard let self, let page else { return }
-                    self.answerRandomFile(requestId: requestId, propertyId: propertyId, page: page)
-                }
+                installCallbacks(on: page, wallpaper: wallpaper, displayID: displayID, load: load)
                 let window = makeSurface(frame, page)
                 windows[displayID] = window
                 loadedProjectRevisions[displayID] = projectRevision
@@ -576,6 +609,70 @@ final class WebWallpaperHost {
         refreshPointerMonitor()
         refreshAudioOutputs()
         if changed { onSurfacesChanged?() }
+    }
+
+    private func installCallbacks(on page: WebWallpaperPage, wallpaper: BridgeWebWallpaper, displayID: UInt32, load: UInt64?) {
+        page.onLoading = { [weak self, weak page] in
+            guard let self, let page, self.windows[displayID]?.page === page,
+                  let current = self.descriptors[displayID] else { return }
+            self.recordState(current, phase: .loading)
+        }
+        page.onFailure = { [weak self, weak page] message in
+            guard let self, let page, self.windows[displayID]?.page === page,
+                  let current = self.descriptors[displayID] else { return }
+            AppLog.error("web wallpaper \(wallpaper.wallpaperId) on display \(displayID): \(message)", load: load)
+            self.recordState(current, phase: .failed, message: message, canRetry: true)
+            self.onError?(String(localized: "Web wallpaper “\(wallpaper.title)” could not load: \(message)"))
+            // Nothing is coming to replace the held picture with: the failed page, and
+            // the retry that is offered, belong on screen and not behind it.
+            self.switchHold?.contentReady(displayID: displayID)
+            // Nor a page to take a poster of: one that loads later asks for posters itself.
+            if let window = self.windows[displayID] { self.dropDeferredPosterRequests(of: window) }
+        }
+        page.onLoaded = { [weak self, weak page] in
+            guard let self, let page, self.windows[displayID]?.page === page,
+                  let current = self.descriptors[displayID] else { return }
+            self.recordState(current, phase: .ready)
+            if let window = self.windows[displayID] { self.answerDeferredPosterRequests(of: window) }
+            if self.switchHold != nil {
+                page.confirmFrame(within: Self.firstFrameLimit) { [weak self, weak page] confirmation in
+                    guard let self, let page, self.windows[displayID]?.page === page else { return }
+                    self.switchHold?.contentReady(
+                        displayID: displayID, after: confirmation == .unavailable ? Self.firstPaintSettle : .zero)
+                }
+            }
+            self.replayDirectories(displayID: displayID)
+            self.scheduleSurfaceChange()
+            self.refreshAudioOutputs()
+            self.refreshPointerMonitor()
+        }
+        // The first-frame grace expires without any host call, so the
+        // pointer monitor and the audio owners would otherwise never
+        // learn that a paused page has just been detached.
+        page.onHostSuspensionChanged = { [weak self, weak page] in
+            guard let self, let page, self.windows[displayID]?.page === page else { return }
+            self.refreshPointerMonitor()
+            self.refreshAudioOutputs()
+        }
+        // An edit shown to a paused page has been drawn and the page is
+        // detached again, so its Space posters are read from the new frame.
+        page.onSuspensionPosterRefreshed = { [weak self, weak page] in
+            guard let self, let page, !self.stopped,
+                  self.windows[displayID]?.page === page else { return }
+            self.onSurfacesChanged?()
+        }
+        page.onAudioDemandChanged = { [weak self, weak page] subscribed in
+            guard let self, let page else { return }
+            self.setAudioDemand(subscribed, page: page, displayID: displayID)
+        }
+        page.onMediaDemandChanged = { [weak self, weak page] demand in
+            guard let self, let page else { return }
+            self.setMediaDemand(demand, page: page, displayID: displayID)
+        }
+        page.onRandomFileRequest = { [weak self, weak page] requestId, propertyId in
+            guard let self, let page else { return }
+            self.answerRandomFile(requestId: requestId, propertyId: propertyId, page: page)
+        }
     }
 
     /// Suspends the page of a display that moves on to another wallpaper and keeps it, when the
@@ -620,6 +717,7 @@ final class WebWallpaperHost {
 
     /// Stops a page that is no longer any display's and takes its window away.
     private func retire(_ window: any WebWallpaperSurface) {
+        dropDeferredPosterRequests(of: window)
         window.page.stop()
         window.retire()
     }
@@ -737,7 +835,7 @@ final class WebWallpaperHost {
     }
 
     private func refreshAudioOutputs() {
-        let owners = WebWallpaperAudioOwnership.owners(in: descriptors) { displayID in
+        let owners = MirrorAudioOwnership.owners(in: descriptors) { displayID in
             windows[displayID]?.page.isLoaded == true && !isSuspended(displayID: displayID)
         }
         // Retire the old audible page before enabling its replacement.
@@ -857,7 +955,8 @@ final class WebWallpaperHost {
     /// user has moved on from; the staged copies themselves stay on disk and
     /// are removed with the project or by `python3 scripts/clean.py`.
     private func pruneAssetState() {
-        let live = Set(windows.values.map { Self.projectKey($0.page.projectURL.path) })
+        let pages = Array(windows.values) + kept.values.flatMap { $0.values.map(\.window) }
+        let live = Set(pages.map { Self.projectKey($0.page.projectURL.path) })
         for project in Array(assetStores.keys) where !live.contains(project) {
             assetStores[project]?.cancelImports()
             assetStores[project] = nil
@@ -877,6 +976,7 @@ final class WebWallpaperHost {
             states.removeValue(forKey: displayID)
             loadedProjectRevisions.removeValue(forKey: displayID)
         }
+        dropDeferredPosterRequests(of: window)
         window.page.stop()
         window.retire()
     }
@@ -1191,6 +1291,10 @@ final class WebWallpaperHost {
     /// whole current set is replayed into it as an addition.
     private func replayDirectories(displayID: UInt32) {
         guard let page = windows[displayID]?.page else { return }
+        replayDirectories(into: page)
+    }
+
+    private func replayDirectories(into page: WebWallpaperPage) {
         let project = Self.projectKey(page.projectURL.path)
         for propertyId in fetchAllProperties[project] ?? [] {
             let files = directoryFiles[project]?[propertyId] ?? []
@@ -1245,10 +1349,12 @@ final class WebWallpaperHost {
     /// contract the renderer uses, so Space posters match the live page.
     private func answerPosterRequest(_ notification: Notification) {
         guard let layer = notification.object as? CALayer,
-              let window = windows.values.first(where: { $0.posterLayer === layer }) else { return }
+              let window = windows.values.first(where: { $0.posterLayer === layer })
+                ?? kept.values.lazy.flatMap({ $0.values }).first(where: { $0.window.posterLayer === layer })?.window
+        else { return }
         let webView = window.page.webView
         let center = frameCenter
-        let context = notification.userInfo?["context"] as? String
+        let context = DesktopPosterNotification.context(in: notification.userInfo)
         // A suspended page has left the window tree and WebKit does not promise
         // a snapshot of a detached view, so its own detach poster is the frame.
         // Published a turn later, like a live snapshot, because the requester
@@ -1261,6 +1367,34 @@ final class WebWallpaperHost {
             }
             return
         }
+        // A page that has not loaded has drawn nothing of its own, and the web view does not
+        // draw a background, so a snapshot now is the black window. Taken as the desktop
+        // picture it would darken the menu bar for nothing; the page answers once it has loaded.
+        guard window.page.isLoaded else {
+            let key = ObjectIdentifier(layer)
+            if deferredPosterRequests[key]?.contains(context) != true {
+                deferredPosterRequests[key, default: []].append(context)
+            }
+            return
+        }
+        snapshotPoster(of: webView, for: layer, contexts: [context])
+    }
+
+    /// Answers the poster requests a window was sent before its page loaded. The snapshot is
+    /// taken after the pending screen updates, so it shows the document that has just loaded.
+    private func answerDeferredPosterRequests(of window: any WebWallpaperSurface) {
+        guard let layer = window.posterLayer,
+              let contexts = deferredPosterRequests.removeValue(forKey: ObjectIdentifier(layer)) else { return }
+        snapshotPoster(of: window.page.webView, for: layer, contexts: contexts)
+    }
+
+    private func dropDeferredPosterRequests(of window: any WebWallpaperSurface) {
+        guard let layer = window.posterLayer else { return }
+        deferredPosterRequests.removeValue(forKey: ObjectIdentifier(layer))
+    }
+
+    private func snapshotPoster(of webView: WKWebView, for layer: CALayer, contexts: [String?]) {
+        let center = frameCenter
         webView.takeSnapshot(with: nil) { image, error in
             MainActor.assumeIsolated {
                 guard let image else {
@@ -1268,8 +1402,8 @@ final class WebWallpaperHost {
                     return
                 }
                 guard let frame = Self.rgbaPixels(of: image) else { return }
-                DesktopPosterFrame(pixels: frame.pixels, width: frame.width, height: frame.height, bgra: false)
-                    .publish(for: layer, to: center, context: context)
+                let poster = DesktopPosterFrame(pixels: frame.pixels, width: frame.width, height: frame.height, bgra: false)
+                for context in contexts { poster.publish(for: layer, to: center, context: context) }
             }
         }
     }

@@ -135,10 +135,11 @@ TEST(ParticleMouseControlpoint, AWorldspaceSystemsControlpointsAreWhereItsLayers
     // The pinned one: the scene place 500, 400 seen from the layer's origin.
     EXPECT_NEAR(controlpoints[1].offset.x(), 400.0, 1.0e-9);
     EXPECT_NEAR(controlpoints[1].offset.y(), 350.0, 1.0e-9);
-    // The cursor at 150, 75 seen from the layer's origin, plus the authored offset.
-    EXPECT_NEAR(controlpoints[3].offset.x(), 51.0, 1.0e-9);
-    EXPECT_NEAR(controlpoints[3].offset.y(), 27.0, 1.0e-9);
-    EXPECT_NEAR(controlpoints[3].offset.z(), 3.0, 1.0e-9);
+    // Cursor linkage replaces the authored translation (including z).
+    // The cursor at 150, 75 is measured from the layer's origin.
+    EXPECT_NEAR(controlpoints[3].offset.x(), 50.0, 1.0e-9);
+    EXPECT_NEAR(controlpoints[3].offset.y(), 25.0, 1.0e-9);
+    EXPECT_NEAR(controlpoints[3].offset.z(), 0.0, 1.0e-9);
 
     // Whose matrix carries the layer's: every control point but the pinned one.
     EXPECT_TRUE(controlpoints[0].has_world_linear);
@@ -466,6 +467,7 @@ float SizeAfter(const std::shared_ptr<const wpscene::ParticleInstanceoverride>& 
         .controlpoints = {},
         .time          = 0.0,
         .time_pass     = 1.0,
+        .time_pass_scaled = 1.0,
     };
     for (const auto& ramp : ramps) WPParticleParser::genParticleOperatorOp(ramp, ctx)(info);
     return particles[0].size;
@@ -560,6 +562,7 @@ TEST(ParticleMouseControlpoint, ControlpointAttractFallsOffLinearlyToTheThreshol
         .controlpoints = controlpoints,
         .time          = 0.0,
         .time_pass     = 1.0,
+        .time_pass_scaled = 1.0,
     };
     op(info);
 
@@ -621,6 +624,7 @@ TEST(ParticleMouseControlpoint, ControlpointAttractNamesTheLastControlpointForAn
             .controlpoints = controlpoints,
             .time          = 0.0,
             .time_pass     = 1.0,
+            .time_pass_scaled = 1.0,
         };
         op(info);
 
@@ -652,6 +656,7 @@ TEST(ParticleMouseControlpoint, ControlpointAttractSkipsZeroDistance) {
         .controlpoints = controlpoints,
         .time          = 0.0,
         .time_pass     = 1.0,
+        .time_pass_scaled = 1.0,
     };
     op(info);
 
@@ -774,17 +779,17 @@ TEST(ParticleMouseControlpoint, RuntimeLinksFollowAncestorChangesWithStationaryP
     EXPECT_EQ(cp.offset, linalg::Vector3d(9.0, 8.0, 7.0));
     cp.link_mouse = true;
     subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(cp.offset, linalg::Vector3d(16.0, 27.0, 3.0));
+    EXPECT_EQ(cp.offset, linalg::Vector3d(15.0, 25.0, 0.0));
     parent->SetTranslate(linalg::Vector3f(80.0f, 40.0f, 0.0f));
     subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(cp.offset, linalg::Vector3d(26.0, 17.0, 3.0));
+    EXPECT_EQ(cp.offset, linalg::Vector3d(25.0, 15.0, 0.0));
     cp.link_mouse = false;
     parent->SetTranslate(linalg::Vector3f::Zero());
     subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(cp.offset, linalg::Vector3d(26.0, 17.0, 3.0));
+    EXPECT_EQ(cp.offset, linalg::Vector3d(25.0, 15.0, 0.0));
     cp.link_mouse = true;
     subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(cp.offset, linalg::Vector3d(66.0, 37.0, 3.0));
+    EXPECT_EQ(cp.offset, linalg::Vector3d(65.0, 35.0, 0.0));
     for (std::size_t i = 0; i + 1 < controlpoints.size(); ++i) {
         EXPECT_EQ(controlpoints[i].offset, linalg::Vector3d::Zero());
     }
@@ -801,16 +806,16 @@ TEST(ParticleMouseControlpoint, MissingAndExpiredOwnersUseWorldCoordinates) {
     cp.link_mouse = true;
     cp.base_offset = linalg::Vector3d(1.0, 2.0, 3.0);
     subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(cp.offset, linalg::Vector3d(151.0, 77.0, 3.0));
+    EXPECT_EQ(cp.offset, linalg::Vector3d(150.0, 75.0, 0.0));
     {
         auto owner = std::make_shared<SceneNode>();
         owner->SetTranslate(linalg::Vector3f(100.0f, 0.0f, 0.0f));
         subsystem->SetOwnerNode(owner);
         subsystem->UpdateMouseControlpoints();
-        EXPECT_EQ(cp.offset, linalg::Vector3d(51.0, 77.0, 3.0));
+        EXPECT_EQ(cp.offset, linalg::Vector3d(50.0, 75.0, 0.0));
     }
     subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(cp.offset, linalg::Vector3d(151.0, 77.0, 3.0));
+    EXPECT_EQ(cp.offset, linalg::Vector3d(150.0, 75.0, 0.0));
 }
 
 TEST(ParticleMouseControlpoint, MovementOperatorReadsRuntimeMutatedSpeedOverride) {
@@ -833,6 +838,7 @@ TEST(ParticleMouseControlpoint, MovementOperatorReadsRuntimeMutatedSpeedOverride
         .controlpoints = controlpoints,
         .time          = 0.0,
         .time_pass     = 1.0,
+        .time_pass_scaled = 1.0,
     };
 
     op(info);

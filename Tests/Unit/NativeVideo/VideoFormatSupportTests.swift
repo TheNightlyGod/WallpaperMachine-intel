@@ -135,6 +135,31 @@ final class VideoFormatSupportTests: XCTestCase {
             .unsupported(Format(container: "WebM", codec: nil), .notPlayable))
     }
 
+    func testAnHev1TrackAVFoundationRefusesPlaysAfterARetagOnlyWhenItsRecordCarriesTheParameterSets() {
+        let plan = HevcSampleEntryRetag.Plan(offsets: [457])
+        let hev1 = report(playable: false, codec: VideoFormatSupport.hev1)
+        let hevc = Format(container: "MP4", codec: "HEVC")
+        XCTAssertEqual(
+            VideoFormatSupport.decide(container: mp4, report: hev1, hardwareAV1: true, hev1: .retag(plan)),
+            .playableAfterRetag(hevc, plan))
+        XCTAssertNil(VideoFormatSupport.message(for: .playableAfterRetag(hevc, plan)), "it is not refused")
+        for finding: HevcSampleEntryRetag.Finding in [.parameterSetsInBand, .none] {
+            XCTAssertEqual(
+                VideoFormatSupport.decide(container: mp4, report: hev1, hardwareAV1: true, hev1: finding),
+                .unsupported(hevc, .notPlayable), "\(finding)")
+        }
+        XCTAssertEqual(
+            VideoFormatSupport.decide(
+                container: mp4, report: report(codec: VideoFormatSupport.hev1), hardwareAV1: true,
+                hev1: .retag(plan)),
+            .supported, "an OS that plays hev1 plays the file itself")
+        XCTAssertEqual(
+            VideoFormatSupport.decide(
+                container: mp4, report: report(playable: false, codec: 0x6876_6331), hardwareAV1: true,
+                hev1: .retag(plan)),
+            .unsupported(hevc, .notPlayable), "an hvc1 track that does not play is not a tag problem")
+    }
+
     func testTheNameCarriesTheCodecWhenItIsKnown() {
         XCTAssertEqual(Format(container: "AVI", codec: nil).name, "AVI")
         XCTAssertEqual(Format(container: "MP4", codec: "AV1").name, "MP4 (AV1)")
@@ -272,6 +297,78 @@ final class VideoFormatSupportTests: XCTestCase {
         }
         XCTAssertNil(cache.file(for: directory.appendingPathComponent("o0.webm")), "the oldest entries go")
         XCTAssertNotNil(cache.file(for: directory.appendingPathComponent("o\(WebMOpenedFiles.capacity + 1).webm")))
+    }
+
+    /// A cache of retagged copies in this test's directory.
+    private func derivedVideos(
+        cloneError: Int32? = nil, copyBudget: Int64 = 1 << 30, available: Int64 = 1 << 40
+    ) -> DerivedVideoCache {
+        let folder = directory.appendingPathComponent("DerivedVideos", isDirectory: true)
+        return DerivedVideoCache(
+            folder: { folder }, copyBudget: copyBudget, freeSpaceReserve: 1 << 20,
+            clone: { cloneError ?? DerivedVideoCache.cloneFile($0, $1) }, availableCapacity: { _ in available })
+    }
+
+    /// The embedded `hev1` clip, skipping the test on a macOS that plays `hev1` itself, where no
+    /// copy is needed and the format check plays the file as it is.
+    private func hev1Clip() async throws -> URL {
+        let url = try Hev1Fixture.write(name: "hev1", into: directory)
+        if case .supported = await VideoFormatSupport.inspect(url: url) {
+            throw XCTSkip("this macOS plays hev1 itself")
+        }
+        return url
+    }
+
+    func testAnHev1ClipIsPlayedFromACopyRetaggedHvc1() async throws {
+        let url = try await hev1Clip()
+        let verdict = await VideoFormatSupport.inspect(url: url)
+        guard case let .playableAfterRetag(format, _) = verdict else {
+            return XCTFail("an hev1 clip with its parameter sets plays from a retagged copy, got \(verdict)")
+        }
+        XCTAssertEqual(format, Format(container: "MP4", codec: "HEVC"))
+        let derived = derivedVideos()
+        let refusal = await VideoFormatSupport.refusal(url: url, derived: derived)
+        XCTAssertNil(refusal, "the host plays it")
+        guard case let .copy(lease) = derived.playableFile(for: url) else {
+            return XCTFail("the surface is handed the copy")
+        }
+        defer { lease.release() }
+        let playable = try await DerivedVideoCache.playsInAVFoundation(lease.url)
+        XCTAssertTrue(playable)
+    }
+
+    func testAnHev1ClipTooLargeForAFullCopyIsRefusedForGood() async throws {
+        let url = try await hev1Clip()
+        let derived = derivedVideos(cloneError: EXDEV, copyBudget: 0)
+        let refusal = await VideoFormatSupport.refusal(url: url, derived: derived)
+        guard case .unsupportedFormat? = refusal else {
+            return XCTFail("a clip no full copy can take is a settled refusal, got \(String(describing: refusal))")
+        }
+        guard case .original = derived.playableFile(for: url) else { return XCTFail("nothing to play from") }
+    }
+
+    func testAnHev1ClipWaitsForRoomForAFullCopyAndForTheCopy() async throws {
+        let url = try await hev1Clip()
+        let size = Int64(try Data(contentsOf: url).count)
+        let full = await VideoFormatSupport.refusal(
+            url: url, derived: derivedVideos(cloneError: EXDEV, available: size))
+        guard case .awaitingCopy(_, making: false)? = full else {
+            return XCTFail("no room now is a failure that waits for room, got \(String(describing: full))")
+        }
+        XCTAssertFalse(full?.isSettled ?? true, "never a verdict on the file")
+
+        let copying = derivedVideos(cloneError: EXDEV)
+        let pending = await VideoFormatSupport.refusal(url: url, derived: copying)
+        guard case .awaitingCopy(_, making: true)? = pending else {
+            return XCTFail("a full copy is made in the background, got \(String(describing: pending))")
+        }
+        XCTAssertFalse(pending?.isSettled ?? true, "and the clip is not refused for it")
+        guard case let .playableAfterRetag(_, plan) = await VideoFormatSupport.inspect(url: url) else {
+            return XCTFail("planned")
+        }
+        _ = await copying.prepare(source: url, plan: plan, waiting: true)
+        let ready = await VideoFormatSupport.refusal(url: url, derived: copying)
+        XCTAssertNil(ready, "once the copy is made, the clip plays")
     }
 
     func testAMissingFileIsNotReportedAsAFormat() async {

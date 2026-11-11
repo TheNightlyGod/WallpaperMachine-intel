@@ -367,11 +367,13 @@ void DynamicValue::propagate() const {
     }
 }
 
-// Whether `choice` is the choice this value's condition names. A text choice is compared as
-// text; a number is compared as a number when the condition is one (`2` and `2.0` are the same
-// choice), else by the text it reads as.
 bool DynamicValue::conditionHolds(const DynamicValue& choice) const {
-    const std::string& wanted = m_condition->condition;
+    return ChoiceMatches(choice, m_condition->condition);
+}
+
+// A text choice is compared as text; a number is compared as a number when the condition is one
+// (`2` and `2.0` are the same choice), else by the text it reads as.
+bool DynamicValue::ChoiceMatches(const DynamicValue& choice, const std::string& wanted) {
     switch (choice.m_type) {
     case String: return choice.m_string == wanted;
     case Float:
@@ -389,7 +391,7 @@ bool DynamicValue::conditionHolds(const DynamicValue& choice) const {
     }
 }
 
-void DynamicValue::track(DynamicValue* other, bool as_vec3) {
+void DynamicValue::track(DynamicValue* other, bool as_vec3, bool read_now) {
     if (other == nullptr || other == this) return;
     const auto take = [this, as_vec3](const DynamicValue& source) {
         if (source.m_type == Null) {
@@ -408,13 +410,13 @@ void DynamicValue::track(DynamicValue* other, bool as_vec3) {
             update(source.m_vec3);
         }
     };
-    take(*other);
+    if (read_now) take(*other);
     m_trackings.push_back(other->listen(take));
 }
 
-void DynamicValue::connect(DynamicValue* other) { track(other, false); }
+void DynamicValue::connect(DynamicValue* other, bool read_now) { track(other, false, read_now); }
 
-void DynamicValue::connectVec3(DynamicValue* other) { track(other, true); }
+void DynamicValue::connectVec3(DynamicValue* other, bool read_now) { track(other, true, read_now); }
 
 void DynamicValue::disconnect() {
     auto trackings = std::move(m_trackings);

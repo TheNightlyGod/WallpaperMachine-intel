@@ -22,7 +22,8 @@ final class WallpaperCoverageProbeWindow: NSWindow {
 /// probe occluded. The probe is fully transparent and ignores the mouse, so a
 /// click on the desktop still reaches Finder. Its occlusion changes post
 /// `NSWindow.didChangeOcclusionStateNotification`, which the presentation
-/// policy already observes, so nothing polls.
+/// policy already observes, so nothing polls. `AppRuleMonitor` observes the same
+/// changes to notice the app in front minimizing or closing the window over the desktop.
 @MainActor
 final class WallpaperCoverageProbes {
     /// Wide enough for the rounded corners of a zoomed window and the margins
@@ -35,7 +36,7 @@ final class WallpaperCoverageProbes {
     func sync() {
         var seen: Set<UInt32> = []
         for screen in NSScreen.screens {
-            guard let displayID = Self.displayID(of: screen),
+            guard let displayID = SystemDisplays.id(of: screen),
                   let frame = Self.probeFrame(for: screen.visibleFrame) else { continue }
             seen.insert(displayID)
             if let probe = probes[displayID] {
@@ -69,10 +70,6 @@ final class WallpaperCoverageProbes {
     static func probeFrame(for visibleFrame: NSRect, margin: CGFloat = edgeMargin) -> NSRect? {
         let frame = visibleFrame.insetBy(dx: margin, dy: margin)
         return frame.width > 0 && frame.height > 0 ? frame : nil
-    }
-
-    static func displayID(of screen: NSScreen) -> UInt32? {
-        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
     }
 
     private static func makeProbe(frame: NSRect) -> WallpaperCoverageProbeWindow {

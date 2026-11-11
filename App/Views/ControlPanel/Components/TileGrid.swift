@@ -1,17 +1,33 @@
 import SwiftUI
 
+extension EnvironmentValues {
+  /// The width the panel's tile grids prefer, which View › Zoom In and Zoom Out change.
+  @Entry var panelTileWidth: CGFloat = TileGridLayout.preferredTileWidth
+}
+
 /// The geometry of a tile grid, apart from the view so it can be tested.
 enum TileGridLayout {
-  /// The width a tile is drawn at when there is room for it.
+  /// The width a tile is drawn at when there is room for it, at the standard zoom.
   static let preferredTileWidth: CGFloat = 140
   static let minimumColumns = 3
+  /// The preferred widths View › Zoom In and Zoom Out step through, one per `TileZoom.steps`;
+  /// the standard one is step 0.
+  static let zoomWidths: [CGFloat] = [112, 140, 176, 220]
+  static let standardZoomIndex = -TileZoom.steps.lowerBound
+
+  /// The preferred tile width at a zoom step.
+  static func preferredWidth(zoom: Int) -> CGFloat {
+    zoomWidths[TileZoom.clamped(zoom) + standardZoomIndex]
+  }
 
   /// How many columns fit `width`: as many tiles of the preferred width and gap as fit, and never
   /// fewer than three, so a narrow window shrinks its tiles instead of dropping to a list.
-  static func columnCount(forWidth width: CGFloat, spacing: CGFloat) -> Int {
-    guard width.isFinite, width > 0 else { return minimumColumns }
+  static func columnCount(
+    forWidth width: CGFloat, spacing: CGFloat, preferredWidth: CGFloat = preferredTileWidth
+  ) -> Int {
+    guard width.isFinite, width > 0, preferredWidth > 0 else { return minimumColumns }
     return max(
-      minimumColumns, Int(((width + spacing) / (preferredTileWidth + spacing)).rounded(.down)))
+      minimumColumns, Int(((width + spacing) / (preferredWidth + spacing)).rounded(.down)))
   }
 
   /// The ways the arrow keys, Home and End move focus.
@@ -56,6 +72,7 @@ struct TileGrid<Item: Identifiable, Cell: View>: View where Item.ID: Hashable {
 
   @State private var width: CGFloat = 0
   @State private var isUserScrolling = false
+  @Environment(\.panelTileWidth) private var preferredTileWidth
   @FocusState private var focused: Item.ID?
 
   init(
@@ -71,7 +88,9 @@ struct TileGrid<Item: Identifiable, Cell: View>: View where Item.ID: Hashable {
   }
 
   private var columnCount: Int {
-    TileGridLayout.columnCount(forWidth: width - insets.leading - insets.trailing, spacing: spacing)
+    TileGridLayout.columnCount(
+      forWidth: width - insets.leading - insets.trailing, spacing: spacing,
+      preferredWidth: preferredTileWidth)
   }
 
   var body: some View {

@@ -147,7 +147,7 @@ TEST(RustShaderBridgeCompat, ExtraStrayEndifIsTolerated) {
     EXPECT_TRUE(CompileFragmentShader(R"(
 #endif
 void main() {
-    gl_FragColor = vec4(1.0);
+    gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
 }
 )")) << shader::LastRustShaderError();
 #endif
@@ -201,7 +201,7 @@ TEST(RustShaderBridgeCompat, ClipIntrinsicCompiles) {
     EXPECT_TRUE(CompileFragmentShader(R"(
 void main() {
     clip(1.0);
-    gl_FragColor = vec4(1.0);
+    gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0);
 }
 )")) << shader::LastRustShaderError();
 #endif

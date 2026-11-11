@@ -12,6 +12,11 @@ enum WorkshopSource: Equatable, Sendable {
     case creator(id: String, name: String)
     /// The wallpapers the signed-in Steam account subscribes to.
     case subscriptions
+    /// The wallpapers the signed-in Steam account marked as favorites, in the order it chose.
+    case favorites
+
+    /// A list of the signed-in account's own, which Steam reads with its session.
+    var isPersonal: Bool { self == .subscriptions || self == .favorites }
 
     /// Whether Steam searches and sorts it; the others are shown in their own order.
     var isSearchable: Bool {
@@ -29,6 +34,7 @@ enum WorkshopSource: Equatable, Sendable {
         case .collection: "collection"
         case .creator: "creator"
         case .subscriptions: "subscriptions"
+        case .favorites: "favorites"
         }
     }
 
@@ -48,6 +54,24 @@ enum WorkshopSource: Equatable, Sendable {
         default: nil
         }
     }
+}
+
+/// The orders Steam offers a favorites list in, as its own `sortmethod` values.
+enum WorkshopFavoritesOrder: String, CaseIterable, Identifiable, Sendable {
+    case dateFavorited = "subscriptiondate"
+    case alphabetical = "alpha"
+    case lastUpdated = "lastupdated"
+    case dateCreated = "creationorder"
+
+    var id: String { rawValue }
+}
+
+/// Which of a profile's Workshop lists a page reads.
+enum WorkshopProfileList: Equatable, Sendable {
+    /// The items the account published.
+    case items
+    case subscriptions
+    case favorites(WorkshopFavoritesOrder)
 }
 
 /// A signed-in Steam Community session, taken from Steam's own sign-in page. It is sent to

@@ -2,6 +2,7 @@
 
 #include "MetalRender/SceneMetalProgram.hpp"
 #include "Scene/Scene.h"
+#include "Shader/FallbackProgram.hpp"
 #include "Shader/RustShaderBridge.hpp"
 #include "Utils/Logging.h"
 #include "Scene/Parse/WPShaderParser.hpp"
@@ -29,16 +30,6 @@ namespace
 /// the state it was: the ordinary path keeps drawing and the next frame
 /// boundary can ask again.
 constexpr std::size_t kMaxQueued = 32;
-
-SceneMetalSlotKind ToSceneMetalSlotKind(shader::RustShaderMetalSlotKind kind)
-{
-    switch (kind) {
-    case shader::RustShaderMetalSlotKind::Texture: return SceneMetalSlotKind::Texture;
-    case shader::RustShaderMetalSlotKind::Sampler: return SceneMetalSlotKind::Sampler;
-    case shader::RustShaderMetalSlotKind::Buffer: break;
-    }
-    return SceneMetalSlotKind::Buffer;
-}
 
 struct VariantJob
 {
@@ -171,26 +162,7 @@ private:
             variant->error = error.empty() ? "the plane variant could not be compiled" : error;
         } else {
             variant->reflection_json = std::move(reflection_json);
-            for (const auto& stage : stages) {
-                SceneMetalStage out;
-                out.kind             = stage.kind == ShaderType::FRAGMENT
-                                           ? SceneMetalStageKind::Fragment
-                                           : SceneMetalStageKind::Vertex;
-                out.source           = stage.source;
-                out.entry_point      = stage.entry_point;
-                out.language_version = stage.language_version;
-                out.bindings.reserve(stage.bindings.size());
-                for (const auto& binding : stage.bindings) {
-                    out.bindings.push_back(SceneMetalBinding {
-                        .name      = binding.name,
-                        .set       = binding.set,
-                        .binding   = binding.binding,
-                        .slot_kind = ToSceneMetalSlotKind(binding.slot_kind),
-                        .slot      = binding.slot,
-                    });
-                }
-                variant->stages.push_back(std::move(out));
-            }
+            for (const auto& stage : stages) variant->stages.push_back(shader::ToSceneMetalStage(stage));
             if (variant->stages.empty() || variant->reflection_json.empty()) {
                 variant->error = "the plane variant produced no usable shader";
             }

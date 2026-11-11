@@ -3,6 +3,7 @@ set(LIB_NAME wpParticle)
 add_library(${LIB_NAME}
 STATIC
 ParticleModify.cpp
+ParticleNoise.cpp
 ParticleSystem.cpp
 ParticleEmitter.cpp
 WPParticleRawGener.cpp

@@ -144,13 +144,47 @@ extension InstalledBrowserModel {
       && !controller.isBusy(PanelActionCoordinator.key("playlistAdd"))
   }
 
-  /// Appends the ticked wallpapers to the target display's playlist. The selection stays.
+  /// Appends the ticked wallpapers to the target display's list and says what that did: how many
+  /// were added, and, when the display's playlist does not play its list, that it does not, with
+  /// the way to its settings. The selection stays.
   @discardableResult
   func addSelectionToPlaylist() -> Task<Void, Never>? {
     let ids = selectedIDs
     guard !ids.isEmpty, canAddSelectionToPlaylist else { return nil }
     return controller.launch(PanelActionCoordinator.key("playlistAdd")) { [controller] in
-      try await controller.addToPlaylist(ids)
+      let addition = try await controller.addToPlaylist(ids)
+      self.say(Self.playlistNotice(addition), link: addition.isPlayed ? nil : .playlistSettings)
+    }
+  }
+
+  private static func playlistNotice(_ addition: PlaylistAddition) -> String {
+    switch (addition.added, addition.isPlayed) {
+    case (0, true): L("Already on this display’s list.")
+    case (0, false): L("Already on this display’s list. Its playlist is not playing the list.")
+    case (1, true): L("Added 1 wallpaper to this display’s list.")
+    case (1, false): L("Added 1 wallpaper to this display’s list. Its playlist is not playing the list.")
+    case (let count, true): L("Added \(count) wallpapers to this display’s list.")
+    case (let count, false):
+      L("Added \(count) wallpapers to this display’s list. Its playlist is not playing the list.")
+    }
+  }
+
+  /// Whether every ticked wallpaper is a favorite already, which makes the favorite tool the one
+  /// that takes them out.
+  var selectionIsAllFavorites: Bool {
+    let ids = selectedIDs
+    return !ids.isEmpty && ids.allSatisfy(controller.favoriteIDs.contains)
+  }
+
+  /// Makes the ticked wallpapers favorites, or, when they all are, none of them. The hearts on
+  /// the tiles show the result; the selection stays.
+  @discardableResult
+  func favoriteSelection() -> Task<Void, Never>? {
+    let ids = selectedIDs
+    guard !ids.isEmpty else { return nil }
+    let makesFavorites = !selectionIsAllFavorites
+    return controller.launch(PanelActionCoordinator.key("favoriteMany")) { [controller] in
+      try await controller.setFavorite(makesFavorites, ids: ids)
     }
   }
 
@@ -191,8 +225,19 @@ extension InstalledBrowserModel {
   @discardableResult
   func refreshLibrary() -> Task<Void, Never> {
     controller.launch(PanelActionCoordinator.key("refresh")) { [controller] in
+      let before = Set(controller.libraryRows.map(\.id))
       try await controller.refresh()
+      let after = Set(controller.libraryRows.map(\.id))
+      // A rescan that found nothing new looks like nothing happened unless it says so.
+      self.say(
+        Self.refreshNotice(added: after.subtracting(before).count, removed: before.subtracting(after).count))
     }
+  }
+
+  private static func refreshNotice(added: Int, removed: Int) -> String {
+    added == 0 && removed == 0
+      ? L("Your library is up to date.")
+      : L("Library refreshed: \(added) added, \(removed) removed.")
   }
 
   // MARK: Collections
@@ -286,15 +331,18 @@ extension InstalledBrowserModel {
       : L("Removed \(count) wallpapers from “\(name)”.")
   }
 
-  /// Shows `text` beside the selection's tools for five seconds, and has VoiceOver read it.
-  func say(_ text: String) {
+  /// Shows `text` in the bar under the grid for five seconds, with the `link` that goes with it,
+  /// and has VoiceOver read it.
+  func say(_ text: String, link: NoticeLink? = nil) {
     notice = text
+    noticeLink = link
     announce(text)
     noticeTask?.cancel()
     noticeTask = Task { [weak self] in
       guard let sleep = self?.sleep else { return }
       do { try await sleep(.seconds(5)) } catch { return }
       self?.notice = nil
+      self?.noticeLink = nil
     }
   }
 }

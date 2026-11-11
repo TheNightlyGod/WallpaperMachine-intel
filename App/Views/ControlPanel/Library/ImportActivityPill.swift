@@ -43,7 +43,7 @@ struct ImportActivityPill: View {
         get: { model.importAnchor == .pill }, set: { if !$0 { model.closeImport() } }),
       arrowEdge: .bottom
     ) {
-      ImportPopover()
+      ImportPopover().panelPresentationLocale()
     }
     .help(label)
     .accessibilityLabel(Text(verbatim: label))

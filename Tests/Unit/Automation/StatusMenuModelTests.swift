@@ -49,10 +49,11 @@ final class StatusMenuModelTests: XCTestCase {
 
     private func input(
         displays: [StatusMenuModel.Display], current: Bool = true, active: Bool = true, paused: Bool = false,
-        muted: Bool = false, downloads: StatusMenuModel.DownloadActivity? = nil, canLock: Bool = true
+        muted: Bool = false, downloads: StatusMenuModel.DownloadActivity? = nil,
+        battery: StatusMenuModel.Battery? = nil, canLock: Bool = true
     ) -> StatusMenuModel.Input {
         .init(playbackIsCurrent: current, hasActiveWallpapers: active, paused: paused, wallpapersMuted: muted,
-              downloads: downloads, displays: displays, canLockScreen: canLock)
+              downloads: downloads, battery: battery, displays: displays, canLockScreen: canLock)
     }
 
     private func titles(_ entries: [Entry]) -> [String] {
@@ -85,6 +86,29 @@ final class StatusMenuModelTests: XCTestCase {
         ])
     }
 
+    func testTheWallpaperMenuOffersTheCommandsWithoutOpeningThePanel() {
+        let entries = StatusMenuModel.wallpaperMenuEntries(for: input(
+            displays: [display("primary", next: true)], downloads: .init(count: 1, percent: 40)))
+        XCTAssertEqual(shape(entries), [
+            .command(.playPause, checked: false),
+            .command(.toggleMute, checked: false),
+            .command(.next(display: "primary"), checked: false),
+            .command(.lockScreen, checked: false),
+        ])
+
+        let nothing = StatusMenuModel.wallpaperMenuEntries(for: input(displays: [display("primary")], active: false, canLock: false))
+        XCTAssertTrue(nothing.isEmpty, "the panel is already open, so nothing is left to offer")
+
+        let several = StatusMenuModel.wallpaperMenuEntries(for: input(displays: [
+            display("primary", shows: "a", next: true), display("7"),
+        ], canLock: false))
+        XCTAssertEqual(shape(several), [
+            .command(.playPause, checked: false),
+            .command(.toggleMute, checked: false),
+            .submenu([.command(.next(display: "primary"), checked: false), .separator, .command(.remove(display: "primary"), checked: false)]),
+        ], "no Open in Control Panel, and a display with nothing left to offer has no submenu")
+    }
+
     func testTheFlatMenuOffersOnlyWhatCanAct() {
         let nothing = StatusMenuModel.entries(for: input(displays: [display("primary")], active: false, canLock: false))
         XCTAssertEqual(shape(nothing), [.command(.openControlPanel, checked: false)], "no switch, no history, no Play/Pause")
@@ -102,6 +126,30 @@ final class StatusMenuModelTests: XCTestCase {
             .command(.openControlPanel, checked: false), .separator,
             .command(.playPause, checked: false), .command(.toggleMute, checked: false), .command(.lockScreen, checked: false),
         ])
+    }
+
+    func testHideDesktopIconsSitsBeforeLockScreenAndIsTickedWhileTheyAreHidden() {
+        var shown = input(displays: [display("primary", next: true)])
+        shown.desktopIconsHidden = false
+        XCTAssertEqual(shape(StatusMenuModel.entries(for: shown)), [
+            .command(.openControlPanel, checked: false), .separator,
+            .command(.playPause, checked: false), .command(.toggleMute, checked: false),
+            .command(.next(display: "primary"), checked: false),
+            .command(.toggleDesktopIcons, checked: false), .command(.lockScreen, checked: false),
+        ])
+
+        var hidden = input(displays: [], active: false, canLock: false)
+        hidden.desktopIconsHidden = true
+        XCTAssertEqual(shape(StatusMenuModel.entries(for: hidden)), [
+            .command(.openControlPanel, checked: false), .separator, .command(.toggleDesktopIcons, checked: true),
+        ], "Finder's icons can be brought back whatever is playing")
+        XCTAssertEqual(shape(StatusMenuModel.wallpaperMenuEntries(for: hidden)), [
+            .command(.toggleDesktopIcons, checked: true),
+        ], "and from the Wallpaper menu while the panel is in front")
+
+        XCTAssertFalse(
+            commands(in: StatusMenuModel.entries(for: input(displays: []))).contains(.toggleDesktopIcons),
+            "left out while the app quits")
     }
 
     func testSeveralDisplaysGetOneSubmenuEachWithTheirOwnCommands() {
@@ -149,7 +197,8 @@ final class StatusMenuModelTests: XCTestCase {
             switch command {
             case .previous(let id), .next(let id), .random(let id), .remove(let id), .openInPanel(let id),
                  .apply(_, let id), .startAgain(_, let id): return id
-            case .openControlPanel, .openDownloads, .playPause, .toggleMute, .lockScreen: return nil
+            case .openControlPanel, .openDownloads, .playPause, .toggleMute, .batteryMode, .otherAppInFront,
+                 .toggleDesktopIcons, .lockScreen: return nil
             }
         }
         func allCommands(_ entries: [Entry]) -> [Command] {
@@ -291,6 +340,101 @@ final class StatusMenuModelTests: XCTestCase {
         }
         XCTAssertNotNil(playPauseTitle(paused: true))
         XCTAssertNotEqual(playPauseTitle(paused: true), playPauseTitle(paused: false), "it says what it will do")
+    }
+
+    // MARK: On Battery
+
+    /// The On Battery submenu with `mode` ticked, and Pause While Using Other Apps ticked or not.
+    private func batterySubmenu(_ mode: BridgeBatteryMode, pausesWhileUsingOtherApps: Bool) -> Shape {
+        .submenu([
+            .command(.batteryMode(.keepRunning), checked: mode == .keepRunning),
+            .command(.batteryMode(.reducedQuality), checked: mode == .reducedQuality),
+            .command(.batteryMode(.pause), checked: mode == .pause),
+            .separator,
+            .command(.otherAppInFront(pausesWhileUsingOtherApps ? .keepRunning : .pauseOnBattery),
+                     checked: pausesWhileUsingOtherApps),
+        ])
+    }
+
+    func testOnBatterySitsAfterMuteWallpapersInTheFlatMenu() {
+        let entries = StatusMenuModel.entries(for: input(
+            displays: [display("primary", shows: "b", next: true)],
+            battery: .init(mode: .reducedQuality, otherAppInFront: .keepRunning)))
+        XCTAssertEqual(shape(entries), [
+            .command(.openControlPanel, checked: false),
+            .separator,
+            .command(.playPause, checked: false),
+            .command(.toggleMute, checked: false),
+            batterySubmenu(.reducedQuality, pausesWhileUsingOtherApps: false),
+            .command(.next(display: "primary"), checked: false),
+            .command(.lockScreen, checked: false),
+        ])
+        XCTAssertEqual(titles(entries)[3], String(localized: "On Battery"))
+    }
+
+    func testOnBatterySitsAfterMuteWallpapersWithSeveralDisplaysToo() {
+        let entries = StatusMenuModel.entries(for: input(
+            displays: [display("primary", shows: "a", next: true), display("7", shows: "b", next: true)],
+            battery: .init(mode: .keepRunning, otherAppInFront: .pauseOnBattery)))
+        let kinds = shape(entries)
+        XCTAssertEqual(Array(kinds.prefix(5)), [
+            .command(.openControlPanel, checked: false), .separator,
+            .command(.playPause, checked: false), .command(.toggleMute, checked: false),
+            batterySubmenu(.keepRunning, pausesWhileUsingOtherApps: true),
+        ])
+        XCTAssertEqual(submenus(in: entries).count, 3, "one for the battery, then one per display")
+        XCTAssertTrue(submenus(in: entries).dropFirst().allSatisfy { inner in
+            !commands(in: inner).contains { if case .batteryMode = $0 { return true } else { return false } }
+        }, "it is one item for the whole Mac, not one in every display's submenu")
+        XCTAssertEqual(Array(shape(StatusMenuModel.wallpaperMenuEntries(for: input(
+            displays: [display("primary", shows: "a", next: true)],
+            battery: .init(mode: .pause, otherAppInFront: .keepRunning)))).prefix(3)),
+            [.command(.playPause, checked: false), .command(.toggleMute, checked: false),
+             batterySubmenu(.pause, pausesWhileUsingOtherApps: false)],
+            "the Wallpaper menu keeps it, since it opens nothing")
+    }
+
+    /// Ticked only for Pause on battery, so a Mute or Pause chosen in Settings (on every power
+    /// source) reads as unticked and choosing the item replaces it with Pause on battery.
+    func testPauseWhileUsingOtherAppsTogglesPauseOnBattery() {
+        func item(_ otherApp: OtherAppInFrontAction) -> (Command, Bool)? {
+            let entries = StatusMenuModel.entries(for: input(
+                displays: [], battery: .init(mode: .keepRunning, otherAppInFront: otherApp)))
+            for inner in submenus(in: entries) {
+                for case .command(let command, _, let checked) in inner {
+                    if case .otherAppInFront = command { return (command, checked) }
+                }
+            }
+            return nil
+        }
+        XCTAssertEqual(item(.pauseOnBattery)?.0, .otherAppInFront(.keepRunning))
+        XCTAssertEqual(item(.pauseOnBattery)?.1, true)
+        for other in [OtherAppInFrontAction.keepRunning, .mute, .pause] {
+            XCTAssertEqual(item(other)?.0, .otherAppInFront(.pauseOnBattery), "\(other)")
+            XCTAssertEqual(item(other)?.1, false, "\(other)")
+        }
+    }
+
+    func testOnBatteryIsOfferedWithABatteryOrWhileAChoiceIsNotTheDefault() {
+        typealias Battery = StatusMenuModel.Battery
+        XCTAssertNil(Battery.offered(hasBattery: false, mode: .keepRunning, otherAppInFront: .keepRunning),
+                     "a Mac without a battery has no use for it")
+        XCTAssertNil(Battery.offered(hasBattery: false, mode: .keepRunning, otherAppInFront: .mute),
+                     "Mute applies on every power source and is not a battery choice")
+        XCTAssertEqual(Battery.offered(hasBattery: true, mode: .keepRunning, otherAppInFront: .mute),
+                       Battery(mode: .keepRunning, otherAppInFront: .mute))
+        XCTAssertNotNil(Battery.offered(hasBattery: false, mode: .pause, otherAppInFront: .keepRunning),
+                        "a battery choice can always be undone")
+        XCTAssertNotNil(Battery.offered(hasBattery: false, mode: .keepRunning, otherAppInFront: .pauseOnBattery))
+
+        let without = StatusMenuModel.entries(for: input(displays: [display("primary")], battery: nil))
+        XCTAssertTrue(submenus(in: without).isEmpty)
+        let idle = StatusMenuModel.entries(for: input(
+            displays: [display("primary")], active: false, battery: .init(mode: .pause, otherAppInFront: .keepRunning),
+            canLock: false))
+        XCTAssertEqual(shape(idle), [
+            .command(.openControlPanel, checked: false), .separator, batterySubmenu(.pause, pausesWhileUsingOtherApps: false),
+        ], "a setting of the whole Mac, offered with nothing playing")
     }
 
     // MARK: Downloads
@@ -479,5 +623,65 @@ final class StatusMenuModelTests: XCTestCase {
         XCTAssertEqual(ordered.map(\.id), ["3", "4", "5", "2"])
         XCTAssertEqual(ordered.map(\.title), ["LG UltraFine", "LG UltraFine (2)", "LG UltraFine (3)", "LG UltraFine (2) (2)"])
         XCTAssertEqual(Set(ordered.map(\.title)).count, ordered.count)
+    }
+
+    // MARK: What each item runs
+
+    /// One per `Command` case. `kind(of:)` switches over every command and `sample(_:)` over every
+    /// kind, so a new command does not compile until it has a kind, and its kind does not compile
+    /// until its sample says what it runs; `allCases` then puts that sample in the test below.
+    private enum Kind: CaseIterable {
+        case openControlPanel, openDownloads, playPause, toggleMute, batteryMode, otherAppInFront, previous,
+             next, random, apply, remove, startAgain, openInPanel, toggleDesktopIcons, lockScreen
+    }
+
+    private func kind(of command: Command) -> Kind {
+        switch command {
+        case .openControlPanel: .openControlPanel
+        case .openDownloads: .openDownloads
+        case .playPause: .playPause
+        case .toggleMute: .toggleMute
+        case .batteryMode: .batteryMode
+        case .otherAppInFront: .otherAppInFront
+        case .previous: .previous
+        case .next: .next
+        case .random: .random
+        case .apply: .apply
+        case .remove: .remove
+        case .startAgain: .startAgain
+        case .openInPanel: .openInPanel
+        case .toggleDesktopIcons: .toggleDesktopIcons
+        case .lockScreen: .lockScreen
+        }
+    }
+
+    /// A command of the kind and what it runs: nil for the items that open something instead.
+    private func sample(_ kind: Kind) -> (Command, AutomationCommand?) {
+        switch kind {
+        case .openControlPanel: (.openControlPanel, nil)
+        case .openDownloads: (.openDownloads, nil)
+        case .playPause: (.playPause, .togglePlayback)
+        case .toggleMute: (.toggleMute, .toggleMute)
+        case .batteryMode: (.batteryMode(.pause), nil)
+        case .otherAppInFront: (.otherAppInFront(.pauseOnBattery), nil)
+        case .previous: (.previous(display: "2"), .previous(display: "2"))
+        case .next: (.next(display: "2"), .next(display: "2"))
+        case .random: (.random(display: "2"), .random(display: "2", pool: .all))
+        case .apply: (.apply(wallpaper: "w", display: "2"), .apply(wallpaperID: "w", display: "2"))
+        case .remove: (.remove(display: "2"), .removeWallpaper(display: "2"))
+        case .startAgain: (.startAgain(wallpaper: "w", display: "2"), .apply(wallpaperID: "w", display: "2"))
+        case .openInPanel: (.openInPanel(display: "2"), nil)
+        case .toggleDesktopIcons: (.toggleDesktopIcons, nil)
+        case .lockScreen: (.lockScreen, nil)
+        }
+    }
+
+    /// The menu and the menu bar panel both run what `automation` says, so this is what either does.
+    func testEveryItemRunsItsOwnAutomationCommandOrOpensSomethingInstead() {
+        for kind in Kind.allCases {
+            let (command, automation) = sample(kind)
+            XCTAssertEqual(self.kind(of: command), kind, "The sample for \(kind) is a command of that kind")
+            XCTAssertEqual(command.automation, automation, "\(command)")
+        }
     }
 }

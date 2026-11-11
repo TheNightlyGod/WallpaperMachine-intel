@@ -21,6 +21,7 @@ final class OtherAudioMonitorTests: XCTestCase {
     private func makeMonitor(
         _ source: FakeProcessAudioSource,
         preferences: PlaybackPreferences? = nil,
+        executables: [pid_t: String] = [:],
         activate: Duration = .milliseconds(40),
         deactivate: Duration = .milliseconds(120)
     ) -> OtherAudioMonitor {
@@ -29,6 +30,7 @@ final class OtherAudioMonitorTests: XCTestCase {
             source: source,
             ownPID: ownPID,
             responsiblePID: { pid in pid == self.childPID ? self.ownPID : pid },
+            executablePath: { executables[$0] },
             activateDelay: activate,
             deactivateDelay: deactivate)
     }
@@ -48,6 +50,48 @@ final class OtherAudioMonitorTests: XCTestCase {
         source.samples.append(ProcessAudioSample(pid: otherPID, isRunningOutput: true))
         source.emit()
         XCTAssertTrue(monitor.isActive)
+    }
+
+    func testSystemSoundServicesDoNotCountAsOtherAudio() async throws {
+        let services: [pid_t: String] = [
+            200: "/usr/sbin/systemsoundserverd",
+            201: "/usr/libexec/audiomxd",
+            202: "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow",
+            203: "/System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter",
+            204: "/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd",
+            205: "/System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd_system",
+        ]
+        let source = FakeProcessAudioSource()
+        source.samples = services.keys.sorted().map { ProcessAudioSample(pid: $0, isRunningOutput: true) }
+        var executables = services
+        executables[otherPID] = "/Applications/Music.app/Contents/MacOS/Music"
+        let monitor = makeMonitor(source, executables: executables, activate: .zero, deactivate: .zero)
+        monitor.start()
+        defer { monitor.stop() }
+        source.emit()
+        XCTAssertFalse(monitor.isActive, "Alert, volume-feedback and Siri listening output is not another app playing")
+
+        source.samples.append(ProcessAudioSample(pid: otherPID, isRunningOutput: true))
+        source.emit()
+        XCTAssertTrue(monitor.isActive)
+    }
+
+    func testOnlyTheSystemCopyOfASoundServiceIsIgnored() async throws {
+        let impostorPID: pid_t = 300
+        let unknownPID: pid_t = 301
+        let source = FakeProcessAudioSource()
+        source.samples = [ProcessAudioSample(pid: impostorPID, isRunningOutput: true)]
+        let monitor = makeMonitor(
+            source, executables: [impostorPID: "/Applications/ControlCenter.app/Contents/MacOS/ControlCenter"],
+            activate: .zero, deactivate: .zero)
+        monitor.start()
+        defer { monitor.stop() }
+        source.emit()
+        XCTAssertTrue(monitor.isActive, "A program outside the system volume with a system service's name still counts")
+
+        source.samples = [ProcessAudioSample(pid: unknownPID, isRunningOutput: true)]
+        source.emit()
+        XCTAssertTrue(monitor.isActive, "A process whose program cannot be read still counts")
     }
 
     func testBecomingActiveWaitsAndATrackGapDoesNotClear() async throws {

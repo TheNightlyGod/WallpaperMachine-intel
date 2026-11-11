@@ -52,6 +52,7 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
         }
         override func viewDidEndLiveResize() { super.viewDidEndLiveResize(); resized?() }
         override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); resized?() }
+        override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); resized?() }
     }
 
     private final class ReadyCallback: @unchecked Sendable {
@@ -72,6 +73,8 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
     private var size: CGSize = .zero
     private var scale: CGFloat = 1
     private var resizing = false
+    private var displayID: UInt32 = 0
+    private var screenObserver: NSObjectProtocol?
 
     init(request: WallpaperPreviewRequest,
          cacheURL: URL = ClientPaths.supportURL.appendingPathComponent("ShaderCache/Previews", isDirectory: true)) {
@@ -127,6 +130,17 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
         do {
             try check(owe_scene_wallpaper_new(&renderer))
             try check(owe_scene_wallpaper_init(renderer))
+            displayID = currentDisplayID
+            try check(owe_scene_wallpaper_set_display_id(renderer, displayID))
+            screenObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didChangeScreenNotification, object: nil, queue: .main
+            ) { [weak self] notification in
+                MainActor.assumeIsolated {
+                    guard let self, let window = notification.object as? NSWindow,
+                          window === self.view.window else { return }
+                    self.resizeIfNeeded()
+                }
+            }
             try check(owe_scene_wallpaper_init_metal(renderer,
                 Unmanaged.passUnretained(layer).toOpaque(), UInt32(size.width), UInt32(size.height), 0, 0, Double(scale)))
             let callback = Unmanaged.passRetained(ReadyCallback { [weak self] in
@@ -143,6 +157,17 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
             if result != 0 { Unmanaged<ReadyCallback>.fromOpaque(callback).release() }
             try check(result)
             try check(owe_scene_wallpaper_set_property_bool(renderer, owe_property_audio_response_enabled(), false))
+            // The desktop's saved script storage, read but never written here (plan decision I3).
+            let storage = ClientPaths.sceneStorageURL
+                .appendingPathComponent(request.projectURL.lastPathComponent, isDirectory: true)
+            try check(owe_scene_wallpaper_set_storage(renderer, storage.path,
+                SceneStorageKey.screenKey(displayID: CGMainDisplayID()), true))
+            // The saved scene quality and the draft's Wallpaper Engine options are in force for
+            // the first frame.
+            if let renderer {
+                try check(SceneEngineOptionsBinding.apply(request.sceneQuality, to: renderer))
+                try check(SceneEngineOptionsBinding.apply(request.engineOptions ?? .identity, to: renderer))
+            }
             try check(owe_scene_wallpaper_apply_config(renderer,
                 request.projectURL.appendingPathComponent("project.json").path, request.assetsURL.path,
                 cacheURL.path, request.fps, false, request.volume, muted, false, request.propertiesJSON))
@@ -177,10 +202,20 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
         try check(owe_scene_wallpaper_set_property_string(renderer, owe_property_project_property_preview_json(), json))
     }
 
+    /// Shows the draft's Wallpaper Engine options on the running scene. Values, flip, rate and
+    /// mouse parallax change in place; the renderer loads the scene again only when the colour
+    /// pass or the image filter is switched on or off, or another filter is chosen.
+    func applyEngineOptions(_ options: WallpaperEngineOptions) throws {
+        guard !stopped, let renderer else { return }
+        try check(SceneEngineOptionsBinding.apply(options, to: renderer))
+    }
+
     func stop() {
         guard !stopped else { return }
         stopped = true
         (view as? RenderView)?.resized = nil
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        screenObserver = nil
         onReady = nil
         onFailure = nil
         if let renderer {
@@ -194,6 +229,10 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
         metal = nil
     }
 
+    private var currentDisplayID: UInt32 {
+        view.window?.screen.flatMap(SystemDisplays.id(of:)) ?? 0
+    }
+
     private func pixelSize(scale: CGFloat) -> CGSize {
         CGSize(width: max(1, min(8192, (view.bounds.width * scale).rounded())),
                height: max(1, min(8192, (view.bounds.height * scale).rounded())))
@@ -201,6 +240,16 @@ final class SceneWallpaperPreviewSurface: WallpaperPreviewSurface {
 
     private func resizeIfNeeded() {
         guard !stopped, !resizing, let renderer, let metal else { return }
+        let nextDisplayID = currentDisplayID
+        if displayID != nextDisplayID {
+            do {
+                try check(owe_scene_wallpaper_set_display_id(renderer, nextDisplayID))
+                displayID = nextDisplayID
+            } catch {
+                onFailure?(error.localizedDescription)
+                return
+            }
+        }
         let nextScale = view.window?.backingScaleFactor ?? 1
         let nextSize = pixelSize(scale: nextScale)
         guard size != nextSize || scale != nextScale else { return }

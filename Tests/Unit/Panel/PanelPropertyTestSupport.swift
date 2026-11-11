@@ -165,6 +165,8 @@ final class InspectorPreviewBridge: LayoutSnapshotBridge {
     var show: Bool
     /// The values being dragged that the displays were told to show on top of the draft.
     var pending: [BridgePropertyEdit] = []
+    /// The Wallpaper Engine option values being dragged, likewise.
+    var pendingEngineOptions: [BridgeEngineOptionEdit] = []
   }
 
   @MainActor weak var store: BridgeStore?
@@ -277,10 +279,77 @@ final class InspectorPreviewBridge: LayoutSnapshotBridge {
     if holdApply { await withCheckedContinuation { heldApplies.append($0) } }
   }
 
-  override func previewWallpaperProperties(wallpaperId: String, show: Bool, pending: [BridgePropertyEdit])
-    async throws
+  override func previewWallpaperProperties(
+    wallpaperId: String, show: Bool, pending: [BridgePropertyEdit],
+    pendingEngineOptions: [BridgeEngineOptionEdit]
+  ) async throws {
+    try await receivePreview(
+      Preview(
+        wallpaperID: wallpaperId, show: show, pending: pending,
+        pendingEngineOptions: pendingEngineOptions))
+  }
+
+  /// The Wallpaper Engine option edits the draft took, in order; `restore <option>` and
+  /// `restoreAll` for the restores.
+  @MainActor var engineEdits: [String] = []
+
+  override func editEngineOption(
+    wallpaperId: String, option: BridgeEngineOptionId, value: BridgePropertyValue
+  ) async throws -> BridgeWallpaperMutationBundle {
+    try await editEngine(wallpaperId, option, value)
+  }
+
+  @MainActor private func editEngine(
+    _ id: String, _ option: BridgeEngineOptionId, _ value: BridgePropertyValue
+  ) throws -> BridgeWallpaperMutationBundle {
+    if let editFailure { throw editFailure }
+    engineEdits.append("\(option) \(value)")
+    return try reply("edit", id, changed: try changingEngineOption(id, option, to: value), dirty: true)
+  }
+
+  override func restoreEngineOptionDefault(wallpaperId: String, option: BridgeEngineOptionId)
+    async throws -> BridgeWallpaperMutationBundle
   {
-    try await receivePreview(Preview(wallpaperID: wallpaperId, show: show, pending: pending))
+    try await restoreEngine(wallpaperId, option)
+  }
+
+  @MainActor private func restoreEngine(_ id: String, _ option: BridgeEngineOptionId) throws
+    -> BridgeWallpaperMutationBundle
+  {
+    engineEdits.append("restore \(option)")
+    let options = try current(id)
+    let defaultValue = options.engineOptions?.rows.first { $0.id == option }?.defaultValue ?? .empty
+    return try reply("restore", id, changed: try changingEngineOption(id, option, to: defaultValue), dirty: true)
+  }
+
+  override func restoreAllEngineOptionDefaults(wallpaperId: String) async throws
+    -> BridgeWallpaperMutationBundle
+  {
+    try await restoreAllEngine(wallpaperId)
+  }
+
+  @MainActor private func restoreAllEngine(_ id: String) throws -> BridgeWallpaperMutationBundle {
+    engineEdits.append("restoreAll")
+    var changed = try current(id)
+    changed.engineOptions = changed.engineOptions.map {
+      BridgeSnapshotFixtures.engineOptions(
+        parallax: $0.rows.contains { $0.id == .mouseParallax }, imageFilters: $0.imageFilters)
+    }
+    return try reply("restoreAll", id, changed: changed, dirty: true)
+  }
+
+  /// The options of `id` with `option` at `value`, rows enabled as the bridge enables them.
+  @MainActor private func changingEngineOption(
+    _ id: String, _ option: BridgeEngineOptionId, to value: BridgePropertyValue
+  ) throws -> BridgeWallpaperOptionsSnapshot {
+    var changed = try current(id)
+    guard let engine = changed.engineOptions else { return changed }
+    var values = Dictionary(uniqueKeysWithValues: engine.rows.map { ($0.id, $0.value) })
+    values[option] = value
+    changed.engineOptions = BridgeSnapshotFixtures.engineOptions(
+      parallax: engine.rows.contains { $0.id == .mouseParallax }, imageFilters: engine.imageFilters,
+      values: values)
+    return changed
   }
 
   override func refreshLibrary() async throws -> BridgeSnapshotBundle {

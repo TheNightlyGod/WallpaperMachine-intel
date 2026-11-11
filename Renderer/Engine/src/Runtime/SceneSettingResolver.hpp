@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Runtime/CameraPath.hpp"
+#include "Runtime/GlobalCameraPath.hpp"
 #include "Runtime/DynamicValue.hpp"
 #include "Runtime/ScalarAnimation.hpp"
 
@@ -80,6 +81,7 @@ std::unique_ptr<DynamicValue> ResolveStringSetting(
     const nlohmann::json& value,
     std::string_view current_layer_name = {});
 std::vector<CameraPath> ParseCameraPaths(const nlohmann::json& json);
+std::vector<GlobalCameraPath> ParseGlobalCameraPaths(const nlohmann::json& json);
 
 // What a bool setting reads before anything runs: its authored value, which a script's first
 // run replaces (the value `ResolveBoolSetting` starts from).

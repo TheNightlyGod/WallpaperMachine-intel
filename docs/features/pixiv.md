@@ -55,17 +55,39 @@ filter only the app applies cost no request; the page after the one on show is
 fetched ahead of time. The summary line names the listing and how many works on
 the page the filters hide, and a page whose works are all hidden offers **Clear
 filters** and **Next page**. JSON requests are spaced at least 350 ms apart and
-carry an honest user agent (`WallpaperMachine/<version> (macOS; pixiv browser)`);
+carry WebKit's user agent form naming the app instead of Safari
+(`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)
+WallpaperMachine/<version>`): pixiv's Cloudflare front answers a signed-in request whose user
+agent lacks the `Mozilla/5.0` form with a 403 browser check ("Just a moment…") on every
+endpoint, while anonymous requests pass either way;
 thumbnails come from `i.pximg.net`, which answers only requests that name pixiv
 as their referrer, through a thumbnail cache of their own
 (`Cache/PixivThumbnails`, 256 MB, six fetches at a time), which the panel's image
 pipeline reads only for `i.pximg.net` addresses and decodes at the size a tile draws.
 
+A request that gets no HTTP answer is reported as "Couldn’t reach pixiv" with the reason.
+When the connection was cut off or refused before pixiv answered (a failed TLS handshake,
+which the system calls "An SSL error has occurred", a reset, refused or timed-out
+connection, an unresolved name), the reason names the failing host (`www.pixiv.net`,
+`i.pximg.net`) and explains that its traffic is probably not going through the proxy, as
+described under [Proxies](workshop-downloads.md#proxies); being offline and other
+failures keep the system's description.
+
 A general HTTP 403 is reported as a denied request, not as a confirmed rate limit, and
 the error asks users to check access in a browser and their network/proxy connection (a
 working browser does not prove the app's requests are accepted); HTTP 429 has separate
-rate-limit advice. Failed HTTP responses log only the status code, never URLs, searches,
-cookies or response bodies, for the [diagnostics report](diagnostics.md#diagnostics-report).
+rate-limit advice. `www.pixiv.net` sits behind Cloudflare, which refuses some networks,
+proxy nodes and client signatures itself, before pixiv sees the request, even when a
+browser on the same network still opens pixiv. Such a refusal (a 403/503 from
+`Server: cloudflare` with `cf-mitigated: challenge`, or a block page naming a Cloudflare
+error reference such as 1010 or 1020: `error code: 1010`, `cf-error-1010`, `Error reference
+number: 1010`) is reported as a block by pixiv's protection service with its reference, and
+the error advises switching proxy node or network; it is never mapped to the R-18 sign-in
+handling below. The app does not claim to be Safari: URLSession shares Safari's TLS
+fingerprint but not its HTTP/2 one, so a full Safari user agent would not make the app look
+like Safari and would only add a mismatch. Failed HTTP responses log the status code, the pixiv
+host and whether Cloudflare refused it (with its reference), never URLs, searches, cookies or
+response bodies, for the [diagnostics report](diagnostics.md#diagnostics-report).
 R-18 ranking denials have the account-specific handling described below.
 
 ## Saving a page
@@ -126,7 +148,12 @@ runs in a private website data store that disappears with the window; the app
 reads exactly one thing from it, the `PHPSESSID` cookie pixiv sets on
 `.pixiv.net` once someone has signed in, and only in its signed-in shape
 (account id, underscore, token). The password, and anything else typed into the
-page, stays between the page and pixiv. Closing the window cancels.
+page, stays between the page and pixiv. Closing the window cancels. When the page
+does not load (a cancelled or replaced navigation aside), WebKit would leave the window
+blank, so the window covers it with **Couldn’t open the sign-in page**, the reason and
+**Retry**, which loads the site's sign-in address again; the next page that loads clears
+it. A connection the network cut off or refused gets the proxy explanation described
+under [Proxies](workshop-downloads.md#proxies), naming the host that failed.
 
 The session is then checked with pixiv (`/touch/ajax/user/self/status`). The
 account's name comes from that answer or, failing that, from its profile
@@ -137,10 +164,15 @@ keychain (service `app.wallpapermachine.pixiv`) and sent, as a `Cookie` header
 added by hand, with every request to `https://www.pixiv.net` and nothing else:
 never to the image host, never logged, and never part of the panel's state.
 At launch the saved session is read off the main thread and confirmed in the
-background. Releases share one designated requirement (see
+background. Developer ID releases share one keychain partition (see
 [build](../build.md#release-signing)), so an update reads what the version
-before it saved; a locally built, ad-hoc signed app is a different app to the
-keychain, and macOS asks once whether it may read the item.
+before it saved; any other build, such as a locally built, ad-hoc signed app,
+has a partition of its own, and macOS asks for the login keychain password
+before it may read the item (**Always Allow** keeps that build from asking
+again); saving over it never asks. A save the keychain refuses is reported with
+the keychain's reason and not retried by deleting the item, which macOS refuses
+to another build anyway (`KeychainGenericPassword`, shared with the Steam
+sign-in).
 
 Signed in, the Mature (R-18) box can be ticked; ticking it adds R-18 works to
 search and the two R-18 rankings to the menu. Unticking it, or signing out,
@@ -168,7 +200,7 @@ and password always works.
 | Requests and decoding | `App/Services/Pixiv/PixivService.swift`, `PixivTransport.swift` |
 | Browse state, account | `App/Services/Pixiv/PixivStore.swift`, `PixivSessionStore.swift` |
 | Downloads and packaging | `App/Services/Pixiv/PixivDownloadQueue.swift`, `PixivWallpaperPackager.swift` |
-| Panel actions and state | `App/Views/ControlPanel/Model/PanelController+Pixiv.swift`, `PixivBrowseState.swift`, `PixivTile.swift`, `PixivQuery+Panel.swift` |
+| Panel actions and state | `App/Views/ControlPanel/Model/PanelController+Pixiv.swift`; `App/Views/ControlPanel/Pixiv/PixivBrowseState.swift`, `PixivTile.swift`, `PixivQuery+Panel.swift` |
 | Sign-in window | `App/Views/ControlPanel/WebSignInWindow.swift` |
 | Page, inspector and toolbar pill | `App/Views/ControlPanel/Pixiv/` |
 

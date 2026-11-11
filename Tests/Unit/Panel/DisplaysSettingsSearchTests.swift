@@ -82,6 +82,18 @@ final class DisplaysSettingsSearchTests: SettingsBTestCase {
     XCTAssertFalse(card("Mirror source", rows: dayNight).showsCard)
   }
 
+  /// Only a rotation on a timer draws Wait for the video to finish: one that changes on unlock does
+  /// not wait for anything. (Next change, which every rotation draws, also says "finishes" while a
+  /// change waits for a video, so the query names the option.)
+  func testTheVideoOptionIsFoundOnlyWhereARotationRunsOnATimer() {
+    let query = "Wait for the video"
+    let timed = card(query, rows: DisplaysCardSearch.Rows(playlistMode: .rotate, rotatesOnTimer: true))
+    XCTAssertTrue(timed.showsCard)
+    XCTAssertTrue(timed.opens(S.playlist))
+    XCTAssertFalse(card(query, rows: DisplaysCardSearch.Rows(playlistMode: .rotate)).showsCard)
+    XCTAssertFalse(card(query, rows: dayNight).showsCard)
+  }
+
   /// A disclosure whose own words match stays, folded, on a display where nothing inside matches.
   func testADisclosureFoundByItsOwnWordsStaysFoldedWhereNothingInsideMatches() {
     let paused = card("Playlist paused", rows: dayNight)

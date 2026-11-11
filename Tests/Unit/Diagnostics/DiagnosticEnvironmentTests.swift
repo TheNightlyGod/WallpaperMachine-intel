@@ -12,7 +12,7 @@ final class DiagnosticEnvironmentTests: XCTestCase {
     BridgeSceneBackendReport(
       displayId: displayId, displayName: "Studio Display", wallpaperId: "rain-1",
       wallpaperTitle: "Rain", backend: backend, failureStage: nil, failureReason: nil, videoPath: "none",
-      optimizationApplied: true)
+      optimizationApplied: true, qualityInForce: nil)
   }
 
   func testRunningSceneLineIncludesTheLiveMode() {
@@ -45,7 +45,7 @@ final class DiagnosticEnvironmentTests: XCTestCase {
     let held = BridgeSceneBackendReport(
       displayId: 3, displayName: "Studio Display", wallpaperId: "rain-1", wallpaperTitle: "Rain",
       backend: "unknown", failureStage: "compile",
-      failureReason: "the shader did not link", videoPath: "none", optimizationApplied: nil)
+      failureReason: "the shader did not link", videoPath: "none", optimizationApplied: nil, qualityInForce: nil)
     let line = DiagnosticEnvironment.runningSceneLine(held, mode: "stopped_after_failure")
 
     XCTAssertTrue(
@@ -59,5 +59,21 @@ final class DiagnosticEnvironmentTests: XCTestCase {
     XCTAssertFalse(
       line.contains("mode"),
       "No live reading is not a mode, and the report must not invent one: \(line)")
+  }
+
+  func testRunningSceneLineNamesTheQualityInForce() {
+    let report = BridgeSceneBackendReport(
+      displayId: 1, displayName: "Studio Display", wallpaperId: "rain-1", wallpaperTitle: "Rain",
+      backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none",
+      optimizationApplied: true,
+      qualityInForce: BridgeSceneQuality(
+        msaa: .off, shadows: .off, volumetrics: .off, reflections: false, postProcessing: .enabled))
+    let line = DiagnosticEnvironment.runningSceneLine(report, mode: "continuous")
+    XCTAssertTrue(
+      line.hasSuffix(
+        ", quality msaa=0 shadows=disabled volumetrics=disabled reflection=false post=enabled"), line)
+    XCTAssertFalse(
+      DiagnosticEnvironment.runningSceneLine(scene(), mode: nil).contains("quality"),
+      "No reading is not a quality")
   }
 }

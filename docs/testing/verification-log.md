@@ -25,136 +25,106 @@ and moves whatever falls past ten verbatim into a monthly file under
 [archive/](archive/); promote anything durable before it goes. Editing an
 entry's recorded result is not allowed.
 
-## 2026-10-24 — Keep each visited desktop's wallpaper loaded and paused
+## 2026-11-11 — Feeling good? offers Sponsor on Open Collective; README lists Open Collective sponsors
 
-Follow-up to PR #77: a display with a different wallpaper for each desktop keeps the wallpapers of visited desktops parked (renderer, bridge, web and video hosts) instead of reloading them on every desktop change; memory pressure and Stop (free memory) let them go.
+The support prompt's second choice opens MMFoundation's Open Collective (approved by Open Source Collective on 2026-11-11) instead of the website's pricing page, with new strings in every shipped language; the four READMEs gain a sponsors block drawn by Open Collective.
 
-- `python3 scripts/check_rust.py` — exit 0; core, bridge, core-integration and shader all pass, including the new `engine::actor::space_parking_tests` (9), `tests::space_parking` (3) and `first_frame_tests::a_wallpaper_the_display_keeps_parked_is_not_awaited`
-- `python3 scripts/check_renderer.py` — exit 0; corpus and media cases skipped as listed (no local assets)
-- `python3 scripts/test.py` — exit 0; 4107 tests: 4060 passed, 47 skipped, after one rerun: the first run on the final code failed `EnergyUsageMonitorTests/testKernelCountersForThisProcessAdvanceWithGPUWork` (3.7 mW against a 10 mW floor, right after the renderer check), which passed alone and in the rerun
-- New Swift tests: `WallpaperSpaceParkingTests`, per-window placement and opening windows in `WallpaperSpacePinningTests`, kept clips and pages in `NativeVideoWallpaperHostTests` and `WebWallpaperHostLifecycleTests`, the auditor's kept-window excuse, pressure edges in `MemoryPressureMonitorTests`
-- Not checked: no desktop run (no intro on return, the kept frame during a swipe, a shared wallpaper on several desktops, `CGSAddWindowsToSpaces`/`CGSRemoveWindowsFromSpaces`, the memory held, release under real memory pressure); the Release app was not rebuilt
+- `python3 scripts/build.py --renderer-only` — OK; the checkout's `libwallpaper_bridge.a` predated main's Steam QR sign-in bridge, so the first targeted build failed to link
+- `xattr -cr build/Build/Products/Debug` — cleared after the extension's CodeSign refused Finder/File Provider attributes (docs/build.md)
+- `python3 scripts/test.py --only SupportPromptPresenterTests --only PanelSupportPromptTests --only PanelPerformanceDataTests --only ExternalLinkTests` — 32 passed; `--only PanelSharingTests` — 5 passed
+- `python3 scripts/test.py` — exit 0: every Python suite, XcodeGen, and 4,843 native tests passed, 0 failed, 68 skipped of 4,911 (two main-thread API runtime warnings)
+- Not checked: the sheet's longer row in six languages on screen (no desktop run, no Release build); the README block through GitHub's image proxy (rendered with GitHub's Markdown API, images loaded from Open Collective directly)
 
-## 2026-10-23 — Different wallpaper for each desktop: windows kept on their desktop, saved posters, new panel UI
+## 2026-11-11 — Wallpaper-switch teardown and lock-screen recovery (issue 184)
 
-Space mode reworked: wallpaper windows of a display in the mode stay on its current desktop and move hidden on a desktop change; other desktops get their wallpaper's saved poster; Apply sets the current desktop's wallpaper; the switch moved onto the display card and the toolbar menu with a desktop strip and a searchable chooser.
+- `python3 scripts/test.py` in an isolated HEAD checkout plus this patch: 687 Python tests passed; native gate 4,741 passed, 66 skipped, zero failures. The shared checkout was blocked by its pre-existing missing `CLAUDE.md`; an earlier targeted build also encountered concurrent desktop-widget API edits.
+- Native result: one main-thread runtime warning, attributed by the detailed xcresult issue to `AppUpdateTests.testSignatureCheckRefusesAnUnsignedOrAlteredCopy()`; no source location.
+- `scripts/check_renderer.py` entry point with its output redirected to the task directory: 3,520 passed, seven local-asset/opt-in tests skipped; all 12 generated image comparisons and eight projects with two reload cycles passed. GPU and cadence checks ran; timer diagnostics were collected.
+- `python3 scripts/check_rust.py`: all four groups passed (2,499 tests); five desktop-window cases were explicitly excluded, and desktop/media/network opt-ins remained disabled.
+- The retiring-renderer acknowledgement regression and the pending-Metal-command release regression failed before their respective fixes and passed afterwards. Interrupted refreshes and genuine repeated renderer exits remain covered.
+- No live desktop run, Wallpaper Engine comparison, or Release app build. The exact Apple Metal HUD crash on the reported macOS build remains unverified; tests cover the identified teardown and acknowledgement races.
 
-- `python3 scripts/test.py` — first run 1 failure (SettingsSectionsLocalizationTests: "Mission Control"/"Spaces" keywords untranslated), fixed; rerun exit 0: 4083 tests, 4037 passed, 46 skipped
-- `python3 scripts/build.py --swift-only --configuration Release` — OK (ad-hoc signed)
-- Authorized desktop run, macOS 27.0.1, one display, three desktops: a standalone window probe showed CGSMoveWindowsToManagedSpace moves an own window to the current Space; re-ordering, toggling canJoinAllSpaces and moveToActiveSpace do not; an alpha-0 window stays occlusion-visible and keeps vending drawables
-- Live app: Mission Control showed desktop 2 Windows 11 and desktop 3 Plastic Beach (before: every desktop showed the live window); swipes show the destination's poster; warm loads shown 0.4 s (Plastic Beach) and 0.9–1.0 s (Windows 11) after the swipe ends
-- Relaunch without visiting: both other desktops and the current one got their own poster within ~3 s
-- Panel: card switch, desktop strip, chooser popover and the toolbar's toggle and "· Desktop 1" label rendered as intended
-- Gap: ad-hoc test builds ask again for System Audio Recording; an audio-responsive scene's first frame waits for the answer (6.4 s and 180 s stalls seen); a pixiv keychain prompt was denied
-- Not checked live: Apply assigning the current desktop (unit-tested), chooser search typing, multiple displays with separate Spaces, web/video on a pinned display, VoiceOver
+## 2026-11-11 — Review fixes for the Steam QR sign-in and native downloads
 
-## 2026-10-24 — Daily active count (DAU/MAU) without an install id
+Addresses the PR review: CM logon cleanup, endpoint fallback and cancellation; HTTPS-only content servers with failover promotion; Workshop app check; free-space check from the manifest size; QR actions through PanelController and cancelled when the dialog closes; localized native failure messages.
 
-- App: TelemetryActiveCount sends one ping per UTC day to /api/telemetry/active (random per-day ping id, day, version, source, monthFirst); hourly retry with the same ping, next send 0-15 min after UTC midnight; no count with WALLPAPER_MACHINE_HOME or a defaults suite.
-- python3 scripts/test.py --only TelemetryActiveCountTests --only TelemetryClientTests --only TelemetryServiceTests: 18 passed, 0 failed.
-- python3 scripts/test.py (full gate, worktree): Python script tests OK; native 4062 passed, 0 failed, 47 skipped; 1 runtime warning (main-thread call), not traced to this change and not baselined.
-- Website (separate repo, branch feat/telemetry-active-count): npm run typecheck OK; local wrangler dev on a scratch D1 with migration 0002: retries (same and lowercase ping) counted once, a day-behind clock kept its day, a far-off clock took the arrival day, bad schema/ping/day/agent 400, cron prune kept 400-day totals and 2-day pings.
-- Dashboard DAU/MAU SQL run on the scratch D1 gave the expected sums; the page's new section was not viewed in a browser (owner sign-in needed).
-- Not done: no D1 remote migration, no Worker deploy, no app Release build, no desktop run.
+- `python3 scripts/test.py` — 4839 tests: 4767 passed, 70 skipped, 2 failed: WebWallpaperErrorStackTests/testStacksReadAsV8WritesThem and WebWallpaperWindowCompositionTests/testPreservingLiveSurfacesLeavesOtherWindowPoliciesIntact, both failing the same way on main on this Mac
+- `python3 scripts/test.py --only SteamCMConnectionTests SteamContentClientTests NativeWorkshopDownloadTests SteamQRSignInTests SteamKeyValuesTests WorkshopStoreTests DownloadQueueTests` — 58 passed, including 10 new tests (logon cleanup, endpoint fallback, cancellation, wrong app, free space, server promotion, HTTPS-only servers, joined logon failure, message mapping)
+- `python3 -m unittest scripts.tests.test_localization_catalogs scripts.tests.test_panel_localization` — 17 passed
+- Not covered: live Steam and the UI were not rerun after these fixes
 
-## 2026-10-24 — Library location: move library and downloads to an external drive
+## 2026-11-11 — Desktop widgets: seven more kinds
 
-- python3 scripts/test.py: passed (Python stage OK; native 4051 passed, 0 failed, 47 skipped).
-- New: StorageMoveServiceTests, StorageCopierTests, StorageLocationTests, DownloaderStorageTests, WallpaperBackupTests moved-library round trip, PanelStorageActionsTests move actions.
-- Another disk is simulated with a fake StorageVolumeInspecting; no real external drive, ExFAT disk or eject was exercised.
-- Not checked: Settings › Storage rows and the Wallpaper Library Unavailable window visually, the removable-volume privacy prompt, a live Steam download to a moved library.
-- Renderer built in this worktree with scripts/build.py --renderer-only; bindings unchanged. App not rebuilt as Release.
+- Added Text, Countdown, Greeting, Battery, Sunrise and sunset, Analog clock and Month calendar widgets; clocks and dates gained Time zone and Label, dates gained month-year, week and day-of-year styles and other calendars.
+- python3 scripts/test.py --only DesktopWidgetTests --only DesktopWidgetControllerTests --only WidgetsSettingsTests --only LowBatteryTests --only SettingsSectionsLocalizationTests: 49 passed.
+- python3 scripts/test.py: 4779 passed, 66 skipped, 0 failed (run with CLAUDE.md restored temporarily; the working tree has it deleted, which fails test_doc_links).
+- Not checked: how the clock face, month grid and multi-line text look on a real desktop; no Release build.
 
-## 2026-10-24 — Desktop posters kept until the wallpaper changes (issue 79)
+## 2026-11-11 — Desktop widgets
 
-macOS 26+ WallpaperAgent keeps a full-size bitmap of every desktop picture file and never deletes it; animated wallpapers made every poster retake a new file. Snapshots that change no display, Space changes, wakes and resumes now keep a settled poster, and a frame nobody asked for never replaces one.
+Clocks and dates drawn on the desktop over any wallpaper (Settings › Desktop Widgets); see [desktop widgets](../features/desktop-widgets.md).
 
-- `python3 scripts/test.py --only DesktopWallpaperTests` — 77 passed; the new hours-of-activity test failed (13 captures instead of 3) with the old two-minute expiry put back temporarily
-- `python3 scripts/test.py` — exit 0; 4070 tests: 4023 passed, 47 opt-in skipped; Python script tests passed; 1 runtime warning (main-thread call) from another class, not raised by DesktopWallpaperTests
-- Not verified: WallpaperAgent's cache on a real Mac (another app's container, not read), real Mission Control thumbnails, `AppDelegate.desktopPosterLayout` (wiring, no unit test); app not rebuilt
-- Space-selection mode still takes posters on every Space visit that switches the wallpaper; not changed here
+- `python3 scripts/build.py --renderer-only` — OK; the renderer library was stale against the committed bindings (`set_audio_gain`), rebuilt so the app links
+- `python3 scripts/test.py --only DesktopWidgetTests --only DesktopWidgetControllerTests --only WidgetsSettingsTests` (plus the Settings search, localization and window render classes) — 45 passed
+- `python3 scripts/test.py` — exit 0; Python stage OK; 4831 native tests: 4765 passed, 66 skipped, 0 failed
+- The Settings page was drawn off screen in light and dark and checked by eye; the Arrange picture matches the desktop geometry
+- Not checked: widget windows on a real desktop (over scene, video and web wallpapers, across Spaces, with the notch strip, after sleep); no desktop run was authorized. No Release build
 
-## 2026-10-23 — Report on GitHub opens the bug form with required fields
+## 2026-11-11 — Reduce volume while another app plays sound (issue 182)
 
-- bug_report.yml: What you did, What went wrong, What you expected and the diagnostics report are required; app facts go to optional wallpaper, version and app-details fields.
-- ExternalLink.newIssue opens ?template=bug_report.yml and prefills only those three field ids; no required field is filled by the app.
-- YAML parsed with PyYAML; the app's query names match the form's field ids (grep both sides).
-- python3 scripts/test.py --only ExternalLinkTests --only PanelLibraryStateTests: 20 passed; --only InspectorPolicyTests: 19 passed.
-- python3 scripts/test.py: 4016 passed, 0 failed, 46 skipped (after rebuilding the stale renderer library with build.py --renderer-only).
-- Not checked: GitHub's rendering of the form and the URL prefill; it only takes effect once the template is on the default branch.
-- Blank issues stay on for the body-prefilled link of app versions up to 1.6.0; app not rebuilt.
+Adds Reduce volume beside Mute under When another app plays sound, with a Reduce volume to slider (0% to 100%, default 30%). The bridge gains a transient audio gain (set_audio_gain) multiplied into each saved volume for scenes, web pages and native video; no saved volume is rewritten.
 
-## 2026-10-23 — Web wallpapers: assigning the property listener is not a delivery
+- `python3 scripts/build.py --renderer-only` — exit 0; renderer built and Swift bindings regenerated (one added call, `setAudioGain`).
+- `python3 scripts/check_rust.py` — exit 0; 2,499 passing tests (core 429, bridge 956, core-integration 20, shader 1,094), 0 failed. Five desktop-window tests explicitly excluded; desktop/media/network opt-ins disabled.
+- New bridge tests: the gain scales an open scene's volume live and restores the saved one, a volume or a mirror's volume changed meanwhile is saved whole and played reduced, a wallpaper applied meanwhile starts reduced, web and native-video descriptors carry the product, a display refresh does not reload a turned-down scene, and a gain outside 0 to 1 is refused.
+- `python3 scripts/check_renderer.py` — exit 0; all 12 generated scenes matched between pooled and isolated runs; seven local-asset-dependent cases skipped.
+- `python3 scripts/test.py` — exit 0: all 32 Python suites, XcodeGen, and 4,739 native tests passed, 0 failed, 66 skipped of 4,805, the skip count of the gate runs logged before it (opt-in media, live Steam and reference jobs). An earlier targeted run failed in CodeSign on build-product extended attributes; `xattr -cr build/Build/Products/Debug`, as [build](../build.md#troubleshooting) says, cleared it.
+- Three runtime warnings, all the known main-thread one (a method that should not be called on the main thread); none was traced to this change.
+- New native tests cover the level preference (default, range, corrupt values, reset, one change posted), its backup validation, the policy's gain channel (only while other sound plays and Reduce volume is chosen, a new level delivered while the rule holds, mute still silences, refused delivery retried, teardown restores) and the panel row (offered beside Mute, shown only while chosen, out-of-range refused).
+- Not checked: the lower volume was not heard on a real output, and the slider was not operated in the running app; no desktop automation and no Release build. A [manual smoke](manual-smoke.md#audio-responsiveness) item covers both.
 
-A React page that assigns `wallpaperPropertyListener` while it renders (issue #69) looped on the host script's synchronous replay until React error 301 left it blank. The host script now replays only what the page has not taken in, once after the assigning turn, and once more for a listener a handler assigns during that replay. This Mac cannot link the test host, so the native gate runs in CI on the pull request (#72), as agreed on the issue.
+## 2026-11-11 — Workshop inspector removal (#183)
 
-- Offscreen `WKWebView` probe with the app's user scripts (no window, no audio) on the reported page: old script → React error 301, 52 listener assignments, empty `#root`; fixed script → full UI, 3 assignments, the player calls `play()`
-- Probe scenarios, old vs fixed: render-time assignment (25+ deliveries and an error vs each value once, one pass per render), replaced listener (whole set vs only changes), late listener with pause (called during the assignment vs once after it), directory replay (resent vs only what is owed), throw-and-reassign (stack overflow vs one call); a handler gained later and a throwing first handler behave as before
-- Review follow-up, the host script run in Node, PR head 5293a5af vs fix: a listener assigned during the replay (general properties never delivered vs once), a restaged file that arrives with no handler (lost vs owed to the next listener); throw-and-reassign still one call, partial take-in plus throw-and-reassign one extra pass; synchronous re-render, replaced and late listener unchanged
-- `swiftc -typecheck` of the shared web wallpaper sources — exit 0; `swiftc -parse` of the two changed test files — exit 0
-- `Tests/Unit/WebWallpaper/` (`WebWallpaperAuthorAPITests`, `WebWallpaperSuspensionTests`) updated and extended; not compiled or run locally
-- Native stage of `python3 scripts/test.py` — not run: no Rust or renderer Homebrew packages here, so the test host does not link; left to CI on the pull request. Python script tests not rerun after rebasing onto f2d6862e (no Python change)
-- Not compared with Wallpaper Engine's frame (VM not used); not checked on the desktop; no Release build
+- Added Move to Trash for installed Workshop items using the existing confirmed library removal action; collections remain open-only.
+- Reused the existing label and translations in all shipped app languages; documented removal in workshop-downloads.md.
+- python3 scripts/test.py --only WorkshopInspectorTests: 13 passed.
+- Initial full gate blocked by the pre-existing deleted CLAUDE.md documentation link; temporarily restored its relative symlink for validation.
+- Parallel full gate: 4722 passed, 5 timing/session failures, 66 skipped.
+- python3 scripts/test.py --serial: 4727 passed, 0 failed, 66 skipped; one runtime warning.
+- Opt-in media/network and desktop UI checks were not run; visual behavior was not manually checked.
 
-## 2026-10-21 — Opt-in compiler uniform-layout diagnostics
+## 2026-11-10 — Steam QR-code sign-in and native Workshop downloads
 
-- python3 scripts/check_rust.py --observer-uniform-layout: ordinary and diagnostic stages passed; normal shader990 and observer shader1001 reported tests,9core exclusions and guarded shader skips retained.
-- Actual C callers compiled and ran once per mode from the same owned synthetic request: ordinary reflection, annotation metadata, MSL and stage payloads matched; identities/cache keys differed; physical Boolean, widened matrix and padded-array metadata survived the existing accessor.
-- The C smoke restored the ordinary static archive afterward. This observes compiler-origin metadata, not native Metal layout, active variants, bound buffers, draws or image parity.
-- Final composed python3 scripts/check_rust.py:2267reported passes (388core/872bridge/17integration/990shader),9core exclusions.
-- python3 scripts/build.py --renderer-only: passed with generated bindings preserved; python3 scripts/check_renderer.py: passed,12generated pairs/reload coverage,17asset/corpus skips.
-- python3 scripts/test.py:425Python and3930native passed;46native skips. No permission, hardware-audio, desktop, private-corpus or network opt-in.
-- Retired57assertion-mapped inherited cases while retaining contributor/Henry islands. Earlier failed consumer source/logs and corrected fixture/contract assumptions remain preserved; no failure was relabeled.
-- No Release app build or launch; licensing/rights clearance, current-main reconciliation and native effects acceptance remain separate.
+Downloads signed in with a QR code run through the app's own Steam client (App/Services/Steam/) instead of SteamCMD; the Rust bridge unpacks depot content (decompress_steam_content).
 
-## 2026-10-21 — Independent bridge lifecycle and state units
+- `python3 scripts/test.py` — 4830 tests: 4759 passed, 70 skipped, 1 failed: WebWallpaperErrorStackTests/testStacksReadAsV8WritesThem, which fails the same way on main without this change
+- `python3 scripts/check_rust.py` — passed; `cargo test -p wallpaper-bridge steam_content` — 3 passed (zstd, VZip LZMA, zip stored/deflated, CRC and truncation)
+- `python3 scripts/test.py --only Steam…Tests NativeWorkshopDownloadTests` — 23 passed against a scripted Steam: QR flow, logon, Multi routing, manifests, chunks, unsafe paths, PICS, queue import, shared connection, refused token
+- `WALLPAPER_MACHINE_NETWORK_TESTS=1 WALLPAPER_MACHINE_STEAM_TOKEN_FILE=… python3 scripts/test.py --only SteamNativeLiveTests` — 2 passed against live Steam (QR session; logon with a QR token and download of Workshop item 3521337568); the later depot-431961 chunk check was not run live
+- Manual Debug-build run: QR sign-in from the panel, 8 Workshop items and the shared scene assets downloaded and imported natively; the log shows no SteamCMD run and no staging left behind
+- Not covered: welcome guide has no QR option yet; no free-space check before the ~800 MB scene depot; native jobs restart from zero after a pause
 
-Bounded independent replacements; existing renderer policy, public APIs and contributor-owned feature islands retained. This is not whole-project licensing clearance.
+## 2026-11-10 — Library tile menu, drop to import, keyboard and batch favorites; service fixes
 
-- python3 scripts/check_rust.py — 2241 reported passes (394 core, 839 bridge, 17 integration, 991 shader); 9 explicit core exclusions and 31 guarded shader skip messages.
-- python3 scripts/build.py --renderer-only — passed; bindings regenerated without API changes.
-- python3 scripts/check_renderer.py — all registered targets passed; 12 generated pooled/isolated comparisons and 8x2 reload cycles passed; 17 asset/corpus cases skipped.
-- Timer contract passed; 42 delivered draws were a diagnostic measurement, not a throughput guarantee. Production scheduling was unchanged.
-- python3 scripts/test.py — 425 Python tests and 3930 native tests passed; 46 native tests skipped.
-- Standalone compiled consumer — genuine core callback cell and production first-frame dispatcher passed ordered delivery, actual pending-send cancellation/join, owner release, stale callback inertia and replacement without replay.
-- Mounted actor/state cases retain real builder, callback, journal and six persistence branches. Natural last-owner actor retention failed before the shared runtime-owner fix; final lifecycle and concurrent-drop cases passed. Earlier failures remain recorded.
-- No desktop, hardware audio, private corpus, permission prompts, native complete-assembly proof or Release delivery. Contributor-grant filing and remaining protected code/resources are separate.
+Installed gains a right-click menu on tiles (the inspector's More actions list, shared as WallpaperActionItems), files dropped on the page import, Command-Delete and Command-Return on the grid, File › Import… and Refresh Library, and a favorite tool for the ticked selection. The same change fixes six service defects (unreadable saved entries no longer erase their neighbours; an automatic command replacing a queued rule or Focus change no longer marks it handled; a day and night display keeps a manual choice across a relaunch; a shuffle round ends without a wallpaper that keeps failing; a stale Steam request no longer signs out a newer session; equal day and night start times are refused), adds feedback where actions were silent, and gathers the renderer's leftover material constants into one log line per scene.
 
-## 2026-10-20 — Independent display and activation boundaries
+- `python3 scripts/test.py` — exit 0; 4789 tests: 4723 passed, 0 failed, 66 skipped (the first run failed two tests that asserted the old batch-limit error; both were updated and the gate rerun)
+- `python3 scripts/check_renderer.py` — exit 0; generated scenes pixel-equal pooled and isolated, 0 reload-cycle diagnostics; the local-corpus tests (particle corpus, local projects through the native backend, poster pictures, energy, corpus stamps, a local clip) skipped: no corpus configured
+- New unit tests: PreservedJSONTests; unreadable entries in WallpaperAutomationStoreTests, PlaylistStoreTests, WallpaperCollectionStoreTests and PlaybackPreferencesTests; queue outcomes in UserCommandQueueTests; a Focus change replaced by a reload in WallpaperAutomationSchedulerTests; relaunch and shuffle rounds in PlaylistSchedulerTests; the Steam session in WorkshopSourceTests
+- New panel tests: add-to-playlist and refresh notices, the unreadable-library state, the failed-still mark (offscreen render), drop import, the favorite tool, Command-Delete and Command-Return on the hosted grid, equal start times, preset and batch-limit refusals
+- Renderer: two gtest cases for UnmatchedConstantTally in material_constant_behavior_test; no frame output changed, so no Wallpaper Engine reference comparison was made
+- Not exercised: the tile's context menu, the drop outline and a real Finder drag, and the File menu items with their shortcuts in a real window. They need desktop control, which was not authorized; the menu's item rules are InspectorPolicy's existing tests, and the drop and menu actions are covered through the model
+- Not rebuilt: no Release build was made, so the delivered app does not contain these changes
+- Runtime warnings in the result bundle (2, main-thread call) come from AppUpdateTests and WebMOpeningTests, which this change does not touch
 
-Combined current-tree verification in an owned system-temp checkout based on7fad94eb, serialized under the recovery lock with isolated preferences.
+## 2026-11-09 — Web wallpaper submitted background for Stage Manager
 
-- `python3 scripts/check_rust.py` — exit0;2079 reported passes:394core/677bridge/17integration/991shader;9explicit core exclusions and31guarded shader skip messages remain unverified.
-- All22new display and23activation cases pass; retained outer actor/display/presenter/configuration suites remain. Source-only writer calls/results and scoped oracle repairs were independently reviewed.
-- `python3 scripts/build.py --renderer-only` — exit0; renderer and generated bindings updated. This is not a Release application build.
-- `python3 scripts/check_renderer.py` — exit0; all12generated pooled/isolated pairs match expected pixels,8projects x2reloads succeed;17asset/corpus cases skipped. Timer36contract cases pass;52draw benchmark is diagnostic only.
-- `python3 scripts/test.py` — exit0;425Python tests;3930native passed,0failed,46skipped. No desktop, media-hardware, network or private-corpus opt-ins.
-- A compiled real API consumer passed isolated persistence/reload, display reconnect, public mirror assignments, raw scene/mirror defaults, lock-screen descriptors and capped-rate survey; its throwaway source was removed from the checkout.
-- The first attempt remains failed/blocked history: bridge676pass/1fail on JSON numeric-representation coupling, plus a parent relative-output mistake caught by source inventory. Numeric value/key coverage was retained; logs were preserved byte-for-byte and the corrected run used absolute output paths.
-- Project-side reconnect/inheritance, web/native-video/export/rate behavior and accepted render-setting lookup remain; no facade/audio cutover, native display/hardware parity, whole-project independence, licensing clearance or Release delivery is claimed.
-
-## 2026-10-20 — Independent library and options-draft replacement
-
-- `python3 scripts/check_rust.py` — final independent tree exit0:394core,632bridge,17selected core-integration and991shader reported passes; nine core exclusions and31guarded shader skip messages remain.
-- All25independent library cases and35independent draft cases passed, with4original project-side draft cases and outer library/actor suites retained. All22old inline library identities passed in a verifier-only diagnostic before their removal; that temporary diagnostic overall retained652bridge passes/2failures.
-- The two diagnostic failures were unsupported invalid-byte directory creation (EILSEQ before scanning) and an external incidental error-wording assertion. The filename test now controls only observed OsString names over genuine files/model/metadata; native invalid-byte filesystem support remains unverified. The wording assertion was deleted, preserving error category and unchanged state.
-- A seven-case original/replacement real-API comparison matched all encoded input bytes, all640000returned RGBA bytes across four PNG/JPEG/GIF fixtures, and all three typed negative outcomes. The real20byte zero-image GIF was Decoding; injected iterator exhaustion is separately IoError/Other. This is compatibility reference evidence, not an independent mathematical or corpus oracle.
-- The first replacement comparison stopped at compiler E0277; an explicit borrow of the existing cropped-view Deref target repaired type binding without allocating a crop buffer. It ran no cases; the later replacement collection matched, and the original successful collection was not repeated.
-- A compiled actual scan/filter/cache/model/draft/store consumer passed: owned thumbnail results, pending-versus-immediate persistence, Cancel/Apply, canonical documents, invalid mutation atomicity and selector isolation. Only synthetic owned-temp files were used.
-- `python3 scripts/build.py --renderer-only` and `python3 scripts/check_renderer.py` — exit0;1974C++passes/17asset skips; all12generated pooled/isolated pairs and8projects x2reload cycles passed. Timer36cases passed;52draws were collected only as a separate diagnostic.
-- `python3 scripts/test.py` — exit0:425Python tests;3930native passes,0failures,46native skips. Raw compiler/runtime warnings remain in the evidence.
-- Canonical system-temp staging, isolated preferences, source/tool/binary guards and the common blocking lock/process teardown were used. No private corpus, desktop, live login/audio-hardware/network or new paired observer capture was authorized. Temporary original tests and smoke sources were removed before the final gate.
-- No Release application was delivered; GPL-2.0-only/notices remain unchanged. Remaining actor/facade/display/activation, native/parser observations, interfaces and contributor/rights publication work are outside this bounded acceptance.
-
-## 2026-10-20 — Independent display coverage and logging, login, power boundaries
-
-- `python3 scripts/check_rust.py` — exit0:394core,594bridge,17selected core-integration and991shader reported passes; nine core exclusions and 31 guarded shader skip messages remain.
-- All48new descriptor/model/pointer cases and31retained cases passed. The first gate retained391core passes/3new-case failures; only M19 configured-destination setup, M32 transitional input routing and P01 unsupported raw-mask expectation were corrected. Production was unchanged.
-- Logging/login/power replacements preserve five/eleven/eleven existing domain cases, respectively. New logging coverage uses actual filesystem/state/error outcomes and process-isolated global scenarios, not flush-call counts; login has15new pure-operation cases and power has3new CFString groups.
-- A compiled smoke exercised real public logger install/host emission/byte accounting/clear and the exact new pure login module with real public status/error types. It did not call live login services or the live power reader.
-- `python3 scripts/build.py --renderer-only` and `python3 scripts/check_renderer.py` — exit0;1974C++passes and17asset/corpus skips. All12generated pooled/isolated pairs matched expected pixels;8projects x2reload cycles passed.
-- The36timer contract cases passed;52draws were collected only as a separate diagnostic. No production timer/scheduling changes or historical failure reclassification.
-- `python3 scripts/test.py` — exit0:425Python tests and3930native passes,0failures,46native skips. Raw compiler/runtime warnings remain recorded.
-- All execution used owned canonical system-temp staging, isolated preferences and the common blocking lock/process teardown. Standard controlled native run-loop tests remained included; no desktop, charger/sleep/wake experiment, audio-hardware, private-corpus or network opt-ins.
-- Initial failed candidate/logs and source authoring/review records are preserved. The smoke scaffold was removed before final gates; only newly authored modules were formatted, with ignored nightly-only style options reported by the stable formatter.
-- No Release app was built/delivered. This bounded support/test slice does not accept parser observations, remaining protected expression, contributor/interface rights or the GPL-3.0-only cutover.
+- The desktop web container now submits one opaque black 1×1 Metal frame per backing layer and retains it through resize and page suspension, with no recurring GPU submission or rendering loop. The bounded allocation trade-off was approved; battery impact was not measured.
+- On the Dell display, the user reported that a submitted surface kept Belle smooth, removing it or replacing it with an empty Metal queue brought the freeze back, and using the submitted surface as the existing black background looked normal and stayed smooth.
+- The earlier tag-only Release candidate and native backing-flattening override failed the visible Stage Manager check. The override is removed; the existing transition tag remains alongside the submitted background.
+- `python3 scripts/test.py --only WebWallpaperWindowCompositionTests` — before the Metal implementation, 3 passed and 2 new regressions failed; final run: 7 passed, 0 failed, 0 skipped. Coverage includes a real submitted frame, resize, suspension/resume and the no-Metal fallback.
+- `python3 scripts/test.py` — passed: Python checks and XcodeGen succeeded; native suite: 4,698 passed, 0 failed, 66 skipped. Three unrelated runtime warnings concerned main-thread use in video and app-update tests.
+- `python3 scripts/build.py --renderer-only` rebuilt current upstream dependencies; `python3 scripts/build.py --swift-only --configuration Release` passed. No renderer source changes were made by this fix.
+- The clean Release app was restarted with the original covered-desktop preference restored. Runtime inspection confirmed attached web views and submitted 1×1 Metal backgrounds on both the Dell and built-in displays, with no diagnostic layer or runtime patch.
+- The additional clean-build Stage Manager and Mission Control visual check was requested but remains unconfirmed. The accepted smoothness result above is from the working prototype, not a claimed final-build visual observation.
+- Wallpaper Engine reference-frame comparison and measured power consumption were not performed; this change addresses host-window presentation rather than wallpaper content rendering.

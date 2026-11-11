@@ -173,14 +173,40 @@ pub struct StageOutput {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Preprocesses one stage (R15, R29). `combos` are written as macros at the
-/// top and are visible to every condition (R16, R17).
+/// The dialect macros every condition sees before the combos. None of them is written into the
+/// output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Prelude {
+    /// Wallpaper Engine's own: `HLSL` and `HLSL_SM40` defined as 1, `GLSL` undefined (probe T5).
+    #[default]
+    Direct3D,
+    /// The same with `GLSL` defined as 1 as well. Only the single retry of a program whose
+    /// fragment varyings exceed the inter-stage component budget uses it (NOTES 143): an author's
+    /// `#ifdef GLSL` branch may declare the smaller varying arrays it wrote for tighter
+    /// interpolator limits.
+    Direct3DWithGlsl,
+}
+
+/// Preprocesses one stage (R15, R29) with Wallpaper Engine's prelude. `combos` are written as
+/// macros at the top and are visible to every condition (R16, R17).
 pub fn preprocess_stage(
     kind: StageKind,
     source: &str,
     combos: &[Combo],
     includes: &dyn IncludeSource,
     mode: Mode,
+) -> Result<StageOutput, PreprocessError> {
+    preprocess_stage_with(kind, source, combos, includes, mode, Prelude::Direct3D)
+}
+
+/// [`preprocess_stage`] with the given dialect macros.
+pub fn preprocess_stage_with(
+    kind: StageKind,
+    source: &str,
+    combos: &[Combo],
+    includes: &dyn IncludeSource,
+    mode: Mode,
+    prelude: Prelude,
 ) -> Result<StageOutput, PreprocessError> {
     let mut engine = Engine {
         kind,
@@ -195,7 +221,7 @@ pub fn preprocess_stage(
         diagnostics: Vec::new(),
         unrecorded_conditions: 0,
     };
-    engine.start(combos);
+    engine.start(combos, prelude);
     engine.expand(source, &Origin::Stage)?;
     if engine.unrecorded_conditions > 0 {
         let more = Diagnostic::new(format!(
@@ -412,9 +438,14 @@ fn chain_text(stack: &[StackEntry], offending: &str) -> String {
 }
 
 impl Engine<'_> {
-    fn start(&mut self, combos: &[Combo]) {
-        for (name, value) in [("GLSL", "1"), ("HLSL", "1"), ("HLSL_SM40", "1")] {
+    fn start(&mut self, combos: &[Combo], prelude: Prelude) {
+        // Wallpaper Engine 2.8.0.42 prepends exactly `#define HLSL 1` and `#define HLSL_SM40 1`
+        // (`sub_1400D5070`); `GLSL` stays undefined (probe T5) except in the budget retry.
+        for (name, value) in [("HLSL", "1"), ("HLSL_SM40", "1")] {
             self.env.insert(name.to_string(), value.to_string());
+        }
+        if prelude == Prelude::Direct3DWithGlsl {
+            self.env.insert("GLSL".to_string(), "1".to_string());
         }
         for combo in combos {
             // A line break in a value would corrupt the definition line (Q21).

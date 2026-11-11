@@ -51,6 +51,25 @@ impl DisplayIdentity {
             && self.name.is_none()
     }
 
+    /// The name a display's script `localStorage` screen file is kept under (plan decision I3):
+    /// `uuid-<UUID>`, else `edid-<vendor>-<model>-<serial or unit>`, else `display-<id>`.
+    /// Only `[A-Za-z0-9-]` is used, so the key is safe in a file name.
+    #[must_use]
+    pub fn storage_key(&self, display_id: u32) -> String {
+        let safe = |text: &str| -> String {
+            text.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect()
+        };
+        if let Some(uuid) = self.uuid.as_deref().map(safe).filter(|uuid| !uuid.is_empty()) {
+            return format!("uuid-{uuid}");
+        }
+        if let (Some(vendor), Some(model), Some(serial)) =
+            (self.vendor_id, self.model_id, self.serial_number.or(self.unit_number))
+        {
+            return format!("edid-{vendor}-{model}-{serial}");
+        }
+        format!("display-{display_id}")
+    }
+
     #[must_use]
     pub fn identity_label(&self) -> String {
         let named = [
@@ -642,6 +661,27 @@ mod tests {
     use super::{
         DisplayDesc, DisplayIdentity, DisplayMetrics, RefreshPlan, RefreshReportLog, plan_refresh,
     };
+
+    #[test]
+    fn storage_key_prefers_uuid_then_edid_then_display_id() {
+        let uuid = DisplayIdentity {
+            uuid: Some("37D8832A-2D66-02CA-B9F7-8F30A301B230".to_string()),
+            vendor_id: Some(1),
+            model_id: Some(2),
+            serial_number: Some(3),
+            ..DisplayIdentity::default()
+        };
+        assert_eq!(uuid.storage_key(5), "uuid-37D8832A-2D66-02CA-B9F7-8F30A301B230");
+        let edid = DisplayIdentity { uuid: None, ..uuid.clone() };
+        assert_eq!(edid.storage_key(5), "edid-1-2-3");
+        let unit = DisplayIdentity { serial_number: None, unit_number: Some(9), ..edid.clone() };
+        assert_eq!(unit.storage_key(5), "edid-1-2-9");
+        assert_eq!(DisplayIdentity::default().storage_key(5), "display-5");
+        let unsafe_uuid = DisplayIdentity { uuid: Some("../a b/".to_string()), ..DisplayIdentity::default() };
+        assert_eq!(unsafe_uuid.storage_key(5), "uuid-ab");
+        let only_unsafe = DisplayIdentity { uuid: Some("/../".to_string()), ..DisplayIdentity::default() };
+        assert_eq!(only_unsafe.storage_key(5), "display-5");
+    }
 
     /// Two monitors of the same model trade unit numbers when macOS
     /// renumbers displays; their UUIDs and serials still tell them apart.

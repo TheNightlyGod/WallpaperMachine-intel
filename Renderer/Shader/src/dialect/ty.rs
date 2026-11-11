@@ -7,7 +7,7 @@
 //! type cannot be decided; every rule treats it as "leave the construct alone"
 //! (P3).
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Sc {
     Bool,
     Int,
@@ -60,8 +60,12 @@ pub enum SamplerKind {
     D3,
     D2Array,
     Cube,
-    /// `sampler2DComparison` and `sampler2DShadow`: outside the supported set (R22).
-    Comparison,
+    /// `sampler2DComparison` (Wallpaper Engine's `Texture2D` + `SamplerComparisonState`) and
+    /// `sampler2DShadow`: a depth texture sampled with a comparison.
+    Shadow,
+    /// `sampler2DMS`: a multisampled texture, read with `texelFetch` (the multisampled
+    /// `sampler2DBackBuffer`, E-D8).
+    D2Ms,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,6 +199,8 @@ impl Ty {
             Ty::Sampler(SamplerKind::D3) => "sampler3D".to_string(),
             Ty::Sampler(SamplerKind::D2Array) => "sampler2DArray".to_string(),
             Ty::Sampler(SamplerKind::Cube) => "samplerCube".to_string(),
+            Ty::Sampler(SamplerKind::Shadow) => "sampler2DShadow".to_string(),
+            Ty::Sampler(SamplerKind::D2Ms) => "sampler2DMS".to_string(),
             _ => return None,
         })
     }
@@ -216,6 +222,15 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
         "float2" => Ty::vec(2),
         "float3" => Ty::vec(3),
         "float4" => Ty::vec(4),
+        "int2" => Ty::Vec(Sc::Int, 2),
+        "int3" => Ty::Vec(Sc::Int, 3),
+        "int4" => Ty::Vec(Sc::Int, 4),
+        "uint2" => Ty::Vec(Sc::Uint, 2),
+        "uint3" => Ty::Vec(Sc::Uint, 3),
+        "uint4" => Ty::Vec(Sc::Uint, 4),
+        "bool2" => Ty::Vec(Sc::Bool, 2),
+        "bool3" => Ty::Vec(Sc::Bool, 3),
+        "bool4" => Ty::Vec(Sc::Bool, 4),
         "mat2x2" => Ty::Mat(2, 2),
         "mat3x3" => Ty::Mat(3, 3),
         "mat4x4" => Ty::Mat(4, 4),
@@ -223,7 +238,8 @@ pub fn builtin_type(name: &str) -> Option<Ty> {
         "sampler3D" => Ty::Sampler(SamplerKind::D3),
         "sampler2DArray" => Ty::Sampler(SamplerKind::D2Array),
         "samplerCube" => Ty::Sampler(SamplerKind::Cube),
-        "sampler2DComparison" | "sampler2DShadow" => Ty::Sampler(SamplerKind::Comparison),
+        "sampler2DComparison" | "sampler2DShadow" => Ty::Sampler(SamplerKind::Shadow),
+        "sampler2DMS" => Ty::Sampler(SamplerKind::D2Ms),
         _ => {
             if let Some(rest) = name.strip_prefix("vec") {
                 return vec_of(Sc::Float, rest);

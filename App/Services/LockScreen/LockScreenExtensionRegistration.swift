@@ -48,9 +48,9 @@ actor LockScreenExtensionRegistration {
       else { throw Failure.invalidBundle }
 
       let registered = try await registrations()
-      let others = registered.map(\.url).filter { !LockScreenExtensionDiagnostics.isSameBundle($0, intended) }
+      let others = registered.map(\.url).filter { !FileLocation.isSame($0, intended) }
       if others.isEmpty, registered.contains(where: {
-        LockScreenExtensionDiagnostics.isSameBundle($0.url, intended)
+        FileLocation.isSame($0.url, intended)
       }) {
         try checkElection(registered, intended: intended)
         return intended
@@ -76,7 +76,7 @@ actor LockScreenExtensionRegistration {
           // Unregistering the containing app can already have removed its extension.
           // Accept that only after observing its absence, never just from an exit code.
           let remaining = try await registrations()
-          if remaining.contains(where: { LockScreenExtensionDiagnostics.isSameBundle($0.url, other) }) {
+          if remaining.contains(where: { FileLocation.isSame($0.url, other) }) {
             throw error
           }
         }
@@ -85,7 +85,7 @@ actor LockScreenExtensionRegistration {
       for attempt in 0..<5 {
         let remaining = try await registrations()
         if !remaining.isEmpty, remaining.allSatisfy({
-          LockScreenExtensionDiagnostics.isSameBundle($0.url, intended)
+          FileLocation.isSame($0.url, intended)
         }) {
           try checkElection(remaining, intended: intended)
           return intended
@@ -122,7 +122,7 @@ actor LockScreenExtensionRegistration {
 
   private func checkElection(_ records: [Record], intended: URL) throws {
     guard let record = records.first(where: {
-      LockScreenExtensionDiagnostics.isSameBundle($0.url, intended)
+      FileLocation.isSame($0.url, intended)
     }) else { return }
     switch record.mark {
     case .ignored:
@@ -156,7 +156,7 @@ actor LockScreenExtensionRegistration {
       let intended = app.appendingPathComponent(Self.extensionPath)
       func ignored(_ records: [Record]) -> Bool {
         records.contains {
-          $0.mark == .ignored && LockScreenExtensionDiagnostics.isSameBundle($0.url, intended)
+          $0.mark == .ignored && FileLocation.isSame($0.url, intended)
         }
       }
       guard ignored(try await registrations()) else {

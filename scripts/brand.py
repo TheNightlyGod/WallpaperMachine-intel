@@ -10,6 +10,7 @@ The wordmark is Manrope ("Wallpaper" bold, "Machine" medium), embedded as outlin
 
     python3 scripts/brand.py                      # native app, Dock choices, tray icon and DMG background
     python3 scripts/brand.py --dmg                # only Packaging/dmg/background.png and background@2x.png
+    python3 scripts/brand.py --seasonal           # only the seasonal Dock icons (AppIconHalloween)
     python3 scripts/brand.py --website ../Site    # plus logo, favicons and manifest there
 
 The app icon exports vector layers for Icon Composer. Website app-icon PNGs reuse the
@@ -17,7 +18,9 @@ native Dock renders; website vectors share their geometry and appearances. Quick
 and sips render square web icons and tray assets. Dock choices use Icon Composer's
 macOS 26 renderer with a transparent outer margin and land in the AppIconMinimal, AppIconDay
 and AppIconNight image sets of `App/Resources/Assets.xcassets` (their Contents.json files are
-committed). The disk-image background is drawn with CoreGraphics and CoreText at 1x and 2x
+committed). A season's Dock icon (AppIconHalloween) is the Night tile with the season's papercut
+night in the panel and a jack-o'-lantern in the gear's place; that picture is committed under
+`Resources/Seasonal/`. The disk-image background is drawn with CoreGraphics and CoreText at 1x and 2x
 from `lib/dmg.py`'s window geometry.
 """
 from __future__ import annotations
@@ -41,6 +44,7 @@ MARK = markers()
 APP_ICON = ROOT / "App/Resources/AppIcon.icon"
 TRAY_ICON_SET = ROOT / "App/Resources/Assets.xcassets/TrayIcon.imageset"
 DOCK_ICONS = ROOT / "App/Resources/Assets.xcassets"
+SEASONAL = ROOT / "Resources/Seasonal"
 DMG_BACKGROUND = BACKGROUND
 
 
@@ -76,6 +80,17 @@ VARIANTS = {
         count=8, root=0.72, hub=0.30, tip=0.56, base=0.82, corner=0.08)),
 }
 MARK_BOX = (1.0, 2.0, 22.1, 22.9)  # visual bounds of the mark inside the 24 box: x0 y0 x1 y1
+
+# The Halloween jack-o'-lantern in the gear's place, in the same 24-unit box; `AppMark` in the
+# panel draws the same outline. Three lobes (cx, rx, ry) on one centre line, the middle one in front;
+# it keeps the gear's clearance from the frame's end caps.
+PUMPKIN = dict(
+    cy=18.5, lobes=((3.85, 2.45, 3.3), (7.95, 2.45, 3.3), (5.9, 2.6, 3.7)),
+    eyes=(((3.6, 18.2), (4.72, 16.41), (5.42, 18.2)), ((8.2, 18.2), (7.08, 16.41), (6.38, 18.2))),
+    mouth=((3.33, 19.24), (4.29, 19.67), (4.86, 19.28), (5.9, 19.81), (6.94, 19.28), (7.51, 19.67), (8.47, 19.24)),
+    mouth_curve=(5.9, 22.42),
+    stem="M5.33 15.15L5.6 13.85Q6.07 13.15 6.99 13.41Q6.47 13.67 6.29 14.11L6.38 15.15Z",
+)
 
 # Standalone website artwork uses an inset macOS squircle; native masking belongs to macOS.
 ICON_CANVAS = 1024
@@ -198,9 +213,39 @@ def squircle_path(size: float, radius: float, smoothing: float = 0.6) -> str:
             + f"L{num(p)} {num(size)}" + corner(-1, -1, False) + f"L0 {num(p)}" + corner(1, -1, True) + "Z")
 
 
+def pumpkin_markup() -> tuple[str, str]:
+    """(gradient defs, shapes) of the jack-o'-lantern: lit from the upper left, its face aglow."""
+    cy = PUMPKIN["cy"]
+
+    def lobe(cx: float, rx: float, ry: float) -> str:
+        return (f'M{num(cx - rx)} {num(cy)}A{num(rx)} {num(ry)} 0 1 0 {num(cx + rx)} {num(cy)}'
+                f'A{num(rx)} {num(ry)} 0 1 0 {num(cx - rx)} {num(cy)}Z')
+
+    def polygon(points) -> str:
+        return "M" + "L".join(f"{num(x)} {num(y)}" for x, y in points)
+
+    *sides, middle = PUMPKIN["lobes"]
+    mouth = polygon(PUMPKIN["mouth"]) + "Q{} {} {} {}Z".format(
+        *map(num, (*PUMPKIN["mouth_curve"], *PUMPKIN["mouth"][0])))
+    face = "".join(polygon(eye) + "Z" for eye in PUMPKIN["eyes"]) + mouth
+    defs = (
+        '<radialGradient id="pk-side" gradientUnits="userSpaceOnUse" cx="4.4" cy="16.6" r="7.5">'
+        '<stop offset="0" stop-color="#f6802a"/><stop offset="1" stop-color="#9c3a08"/></radialGradient>'
+        '<radialGradient id="pk-middle" gradientUnits="userSpaceOnUse" cx="5.1" cy="15.9" r="6.6">'
+        '<stop offset="0" stop-color="#ffa850"/><stop offset="1" stop-color="#d65a0c"/></radialGradient>'
+        '<radialGradient id="pk-glow" gradientUnits="userSpaceOnUse" cx="5.9" cy="18.9" r="3.2">'
+        '<stop offset="0" stop-color="#fff4c2"/><stop offset="1" stop-color="#ffb52e"/></radialGradient>')
+    shapes = (f'<path d="{PUMPKIN["stem"]}" fill="#a3ad62"/>'
+              + "".join(f'<path d="{lobe(*side)}" fill="url(#pk-side)"/>' for side in sides)
+              + f'<path d="{lobe(*middle)}" fill="url(#pk-middle)"/>'
+              + f'<path d="{face}" fill="url(#pk-glow)"/>')
+    return defs, shapes
+
+
 def icon_svg(variant: str = "regular", bleed: bool = False, square: bool = False,
              *, layer: str | None = None, appearance: str = "day") -> str:
-    """Website icon, or a transparent screen/mark layer for the native app icon.
+    """Website icon, or a transparent layer for the native app icon: `screen`, `mark`, or for
+    a seasonal icon `frame`, `pumpkin` and `panel` (the screen's outline in black, a mask).
 
     `bleed` drops the macOS margin; `square` also drops the rounded corners.
     """
@@ -244,12 +289,21 @@ def icon_svg(variant: str = "regular", bleed: bool = False, square: bool = False
         '<radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="17.5" cy="6.5" r="9">'
         '<stop offset="0" stop-color="#fff" stop-opacity=".5"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient>')
     screen = f'<path d="{panel}" fill="url(#wp)"/><path d="{panel}" fill="url(#glow)"/>'
+    frame = frame_outline_path(spec["radius"] + spec["pad"], stroke)
     if layer == "mark":
-        frame = frame_outline_path(spec["radius"] + spec["pad"], stroke)
         mark = f'<path d="{frame}" fill="#fff"/><path d="{gear}" fill="#fff" fill-rule="evenodd"/>'
+    elif layer == "frame":
+        mark = f'<path d="{frame}" fill="#fff"/>'
+    elif layer == "pumpkin":
+        pumpkin_defs, mark = pumpkin_markup()
+        defs += pumpkin_defs
+    elif layer == "panel":
+        mark = f'<path d="{panel}" fill="#000"/>'
     else:
         mark = mark_markup(foreground, variant)
-    artwork = screen if layer == "screen" else mark if layer == "mark" or appearance == "minimal" else screen + mark
+    artwork = (screen if layer == "screen"
+               else mark if layer in ("mark", "frame", "pumpkin", "panel") or appearance == "minimal"
+               else screen + mark)
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">'
             f'<defs>{defs}</defs>{shape if layer is None else ""}'
             f'<g transform="translate({num(tx)} {num(ty)}) scale({num(scale)})">{artwork}</g></svg>')
@@ -373,8 +427,7 @@ def write_app_icons(work: Path) -> list[Path]:
 
 def write_dock_icons(work: Path) -> list[Path]:
     """Render fixed Dock appearances with the same outer margin as the compiled app icon."""
-    developer = Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip())
-    tool = developer.parent / "Applications/Icon Composer.app/Contents/Executables/ictool"
+    tool = ictool()
     minimal = work / "Minimal.icon"
     (minimal / "Assets").mkdir(parents=True, exist_ok=True)
     (minimal / "Assets/mark.svg").write_text(icon_svg(layer="mark"))
@@ -389,13 +442,90 @@ def write_dock_icons(work: Path) -> list[Path]:
     paths = []
     for name, source, rendition in (("minimal", minimal, "Default"),
                                     ("day", APP_ICON, "Default"), ("night", APP_ICON, "Dark")):
-        image = work / f"dock-{name}.png"
-        subprocess.run([str(tool), str(source), "--export-image", "--output-file", str(image),
-                        "--platform", "macOS", "--rendition", rendition,
-                        "--width", str(ICON_INSET_BOX), "--height", str(ICON_INSET_BOX),
-                        "--scale", "1", "--design-generation", "26"], check=True, capture_output=True)
-        dock_icon(name).parent.mkdir(parents=True, exist_ok=True)
-        paths.extend((image, dock_icon(name)))
+        paths.extend(export_dock_tile(tool, source, rendition, work / f"dock-{name}.png", dock_icon(name)))
+    add_dock_margins(paths)
+    return paths[1::2]
+
+
+def ictool() -> Path:
+    developer = Path(subprocess.check_output(["xcode-select", "-p"], text=True).strip())
+    return developer.parent / "Applications/Icon Composer.app/Contents/Executables/ictool"
+
+
+def export_dock_tile(tool: Path, source: Path, rendition: str, image: Path, target: Path) -> tuple[Path, Path]:
+    """Render one appearance of an Icon Composer document as the full-bleed tile `image`."""
+    subprocess.run([str(tool), str(source), "--export-image", "--output-file", str(image),
+                    "--platform", "macOS", "--rendition", rendition,
+                    "--width", str(ICON_INSET_BOX), "--height", str(ICON_INSET_BOX),
+                    "--scale", "1", "--design-generation", "26"], check=True, capture_output=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return image, target
+
+
+def write_seasonal_dock_icons(work: Path) -> list[Path]:
+    """The Halloween Dock icon: the Night tile, the papercut night clipped to the screen panel
+    and a jack-o'-lantern in the gear's place (`AppThemeStore.dockIconName` while it is on)."""
+    document_dir = work / "Halloween.icon"
+    assets = document_dir / "Assets"
+    assets.mkdir(parents=True, exist_ok=True)
+    (assets / "frame.svg").write_text(icon_svg(layer="frame"))
+    (assets / "pumpkin.svg").write_text(icon_svg(layer="pumpkin"))
+    mask = work / "halloween-panel-mask.png"
+    rasterize(icon_svg(layer="panel"), {mask: ICON_CANVAS}, work, template=True)
+    # The panel's bounds on the 1024 canvas, as `icon_svg` places the layers.
+    stroke = VARIANTS["regular"]["stroke"]
+    inset = stroke / 2 - 0.08
+    scale = ICON_CANVAS * 0.82 / 24
+    x0 = ICON_CANVAS / 2 + (FRAME["left"] + inset - (FRAME["left"] + FRAME["right"]) / 2) * scale
+    y0 = ICON_CANVAS / 2 + (FRAME["top"] + inset - (FRAME["top"] + FRAME["bottom"]) / 2) * scale
+    side = (FRAME["right"] - FRAME["left"] - 2 * inset) * scale
+    subprocess.run(["swift", "-e", r'''
+import AppKit
+let arguments = CommandLine.arguments
+func load(_ path: String) -> CGImage {
+    guard let image = NSBitmapImageRep(data: try! Data(contentsOf: URL(fileURLWithPath: path)))?.cgImage
+    else { fatalError("Cannot decode \(path)") }
+    return image
+}
+let scene = load(arguments[1]), mask = load(arguments[2])
+let canvas = mask.width
+let box = arguments[4...7].map { CGFloat(Double($0)!) }
+guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+      let context = CGContext(data: nil, width: canvas, height: canvas, bitsPerComponent: 8, bytesPerRow: 0,
+          space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+else { fatalError("Cannot create the panel canvas") }
+// Fill the panel's square with the painting, then keep only what the panel's outline covers.
+let target = CGRect(x: box[0], y: CGFloat(canvas) - box[1] - box[2], width: box[2], height: box[2])
+let fill = max(target.width / CGFloat(scene.width), target.height / CGFloat(scene.height))
+let size = CGSize(width: CGFloat(scene.width) * fill, height: CGFloat(scene.height) * fill)
+context.interpolationQuality = .high
+context.draw(scene, in: CGRect(x: target.midX - size.width / 2, y: target.midY - size.height / 2,
+                               width: size.width, height: size.height))
+context.setBlendMode(.destinationIn)
+context.draw(mask, in: CGRect(x: 0, y: 0, width: canvas, height: canvas))
+guard let panel = context.makeImage(),
+      let png = NSBitmapImageRep(cgImage: panel).representation(using: .png, properties: [:])
+else { fatalError("Cannot encode the panel") }
+try png.write(to: URL(fileURLWithPath: arguments[3]))
+''', str(SEASONAL / "halloween-night.jpg"), str(mask), str(assets / "screen.png"),
+                    *(f"{value:.3f}" for value in (x0, y0, side, side))], check=True, capture_output=True)
+    document = json.loads((APP_ICON / "icon.json").read_text())
+    document["fill-specializations"] = [{"value": {"solid": "srgb:0,0,0,1"}}]
+    document["groups"][0]["layers"] = [
+        {"image-name": "screen.png", "name": "Halloween night", "glass": False},
+        {"image-name": "frame.svg", "name": "Frame", "glass": False,
+         "fill-specializations": [{"value": {"solid": "srgb:1,1,1,1"}}]},
+        {"image-name": "pumpkin.svg", "name": "Jack-o'-lantern", "glass": False},
+    ]
+    (document_dir / "icon.json").write_text(json.dumps(document, indent=2) + "\n")
+    paths = list(export_dock_tile(ictool(), document_dir, "Default", work / "dock-halloween.png",
+                                  dock_icon("halloween")))
+    add_dock_margins(paths)
+    return paths[1::2]
+
+
+def add_dock_margins(paths: list[Path]) -> None:
+    """Pairs of (full-bleed tile, Dock image): centre each tile on a transparent 1024 canvas."""
     # Icon Composer exports a full-bleed tile. NSApplication's replacement image needs
     # the transparent margin normally added by actool, not Quick Look's white matte.
     subprocess.run(["swift", "-e", r'''
@@ -418,7 +548,6 @@ for index in stride(from: 3, to: CommandLine.arguments.count, by: 2) {
     try png.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
 }
 ''', str(ICON_CANVAS), str(ICON_INSET_BOX), *map(str, paths)], check=True, capture_output=True)
-    return paths[1::2]
 
 
 def write_website(site: Path, work: Path) -> list[Path]:
@@ -623,6 +752,7 @@ def main() -> int:
     parser.add_argument("--website", type=Path, help="also write logo, favicons and manifest into this directory")
     parser.add_argument("--skip-app", action="store_true", help="do not touch native app, Dock or tray assets")
     parser.add_argument("--dmg", action="store_true", help="write only the disk-image background pair (Packaging/dmg)")
+    parser.add_argument("--seasonal", action="store_true", help="write only the seasonal Dock icons (AppIconHalloween)")
     args = parser.parse_args()
     if sys.platform != "darwin":
         print(f"{MARK.missing} brand.py rasterizes with qlmanage and sips; macOS only", file=sys.stderr)
@@ -631,8 +761,11 @@ def main() -> int:
         work = Path(scratch)
         if args.dmg:
             written = write_dmg_background(work)
+        elif args.seasonal:
+            written = write_seasonal_dock_icons(work)
         else:
-            written = [] if args.skip_app else write_app_icons(work) + write_dock_icons(work)
+            written = [] if args.skip_app else (write_app_icons(work) + write_dock_icons(work)
+                                                + write_seasonal_dock_icons(work))
             written += write_dmg_background(work)
             if args.website:
                 written += write_website(args.website.resolve(), work)

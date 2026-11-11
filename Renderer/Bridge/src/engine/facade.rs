@@ -1,8 +1,9 @@
 use std::{
     future::Future,
+    path::PathBuf,
     sync::Arc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(test)]
@@ -16,12 +17,13 @@ use futures_util::future::{BoxFuture, FutureExt};
 #[cfg(test)]
 use wallpaper_core::project::SceneTemplate;
 use wallpaper_core::{
-    AudioSpectrum128, DisplaySelector, DisplaySnapshotEntry, EngineError, FirstFrameCallback,
+    AudioSpectrum128, DisplaySelector, SceneCapabilityProbe, DisplaySnapshotEntry, EngineError, FirstFrameCallback,
     PropertyPreview, RecoveryOutcome, RecoveryReason, SceneBackend, SceneDemandReasons, SceneWindowEntry,
     SceneResolution, SceneUpdateMode, WallpaperAssignment, WallpaperEngine,
     media::audio::{
         AudioCaptureBackend, AudioCaptureController, AudioVolume, PlatformAudioCaptureBackend,
-        RESTART_RETRY_DELAYS, RestartOutcome, device_watch::OutputDeviceWatcher,
+        RESTART_RETRY_DELAYS, RestartOutcome, TAP_STALL_REBUILD_LIMIT, TAP_STALL_TIMEOUT,
+        TapStallCheck, device_watch::OutputDeviceWatcher,
     },
     project::{ScalingMode, SceneDesc, SceneFraming, SceneHandle, SceneResult},
     render::RendererSurfaceCounters,
@@ -74,6 +76,9 @@ pub trait EngineFacade: Send + Sync + 'static {
     fn set_parked_scenes(&self, display_id: u32, scene_paths: Vec<String>) -> EngineFuture<()> {
         let _ = (display_id, scene_paths);
         async move { Ok(()) }.boxed()
+    }
+    fn preload_scene(&self, _desc: SceneDesc, _render_scale: f64) -> EngineFuture<()> {
+        async move { Err(EngineError::Platform("desktop preloading is unavailable".into())) }.boxed()
     }
     fn close_all_scenes(&self) -> EngineFuture<()>;
     /// Applies a global pause target to every open scene in one pass: a scene
@@ -139,6 +144,26 @@ pub trait EngineFacade: Send + Sync + 'static {
         scene_path: String,
         flat_json: String,
     ) -> EngineFuture<PropertyPreview>;
+    /// Shows Wallpaper Engine's per-wallpaper options on a scene while an edit
+    /// is under way, like [`Self::preview_property_override`]: the renderer
+    /// follows, the engine's stored state does not, a scene that draws another
+    /// wallpaper than `scene_path` is answered
+    /// [`PropertyPreview::OtherWallpaper`] and options a scene already shows
+    /// are not sent again.
+    fn preview_user_options(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        options: wallpaper_core::project::SceneUserOptions,
+    ) -> EngineFuture<PropertyPreview>;
+    /// Reads what scene `project_json` says about the per-wallpaper options
+    /// Wallpaper Engine offers for it, without loading it. Required, with no
+    /// default: a facade that answered "nothing offered" by default would hide
+    /// the mouse-parallax switch without anyone noticing.
+    fn read_scene_traits(
+        &self,
+        project_json: &std::path::Path,
+    ) -> Result<wallpaper_core::SceneTraits, EngineError>;
     fn set_fps(&self, handle: SceneHandle, fps: u32) -> EngineFuture<()>;
     /// Live-updates one scene's internal rasterization scale. Resizes render
     /// targets in place; it must not reparse the project or reopen video.
@@ -273,6 +298,30 @@ pub trait EngineFacade: Send + Sync + 'static {
         let _ = enabled;
         Ok(())
     }
+    /// Turns SDR display framing on or off inside native Metal scenes,
+    /// process-wide. Off by default.
+    ///
+    /// An SDR scene at Display resolution whose canvas overhangs the display
+    /// then draws only the part the display shows. A running scene takes the
+    /// change at its next frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer rejects the call.
+    fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        let _ = enabled;
+        Ok(())
+    }
+    /// Brings a scene drawn below full resolution back to full size with
+    /// MetalFX instead of a bilinear stretch, process-wide. Off by default.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the renderer rejects the call.
+    fn set_metalfx_upscaling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        let _ = enabled;
+        Ok(())
+    }
     /// Chooses how many pixels a 2D scene is rasterized with, process-wide.
     /// `Canvas` by default.
     ///
@@ -323,6 +372,31 @@ pub trait EngineFacade: Send + Sync + 'static {
     fn current_audio_spectrum(&self) -> Result<Option<AudioSpectrum128>, EngineError> {
         Ok(None)
     }
+    /// Reads an installed scene without drawing it (see
+    /// [`wallpaper_core::probe_scene_capability`]). Blocks for as long as the parse takes, so it is
+    /// called on a thread that may wait, never on the actor. A facade without a scene engine
+    /// cannot read one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the engine refuses the call or its answer cannot be read.
+    fn probe_scene_capability(
+        &self,
+        request: SceneProbeRequest,
+    ) -> Result<SceneCapabilityProbe, EngineError> {
+        let _ = request;
+        Err(EngineError::UnsupportedPlatform("reading a scene without a scene engine"))
+    }
+}
+
+/// The scene a capability probe reads: the files and saved choices loading it would use.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SceneProbeRequest {
+    pub project_file: PathBuf,
+    pub assets: PathBuf,
+    pub shader_cache: PathBuf,
+    /// The saved property choices as a flat JSON object, or `None` for the project's defaults.
+    pub property_overrides: Option<String>,
 }
 
 #[derive(Clone)]
@@ -368,7 +442,7 @@ pub(crate) fn displays_awaiting_first_frame(
         .iter()
         .filter(|scene| {
             !windows.iter().any(|window| {
-                window.parked
+                window.parked && window.ready
                     && window.display_id == scene.display.display_id
                     && {
                         let mut kept = window.desc.clone();
@@ -440,7 +514,7 @@ pub(crate) async fn reconcile_with_readiness<S, C, CF, P, PF>(
     prune: P,
 ) -> Result<Vec<SceneResult>, EngineError>
 where
-    S: FnOnce() -> (Vec<DisplaySnapshotEntry>, Vec<SceneWindowEntry>),
+    S: Fn() -> (Vec<DisplaySnapshotEntry>, Vec<SceneWindowEntry>),
     C: FnOnce(Vec<SceneDesc>) -> CF,
     CF: Future<Output = Result<Vec<SceneResult>, EngineError>>,
     P: FnOnce() -> PF,
@@ -449,8 +523,18 @@ where
     let _turn = reconcile_turn.lock().await;
     let checkpoint = readiness.checkpoint();
     let (live, windows) = snapshot();
-    let changed = displays_awaiting_first_frame(&live, &windows, &scenes);
+    let mut changed = displays_awaiting_first_frame(&live, &windows, &scenes);
     let results = mutate_scenes_and_prune(audio_mutation, || core(scenes), prune).await?;
+    if !changed.is_empty() {
+        // A preload may have presented before the checkpoint, while its published snapshot
+        // still said loading. Promotion republishes its actual presentation state. Match the
+        // returned handle so a ready window of another generation cannot satisfy this wait.
+        let (_, windows) = snapshot();
+        changed.retain(|display| !windows.iter().any(|window| {
+            window.display_id == *display && window.ready
+                && results.iter().any(|result| result.display_id == *display && result.handle == window.handle)
+        }));
+    }
     readiness
         .await_results(checkpoint, &changed, results, first_frame_timeout)
         .await
@@ -469,6 +553,10 @@ fn first_frame_timeout() -> EngineError {
 }
 
 impl EngineFacade for RealEngineFacade {
+    fn preload_scene(&self, desc: SceneDesc, render_scale: f64) -> EngineFuture<()> {
+        let engine = self.engine.clone();
+        async move { engine.preload_scene(desc, render_scale).await }.boxed()
+    }
     fn update_media(&self, handle: SceneHandle, enabled: bool, state: wallpaper_core::media::MediaPollResult) -> EngineFuture<()> {
         let engine = self.engine.clone();
         async move { engine.update_media(handle, enabled, state).await }.boxed()
@@ -575,6 +663,14 @@ impl EngineFacade for RealEngineFacade {
         self.engine.set_scene_video_plane_sampling_enabled(enabled)
     }
 
+    fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.engine.set_scene_display_framing_enabled(enabled)
+    }
+
+    fn set_metalfx_upscaling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.engine.set_metalfx_upscaling_enabled(enabled)
+    }
+
     fn set_scene_resolution(&self, resolution: SceneResolution) -> Result<(), EngineError> {
         self.engine.set_scene_resolution(resolution)
     }
@@ -599,6 +695,18 @@ impl EngineFacade for RealEngineFacade {
 
     fn current_audio_spectrum(&self) -> Result<Option<AudioSpectrum128>, EngineError> {
         self.engine.current_audio_spectrum()
+    }
+
+    fn probe_scene_capability(
+        &self,
+        request: SceneProbeRequest,
+    ) -> Result<SceneCapabilityProbe, EngineError> {
+        wallpaper_core::probe_scene_capability(
+            &request.project_file,
+            &request.assets,
+            Some(&request.shader_cache),
+            request.property_overrides.as_deref(),
+        )
     }
 
     fn set_renderer_counters_enabled(&self, enabled: bool) -> Result<(), EngineError> {
@@ -709,6 +817,23 @@ impl EngineFacade for RealEngineFacade {
                 .await
         }
         .boxed()
+    }
+
+    fn preview_user_options(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        options: wallpaper_core::project::SceneUserOptions,
+    ) -> EngineFuture<PropertyPreview> {
+        let engine = self.engine.clone();
+        async move { engine.preview_user_options(handle, scene_path, options).await }.boxed()
+    }
+
+    fn read_scene_traits(
+        &self,
+        project_json: &std::path::Path,
+    ) -> Result<wallpaper_core::SceneTraits, EngineError> {
+        wallpaper_core::read_scene_traits(project_json)
     }
 
     fn set_fps(&self, handle: SceneHandle, fps: u32) -> EngineFuture<()> {
@@ -897,6 +1022,38 @@ pub(crate) fn handle_output_device_change<B: AudioCaptureBackend>(
         );
     }
     attempt_audio_restart(controller, generation, 0)
+}
+
+/// The lane's once-a-second stall check came due at `now`: rebuild a tap that
+/// stopped calling back, through the same rebuild and retries as a device
+/// change. The rebuild starts a generation of its own, so a later device change
+/// supersedes its pending retries.
+pub(crate) fn handle_tap_stall_check<B: AudioCaptureBackend>(
+    controller: &mut AudioCaptureController<B>,
+    state: &mut AudioRestartState,
+    now: Instant,
+) -> RestartAction {
+    match controller.check_tap_stall(now) {
+        TapStallCheck::Stalled => {
+            log::warn!(
+                "[wallpaper-core audio] system audio tap stalled (no callbacks for {} s while the output device is running); rebuilding it",
+                TAP_STALL_TIMEOUT.as_secs()
+            );
+            let generation = state.begin();
+            attempt_audio_restart(controller, generation, 0)
+        }
+        TapStallCheck::GaveUp => {
+            log::warn!(
+                "[wallpaper-core audio] system audio tap stalled again after {TAP_STALL_REBUILD_LIMIT} rebuilds within a minute; it is left alone until the next scene or demand change"
+            );
+            RestartAction::Done
+        }
+        TapStallCheck::Recovered => {
+            log::info!("[wallpaper-core audio] system audio tap is delivering again after a stall");
+            RestartAction::Done
+        }
+        TapStallCheck::Healthy | TapStallCheck::Idle => RestartAction::Done,
+    }
 }
 
 /// A retry scheduled by an earlier [`RestartAction::RetryIn`] came due.
@@ -1115,6 +1272,15 @@ impl CaptureAssembly for PlatformCaptureAssembly {
         schedule_audio_restart(action, events);
     }
 
+    fn check_tap_stall(
+        &mut self,
+        controller: &mut AudioCaptureController<Self::Backend>,
+        events: &CaptureEvents,
+    ) {
+        let action = handle_tap_stall_check(controller, &mut self.restart, Instant::now());
+        schedule_audio_restart(action, events);
+    }
+
     fn sync_watch(&mut self, wanted: bool, events: &CaptureEvents) {
         self.output_watch.sync(wanted, || watch_output_device(events.clone()));
     }
@@ -1146,6 +1312,7 @@ pub struct FakeEngineFacade {
     display_paused_calls: Observation<(u32, bool)>,
     /// Every parking list the bridge handed over, by display.
     parked_scene_calls: Observation<(u32, Vec<String>)>,
+    preloaded_scene_calls: Observation<SceneDesc>,
     /// What `scene_windows` reports; a test scripts it.
     scene_windows: Arc<ArcSwap<Vec<SceneWindowEntry>>>,
     /// Every pause value applied to a rendered scene, by its display, in the
@@ -1174,11 +1341,21 @@ pub struct FakeEngineFacade {
     /// display, like the real renderer's own record: gone when a reconcile opens
     /// the display's scene afresh or loads it again.
     shown_property_documents: Arc<std::sync::Mutex<std::collections::HashMap<u32, String>>>,
+    /// Per-wallpaper options the fake renderers were told to show while an
+    /// edit is under way. Unlike property documents the fake sends them every
+    /// time; the real engine skips options a scene already shows.
+    preview_user_options_calls: Observation<(SceneHandle, wallpaper_core::project::SceneUserOptions)>,
+    /// What `read_scene_traits` answers, by project file; not offered for one
+    /// not listed.
+    scene_traits: Reading<std::collections::BTreeMap<std::path::PathBuf, wallpaper_core::SceneTraits>>,
+    scene_traits_reads: Observation<std::path::PathBuf>,
     fps_calls: Observation<(SceneHandle, u32)>,
     render_scale_calls: Observation<(SceneHandle, f32)>,
     scene_optimization_calls: Observation<bool>,
     scene_on_demand_calls: Observation<bool>,
     scene_video_plane_sampling_calls: Observation<bool>,
+    scene_display_framing_calls: Observation<bool>,
+    metalfx_upscaling_calls: Observation<bool>,
     scene_resolution_calls: Observation<SceneResolution>,
     scene_runtime_reports: Reading<Vec<SceneRuntimeReport>>,
     /// Scripted snapshots retain the final sample; `None` reads the live state.
@@ -1186,6 +1363,9 @@ pub struct FakeEngineFacade {
     recover_calls: Observation<(u32, RecoveryReason)>,
     recover_result: Reading<Option<Result<RecoveryOutcome, String>>>,
     audio_spectrum: Reading<Option<AudioSpectrum128>>,
+    /// Every scene the bridge asked to read, and what reading one answers.
+    scene_probe_calls: Observation<SceneProbeRequest>,
+    scene_probe_answer: Reading<SceneCapabilityProbe>,
     mouse_poll_calls: Observation<()>,
     mouse_polls_seen: Arc<std::sync::atomic::AtomicUsize>,
     mouse_poll_count: Arc<std::sync::atomic::AtomicUsize>,
@@ -1355,6 +1535,7 @@ impl Default for FakeEngineFacade {
             paused_calls: Observation::new(),
             display_paused_calls: Observation::new(),
             parked_scene_calls: Observation::new(),
+            preloaded_scene_calls: Observation::new(),
             scene_windows: Default::default(),
             scene_pause_log: Observation::new(),
             audio_volume_calls: Observation::new(),
@@ -1373,17 +1554,24 @@ impl Default for FakeEngineFacade {
             preview_property_calls: Observation::new(),
             declined_property_previews: Observation::new(),
             shown_property_documents: Default::default(),
+            preview_user_options_calls: Observation::new(),
+            scene_traits: Reading::new(Default::default()),
+            scene_traits_reads: Observation::new(),
             fps_calls: Observation::new(),
             render_scale_calls: Observation::new(),
             scene_optimization_calls: Observation::new(),
             scene_on_demand_calls: Observation::new(),
             scene_video_plane_sampling_calls: Observation::new(),
+            scene_display_framing_calls: Observation::new(),
+            metalfx_upscaling_calls: Observation::new(),
             scene_resolution_calls: Observation::new(),
             scene_runtime_reports: Reading::new(Default::default()),
             display_snapshot_script: Reading::new(Default::default()),
             recover_calls: Observation::new(),
             recover_result: Reading::new(Default::default()),
             audio_spectrum: Reading::new(Default::default()),
+            scene_probe_calls: Observation::new(),
+            scene_probe_answer: Reading::new(Default::default()),
             mouse_poll_calls: Observation::new(),
             mouse_polls_seen: Default::default(),
             pointer_activity: Default::default(),
@@ -1699,6 +1887,7 @@ impl FakeEngineFacade {
     pub fn parked_scene_calls(&self) -> Vec<(u32, Vec<String>)> {
         self.parked_scene_calls.snapshot()
     }
+    pub fn preloaded_scene_calls(&self) -> Vec<SceneDesc> { self.preloaded_scene_calls.snapshot() }
 
     /// Makes `scene_windows` report `windows` from now on.
     pub fn set_scene_windows(&self, windows: Vec<SceneWindowEntry>) {
@@ -1784,6 +1973,18 @@ impl FakeEngineFacade {
         self.scene_video_plane_sampling_calls.snapshot()
     }
 
+    /// Every SDR display framing change the bridge pushed, in order.
+    #[must_use]
+    pub fn scene_display_framing_calls(&self) -> Vec<bool> {
+        self.scene_display_framing_calls.snapshot()
+    }
+
+    /// Every MetalFX upscaling change the bridge pushed, in order.
+    #[must_use]
+    pub fn metalfx_upscaling_calls(&self) -> Vec<bool> {
+        self.metalfx_upscaling_calls.snapshot()
+    }
+
     /// Every 2D scene resolution the bridge pushed, in order.
     #[must_use]
     pub fn scene_resolution_calls(&self) -> Vec<SceneResolution> {
@@ -1824,6 +2025,17 @@ impl FakeEngineFacade {
     /// Sets what the next spectrum read returns. `None` is "no analysis yet".
     pub fn set_audio_spectrum(&self, spectrum: Option<AudioSpectrum128>) {
         self.audio_spectrum.set(spectrum);
+    }
+
+    /// Sets what reading a scene answers from now on.
+    pub fn set_scene_probe_answer(&self, answer: SceneCapabilityProbe) {
+        self.scene_probe_answer.set(answer);
+    }
+
+    /// Every scene the bridge asked to read, in order.
+    #[must_use]
+    pub fn scene_probe_calls(&self) -> Vec<SceneProbeRequest> {
+        self.scene_probe_calls.snapshot()
     }
 
     #[must_use]
@@ -1869,6 +2081,27 @@ impl FakeEngineFacade {
     #[must_use]
     pub fn declined_property_previews(&self) -> Vec<(SceneHandle, String)> {
         self.declined_property_previews.snapshot()
+    }
+
+    /// Every set of per-wallpaper options the fake renderers were shown while
+    /// an edit was under way, in order.
+    #[must_use]
+    pub fn preview_user_options_calls(&self) -> Vec<(SceneHandle, wallpaper_core::project::SceneUserOptions)> {
+        self.preview_user_options_calls.snapshot()
+    }
+
+    /// Makes `read_scene_traits` answer `traits` for the project file
+    /// `project_json`.
+    pub fn set_scene_traits(&self, project_json: std::path::PathBuf, traits: wallpaper_core::SceneTraits) {
+        let mut all = self.scene_traits.read();
+        all.insert(project_json, traits);
+        self.scene_traits.set(all);
+    }
+
+    /// Every project file `read_scene_traits` was asked about, in order.
+    #[must_use]
+    pub fn scene_traits_reads(&self) -> Vec<std::path::PathBuf> {
+        self.scene_traits_reads.snapshot()
     }
 
     #[must_use]
@@ -2113,6 +2346,11 @@ impl EngineFacade for FakeEngineFacade {
             fake.parked_scene_calls.record((display_id, scene_paths));
             Ok(())
         }.boxed()
+    }
+
+    fn preload_scene(&self, desc: SceneDesc, _render_scale: f64) -> EngineFuture<()> {
+        let fake = self.clone();
+        async move { fake.preloaded_scene_calls.record(desc); Ok(()) }.boxed()
     }
 
     fn close_all_scenes(&self) -> EngineFuture<()> {
@@ -2393,6 +2631,35 @@ impl EngineFacade for FakeEngineFacade {
         .boxed()
     }
 
+    fn preview_user_options(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        options: wallpaper_core::project::SceneUserOptions,
+    ) -> EngineFuture<PropertyPreview> {
+        let fake = self.clone();
+        async move {
+            options.validate()?;
+            let drawn = fake.scene_behind(handle).ok_or_else(|| {
+                EngineError::InvalidInput(format!("unknown scene handle {}", handle.raw()))
+            })?;
+            if drawn.scene_path != scene_path {
+                return Ok(PropertyPreview::OtherWallpaper);
+            }
+            fake.preview_user_options_calls.record((handle, options));
+            Ok(PropertyPreview::Shown)
+        }
+        .boxed()
+    }
+
+    fn read_scene_traits(
+        &self,
+        project_json: &std::path::Path,
+    ) -> Result<wallpaper_core::SceneTraits, EngineError> {
+        self.scene_traits_reads.record(project_json.to_path_buf());
+        Ok(self.scene_traits.read().get(project_json).copied().unwrap_or_default())
+    }
+
     fn set_fps(&self, handle: SceneHandle, fps: u32) -> EngineFuture<()> {
         let fake = self.clone();
         async move {
@@ -2432,6 +2699,16 @@ impl EngineFacade for FakeEngineFacade {
         Ok(())
     }
 
+    fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.scene_display_framing_calls.record(enabled);
+        Ok(())
+    }
+
+    fn set_metalfx_upscaling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.metalfx_upscaling_calls.record(enabled);
+        Ok(())
+    }
+
     fn set_scene_resolution(&self, resolution: SceneResolution) -> Result<(), EngineError> {
         self.scene_resolution_calls.record(resolution);
         Ok(())
@@ -2458,6 +2735,14 @@ impl EngineFacade for FakeEngineFacade {
 
     fn current_audio_spectrum(&self) -> Result<Option<AudioSpectrum128>, EngineError> {
         Ok(self.audio_spectrum.read())
+    }
+
+    fn probe_scene_capability(
+        &self,
+        request: SceneProbeRequest,
+    ) -> Result<SceneCapabilityProbe, EngineError> {
+        self.scene_probe_calls.record(request);
+        Ok(self.scene_probe_answer.read())
     }
 
     fn poll_mouse_position(&self) -> EngineFuture<()> {
@@ -2675,6 +2960,7 @@ mod first_frame_tests {
             desc: scene.clone(),
             window_number: Some(4_242),
             parked,
+            ready: true,
         }
     }
 
@@ -2687,6 +2973,11 @@ mod first_frame_tests {
         city.scene_path = "/library/city/project.json".into();
         let live = [live(&shown)];
         assert!(displays_awaiting_first_frame(&live, &[kept(&city, true)], &[city.clone()]).is_empty());
+
+        let mut preparing = kept(&city, true);
+        preparing.ready = false;
+        assert_eq!(displays_awaiting_first_frame(&live, &[preparing], &[city.clone()]), vec![8],
+            "arriving during preload must still wait for the first frame");
 
         // Muted and capped while it waited: applied live, nothing reloads.
         let mut quieter = city.clone();

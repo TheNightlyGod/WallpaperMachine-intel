@@ -6,11 +6,12 @@ import XCTest
 /// The unit-test bundle's principal class, which XCTest creates before any test runs.
 ///
 /// The tests run inside the app, so it first takes the desktop away from them: from here on an
-/// address opened, a file revealed in Finder, System Settings or a hidden app is only recorded in
-/// `DesktopActionLog.shared`. A test that means to check such an action injects its own seam or
-/// reads the log; none can open a browser tab or a Finder window on the developer's Mac. The
-/// panel's strings follow English (`AppLanguageStore.testHost`), not the language the installed
-/// app was last set to, and every test starts in English whatever the test before it bound.
+/// address opened, a file revealed in Finder, System Settings, a hidden app or a change to Finder's
+/// desktop icons is only recorded in `DesktopActionLog.shared`. A test that means to check such an
+/// action injects its own seam or reads the log; none can open a browser tab or a Finder window on
+/// the developer's Mac, or restart their Finder. The panel's strings follow English
+/// (`AppLanguageStore.testHost`), not the language the installed app was last set to, and every
+/// test starts in English whatever the test before it bound.
 @objc(WallpaperMachineTestBundle)
 final class TestBundle: NSObject, XCTestObservation {
   override init() {
@@ -36,12 +37,32 @@ final class DesktopActionLog {
   private(set) var revealed: [[URL]] = []
   private(set) var loginItemsOpened = 0
   private(set) var hidden = 0
+  /// The stand-in Finder's `CreateDesktop`, as macOS would return it; nil until something sets it.
+  var finderDesktopPreference: Any?
+  /// Whether the stand-in accepts a write of `CreateDesktop`, as macOS normally does.
+  var acceptsFinderDesktopWrites = true
+  /// Whether the stand-in Finder can be ended for a restart, as a running Finder normally can.
+  var finderEndsForRestart = true
+  private(set) var finderDesktopWrites: [Bool] = []
+  /// Restarts asked for, including any the stand-in refused.
+  private(set) var finderRestarts = 0
 
   var actions: DesktopActions {
     DesktopActions(
       open: { [unowned self] in opened.append($0); return true },
       reveal: { [unowned self] in revealed.append($0) },
       openLoginItemsSettings: { [unowned self] in loginItemsOpened += 1 },
-      hideApplication: { [unowned self] in hidden += 1 })
+      hideApplication: { [unowned self] in hidden += 1 },
+      finderDesktopPreference: { [unowned self] in finderDesktopPreference },
+      setFinderDesktopPreference: { [unowned self] shown in
+        finderDesktopWrites.append(shown)
+        guard acceptsFinderDesktopWrites else { return false }
+        finderDesktopPreference = shown
+        return true
+      },
+      restartFinder: { [unowned self] in
+        finderRestarts += 1
+        return finderEndsForRestart
+      })
   }
 }

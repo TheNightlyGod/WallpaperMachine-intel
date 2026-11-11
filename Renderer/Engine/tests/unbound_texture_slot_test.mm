@@ -22,7 +22,7 @@ constexpr Rgba kClear { 26, 51, 77, 255 };
 const char* kQuarterPlusSecond = R"(varying vec2 v_TexCoord;
 uniform sampler2D g_Texture1;
 void main() {
-    gl_FragColor = texSample2D(g_Texture1, v_TexCoord) + vec4(0.25);
+    gl_FragColor = texSample2D(g_Texture1, v_TexCoord) + vec4(0.25, 0.25, 0.25, 0.25);
 }
 )";
 
@@ -153,4 +153,23 @@ TEST_F(UnboundSlot, AReferenceToALayerThatDoesNotResolveIsNotANullBindingEither)
     EXPECT_FALSE(ExpectPixel(*picture, 128, 72, { 64, 64, 64, 255 }, 2))
         << "a layer that is not there must not read as zero";
     EXPECT_TRUE(ExpectPixel(*picture, 128, 72, { 0, 0, 0, 0 }, 0)) << "the sampling step is skipped";
+}
+
+// Wallpaper Engine describes a slot with no texture as two texels square: g_Texture<N>Resolution
+// (2, 2, 2, 2) and g_Texture<N>Texel (0.5, 0.5, 2, 2) (`sub_1400D8300` cases 0x3E-0x51), whatever
+// stands in for the texture here.
+TEST_F(UnboundSlot, ASlotNobodyBoundDescribesItselfAsTwoTexelsSquare)
+{
+    const char* fragment = R"(varying vec2 v_TexCoord;
+uniform sampler2D g_Texture1;
+uniform vec4 g_Texture1Resolution;
+uniform vec4 g_Texture1Texel;
+void main() {
+    gl_FragColor = vec4(g_Texture1Resolution.x / 8.0, g_Texture1Texel.x, g_Texture1Texel.z / 8.0, 1.0)
+                 + texSample2D(g_Texture1, v_TexCoord) * 0.0;
+}
+)";
+    const auto picture = Draw(fragment, Json::array({ nullptr }));
+    ASSERT_TRUE(picture.has_value()) << last_error;
+    EXPECT_TRUE(ExpectPixel(*picture, 128, 72, { 64, 128, 64, 255 }, 2)) << "2/8, 1/2, 2/8";
 }

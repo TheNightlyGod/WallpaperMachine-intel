@@ -300,6 +300,62 @@ TEST_F(BackdropScene, ALargePictureWithBarsAboveAndBelowTakesTheEightBitStep)
     CheckCase(kLargeAboveBelow);
 }
 
+// ---- the colour of the bars ----------------------------------------------------------------
+
+namespace
+{
+/// How many pixels outside the picture are exactly `color`, and how many there are.
+std::pair<size_t, size_t> BarsOfColour(const Image& image, const PixelRect& picture, Rgba color)
+{
+    size_t matching = 0, total = 0;
+    for (uint32_t y = 0; y < image.height; ++y) {
+        for (uint32_t x = 0; x < image.width; ++x) {
+            if (Inside(picture, x, y)) continue;
+            ++total;
+            const Rgba here = image.At(x, y);
+            if (here[0] == color[0] && here[1] == color[1] && here[2] == color[2]) ++matching;
+        }
+    }
+    return { matching, total };
+}
+} // namespace
+
+// Wallpaper Engine clears the room a fitted picture leaves with the wallpaper's `schemecolor`
+// (sub_140181F30 reads it, sub_14017FA70 clears with it); the blurred backdrop fills its bars
+// with the picture instead.
+TEST_F(BackdropScene, FitBordersTakeTheSchemeColour)
+{
+    ScenePackage package;
+    MakeGradientScene(package, kBarsLeftRight);
+    package.SetProject({ { "schemecolor", { { "type", "color" }, { "text", "Scheme" }, { "value", "1 0 0" } } } });
+    GpuScene scene(package, OptionsFor(kBarsLeftRight));
+    ASSERT_TRUE(scene.ok()) << scene.error();
+    const PixelRect picture = Shown(LayoutOf(kBarsLeftRight, kFit));
+
+    scene.renderer().SetWallpaperScalingMode(kFit);
+    const auto red = BarsOfColour(scene.Run(3), picture, { 255, 0, 0, 255 });
+    ASSERT_GT(red.second, 0u) << "Fit leaves bars on this display";
+    EXPECT_EQ(red.first, red.second) << "every bar pixel is the scheme colour";
+
+    // The property follows a live change.
+    ASSERT_TRUE(scene.SetProperty("schemecolor", "0 0 1"));
+    const auto blue = BarsOfColour(scene.Run(3), picture, { 0, 0, 255, 255 });
+    EXPECT_EQ(blue.first, blue.second);
+
+    scene.renderer().SetWallpaperScalingMode(kBlurred);
+    const auto blurred = BarsOfColour(scene.Run(3), Shown(LayoutOf(kBarsLeftRight, kBlurred)), { 0, 0, 255, 255 });
+    EXPECT_EQ(blurred.first, 0u) << "the blurred backdrop is never the scheme colour";
+}
+
+TEST_F(BackdropScene, FitBordersAreBlackWithoutASchemeColour)
+{
+    Showing fit(kBarsLeftRight, kFit);
+    ASSERT_TRUE(fit.scene().ok()) << fit.scene().error();
+    const auto black = BarsOfColour(fit.Picture(), Shown(LayoutOf(kBarsLeftRight, kFit)), { 0, 0, 0, 255 });
+    ASSERT_GT(black.second, 0u);
+    EXPECT_EQ(black.first, black.second);
+}
+
 // A picture of four flat colours, hard edges and all, on a display that leaves bars.
 Image PictureOfQuadrants(const Case& c)
 {

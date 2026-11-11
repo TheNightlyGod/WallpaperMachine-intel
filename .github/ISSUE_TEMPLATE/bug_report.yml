@@ -58,7 +58,7 @@ body:
     id: app-details
     attributes:
       label: Details from the app
-      description: Filled in when you report from a wallpaper's details in the app (its type, what draws it and any error). Leave it as it is.
+      description: Filled in when you report from a wallpaper's details in the app (its type, what draws it, any error and the options you changed). Leave it as it is.
   - type: input
     id: version
     attributes:

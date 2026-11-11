@@ -272,7 +272,17 @@ pub fn convert_default_text(text: &str) -> Result<UniformValue, RequestError> {
         if piece.is_empty() {
             continue;
         }
-        values.push(piece.parse::<f32>().map_err(|_| invalid_number())?);
+        let value = match piece.parse::<f32>() {
+            Ok(v) => v,
+            Err(_) => {
+                let prefix = numeric_prefix(piece);
+                if prefix.is_empty() {
+                    return Err(invalid_number());
+                }
+                prefix.parse::<f32>().map_err(|_| invalid_number())?
+            }
+        };
+        values.push(value);
     }
     Ok(match values.len() {
         1 => UniformValue::Number(values[0]),
@@ -437,6 +447,7 @@ mod tests {
         assert_eq!(n("util/white").unwrap_err().to_string(), "invalid shader request: metadata number is invalid");
         assert!(n("3 y").is_err());
         assert_eq!(n("+1.5 .5 5. 1e3"), Ok(UniformValue::Vec4([1.5, 0.5, 5.0, 1000.0])));
+        assert_eq!(n("0.925 0.85)"), Ok(UniformValue::Vec2([0.925, 0.85])));
         assert_eq!(n(" 1,,2 "), Ok(UniformValue::Vec2([1.0, 2.0])));
         assert!(matches!(n("inf"), Ok(UniformValue::Number(v)) if v.is_infinite()));
         assert!(matches!(n("nan"), Ok(UniformValue::Number(v)) if v.is_nan()));

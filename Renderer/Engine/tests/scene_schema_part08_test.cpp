@@ -8,6 +8,7 @@
 
 #include "Fs/MemBinaryStream.h"
 #include "Runtime/RuntimeImageSource.hpp"
+#include "Text/TextGlyphMesh.hpp"
 #include "Text/TextLayer.hpp"
 #include "Utils/Logging.h"
 #include "WPSceneParser.hpp"
@@ -15,6 +16,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -277,6 +279,27 @@ export function update(value) { return value; }
     EXPECT_EQ(label_config.value("id", -1), 7);
 }
 
+// An id passed as text (`getLayerByID(String(id))`) finds the same layer as the number: a
+// scene that looks its layers up that way and hides one by alpha shows it hidden in Wallpaper
+// Engine (issue #127).
+TEST(LayerRegistry, AnIdWrittenAsTextFindsTheSameLayer)
+{
+    const std::string script = std::string(kCheckHelper) + R"JS(
+export function init(value) {
+    check(thisScene.getLayerByID('31') === thisScene.getLayer('first'), 'text id 31 is first');
+    check(thisScene.getLayerByID(String(7)) === thisScene.getLayer('label'), 'text id 7 is the label');
+    check(thisScene.getLayerByID('9999') === null, 'unknown text id');
+    check(thisScene.getLayerByID('') === null, 'empty text');
+    check(thisScene.getLayerByID('x') === null, 'non-numeric text');
+}
+export function update(value) { return value; }
+)JS";
+    Played run(Json::array({ ImageObject(31, "first"), TextObject(7, "label"),
+                             ImageObject(12, "last", { { "visible", { { "value", true }, { "script", script } } } }) }));
+    ASSERT_TRUE(run.ok());
+    EXPECT_TRUE(run.rt().scriptErrors().empty()) << (run.rt().scriptErrors().empty() ? "" : run.rt().scriptErrors().front());
+}
+
 // The order scripts see is the order of the file, whatever order the layers' bindings were made in.
 TEST(LayerRegistry, DeclarationOrderHoldsForLayersWhoseBindingsAreMadeLate)
 {
@@ -451,15 +474,17 @@ TEST(ScriptMadeText, ALayerMadeByAScriptIsBuiltLikeASceneTextObject)
     SceneNode* node = run.Root(name);
     ASSERT_NE(node, nullptr);
     ASSERT_NE(node->Mesh(), nullptr);
-    const SceneMaterial* material = node->Mesh()->Material();
+    const SceneMaterial* material = node->Mesh()->MaterialForSlot(kTextGlyphSubmesh);
     ASSERT_NE(material, nullptr);
     const auto& constants = material->customShader.constValues;
-    ASSERT_NE(constants.find("g_Color"), constants.end());
-    EXPECT_FLOAT_EQ(constants.at("g_Color")[0], 0.2f);
-    EXPECT_FLOAT_EQ(constants.at("g_Color")[1], 0.4f);
-    EXPECT_FLOAT_EQ(constants.at("g_Color")[2], 0.6f);
-    ASSERT_NE(constants.find("g_Alpha"), constants.end());
-    EXPECT_FLOAT_EQ(constants.at("g_Alpha")[0], 0.5f);
+    ASSERT_NE(constants.find("g_Color4"), constants.end());
+    ASSERT_EQ(constants.at("g_Color4").size(), 4u);
+    EXPECT_FLOAT_EQ(constants.at("g_Color4")[0], 0.2f);
+    EXPECT_FLOAT_EQ(constants.at("g_Color4")[1], 0.4f);
+    EXPECT_FLOAT_EQ(constants.at("g_Color4")[2], 0.6f);
+    EXPECT_FLOAT_EQ(constants.at("g_Color4")[3], 0.5f);
+    EXPECT_GT(node->Mesh()->Submeshes().at(kTextGlyphSubmesh).GetIndexArray(0).DrawIndexCount(), 0u)
+        << "the script-made layer must have drawable glyphs";
 
     EXPECT_TRUE(rt.ConsumeSceneGraphMutationFlag());
     ASSERT_EQ(rt.LayerCount(), 4u);
@@ -612,7 +637,7 @@ export function cursorClick() {
     EXPECT_GT(after.y(), before.y());
 }
 
-TEST(TextRestyle, ValuesTheStyleCannotTakeAreRefusedAndTheStateStays)
+TEST(TextRestyle, InvalidPointSizeIsRefusedAndAlignmentWordsUseTheirDefaults)
 {
     const std::string script = R"JS(
 export function update(value) { return value; }
@@ -631,7 +656,7 @@ export function cursorClick() {
     ASSERT_TRUE(state.has_value());
     EXPECT_FLOAT_EQ(state->point_size, 20.0f);
     EXPECT_EQ(state->horizontal_align, "left");
-    EXPECT_EQ(state->vertical_align, "top");
+    EXPECT_EQ(state->vertical_align, "center");
 }
 
 // ---- teardown ---------------------------------------------------------------------------------
@@ -718,24 +743,121 @@ TEST(Teardown, TheRastersOfMadeAndDestroyedTextLayersAreReleased)
         SCOPED_TRACE("round " + std::to_string(round));
         const std::string name = rt.CreateTextLayer("{\"text\":\"x\",\"pointsize\":20,\"visible\":true}", "owner");
         ASSERT_FALSE(name.empty());
-        const std::string texture = TextTextureName(name);
-        EXPECT_TRUE(run.scene().textures.count(texture) > 0);
-        EXPECT_TRUE(images->IsRuntimeImage(texture));
-        EXPECT_EQ(RuntimeTextTextures(run.scene()), baseline + 1);
+        const std::array<std::string, 2> textures { TextAtlasName(name), TextColorAtlasName(name) };
+        std::array<std::weak_ptr<Image>, 2> retired_images;
+        for (std::size_t index = 0; index < textures.size(); ++index) {
+            const auto& texture = textures[index];
+            EXPECT_TRUE(run.scene().textures.count(texture) > 0);
+            EXPECT_TRUE(images->IsRuntimeImage(texture));
+            retired_images[index] = images->Parse(texture);
+            EXPECT_FALSE(retired_images[index].expired());
+        }
+        EXPECT_EQ(RuntimeTextTextures(run.scene()), baseline + textures.size());
 
         rt.ConsumeSceneGraphMutationFlag();
         EXPECT_TRUE(rt.DestroyLayer(name));
-        EXPECT_TRUE(run.scene().textures.count(texture) > 0) << "the compiled graph may still sample it";
+        for (const auto& texture : textures) {
+            EXPECT_TRUE(run.scene().textures.count(texture) > 0) << "the compiled graph may still sample it";
+        }
         rt.Tick(1.0 / 60.0);
-        EXPECT_TRUE(run.scene().textures.count(texture) > 0) << "not while the graph that samples it has yet to be rebuilt";
+        for (std::size_t index = 0; index < textures.size(); ++index) {
+            EXPECT_TRUE(run.scene().textures.count(textures[index]) > 0)
+                << "not while the graph that samples it has yet to be rebuilt";
+            EXPECT_FALSE(retired_images[index].expired());
+        }
 
         EXPECT_TRUE(rt.ConsumeSceneGraphMutationFlag()) << "a rebuilt graph no longer holds the layer";
         rt.Tick(1.0 / 60.0);
-        EXPECT_EQ(run.scene().textures.count(texture), 0u);
-        EXPECT_FALSE(images->IsRuntimeImage(texture));
+        for (std::size_t index = 0; index < textures.size(); ++index) {
+            EXPECT_EQ(run.scene().textures.count(textures[index]), 0u);
+            EXPECT_FALSE(images->IsRuntimeImage(textures[index]));
+            EXPECT_TRUE(retired_images[index].expired()) << "the retired atlas image is released";
+        }
         EXPECT_EQ(RuntimeTextTextures(run.scene()), baseline);
     }
     EXPECT_TRUE(images->IsRuntimeImage("$mediaThumbnail")) << "cover images are never removed";
+}
+
+// ---- layers made with createLayer({ model: thisScene.createModelData(...) }) -----------------
+
+// One triangle per shape: `tri(x)` is three POSITION | UV | COLOR vertices whose first x is `x`.
+const std::string kModelHelpers = std::string(kCheckHelper) + R"JS(
+function tri(x) {
+    return new Float32Array([x, 0, 0, 0, 0, 1, 0, 0, 1,  x + 10, 0, 0, 1, 0, 0, 1, 0, 1,  x, 10, 0, 0, 1, 0, 0, 1, 1]);
+}
+const FORMAT = [IModelData.POSITION, IModelData.UV, IModelData.COLOR];
+function throws(fn, what) {
+    try { fn(); } catch (e) { return; }
+    throw new Error('check failed: no exception for ' + what);
+}
+)JS";
+
+TEST(ScriptMadeModel, TheVertexFormatFlagsAreWallpaperEnginesWords)
+{
+    const std::string script = kModelHelpers + R"JS(
+export function init(value) {
+    check(IModelData.POSITION === 'position' && IModelData.NORMAL === 'normal' && IModelData.UV === 'uv', 'flags');
+    check(IModelData.TANGENT_SIGNED === 'tangentSigned' && IModelData.COLOR === 'color', 'more flags');
+    const model = thisScene.createModelData({ shapes: [{ vertexBuffer: tri(0), vertexFormat: FORMAT, material: 'mat.json' }] });
+    check(model instanceof IModelData, 'instanceof');
+    return value;
+}
+)JS";
+    Played run(Json::array({ ScriptOwner(2, script) }));
+    ASSERT_TRUE(run.ok());
+    EXPECT_TRUE(run.rt().scriptErrors().empty()) << (run.rt().scriptErrors().empty() ? "" : run.rt().scriptErrors().front());
+    EXPECT_EQ(run.rt().sceneScriptCount(), 1u);
+}
+
+TEST(ScriptMadeModel, AModelLayerHoldsTheScriptsVerticesInTheFormatsOrderAndIsAnOrdinaryLayer)
+{
+    const std::string script = kModelHelpers + R"JS(
+export function init(value) {
+    const model = thisScene.createModelData({ boundingBoxMins: new Vec3(-50, -50, -1), boundingBoxMaxs: new Vec3(50, 50, 1),
+        shapes: [{ vertexBuffer: tri(0), indexBuffer: new Uint16Array([0, 1, 2]), vertexFormat: FORMAT, material: 'mat.json' },
+                 { vertexBuffer: tri(20), vertexFormat: FORMAT, material: 'mat.json', isVertexBufferDynamic: true }] });
+    const layer = thisScene.createLayer({ model: model, name: 'mesh', origin: new Vec3(5, 6, 0) });
+    check(thisScene.getLayer('mesh') === layer, 'found by name');
+    check(layer.origin.x === 5 && layer.origin.y === 6, 'origin');
+    check(thisScene.getLayerCount() === 2, 'count');
+    const gone = thisScene.createLayer(model);
+    check(thisScene.destroyLayer(gone), 'destroyed');
+    return value;
+}
+)JS";
+    Played run(Json::array({ ScriptOwner(2, script) }));
+    ASSERT_TRUE(run.ok());
+    SceneRuntimeContext& rt = run.rt();
+    EXPECT_TRUE(rt.scriptErrors().empty()) << (rt.scriptErrors().empty() ? "" : rt.scriptErrors().front());
+    ASSERT_EQ(rt.LayerCount(), 2u);
+    const std::string name = rt.ResolveLayerName("mesh");
+    SceneNode* node = run.Root(name);
+    ASSERT_NE(node, nullptr);
+    ASSERT_NE(node->Mesh(), nullptr);
+    const SceneMesh& mesh = *node->Mesh();
+    ASSERT_EQ(mesh.Submeshes().size(), 2u);
+    EXPECT_TRUE(mesh.Dynamic()) << "one shape is dynamic";
+    EXPECT_FALSE(mesh.UpdateDriver() == MeshUpdate::PerFrame) << "rewritten only when the script applies data";
+    for (std::size_t shape = 0; shape < 2; ++shape) {
+        const auto& submesh = mesh.Submeshes()[shape];
+        EXPECT_EQ(submesh.material_slot, shape);
+        ASSERT_EQ(submesh.VertexCount(), 1u);
+        const SceneVertexArray& vertices = submesh.GetVertexArray(0);
+        ASSERT_EQ(vertices.Attributes().size(), 3u);
+        EXPECT_EQ(vertices.Attributes()[0].name, "a_Position");
+        EXPECT_EQ(vertices.Attributes()[1].name, "a_TexCoord");
+        EXPECT_EQ(vertices.Attributes()[2].name, "a_Color");
+        ASSERT_EQ(vertices.OneSize(), 9u) << "tightly packed, as the script lays the buffer out";
+        ASSERT_EQ(vertices.VertexCount(), 3u);
+        EXPECT_FLOAT_EQ(vertices.Data()[0], shape == 0 ? 0.0f : 20.0f);
+        EXPECT_FLOAT_EQ(vertices.Data()[9], shape == 0 ? 10.0f : 30.0f);
+        EXPECT_FLOAT_EQ(vertices.Data()[9 + 6], 1.0f) << "the second vertex is green";
+    }
+    ASSERT_EQ(mesh.Submeshes()[0].IndexCount(), 1u);
+    EXPECT_EQ(mesh.Submeshes()[0].GetIndexArray(0).DrawIndexCount(), 3u);
+    EXPECT_EQ(mesh.Submeshes()[1].IndexCount(), 0u) << "no index buffer: drawn as a triangle list";
+    ASSERT_EQ(mesh.MaterialSlots().size(), 2u);
+    EXPECT_NE(mesh.MaterialForSlot(0), nullptr);
 }
 
 // ---- bounded JSON nesting ---------------------------------------------------------------------

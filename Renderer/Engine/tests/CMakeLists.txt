@@ -79,6 +79,7 @@ add_scene_schema_behavior_test(scene_schema_part02_test
     scene_schema_part02_lights_test.cpp
     scene_schema_part02_materials_test.cpp
     scene_schema_part02_graph_test.cpp)
+target_link_libraries(scene_schema_part02_test PRIVATE wpRenderCommon wpRGraph)
 add_scene_schema_behavior_test(scene_schema_part03_test
     scene_schema_part03_layout_test.cpp
     scene_schema_part03_tint_test.cpp)
@@ -100,7 +101,9 @@ add_scene_schema_behavior_test(scene_schema_part10_test
     scene_schema_part10_vector_test.cpp)
 add_scene_schema_behavior_test(scene_schema_part11_test
     scene_schema_part11_timelines_test.cpp
-    scene_schema_part11_audio_test.cpp)
+    scene_schema_part11_audio_test.cpp
+    scene_schema_part11_particle_scripts_test.cpp
+    scene_schema_part11_camera_scripts_test.cpp)
 # ------------------------------------------------------------------------------------------
 
 add_executable(mdl_schema_tests mdl_schema_tests.cpp)
@@ -116,7 +119,7 @@ gtest_discover_tests(
 # Model files built byte by byte (mdl_fixtures.hpp): mesh records, skeleton, optional blocks and the
 # geometry generated from them.
 add_executable(mdl_parse_tests mdl_mesh_tests.cpp mdl_skeleton_tests.cpp)
-target_link_libraries(mdl_parse_tests PRIVATE ${PROJECT_NAME} wpFs wpScene GTest::gtest_main)
+target_link_libraries(mdl_parse_tests PRIVATE ${PROJECT_NAME} wpFs wpScene nlohmann_json::nlohmann_json GTest::gtest_main)
 target_include_directories(mdl_parse_tests PRIVATE .)
 target_compile_features(mdl_parse_tests PRIVATE cxx_std_20)
 gtest_discover_tests(
@@ -126,8 +129,8 @@ gtest_discover_tests(
 )
 
 # In-memory puppets: layer sampling, blending, playback controls and shared state.
-add_executable(puppet_pose_tests puppet_pose_tests.cpp)
-target_link_libraries(puppet_pose_tests PRIVATE ${PROJECT_NAME} wpFs wpScene GTest::gtest_main)
+add_executable(puppet_pose_tests puppet_pose_tests.cpp puppet_link_tests.cpp puppet_morph_tests.cpp scene_force_tests.cpp)
+target_link_libraries(puppet_pose_tests PRIVATE ${PROJECT_NAME} wpFs wpScene nlohmann_json::nlohmann_json GTest::gtest_main)
 target_include_directories(puppet_pose_tests PRIVATE .)
 target_compile_features(puppet_pose_tests PRIVATE cxx_std_20)
 gtest_discover_tests(
@@ -306,9 +309,16 @@ gtest_discover_tests(
 # runtime only (support/script_scene.hpp): no device, no surface, no window.
 add_executable(scenescript_behavior_test
     scenescript_values_test.cpp
+    scenescript_cursor_test.cpp
     scenescript_objects_test.cpp
+    scenescript_scene_api_test.cpp
+    scenescript_general_test.cpp
+    scenescript_general_uniforms_test.cpp
+    scenescript_model_data_test.cpp
     scenescript_startup_test.cpp
     scenescript_rotation_test.cpp
+    scenescript_lookat_test.cpp
+    scenescript_parenting_test.cpp
     scenescript_layer_release_test.cpp
     support/pixels.cpp
     support/scene_package.cpp
@@ -325,6 +335,24 @@ gtest_discover_tests(
     PROPERTIES TIMEOUT 60
     DISCOVERY_TIMEOUT 60
 )
+# Script localStorage: WE's set/get rules and the files it is kept in between runs.
+add_executable(scenescript_storage_test
+    scenescript_storage_test.cpp
+    support/pixels.cpp
+    support/scene_package.cpp
+    support/script_scene.cpp)
+target_link_libraries(scenescript_storage_test PRIVATE ${PROJECT_NAME} wpAudio wpScene wpFs nlohmann_json::nlohmann_json GTest::gtest_main)
+target_include_directories(scenescript_storage_test PRIVATE . ${CMAKE_SOURCE_DIR}/src)
+target_compile_features(scenescript_storage_test PRIVATE cxx_std_20)
+if(TARGET wescene_rust_shader)
+    target_link_libraries(scenescript_storage_test PRIVATE wescene_rust_shader)
+endif()
+gtest_discover_tests(
+    scenescript_storage_test
+    TEST_PREFIX scenescript_storage_test.
+    PROPERTIES TIMEOUT 60
+    DISCOVERY_TIMEOUT 60
+)
 # Script, media and texture-slot behaviour driven straight through the runtime and the scene
 # parser: no package, no device, no window. One executable per area.
 function(add_runtime_behavior_test name)
@@ -338,9 +366,11 @@ add_runtime_behavior_test(sound_layer_cursor_behavior_test sound_layer_cursor_be
 add_runtime_behavior_test(media_event_behavior_test media_event_behavior_test.cpp)
 add_runtime_behavior_test(texture_slot_behavior_test texture_slot_behavior_test.cpp)
 add_runtime_behavior_test(material_constant_behavior_test material_constant_behavior_test.cpp)
+add_runtime_behavior_test(scenescript_puppet_bones_test scenescript_puppet_bones_test.cpp)
 add_runtime_behavior_test(create_layer_behavior_test create_layer_behavior_test.cpp)
 add_runtime_behavior_test(script_host_behavior_test script_host_behavior_test.cpp)
 add_runtime_behavior_test(shader_updater_behavior_test shader_updater_behavior_test.cpp)
+target_link_libraries(shader_updater_behavior_test PRIVATE wpRenderCommon)
 # Explicit CLI diagnostic, not registered with ctest. Never creates a surface.
 add_executable(render_target_lifetime_test render_target_lifetime_test.cpp)
 target_link_libraries(render_target_lifetime_test PRIVATE ${PROJECT_NAME} wpScene wpRenderCommon wpRGraph nlohmann_json::nlohmann_json GTest::gtest_main)
@@ -367,9 +397,8 @@ target_link_libraries(scene_reload_cycle_probe PRIVATE ${PROJECT_NAME} wpAudio w
 target_include_directories(scene_reload_cycle_probe PRIVATE . ${CMAKE_SOURCE_DIR}/src)
 target_compile_features(scene_reload_cycle_probe PRIVATE cxx_std_20)
 
-# The text tests measure a font with FreeType itself, as the reference for the
-# size the layout requests.
-find_package(Freetype REQUIRED)
+# The text tests measure a font with FreeType itself (the engine's Freetype::Freetype),
+# as the reference for the size the layout requests.
 add_executable(text_object_runtime_test text_object_runtime_test.cpp)
 target_link_libraries(text_object_runtime_test PRIVATE ${PROJECT_NAME} wpAudio wpScene wpFs wpRenderCommon wpRGraph Freetype::Freetype nlohmann_json::nlohmann_json GTest::gtest_main)
 target_include_directories(text_object_runtime_test PRIVATE . ${CMAKE_SOURCE_DIR}/src)
@@ -530,7 +559,8 @@ gtest_discover_tests(
     PROPERTIES TIMEOUT 30
     DISCOVERY_TIMEOUT 60
 )
-add_executable(rendergraph_smoke rendergraph_smoke.cpp graph_contract_cases.cpp)
+add_executable(rendergraph_smoke rendergraph_smoke.cpp graph_contract_cases.cpp
+    transparent_sorting_test.cpp planar_reflection_test.cpp scene_pass_merge_test.cpp)
 target_link_libraries(rendergraph_smoke PRIVATE ${PROJECT_NAME} wpRenderCommon wpRGraph wpScene wpAudio wpFs GTest::gtest_main)
 target_include_directories(rendergraph_smoke PRIVATE . ${CMAKE_SOURCE_DIR}/src)
 target_compile_features(rendergraph_smoke PRIVATE cxx_std_20)
@@ -703,7 +733,7 @@ endif()
 
 add_executable(video_source_input_test video_source_input_test.cpp)
 target_link_libraries(video_source_input_test PRIVATE ${PROJECT_NAME}
-    wmMedia wescene_testing_media GTest::gtest_main)
+    wmMedia wescene_testing_media GTest::gtest_main "-framework CoreVideo")
 target_include_directories(video_source_input_test PRIVATE
     . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/include)
 target_compile_features(video_source_input_test PRIVATE cxx_std_20)
@@ -769,6 +799,23 @@ if(APPLE)
     gtest_discover_tests(scene_load_sound_test PROPERTIES TIMEOUT 120 DISCOVERY_TIMEOUT 60)
 endif()
 
+# Scene quality through the C bindings: checked values, in force for the load,
+# read back as drawn. Detached Metal layer, null sound output.
+if(APPLE)
+    add_executable(scene_options_binding_test scene_options_binding_test.mm)
+    target_link_libraries(scene_options_binding_test PRIVATE ${PROJECT_NAME}
+        wpScene wpRenderCommon wpRGraph wpFs nlohmann_json::nlohmann_json GTest::gtest_main)
+    target_include_directories(scene_options_binding_test PRIVATE
+        . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/include
+        ${CMAKE_SOURCE_DIR}/src/Scene/RenderCommon/include)
+    target_compile_features(scene_options_binding_test PRIVATE cxx_std_20)
+    set_target_properties(scene_options_binding_test PROPERTIES
+        OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED YES)
+    target_compile_options(scene_options_binding_test PRIVATE
+        $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    gtest_discover_tests(scene_options_binding_test PROPERTIES TIMEOUT 120 DISCOVERY_TIMEOUT 60)
+endif()
+
 # Render-target sizing only: no device, no surface, no GPU.
 add_executable(render_scale_test render_scale_test.cpp)
 target_link_libraries(render_scale_test PRIVATE ${PROJECT_NAME} wpScene wpRenderCommon wpRGraph nlohmann_json::nlohmann_json GTest::gtest_main)
@@ -796,7 +843,9 @@ gtest_discover_tests(
 )
 
 add_executable(timer_tests timer/frame_timer_test.cpp
-                           timer/request_admission_contract_test.cpp)
+                           timer/request_admission_contract_test.cpp
+                           timer/present_feedback_test.cpp
+                           timer/present_pacing_test.cpp)
 target_link_libraries(timer_tests PRIVATE wpTimer GTest::gtest_main)
 target_include_directories(timer_tests PRIVATE . ${CMAKE_SOURCE_DIR}/src)
 target_compile_features(timer_tests PRIVATE cxx_std_20)
@@ -816,7 +865,7 @@ target_compile_features(timer_delivery_benchmark PRIVATE cxx_std_20)
 # WM_DEFAULT_CORPUS_ROOT is the folder the corpus tests read when WALLPAPER_MACHINE_WORKSHOP_ROOT
 # is not set; neither ships with the repository.
 add_library(workshop_snapshot STATIC workshop_snapshot.cpp workshop_corpus.cpp)
-target_link_libraries(workshop_snapshot PUBLIC ${PROJECT_NAME} wpFs wpScene nlohmann_json::nlohmann_json)
+target_link_libraries(workshop_snapshot PUBLIC ${PROJECT_NAME} wpFs wpScene nlohmann_json::nlohmann_json PRIVATE wpParticle)
 target_include_directories(workshop_snapshot PUBLIC .)
 target_compile_features(workshop_snapshot PUBLIC cxx_std_20)
 target_compile_definitions(workshop_snapshot PUBLIC WM_DEFAULT_CORPUS_ROOT="${CMAKE_SOURCE_DIR}/workshop")
@@ -863,16 +912,20 @@ if(APPLE)
   # The first thing to feed translated Metal Shading Language to the Metal
   # compiler, and the first to draw an author layer with a render command
   # encoder. Creates only private textures and an offscreen layer.
-  add_executable(metal_scene_draw_smoke metal_scene_draw_smoke.mm)
+  add_executable(metal_scene_draw_smoke metal_scene_draw_smoke.mm camera_fade_gpu_test.mm
+      scene_general_gpu_test.mm puppet_morph_gpu_test.mm scene_hierarchy_gpu_test.mm model_data_gpu_test.mm
+      volumetrics_gpu_test.mm volumetrics_depth_gpu_test.mm spot_cookie_gpu_test.mm planar_reflection_gpu_test.mm transparent_sorting_gpu_test.mm transparent_sorting_lifetime_gpu_test.mm
+      static_reuse_inputs_gpu_test.mm metal_surface_lifetime_test.mm)
   target_link_libraries(metal_scene_draw_smoke PRIVATE
       ${PROJECT_NAME} wpMetalRender wpScene wpRGraph
       wpParticle wpAudio wpFs nlohmann_json::nlohmann_json GTest::gtest_main
       # The video-layer case needs a real decodable file, which the fixture
       # encodes rather than shipping one.
-      wescene_testing_media)
+      wescene_testing_media scene_test_support)
   target_include_directories(metal_scene_draw_smoke PRIVATE
       . ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/src/Scene/MetalRender/include)
   target_compile_features(metal_scene_draw_smoke PRIVATE cxx_std_20)
+  target_sources(metal_scene_draw_smoke PRIVATE hdr_output_gpu_test.mm)
   set_target_properties(metal_scene_draw_smoke PROPERTIES
       OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED YES)
   target_compile_options(metal_scene_draw_smoke PRIVATE
@@ -969,6 +1022,20 @@ if(APPLE)
       DISCOVERY_TIMEOUT 60
   )
 
+  # MetalFX upscaling of a scene drawn below full resolution, through the harness above.
+  add_executable(metalfx_upscale_test metalfx_upscale_test.mm)
+  target_link_libraries(metalfx_upscale_test PRIVATE scene_test_support GTest::gtest_main)
+  set_target_properties(metalfx_upscale_test PROPERTIES
+      OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED YES)
+  target_compile_options(metalfx_upscale_test PRIVATE
+      $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+  gtest_discover_tests(
+      metalfx_upscale_test
+      TEST_PREFIX metalfx_upscale_test.
+      PROPERTIES TIMEOUT 120
+      DISCOVERY_TIMEOUT 60
+  )
+
   # The pointer follows the picture under the horizontal flip: the real host path on a detached
   # Metal layer, driven through the C bindings.
   add_executable(horizontal_flip_pointer_test horizontal_flip_pointer_test.mm)
@@ -1004,10 +1071,12 @@ if(APPLE)
     )
   endforeach()
 
-  # What a running wallpaper holds in memory: the pipeline-archive stores and the pictures
-  # displays share. Private textures and archive files in the temp directory only.
+  # What a running wallpaper holds in memory: the pipeline-archive stores, the pictures
+  # displays share and the levels a picture's texture holds. Private textures and archive
+  # files in the temp directory only.
   add_executable(metal_memory_test
       metal_archive_store_test.mm
+      metal_image_levels_test.mm
       scene_shared_pictures_test.mm)
   target_link_libraries(metal_memory_test PRIVATE scene_test_support GTest::gtest_main)
   set_target_properties(metal_memory_test PROPERTIES
@@ -1018,6 +1087,15 @@ if(APPLE)
       metal_memory_test
       TEST_PREFIX metal_memory_test.
       PROPERTIES TIMEOUT 240
+      DISCOVERY_TIMEOUT 60
+  )
+
+  add_executable(scene_capability_probe_test scene_capability_probe_test.cpp)
+  target_link_libraries(scene_capability_probe_test PRIVATE scene_test_support GTest::gtest_main)
+  gtest_discover_tests(
+      scene_capability_probe_test
+      TEST_PREFIX scene_capability_probe_test.
+      PROPERTIES TIMEOUT 60
       DISCOVERY_TIMEOUT 60
   )
 
@@ -1037,7 +1115,8 @@ if(APPLE)
       perspective_image_layer_test
       model_parallax_test
       unbound_texture_slot_test
-      scene_lighting_fog_test)
+      scene_lighting_fog_test
+      script_model_layer_test)
     add_executable(${scene_render_test} ${scene_render_test}.mm)
     target_link_libraries(${scene_render_test} PRIVATE scene_test_support GTest::gtest_main)
     set_target_properties(${scene_render_test} PROPERTIES

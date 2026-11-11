@@ -2,6 +2,7 @@
 
 #include "Fs/MemBinaryStream.h"
 #include "WPSceneParser.hpp"
+#include "support/font_assets.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -33,7 +34,7 @@ std::shared_ptr<fs::IBinaryStreamW> MemoryFs::OpenW(std::string_view) { return n
 
 void MountAssets(fs::VFS& vfs, FileMap files)
 {
-    vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files)));
+    vfs.Mount("/assets", std::make_unique<MemoryFs>(wallpaper::test::WithFontAssets(std::move(files))));
 }
 
 void Add(FileMap& into, const FileMap& more)
@@ -108,8 +109,8 @@ ByteWriter& ByteWriter::PatchU32(std::size_t at, std::uint32_t value)
 namespace
 {
 
-constexpr std::uint32_t kSkinnedFlags  = 0x00800000u | 0x01000000u | 0x00000008u;
-constexpr std::uint32_t kMeshOnlyFlags = 0x00000008u;
+constexpr std::uint32_t kSkinnedFlags  = 0x00000001u | 0x00800000u | 0x01000000u | 0x00000008u;
+constexpr std::uint32_t kMeshOnlyFlags = 0x00000001u | 0x00000008u;
 
 // The three corners every test mesh uses, as (x, y, u).
 constexpr float kCorners[3][3] = { { 0.0f, 0.0f, 0.0f }, { 1.0f, 0.0f, 0.5f }, { 0.0f, 1.0f, 1.0f } };
@@ -180,6 +181,23 @@ std::string MdlMaskedHead()
     out.Stamp("MDLV", 23).U32(kSkinnedFlags).U32(1).U32(2);
     WriteMesh(out, "mat/head.json", 10, true);
     out.U32(1).U32(7).U32(0).Str("mat/head_mask.json").U32(0).U32(1).U32(0).U32(1).U32(0);
+    WriteMesh(out, "mat/eyes.json", 20, true);
+    out.U32(0);
+    WriteSkeleton(out, { { "root", -1 } });
+    WriteNoAnimations(out);
+    return out.Take();
+}
+
+std::string MdlNestedMaskedHead()
+{
+    ByteWriter out;
+    out.Stamp("MDLV", 23).U32(kSkinnedFlags).U32(1).U32(2);
+    WriteMesh(out, "mat/head.json", 10, true);
+    // Mask 0 clips piece 0 and is drawn from nothing; mask 1 is drawn from piece 0,
+    // which mask 0 clips, so it is nested in mask 0.
+    out.U32(2);
+    out.U32(7).U32(0).Str("mat/head_mask.json").U32(0).U32(1).U32(0).U32(0);
+    out.U32(7).U32(0).Str("mat/head_mask.json").U32(0).U32(0).U32(1).U32(0);
     WriteMesh(out, "mat/eyes.json", 20, true);
     out.U32(0);
     WriteSkeleton(out, { { "root", -1 } });
@@ -352,7 +370,7 @@ FileMap PuppetAssets(const PuppetOptions& options)
     if (options.mesh_only) {
         files["/puppet.mdl"] = MdlMeshOnly();
     } else if (options.masked) {
-        files["/puppet.mdl"] = MdlMaskedHead();
+        files["/puppet.mdl"] = options.nested_masks ? MdlNestedMaskedHead() : MdlMaskedHead();
     } else {
         files["/puppet.mdl"] = MdlTwoMeshes();
     }
@@ -480,6 +498,9 @@ FileMap BloomAssets(BloomSet set)
             { "hdr_downsample_bloom", "hdr_extract" },       { "hdr_downsample", "hdr_down" },
             { "hdr_upsample", "hdr_up" },                    { "hdr_upsample_cubic", "hdr_cubic" },
             { "combine_hdr_upsample_linear", "hdr_combine" },
+            { "combine_hdr_upsample", "hdr_combine" },
+            { "combine_dhdr_upsample", "hdr_combine" },
+            { "combine_srgb", "hdr_combine" },
         };
         for (const auto& [material, shader] : materials) {
             AddBloomMaterial(files, material, shader);
@@ -616,6 +637,7 @@ std::shared_ptr<Scene> ParseRig::Parse(const std::string& scene_text, ParseOptio
     SceneParseRequest request;
     request.scene_id    = "schema-test";
     request.pkg_version = options.pkg_version;
+    request.quality     = options.quality;
     if (options.live) request.project_properties = &properties_;
     scene_ = parser.Parse(request, scene_text, *vfs_, *sound_);
     return scene_;

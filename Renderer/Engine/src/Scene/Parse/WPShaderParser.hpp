@@ -24,11 +24,24 @@ using WPAliasValueDict = Map<std::string, std::string>;
 
 using WPDefaultTexs = std::vector<std::pair<i32, std::string>>;
 
+/// A point-input geometry stage (WE's DX11 rope path), lowered into the vertex stage: the
+/// renderer supplies `max_vertices` copies of each point record, each naming in
+/// `output_index_attribute` the vertex of the emitted strip it keeps.
+struct WPPointGeometryShader {
+    std::string source;
+    uint32_t    max_vertices { 0 };
+    std::string output_index_attribute;
+};
+
 struct WPShaderInfo {
+    /// Present while the program is compiled with its geometry stage.
+    std::shared_ptr<const WPPointGeometryShader> point_geometry;
     Combos           combos;
     ShaderValueMap   svs;
     ShaderValueMap   baseConstSvs;
     WPAliasValueDict alias;
+    /// Material properties whose displayed degrees are converted to shader radians.
+    Set<std::string> alias_rad2deg;
     WPDefaultTexs    defTexs;
     /// The pass is drawn somewhere the scene's fog does not belong -- into the
     /// card of a layer that composites through effects -- so `LoadMaterial`
@@ -51,6 +64,7 @@ struct WPShaderTexInfo {
     bool                enabled { false };
     TextureFormat       format { TextureFormat::RGBA8 };
     std::array<bool, 4> composEnabled { false, false, false, false };
+    std::optional<uint32_t> sample_count;
 };
 
 struct WPShaderUnit {

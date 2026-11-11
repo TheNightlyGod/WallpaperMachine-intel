@@ -32,6 +32,11 @@ final class DisplayTransferTestBridge: LayoutSnapshotBridge {
     private(set) var ejections: [(String, String)] = []
     /// What an eject throws instead of taking the wallpaper off the display.
     var ejectFailure: Error?
+    /// What reading a scene answers, and the scenes read, in order. Nil answers throw.
+    var sceneCapabilityAnswer: BridgeSceneCapability?
+    private(set) var sceneCapabilityReads: [String] = []
+    /// Runs while a scene is being read, as the user may act during that wait.
+    var whileReadingScene: (@MainActor () -> Void)?
 
     func installProjects(in library: URL) throws {
         for id in ["a", "b", "c"] {
@@ -79,6 +84,12 @@ final class DisplayTransferTestBridge: LayoutSnapshotBridge {
     }
     override func selectWallpaper(id: String) async throws -> BridgeSnapshotBundle { selected = id; return currentBundle }
     override func allSnapshots() async throws -> BridgeSnapshotBundle { currentBundle }
+    override func sceneCapability(wallpaperId: String) async throws -> BridgeSceneCapability {
+        sceneCapabilityReads.append(wallpaperId)
+        whileReadingScene?()
+        guard let sceneCapabilityAnswer else { throw WallpaperActionError(message: "no scene probe in this test") }
+        return sceneCapabilityAnswer
+    }
     /// Set to make the next rescans of the library fail, as a folder that cannot be read does.
     var libraryRefreshFailure: Error?
     override func refreshLibrary() async throws -> BridgeSnapshotBundle {

@@ -7,7 +7,7 @@ use super::support::*;
 use crate::error::ErrorCategory;
 use crate::request::StageKind;
 
-const FRAGMENT: &str = "void main() { gl_FragColor = vec4(1.0); }";
+const FRAGMENT: &str = "void main() { gl_FragColor = CAST4(1.0); }";
 
 fn inputs(p: &crate::pipeline::CompiledProgram) -> Vec<(String, u32)> {
     p.reflection.vertex_inputs.iter().map(|i| (i.name.clone(), i.location)).collect()
@@ -59,7 +59,7 @@ fn locations_up_to_thirty_are_accepted_and_thirty_one_fails() {
 
 #[test]
 fn integer_inputs_have_integer_formats_and_need_no_attribute_conversion() {
-    let p = ok("attribute vec3 a_Position;\nattribute uvec4 a_BlendIndices;\nattribute vec4 a_BlendWeights;\nattribute ivec2 a_Cell;\nvoid main() { gl_Position = vec4(a_Position, 1.0) * a_BlendWeights.x + vec4(float(a_BlendIndices.x) + float(a_Cell.x)); }", FRAGMENT);
+    let p = ok("attribute vec3 a_Position;\nattribute uvec4 a_BlendIndices;\nattribute vec4 a_BlendWeights;\nattribute int2 a_Cell;\nvoid main() { gl_Position = vec4(a_Position, 1.0) * a_BlendWeights.x + CAST4(float(a_BlendIndices.x) + float(a_Cell.x)); }", FRAGMENT);
     let formats: Vec<String> = p.reflection.vertex_inputs.iter().map(|i| i.format.name()).collect();
     assert_eq!(formats, ["r32g32b32_sfloat", "r32g32b32a32_uint", "r32g32b32a32_sfloat", "r32g32_sint"]);
 }

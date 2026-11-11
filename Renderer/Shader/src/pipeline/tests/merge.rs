@@ -58,7 +58,7 @@ fn run(req: &Req, reflector: &dyn StageReflector) -> Result<CompiledProgram, Sha
 }
 
 fn descriptor(name: &str, binding: u32, kind: DescriptorKind, stages: StageMask, count: u32) -> DescriptorBinding {
-    DescriptorBinding { name: name.into(), set: 0, binding, descriptor: kind, stages, count }
+    DescriptorBinding { name: name.into(), set: 0, binding, descriptor: kind, stages, count, image: Default::default(), comparison: false }
 }
 
 fn block(name: &str, binding: u32, offset_of_second: u32) -> UniformBlock {
@@ -260,7 +260,7 @@ fn every_ingredient_of_the_key_changes_it() {
 #[test]
 fn a_different_legalization_changes_the_key_with_the_sources_unchanged() {
     // The same text under two combos legalizes differently (the text depends on a macro).
-    let f = "void main() {\n#if FLAG\n  gl_FragColor = vec4(1.0);\n#else\n  gl_FragColor = vec4(0.0);\n#endif\n}\n";
+    let f = "void main() {\n#if FLAG\n  gl_FragColor = CAST4(1.0);\n#else\n  gl_FragColor = CAST4(0.0);\n#endif\n}\n";
     let a = Req::new(PASS_VERTEX, f).combo("FLAG", "1");
     let b = Req::new(PASS_VERTEX, f).combo("FLAG", "0");
     assert_ne!(key(&a), key(&b));

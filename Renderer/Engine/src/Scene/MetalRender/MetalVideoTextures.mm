@@ -3,6 +3,7 @@
 #include "MetalRender/MetalVideoSupport.hpp"
 
 #import <CoreVideo/CoreVideo.h>
+#import <IOSurface/IOSurface.h>
 
 #include "Core/RendererCounters.hpp"
 #include "Image.hpp"
@@ -39,11 +40,6 @@ constexpr MTLPixelFormat kVideoDestinationPixelFormat = MTLPixelFormatBGRA8Unorm
 /// the one this frame writes. A destination a command buffer may still be
 /// reading is therefore never the one chosen next.
 constexpr std::size_t kDestinationSlots = 3;
-
-/// Frames between opportunistic `CVMetalTextureCacheFlush` calls. Flushing
-/// every frame would drop the cache's own reuse, which is the only reason the
-/// per-frame import is cheap; never flushing keeps dead surfaces mapped.
-constexpr std::uint64_t kTextureCacheFlushInterval = 64;
 
 bool SetError(std::string* error, std::string message)
 {
@@ -99,6 +95,40 @@ bool SupportedPixelFormat(std::uint32_t pixel_format, PixelKind* kind)
     return true;
 }
 
+/// A texture on one plane of a decoded frame's IOSurface: the decoder's own
+/// memory, nothing copied. Made for one frame and released with it.
+///
+/// Not through `CVMetalTextureCache`. Its textures map the whole surface into
+/// the device's address space, one mapping per plane, and it keeps each texture
+/// it has vended for a second after it is released, in case the same buffer
+/// comes back. It reuses one only when it can match the buffer to the texture
+/// it made before, which it does for a buffer made on the surface but not for
+/// the ones VideoToolbox hands out from its pool as this renderer's sources
+/// queue them: there every import made a new pair and the device held a
+/// second's worth of them (about 4 GB for a 7232x3100 clip at 60 frames per
+/// second). A flush does not shorten that second, and a zero age disables it
+/// rather than ending it. These textures go when the frame does, so what the
+/// device holds is what is drawn or in flight; making one costs about what a
+/// cache miss did.
+id<MTLTexture> SurfacePlaneTexture(id<MTLDevice> device,
+                                   IOSurfaceRef  surface,
+                                   MTLPixelFormat format,
+                                   std::size_t   width,
+                                   std::size_t   height,
+                                   std::size_t   plane)
+{
+    if (device == nil || surface == nullptr || width == 0 || height == 0) return nil;
+    MTLTextureDescriptor* descriptor =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                           width:width
+                                                          height:height
+                                                       mipmapped:NO];
+    if (descriptor == nil) return nil;
+    descriptor.usage       = MTLTextureUsageShaderRead;
+    descriptor.storageMode = MTLStorageModeShared;
+    return [device newTextureWithDescriptor:descriptor iosurface:surface plane:plane];
+}
+
 } // namespace
 
 /// Members of `MetalVideoTextures::State`, which is declared in a header, so
@@ -108,21 +138,23 @@ namespace video_detail
 
 /// Everything one imported frame's texture depends on, released together.
 ///
-/// Core Video documents the wrapper, not the vended `MTLTexture`, as the object
-/// whose lifetime governs the texture's validity, and the pixel buffer outlives
-/// the decoder slot it came from, so all three are held here rather than
-/// assumed alive.
+/// The plane textures are views of the pixel buffer's IOSurface, and the pixel
+/// buffer is what keeps the decoder from writing that surface again, so the
+/// frame is held here as long as any texture made on it rather than assumed
+/// alive.
 struct FrameBundle {
     video::VideoTextureFrame frame {};
-    CVMetalTextureRef        wrappers[2] { nullptr, nullptr };
-    /// What author shaders sample as one image: the vended BGRA texture, or
-    /// the conversion destination the NV12 kernel wrote. Nil when every
+    /// What author shaders sample as one image: the BGRA frame's own texture,
+    /// or the conversion destination the NV12 kernel wrote. Nil when every
     /// consumer reads the planes and nothing needed one image.
     id<MTLTexture>           sampled { nil };
     id<MTLTexture>           destination { nil };
-    /// The decoder's own planes, vended from `wrappers`. Held here because a
-    /// shader that samples them directly depends on the wrappers and the pixel
-    /// buffer staying alive exactly as long as the vended texture does.
+    /// A BGRA frame's own texture, which a display-transform conversion reads
+    /// and replaces as `sampled`.
+    id<MTLTexture>           image { nil };
+    /// The decoder's own planes. Held here because a shader that samples them
+    /// directly depends on the pixel buffer staying alive exactly as long as
+    /// these textures do.
     id<MTLTexture>           luma { nil };
     id<MTLTexture>           chroma { nil };
     video::YuvColorParams    color {};
@@ -142,12 +174,11 @@ struct FrameBundle {
     ~FrameBundle()
     {
         if (slot_busy) slot_busy->store(false, std::memory_order_release);
-        for (auto& wrapper : wrappers) {
-            if (wrapper != nullptr) {
-                CFRelease(wrapper);
-                wrapper = nullptr;
-            }
-        }
+        // The textures on the frame's surface before the frame that owns it.
+        sampled = nil;
+        image   = nil;
+        luma    = nil;
+        chroma  = nil;
         video::ReleaseAppleVideoFrame(&frame);
     }
 };
@@ -171,6 +202,9 @@ struct VideoSourceEntry {
     std::shared_ptr<FrameBundle>               current;
     id<MTLTexture>                             texture { nil };
     std::uint64_t                              imported_generation { 0 };
+    /// `State::imports` as it stood after the import that produced `current`:
+    /// unique to that import, so it can stand for everything the import made.
+    std::uint64_t                              import_serial { 0 };
     bool                                       has_import { false };
     /// Destination-slot shape, which is the conversion's, not the frame's.
     std::uint32_t                              width { 0 };
@@ -203,7 +237,6 @@ using namespace video_detail;
 
 struct MetalVideoTextures::State {
     id<MTLDevice>               device { nil };
-    CVMetalTextureCacheRef      texture_cache { nullptr };
     id<MTLComputePipelineState> nv12_pipeline { nil };
     id<MTLComputePipelineState> bgra_pipeline { nil };
     /// Built the first time a source's frames are 10-bit, never for 8-bit video:
@@ -222,12 +255,10 @@ struct MetalVideoTextures::State {
     RendererCounters*                       counters { nullptr };
     bool                                    paused { false };
     float                                   rate { 1.0f };
-    std::uint64_t                           frames { 0 };
     std::uint64_t                           conversions_encoded { 0 };
     std::uint64_t                           imports { 0 };
 
-    /// Entries go before the device objects they were made from, so nothing
-    /// outlives the cache it came out of within this object.
+    /// Entries go before the device objects they were made from.
     ~State()
     {
         sources.clear();
@@ -237,30 +268,16 @@ struct MetalVideoTextures::State {
 
     void releaseDeviceObjects()
     {
-        if (texture_cache != nullptr) {
-            CFRelease(texture_cache);
-            texture_cache = nullptr;
-        }
         nv12_pipeline = nil;
         bgra_pipeline = nil;
         ten_bit_pipeline = nil;
         device        = nil;
     }
 
-    /// Pipeline and Core Video cache both belong to one device, so they are
-    /// built together and thrown away together.
+    /// The pipelines belong to one device, so they are built together and
+    /// thrown away together.
     void buildDeviceObjects()
     {
-        CVMetalTextureCacheRef cache = nullptr;
-        if (CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device, nullptr, &cache) ==
-                kCVReturnSuccess &&
-            cache != nullptr) {
-            texture_cache = cache;
-        } else {
-            pipeline_error = "failed to create a Core Video texture cache for this Metal device";
-            return;
-        }
-
         NSError*  library_error = nil;
         NSString* source        = [NSString stringWithUTF8String:video::kVideoConversionMetalSource];
         id<MTLLibrary> library =
@@ -442,13 +459,6 @@ bool MetalVideoTextures::prepare(Scene&                          scene,
     if (state.device == nil) {
         return SetError(error, "no Metal device for the scene's video textures");
     }
-    if (state.texture_cache == nullptr) {
-        return SetError(error,
-                        state.pipeline_error.empty()
-                            ? std::string("no Core Video texture cache for the scene's video "
-                                          "textures")
-                            : state.pipeline_error);
-    }
 
     for (const auto& key : texture_keys) {
         if (key.empty() || state.sources.count(key) != 0) continue;
@@ -555,7 +565,7 @@ bool MetalVideoTextures::prepareForTests(const std::string&                     
                                          std::string*                               error)
 {
     auto& state = *m_state;
-    if (state.device == nil || state.texture_cache == nullptr) {
+    if (state.device == nil) {
         return SetError(error, "MetalVideoTextures was not configured with a Metal device");
     }
     if (! source) return SetError(error, "a test video source must not be null");
@@ -594,7 +604,6 @@ void MetalVideoTextures::release()
     // is owned by that command buffer's pending block and outlives this call.
     m_state->sources.clear();
     m_state->demand.clear();
-    if (m_state->texture_cache != nullptr) CVMetalTextureCacheFlush(m_state->texture_cache, 0);
 }
 
 void MetalVideoTextures::hold()
@@ -706,12 +715,22 @@ bool MetalVideoTextures::frameSize(const std::string& key, std::uint32_t* width,
     return true;
 }
 
-bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, std::string* error)
+std::uint64_t MetalVideoTextures::importSerial(const std::string& key) const
+{
+    const auto iterator = m_state->sources.find(key);
+    if (iterator == m_state->sources.end() || ! iterator->second.has_import) return 0;
+    return iterator->second.import_serial;
+}
+
+bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, std::string* error,
+                                    bool* imported)
 {
     auto& state = *m_state;
+    if (imported != nullptr) *imported = false;
     if (state.sources.empty()) return true;
     if (command == nil) return SetError(error, "video textures need a command buffer to import into");
 
+    const std::uint64_t imports_before = state.imports;
     auto pending = std::make_shared<PendingFrames>();
     id<MTLComputeCommandEncoder> encoder = nil;
     const auto convert = [&](VideoSourceEntry& entry, const std::shared_ptr<FrameBundle>& bundle,
@@ -727,7 +746,7 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
         DestinationSlot* slot = nullptr;
         auto destination = state.acquireDestination(entry, frame.displayWidth(), frame.displayHeight(), &slot);
         if (destination == nil) return 0;
-        auto source = nv12 ? bundle->luma : bundle->sampled;
+        auto source = nv12 ? bundle->luma : bundle->image;
         bundle->destination = destination;
         bundle->sampled = destination;
         bundle->slot_busy = slot->busy;
@@ -798,8 +817,8 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
                  (entry.satisfied.planes == demand.planes && entry.satisfied.rgb == demand.rgb))) {
                 // Retained into this command buffer even though nothing was
                 // imported for it: the plane and image textures this frame
-                // samples are vended from that bundle's Core Video wrappers,
-                // and the wrappers have to outlive the commands that read them.
+                // samples are views of that bundle's pixel buffer, which has to
+                // outlive the commands that read them.
                 if (entry.current) pending->bundles.push_back(entry.current);
                 continue;
             }
@@ -829,6 +848,14 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
                                 "video texture \"" + key + "\" produced a frame with no pixel "
                                                            "buffer");
             }
+            // The decoder is asked for IOSurface-backed buffers; the planes are
+            // textures on that surface.
+            IOSurfaceRef surface = CVPixelBufferGetIOSurface(pixel_buffer);
+            if (surface == nullptr) {
+                return SetError(error,
+                                "video texture \"" + key + "\" produced a frame that is not "
+                                                           "IOSurface-backed");
+            }
 
             // Decided per frame from the format the decoder really produced,
             // never from the first frame's: software decode hands back BGRA and
@@ -836,25 +863,13 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
             // take over mid-playback.
             VideoFramePath path = VideoFramePath::None;
             if (kind == PixelKind::Bgra) {
-                const CVReturn result =
-                    CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
-                                                              state.texture_cache,
-                                                              pixel_buffer,
-                                                              nullptr,
-                                                              kVideoDestinationPixelFormat,
-                                                              frame.width,
-                                                              frame.height,
-                                                              0,
-                                                              &bundle->wrappers[0]);
-                if (result != kCVReturnSuccess || bundle->wrappers[0] == nullptr) {
-                    return SetError(error,
-                                    "failed to import the BGRA frame of video texture \"" + key +
-                                        "\"");
-                }
-                bundle->sampled = CVMetalTextureGetTexture(bundle->wrappers[0]);
+                bundle->image   = SurfacePlaneTexture(state.device, surface, kVideoDestinationPixelFormat,
+                                                      CVPixelBufferGetWidth(pixel_buffer),
+                                                      CVPixelBufferGetHeight(pixel_buffer), 0);
+                bundle->sampled = bundle->image;
                 if (bundle->sampled == nil) {
                     return SetError(error,
-                                    "Core Video returned no texture for video texture \"" + key +
+                                    "failed to import the BGRA frame of video texture \"" + key +
                                         "\"");
                 }
                 path = VideoFramePath::Bgra;
@@ -875,42 +890,16 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
                 if (! state.ensureTenBitPipeline(error)) return false;
                 // The planes' own sizes, not half the luma's: a buffer whose width
                 // is odd has a chroma plane one column wider than that.
-                const std::size_t luma_width    = CVPixelBufferGetWidthOfPlane(pixel_buffer, 0);
-                const std::size_t luma_height   = CVPixelBufferGetHeightOfPlane(pixel_buffer, 0);
-                const std::size_t chroma_width  = CVPixelBufferGetWidthOfPlane(pixel_buffer, 1);
-                const std::size_t chroma_height = CVPixelBufferGetHeightOfPlane(pixel_buffer, 1);
-                const CVReturn luma_result =
-                    CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
-                                                              state.texture_cache,
-                                                              pixel_buffer,
-                                                              nullptr,
-                                                              MTLPixelFormatR16Unorm,
-                                                              luma_width,
-                                                              luma_height,
-                                                              0,
-                                                              &bundle->wrappers[0]);
-                const CVReturn chroma_result =
-                    CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
-                                                              state.texture_cache,
-                                                              pixel_buffer,
-                                                              nullptr,
-                                                              MTLPixelFormatRG16Unorm,
-                                                              chroma_width,
-                                                              chroma_height,
-                                                              1,
-                                                              &bundle->wrappers[1]);
-                if (luma_result != kCVReturnSuccess || bundle->wrappers[0] == nullptr ||
-                    chroma_result != kCVReturnSuccess || bundle->wrappers[1] == nullptr) {
+                bundle->luma   = SurfacePlaneTexture(state.device, surface, MTLPixelFormatR16Unorm,
+                                                     CVPixelBufferGetWidthOfPlane(pixel_buffer, 0),
+                                                     CVPixelBufferGetHeightOfPlane(pixel_buffer, 0), 0);
+                bundle->chroma = SurfacePlaneTexture(state.device, surface, MTLPixelFormatRG16Unorm,
+                                                     CVPixelBufferGetWidthOfPlane(pixel_buffer, 1),
+                                                     CVPixelBufferGetHeightOfPlane(pixel_buffer, 1), 1);
+                if (bundle->luma == nil || bundle->chroma == nil) {
                     return SetError(error,
                                     "failed to import the 10-bit planes of video texture \"" + key +
                                         "\"");
-                }
-                bundle->luma   = CVMetalTextureGetTexture(bundle->wrappers[0]);
-                bundle->chroma = CVMetalTextureGetTexture(bundle->wrappers[1]);
-                if (bundle->luma == nil || bundle->chroma == nil) {
-                    return SetError(error,
-                                    "Core Video returned no plane textures for video texture \"" +
-                                        key + "\"");
                 }
                 const auto description = video::AppleVideoFrameColorDescription(frame);
                 video::ReportTenBitColor(description);
@@ -927,39 +916,19 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
                 path = VideoFramePath::Yuv10Converted;
             } else {
                 // Both planes, whichever path the consumers take: the direct
-                // one samples them and the conversion reads them.
-                const CVReturn luma_result =
-                    CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
-                                                              state.texture_cache,
-                                                              pixel_buffer,
-                                                              nullptr,
-                                                              MTLPixelFormatR8Unorm,
-                                                              frame.width,
-                                                              frame.height,
-                                                              0,
-                                                              &bundle->wrappers[0]);
-                const CVReturn chroma_result =
-                    CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault,
-                                                              state.texture_cache,
-                                                              pixel_buffer,
-                                                              nullptr,
-                                                              MTLPixelFormatRG8Unorm,
-                                                              frame.width / 2,
-                                                              frame.height / 2,
-                                                              1,
-                                                              &bundle->wrappers[1]);
-                if (luma_result != kCVReturnSuccess || bundle->wrappers[0] == nullptr ||
-                    chroma_result != kCVReturnSuccess || bundle->wrappers[1] == nullptr) {
+                // one samples them and the conversion reads them. The planes'
+                // own sizes, as for 10-bit: an odd width has a chroma plane one
+                // column wider than half the luma's.
+                bundle->luma   = SurfacePlaneTexture(state.device, surface, MTLPixelFormatR8Unorm,
+                                                     CVPixelBufferGetWidthOfPlane(pixel_buffer, 0),
+                                                     CVPixelBufferGetHeightOfPlane(pixel_buffer, 0), 0);
+                bundle->chroma = SurfacePlaneTexture(state.device, surface, MTLPixelFormatRG8Unorm,
+                                                     CVPixelBufferGetWidthOfPlane(pixel_buffer, 1),
+                                                     CVPixelBufferGetHeightOfPlane(pixel_buffer, 1), 1);
+                if (bundle->luma == nil || bundle->chroma == nil) {
                     return SetError(error,
                                     "failed to import the NV12 planes of video texture \"" + key +
                                         "\"");
-                }
-                bundle->luma   = CVMetalTextureGetTexture(bundle->wrappers[0]);
-                bundle->chroma = CVMetalTextureGetTexture(bundle->wrappers[1]);
-                if (bundle->luma == nil || bundle->chroma == nil) {
-                    return SetError(error,
-                                    "Core Video returned no plane textures for video texture \"" +
-                                        key + "\"");
                 }
                 bundle->color = video::AppleVideoFrameColorParams(frame);
 
@@ -987,6 +956,7 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
             }
             entry.texture             = bundle->sampled;
             entry.imported_generation = frame.generation;
+            entry.import_serial       = state.imports;
             entry.has_import          = true;
             entry.frame_width         = frame.displayWidth();
             entry.frame_height        = frame.displayHeight();
@@ -1002,15 +972,15 @@ bool MetalVideoTextures::beginFrame(Scene& scene, id<MTLCommandBuffer> command, 
     }();
 
     if (encoder != nil) [encoder endEncoding];
+    // Also after a failure: a frame that imported part of its videos did take
+    // frames, whether or not it goes on to be drawn.
+    if (imported != nullptr) *imported = state.imports != imports_before;
     if (! pending->bundles.empty()) {
         // The handler owns the frames, not the renderer: it may run after
         // `release()` or after this object is gone, on a thread Metal chose.
         [command addCompletedHandler:^(id<MTLCommandBuffer>) {
             pending->bundles.clear();
         }];
-    }
-    if (++state.frames % kTextureCacheFlushInterval == 0 && state.texture_cache != nullptr) {
-        CVMetalTextureCacheFlush(state.texture_cache, 0);
     }
     return ok;
 }

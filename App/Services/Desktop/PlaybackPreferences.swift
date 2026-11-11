@@ -7,8 +7,37 @@ enum DisplaySleepAction: String, Codable, CaseIterable, Sendable {
 
 enum OtherAudioAction: String, Codable, CaseIterable, Sendable {
     case keepRunning
+    /// Keep playing, each wallpaper at a share of its own volume
+    /// (`PlaybackPreferences.otherAudioVolume`). It never mutes or pauses anything by itself.
+    case reduceVolume
     case mute
     case pause
+}
+
+/// What wallpapers do while an app other than the desktop is in front: any app but Finder (which
+/// clicking the desktop brings forward) and this app itself.
+enum OtherAppInFrontAction: String, Codable, CaseIterable, Sendable {
+    case keepRunning
+    case mute
+    case pause
+    /// Pause as `pause` does, but only while the Mac runs on battery; plugged in it does nothing.
+    case pauseOnBattery
+
+    /// The rule action it contributes while another app is in front, the same way an app rule's
+    /// does: nil while it keeps running, and for Pause on battery while the Mac is not on battery.
+    /// `onBattery` is read only for Pause on battery.
+    func ruleAction(onBattery: @autoclosure () -> Bool) -> AppRuleAction? {
+        switch self {
+        case .keepRunning: nil
+        case .mute: .mute
+        case .pause: .pause
+        case .pauseOnBattery: onBattery() ? .pause : nil
+        }
+    }
+
+    /// Whether the app in front can change playback on some power source, which is when app
+    /// activations have to be watched.
+    var watchesFrontmostApp: Bool { self != .keepRunning }
 }
 
 /// What a wallpaper does while other windows cover its display's working area.
@@ -39,6 +68,24 @@ enum SystemConditionAction: String, Codable, CaseIterable, Sendable {
     }
 
     var reducesQuality: Bool { self == .reduceQuality }
+}
+
+/// What wallpapers do once the Mac has had no keyboard, mouse or trackpad input for the time the
+/// user chose (`PlaybackPreferences.inactivityMinutes`). It offers no Reduced quality: nobody is
+/// watching, so there is nothing to keep playing for.
+enum InactivityAction: String, Codable, CaseIterable, Sendable {
+    case keepRunning
+    case pause
+    case stop
+
+    /// The same choice among the Mac conditions' own, which `SystemConditionMonitor` evaluates.
+    var conditionAction: SystemConditionAction {
+        switch self {
+        case .keepRunning: .keepRunning
+        case .pause: .pause
+        case .stop: .stop
+        }
+    }
 }
 
 /// Why wallpapers are asked to run at reduced quality. Declared in the order the causes are
@@ -81,10 +128,11 @@ struct AppRule: Codable, Equatable, Identifiable, Sendable {
     var action: AppRuleAction
 }
 
-/// UserDefaults-backed playback rules for display sleep, other-app audio, a
-/// covered desktop, Low Power Mode, a hot Mac, a low battery, playing only on the display in use
-/// and per-app pause, mute and stop, whether every wallpaper is muted, and whether the macOS
-/// desktop picture is written at all. Mutations post `didChangeNotification` once.
+/// UserDefaults-backed playback rules for display sleep, other-app audio (and the volume wallpapers
+/// keep while it plays), another app in front, a
+/// covered desktop, Low Power Mode, a hot Mac, a low battery, an inactive Mac, playing only on the
+/// display in use and per-app pause, mute and stop, whether every wallpaper is muted, and whether
+/// the macOS desktop picture is written at all. Mutations post `didChangeNotification` once.
 @MainActor
 final class PlaybackPreferences {
     static let didChangeNotification = Notification.Name("WallpaperMachine.playbackPreferencesDidChange")
@@ -96,28 +144,40 @@ final class PlaybackPreferences {
         }
     }
 
-    private static let displaySleepKey = "WallpaperMachine.displaySleepAction"
-    private static let otherAudioKey = "WallpaperMachine.otherAudioAction"
-    private static let desktopCoveredKey = "WallpaperMachine.desktopCoveredAction"
-    private static let appRulesKey = "WallpaperMachine.appRules"
-    private static let lowPowerModeKey = "WallpaperMachine.lowPowerModeAction"
-    private static let thermalKey = "WallpaperMachine.thermalAction"
-    private static let lowBatteryActionKey = "WallpaperMachine.lowBatteryAction"
-    private static let lowBatteryThresholdKey = "WallpaperMachine.lowBatteryThreshold"
+    nonisolated static let displaySleepKey = "WallpaperMachine.displaySleepAction"
+    nonisolated static let otherAudioKey = "WallpaperMachine.otherAudioAction"
+    nonisolated static let otherAudioVolumeKey = "WallpaperMachine.otherAudioVolume"
+    nonisolated static let otherAppInFrontKey = "WallpaperMachine.otherAppInFrontAction"
+    nonisolated static let desktopCoveredKey = "WallpaperMachine.desktopCoveredAction"
+    nonisolated static let appRulesKey = "WallpaperMachine.appRules"
+    nonisolated static let lowPowerModeKey = "WallpaperMachine.lowPowerModeAction"
+    nonisolated static let thermalKey = "WallpaperMachine.thermalAction"
+    nonisolated static let lowBatteryActionKey = "WallpaperMachine.lowBatteryAction"
+    nonisolated static let lowBatteryThresholdKey = "WallpaperMachine.lowBatteryThreshold"
+    nonisolated static let inactivityActionKey = "WallpaperMachine.inactivityAction"
+    nonisolated static let inactivityMinutesKey = "WallpaperMachine.inactivityMinutes"
     private static let periodicDesktopPictureKey = "WallpaperMachine.refreshDesktopPicturePeriodically"
     private static let writeDesktopPictureKey = "WallpaperMachine.writeDesktopPicture"
-    private static let playOnlyOnActiveDisplayKey = "WallpaperMachine.playOnlyOnActiveDisplay"
+    nonisolated static let playOnlyOnActiveDisplayKey = "WallpaperMachine.playOnlyOnActiveDisplay"
     private static let wallpapersMutedKey = "WallpaperMachine.wallpapersMuted"
 
     /// The charge levels the user can pick for the low-battery rule, in percent.
     nonisolated static let lowBatteryThresholds = [10, 20, 30]
     nonisolated static let defaultLowBatteryThreshold = 20
+    /// The share of its own volume a wallpaper can keep while another app plays sound, in percent.
+    nonisolated static let otherAudioVolumeRange = 0...100
+    nonisolated static let defaultOtherAudioVolume = 30
+    /// The times without input the user can pick for the inactivity rule, in minutes.
+    nonisolated static let inactivityMinuteChoices = [5, 10, 15, 30, 60]
+    nonisolated static let defaultInactivityMinutes = 10
 
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = ClientPreferences.defaults) {
         self.defaults = defaults
-        appRules = Self.loadRules(from: defaults)
+        let saved = Self.loadRules(from: defaults)
+        appRules = saved.values
+        unreadRules = saved.unread
     }
 
     var displaySleepAction: DisplaySleepAction {
@@ -128,6 +188,34 @@ final class PlaybackPreferences {
     var otherAudioAction: OtherAudioAction {
         get { storedEnum(Self.otherAudioKey, default: .keepRunning) }
         set { store(newValue.rawValue, forKey: Self.otherAudioKey) }
+    }
+
+    /// The share of its own saved volume each wallpaper plays at, in percent, while another app
+    /// plays sound and `otherAudioAction` is Reduce volume. A whole number in
+    /// `otherAudioVolumeRange`: a stored value outside it, or one that is not a whole number,
+    /// which only a hand edit or a damaged file can leave, reads as the default; setting one is
+    /// ignored. It never rewrites a wallpaper's own volume.
+    var otherAudioVolume: Int {
+        get {
+            // A stored Boolean bridges to 0 or 1, which would read as a level nobody chose.
+            guard let number = defaults.object(forKey: Self.otherAudioVolumeKey) as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let stored = number as? Int, Self.otherAudioVolumeRange.contains(stored)
+            else { return Self.defaultOtherAudioVolume }
+            return stored
+        }
+        set {
+            guard Self.otherAudioVolumeRange.contains(newValue) else { return }
+            defaults.set(newValue, forKey: Self.otherAudioVolumeKey)
+            postChange()
+        }
+    }
+
+    /// Off until chosen: which app is in front alone never changes playback. Pause on battery
+    /// pauses only while the Mac runs on battery.
+    var otherAppInFrontAction: OtherAppInFrontAction {
+        get { storedEnum(Self.otherAppInFrontKey, default: .keepRunning) }
+        set { store(newValue.rawValue, forKey: Self.otherAppInFrontKey) }
     }
 
     var desktopCoveredAction: DesktopCoveredAction {
@@ -169,6 +257,29 @@ final class PlaybackPreferences {
         set {
             guard Self.lowBatteryThresholds.contains(newValue) else { return }
             defaults.set(newValue, forKey: Self.lowBatteryThresholdKey)
+            postChange()
+        }
+    }
+
+    /// Off until chosen: being away from the Mac alone never changes playback. Applies once the
+    /// Mac has had no keyboard, mouse or trackpad input for `inactivityMinutes`, and ends at the
+    /// next input. Never touches the user's own Play/Pause.
+    var inactivityAction: InactivityAction {
+        get { storedEnum(Self.inactivityActionKey, default: .keepRunning) }
+        set { store(newValue.rawValue, forKey: Self.inactivityActionKey) }
+    }
+
+    /// One of `inactivityMinuteChoices`. A stored value outside the list, which only a hand edit
+    /// or a damaged file can leave, reads as the default; setting one is ignored.
+    var inactivityMinutes: Int {
+        get {
+            guard let stored = defaults.object(forKey: Self.inactivityMinutesKey) as? Int,
+                  Self.inactivityMinuteChoices.contains(stored) else { return Self.defaultInactivityMinutes }
+            return stored
+        }
+        set {
+            guard Self.inactivityMinuteChoices.contains(newValue) else { return }
+            defaults.set(newValue, forKey: Self.inactivityMinutesKey)
             postChange()
         }
     }
@@ -221,6 +332,9 @@ final class PlaybackPreferences {
     }
 
     private(set) var appRules: [AppRule]
+    /// Saved rules this build could not read (a newer build's action, say), as they were saved.
+    /// They are written back with the others, so editing one rule never erases them.
+    private var unreadRules: [Data] = []
 
     @discardableResult
     func addRule(bundleIdentifier: String, name: String) -> AppRule {
@@ -261,14 +375,15 @@ final class PlaybackPreferences {
     /// announced once.
     func resetToDefaults() {
         for key in [
-            Self.displaySleepKey, Self.otherAudioKey, Self.desktopCoveredKey, Self.appRulesKey,
+            Self.displaySleepKey, Self.otherAudioKey, Self.otherAudioVolumeKey, Self.otherAppInFrontKey, Self.desktopCoveredKey, Self.appRulesKey,
             Self.lowPowerModeKey, Self.thermalKey, Self.lowBatteryActionKey, Self.lowBatteryThresholdKey,
-            Self.periodicDesktopPictureKey, Self.writeDesktopPictureKey, Self.playOnlyOnActiveDisplayKey,
+            Self.inactivityActionKey, Self.inactivityMinutesKey, Self.periodicDesktopPictureKey, Self.writeDesktopPictureKey, Self.playOnlyOnActiveDisplayKey,
             Self.wallpapersMutedKey,
         ] {
             defaults.removeObject(forKey: key)
         }
         appRules = []
+        unreadRules = []
         postChange()
     }
 
@@ -283,7 +398,7 @@ final class PlaybackPreferences {
     }
 
     private func persistRules() {
-        guard let data = try? JSONEncoder().encode(appRules) else { return }
+        guard let data = try? PreservedJSON.writeArray(appRules, keeping: unreadRules) else { return }
         defaults.set(data, forKey: Self.appRulesKey)
         postChange()
     }
@@ -292,9 +407,9 @@ final class PlaybackPreferences {
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 
-    private static func loadRules(from defaults: UserDefaults) -> [AppRule] {
+    private static func loadRules(from defaults: UserDefaults) -> (values: [AppRule], unread: [Data]) {
         guard let data = defaults.data(forKey: appRulesKey),
-              let decoded = try? JSONDecoder().decode([AppRule].self, from: data) else { return [] }
-        return decoded
+              let saved = PreservedJSON.readArray(data, as: AppRule.self) else { return ([], []) }
+        return saved
     }
 }

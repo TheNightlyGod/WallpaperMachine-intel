@@ -149,6 +149,7 @@ bool ParticleChild::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
     ChildDepthGuard guard;
 
     std::string file;
+    GET_JSON_NAME_VALUE_NOWARN(json, "flags", flags);
     GET_JSON_NAME_VALUE_NOWARN(json, "name", file);
     if (file.empty()) return false;
     nlohmann::json child_json;
@@ -173,9 +174,10 @@ bool ParticleChild::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
 
 bool ParticleControlpoint::FromJson(const nlohmann::json& json) {
     uint32_t raw_flags { 0 };
-    GET_JSON_NAME_VALUE_NOWARN(json, "id", id);
     GET_JSON_NAME_VALUE_NOWARN(json, "flags", raw_flags);
     GET_JSON_NAME_VALUE_NOWARN(json, "offset", offset);
+    has_angles = GET_JSON_NAME_VALUE_NOWARN(json, "angles", angles);
+    GET_JSON_NAME_VALUE_NOWARN(json, "parentcontrolpoint", parentcontrolpoint);
     flags = EFlags(raw_flags);
     return true;
 }
@@ -186,6 +188,22 @@ bool ParticleRender::FromJson(const nlohmann::json& json) {
     GET_JSON_NAME_VALUE_NOWARN(json, "name", name);
 
     const bool is_rope  = sstart_with(name, "rope");
+    std::string orientation_name;
+    if (const auto found = json.find("orientation"); found != json.end() && found->is_string())
+        orientation_name = found->get<std::string>();
+    if (orientation_name == "upright") orientation = ParticleOrientation::Upright;
+    else if (orientation_name == "fixed") orientation = ParticleOrientation::Fixed;
+    // Native reads orientation as a case-sensitive string; numeric spellings
+    // and unrecognized names take the screen branch.
+    GET_JSON_NAME_VALUE_NOWARN(json, "axis", axis);
+    if (axis[0] == 0.0f && axis[1] == 0.0f && axis[2] == 0.0f) axis = {0,1,0};
+    else {
+        const float length = std::sqrt(axis[0]*axis[0] + axis[1]*axis[1] + axis[2]*axis[2]);
+        for (auto& value : axis) value /= length;
+    }
+    uint32_t renderer_flags = 0;
+    GET_JSON_NAME_VALUE_NOWARN(json, "flags", renderer_flags);
+    flags = static_cast<uint8_t>(renderer_flags & 0xffu);
     const bool is_trail = send_with(name, "trail");
     if (is_rope && is_trail) {
         length      = 1.0f;
@@ -204,6 +222,8 @@ bool ParticleRender::FromJson(const nlohmann::json& json) {
         subdivision = std::isfinite(subdivision) ? std::clamp(std::trunc(subdivision), 0.0f, 32.0f)
                                                  : 0.0f;
         if (is_trail) {
+            GET_JSON_NAME_VALUE_NOWARN(json, "fadealpha", fadealpha);
+            GET_JSON_NAME_VALUE_NOWARN(json, "fadesize", fadesize);
             GET_JSON_NAME_VALUE_NOWARN(json, "segments", segments);
             segments = std::isfinite(segments) ? std::clamp(std::trunc(segments), 2.0f, 32.0f)
                                                : 2.0f;
@@ -239,11 +259,14 @@ bool Emitter::FromJson(const nlohmann::json& json) {
 
     id = 0;  // the member has no initialiser; an absent key must read 0
     lenient("name", name);
+    if (name == "layerimage") { speedmin = 0.1f; speedmax = 0.2f; }
     lenient("id", id);
     lenient("rate", rate);
     lenient("instantaneous", instantaneous);
     lenient("speedmin", speedmin);
     lenient("speedmax", speedmax);
+    lenient("offsetmin", offsetmin);
+    lenient("offsetmax", offsetmax);
     lenient("directions", directions);
     lenient("origin", origin);
     lenient("distancemin", distancemin);
@@ -258,7 +281,7 @@ bool Emitter::FromJson(const nlohmann::json& json) {
     if (controlpoint >= 8) LOG_ERROR("emitter names control point %d; using 7", controlpoint);
     controlpoint = ClampControlpoint(controlpoint);
 
-    uint32_t raw_flags { 0 };
+    uint32_t raw_flags { name == "layerimage" ? 0x10000u : 0u };
     GET_JSON_NAME_VALUE_NOWARN(json, "flags", raw_flags);
     flags = EFlags(raw_flags);
 

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 #include <memory>
+#include <functional>
 
 #include "Project/ProjectProperties.hpp"
 #include "Scene/Scene.h"
@@ -27,6 +28,19 @@ struct SceneParseRequest
     // cleared again. Null means the table above is also the authored one.
     const ProjectProperties* authored_project_properties { nullptr };
     uint16_t                 pkg_version { kUnknownPkgVersion };
+    // Scene quality (plan decision I1; `SceneQuality` lives in
+    // Scene/SceneQuality.hpp so `Scene` can carry it without including this header).
+    SceneQuality             quality {};
+    // Where the scripts' `localStorage` lives (plan decision I3): empty = memory only.
+    std::string              storage_directory {};
+    std::string              storage_screen_key {};
+    bool                     storage_read_only { false };
+    // Wallpaper Engine's per-wallpaper options (plan decision I2): the colour /
+    // LUT pass, mouse parallax. Flip and playback rate are applied by the host.
+    WeUserOptions            user_options {};
+    // Invoked once only for an MSAA request in a scene containing a model.
+    // The host supplies its device choice; a parser-only caller can omit it.
+    std::function<uint32_t(uint32_t)> select_msaa_samples;
 };
 
 class ISceneParser {

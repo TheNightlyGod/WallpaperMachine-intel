@@ -191,7 +191,7 @@ TEST_F(LightingFog, AmbientAndSkylightAreEachBoundAndEachCounted)
     EXPECT_TRUE(ExpectPixel(both.picture, 128, 72, { 128, 102, 77, 255 }, 2)) << "the two together";
 }
 
-TEST_F(LightingFog, ChangingABoundPropertyIsAppliedByALoadNotByAFrame)
+TEST_F(LightingFog, ChangingABoundPropertyIsAppliedByTheNextFrame)
 {
     const Json properties = { { "ambient", ColorProperty("0.8 0.4 0.2") } };
     const Json bound      = { { "ambientcolor", PropertyBinding("ambient", "0 0 0") } };
@@ -209,25 +209,19 @@ TEST_F(LightingFog, ChangingABoundPropertyIsAppliedByALoadNotByAFrame)
     ASSERT_TRUE(scene.ok()) << scene.error();
     ASSERT_TRUE(ExpectPixel(scene.Run(3), 128, 72, { 102, 51, 26, 255 }, 2));
 
-    // A live edit is held at what the scene loaded with, and the scene says a load would change it.
+    // Wallpaper Engine evaluates the scene's ambient colour every frame: a live edit is drawn
+    // without a load, and no load is asked for.
     const auto held = scene.runtime()->LoadOnlyProperties();
-    EXPECT_NE(std::find(held.begin(), held.end(), "ambient"), held.end());
+    EXPECT_EQ(std::find(held.begin(), held.end(), "ambient"), held.end());
     ASSERT_TRUE(scene.SetProperty("ambient", "0.2 0.2 0.2"));
-    EXPECT_TRUE(ExpectPixel(scene.Run(2), 128, 72, { 102, 51, 26, 255 }, 2));
-
-    // The load that applies it shows the new colour from its first frame.
-    GpuSceneOptions options;
-    options.saved_properties = { { "ambient", "0.2 0.2 0.2" } };
-    GpuScene reloaded(package, options);
-    ASSERT_TRUE(reloaded.ok()) << reloaded.error();
-    EXPECT_TRUE(ExpectPixel(reloaded.Run(1), 128, 72, { 26, 26, 26, 255 }, 2));
+    EXPECT_TRUE(ExpectPixel(scene.Run(2), 128, 72, { 26, 26, 26, 255 }, 2));
 }
 
-TEST_F(LightingFog, DistanceFogBoundToAPropertyKeepsItsAuthoredValue)
+TEST_F(LightingFog, DistanceFogBoundToAPropertyFollowsIt)
 {
     const Json properties = { { "distance_colour", ColorProperty("0.1 0.1 0.9") } };
     const Json fog        = { { "fogdistance", true }, { "fogdistancecolor", PropertyBinding("distance_colour", "0.2 0.6 0.4") } };
     const auto drawn = Draw(kDistanceFogColour, fog, properties, { { "distance_colour", "0.1 0.1 0.9" } });
     ASSERT_TRUE(drawn.ok) << drawn.error;
-    EXPECT_TRUE(ExpectPixel(drawn.picture, 128, 72, { 51, 153, 102, 255 }, 2));
+    EXPECT_TRUE(ExpectPixel(drawn.picture, 128, 72, { 26, 26, 230, 255 }, 2));
 }

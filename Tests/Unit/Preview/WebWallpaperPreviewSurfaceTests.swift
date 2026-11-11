@@ -32,7 +32,8 @@ final class WebWallpaperPreviewSurfaceTests: XCTestCase {
         let request = try WallpaperPreviewRequest(.init(wallpaperId: "preview", title: "Preview", kind: .webpage,
             projectPath: project.path, entryFile: "index.html", assetsPath: project.path,
             propertiesJson: properties,
-            fps: 30, scalingMode: .fill, scalingFactor: 1, volume: 0.5))
+            fps: 30, scalingMode: .fill, scalingFactor: 1, volume: 0.5, engineOptions: nil, lutPath: nil,
+            sceneQuality: .wallpaperEngineDefault))
         let assets = UserAssetStore(projectURL: project, wallpaperId: "preview",
             managed: ManagedUserAssetStore(root: root.appendingPathComponent("UserAssets")))
         return WebWallpaperPreviewSurface(request: request, generation: generation, assets: assets, inspectable: inspectable)

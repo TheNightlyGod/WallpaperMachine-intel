@@ -57,11 +57,13 @@ class WPMaterial {
 public:
     bool FromJson(const nlohmann::json&);
     void MergePass(const WPMaterialPass&);
-    // Draw state; the defaults are what a pass that names nothing gets.
-    std::string blending { "translucent" };
+    // Draw state; the defaults are what a pass that names nothing gets. A pass without a
+    // `blending` key blends as normal, the first entry of Wallpaper Engine's table (probe T10).
+    std::string blending { "normal" };
     std::string cullmode { "nocull" };
     std::string depthtest { "disabled" };
     std::string depthwrite { "disabled" };  // draw-state tests rely on this
+    std::string alphawriting { "default" };
 
     std::string                                            shader;
     std::vector<std::string>                               textures;

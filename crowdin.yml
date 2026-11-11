@@ -1,0 +1,20 @@
+# Crowdin project "Wallpaper Machine". scripts/crowdin_sync.py drives it; docs/localization.md
+# says how. The project id is public; the token is not and never lives here: sign in with
+# `crowdin login` (saved in ~/.crowdin.yml) or export CROWDIN_PERSONAL_TOKEN.
+project_id: 941177
+api_token_env: CROWDIN_PERSONAL_TOKEN
+base_path: .
+preserve_hierarchy: true
+
+# Each catalog is one multilingual file: every language lives inside it, so the translation
+# path is the source path and Crowdin answers with the same catalog, languages included.
+files:
+  - source: /App/Resources/Localizable.xcstrings
+    translation: /App/Resources/Localizable.xcstrings
+    multilingual: true
+  - source: /App/Resources/InfoPlist.xcstrings
+    translation: /App/Resources/InfoPlist.xcstrings
+    multilingual: true
+  - source: /Extension/Localizable.xcstrings
+    translation: /Extension/Localizable.xcstrings
+    multilingual: true

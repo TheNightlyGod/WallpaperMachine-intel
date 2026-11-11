@@ -1,0 +1,40 @@
+# Notice a new SteamCMD from Valve before it breaks Steam sign-in for users.
+#
+# The app installs SteamCMD from Valve's package manifest and never lets it update itself;
+# it compares its copy with the manifest instead. When Valve ships a new SteamCMD, an old
+# copy can stop signing in, which is what made 1.6.4 an emergency release. Every day, and on
+# demand from Actions -> SteamCMD canary -> Run workflow, this installs Valve's newest
+# SteamCMD the way the app does on an Apple silicon runner and signs in anonymously with
+# scripts/steamcmd_canary.py. A version no issue names yet opens
+# "SteamCMD <version> released <date>"; a failed sign-in opens "SteamCMD canary failing",
+# or comments on the one already open, and fails the run. It needs no secret and
+# publishes nothing else.
+name: SteamCMD canary
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: steamcmd-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The job runs Valve's downloaded code; it needs no Git credentials, only GH_TOKEN.
+          persist-credentials: false
+
+      - name: Install SteamCMD and sign in anonymously
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/steamcmd_canary.py --report-issues

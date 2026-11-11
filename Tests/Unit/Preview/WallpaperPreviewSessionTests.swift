@@ -7,7 +7,9 @@ final class WallpaperPreviewSessionTests: XCTestCase {
     private func request(_ id: String) throws -> WallpaperPreviewRequest {
         try WallpaperPreviewRequest(.init(wallpaperId: id, title: id, kind: .webpage,
             projectPath: "/fixture/\(id)", entryFile: "index.html", assetsPath: "/fixture/assets",
-            propertiesJson: "{}", fps: 30, scalingMode: .fill, scalingFactor: 1, volume: 0.5))
+            propertiesJson: "{}", fps: 30, scalingMode: .fill, scalingFactor: 1, volume: 0.5,
+            engineOptions: BridgeSnapshotFixtures.engineOptionValues(), lutPath: nil,
+            sceneQuality: .wallpaperEngineDefault))
     }
 
     private func settle() async { for _ in 0..<40 { await Task.yield() } }
@@ -169,5 +171,6 @@ private final class PreviewFixtureSurface: WallpaperPreviewSurface {
     func setPaused(_ paused: Bool) throws { self.paused = paused }
     func setMuted(_ muted: Bool) throws { self.muted = muted }
     func applyProperties(_ json: String) throws {}
+    func applyEngineOptions(_ options: WallpaperEngineOptions) throws {}
     func stop() { stops += 1 }
 }

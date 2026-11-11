@@ -49,10 +49,12 @@ __pycache__/
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/wallpaper-issue
+!.claude/skills/hotfix-release
 .agents/*
 !.agents/skills/
 .agents/skills/*
 !.agents/skills/wallpaper-issue/
+!.agents/skills/hotfix-release/
 .conductor/
 .commandcode/
 CLAUDE.local.md

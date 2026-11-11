@@ -28,13 +28,27 @@ enum NativeVideoRefusal: Equatable {
     /// The file is in a format nothing in this app can play. The string is the message a person
     /// reads, naming the format. A settled answer: the display keeps the picture it had.
     case unsupportedFormat(String)
+    /// The file plays only from a corrected copy the app makes of it (an HEVC clip tagged `hev1`,
+    /// on the desktop), and the copy is not there yet: it is being made (`making`), or there is no
+    /// room for it until other copies are let go. Not a verdict on the file and not retried at once:
+    /// the desktop host opens the clip again when the copies change, and a copy that failed is then
+    /// a `preparationFailed` of that offer. The string is the message a person reads meanwhile.
+    case awaitingCopy(String, making: Bool)
 
     /// Whether this answer is settled for the inputs it was decided on. A
     /// settled refusal may be recorded and reported once; an unsettled one
     /// must be retried instead, within a bound.
     var isSettled: Bool {
-        if case .preparationFailed = self { return false }
-        return true
+        switch self {
+        case .preparationFailed, .awaitingCopy: return false
+        case .notPlayable, .playbackFailed, .unsupportedFormat: return true
+        }
+    }
+
+    /// Whether this answer waits for a corrected copy (`awaitingCopy`).
+    var awaitsCopy: Bool {
+        if case .awaitingCopy = self { return true }
+        return false
     }
 
     var reason: String {
@@ -45,7 +59,7 @@ enum NativeVideoRefusal: Equatable {
             return "asset metadata could not be read: \(detail)"
         case let .playbackFailed(detail):
             return "the platform player could not play the asset: \(detail)"
-        case let .unsupportedFormat(message):
+        case let .unsupportedFormat(message), let .awaitingCopy(message, _):
             return message
         }
     }

@@ -23,7 +23,7 @@ fn a_scalar_after_an_array_declarator_is_a_scalar() {
   float color[4], f;
   f = data[0];
   for (int i = 0; i < 4; i++) {{ color[i] = data[1 + i]; }}
-  vec2 s = vec2(1.0) + f;
+  vec2 s = CAST2(1.0) + f;
   data[16] = s.x + s.y * 10.0;
   data[17] = color[2] + f;
 }}"
@@ -42,7 +42,7 @@ fn an_array_declarator_in_the_middle_of_a_list_types_only_itself() {
   vec2 a, b[2], c;
   a = vec2(data[0], data[1]);
   b[0] = a * 2.0; b[1] = a * 3.0;
-  c = a + vec2(1.0);
+  c = a + CAST2(1.0);
   vec2 d = a + c + b[1];
   data[16] = d.x; data[17] = d.y;
 }}"
@@ -65,7 +65,7 @@ void main() {{
   const float L[2] = float[2](4.0, 5.0), H = 6.0;
   gain = data[0];
   taps[1] = data[1];
-  vec2 s = vec2(1.0) + gain + G + H;
+  vec2 s = CAST2(1.0) + gain + G + H;
   data[16] = s.y;
   data[17] = taps[1] * K[1] + L[0];
 }}"
@@ -140,7 +140,7 @@ fn a_uniform_list_declares_every_name_with_its_own_type() {
 uniform float g_Bands[4], g_Gain;
 uniform vec2 g_Center, g_Points[2], g_Offset;
 void main() {
-  vec2 s = vec2(1.0) + g_Gain;
+  vec2 s = CAST2(1.0) + g_Gain;
   gl_FragColor = vec4(s * g_Center + g_Points[1] + g_Offset, g_Bands[3], 1.0);
 }";
     let p = program_ok(fragment);
@@ -164,11 +164,11 @@ fn an_annotation_after_a_uniform_list_binds_where_it_did_without_the_array_suffi
     let plain = "varying vec2 v_TexCoord;
 uniform float g_Rate, g_Gain; // {\"material\":\"rate\"}
 uniform float g_Mix; // {\"material\":\"mix\"}
-void main() { gl_FragColor = vec4(g_Rate + g_Gain + g_Mix); }";
+void main() { gl_FragColor = CAST4(g_Rate + g_Gain + g_Mix); }";
     let with_array = "varying vec2 v_TexCoord;
 uniform float g_Rate[4], g_Gain; // {\"material\":\"rate\"}
 uniform float g_Mix; // {\"material\":\"mix\"}
-void main() { gl_FragColor = vec4(g_Rate[0] + g_Gain + g_Mix); }";
+void main() { gl_FragColor = CAST4(g_Rate[0] + g_Gain + g_Mix); }";
     let expected = vec![("rate".to_string(), "g_Rate".to_string()), ("mix".to_string(), "g_Mix".to_string())];
     assert_eq!(alias_of(plain), expected);
     assert_eq!(alias_of(with_array), expected);

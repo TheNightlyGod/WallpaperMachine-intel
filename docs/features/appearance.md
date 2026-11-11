@@ -11,6 +11,7 @@ playback and display settings are untouched.
 | Accent color | Nine macOS-style swatches and a color well, with the chosen hex value beside them | The well takes any color the swatches lack and saves once the color has settled for a moment. Colors buttons, links, selection and focus rings |
 | Surface tone | **Neutral**, **Warm**, **Cool**, each shown as a picture of a window | Warms or cools the window background |
 | App icon | **Minimal**, **Day**, **Night** | Changes the running Dock icon immediately and restores the choice at launch; Finder and the menu bar stay unchanged |
+| Halloween look | **Halloween week**, **Always**, **Off**, each shown as a picture of a window | Halloween week (the default) wears the [Halloween look](#halloween-look) from October 24 to November 1; Always wears it all year; Off never |
 
 Accent shades adapt so text, buttons and focus rings stay readable against the
 resolved background. `PanelTheme` (`App/Views/ControlPanel/Theme/`) derives them for
@@ -21,6 +22,43 @@ sets the accent as the tint, re-rendering when the stored accent or tone changes
 the resolved appearance flips and when the language does. It reads the appearance
 macOS resolved and never sets one itself; `AppDelegate` is the only writer of
 `NSApp.appearance`.
+
+## Halloween look
+
+While the Halloween look is on, the window wears it instead of the person's own tone,
+accent and Dock icon; their choices are kept and come back when it ends. `AppThemeStore`
+reads the **Halloween look** choice against today (`Season.halloween.covers`, the local
+calendar's October 24 to November 1) and publishes the result as `season`. It reads the
+date again when macOS posts `NSCalendarDayChanged`, at midnight or on waking from a sleep
+that crossed one, so the look starts and ends while the app runs; it does no timer or
+per-frame work.
+
+- **Palettes.** `PanelTheme` takes the season's surfaces and accent: `SurfacePalette`
+  has a Halloween column beside the tones (moonlit ink in the dark, candlelit parchment
+  in the light) and `AccentPalette` fits the pumpkin orange `#ff7a1a` like any accent.
+  Light, dark and System still follow the **Appearance** choice.
+- **Mark and Dock icon.** A jack-o'-lantern takes the gear's place: in the title bar's
+  mark (`AppMark`, in the accent's graphic shade) and in the Dock, where `AppDelegate`
+  shows `AppThemeStore.dockIconName`, the `AppIconHalloween` image set while the look is
+  on. Settings › About and the first welcome page show the same icon.
+- **Papercut horizon.** Every picture of the look is cut from one sheet of Victorian
+  papercut silhouettes in two inks, night ink and pumpkin glow (the `Halloween…` image
+  sets). `SeasonHorizon` stands them on rolling hills under a low moon, harvest orange
+  over a light window and cream in the dark. Across the window, a band of it sits on the
+  Now Playing bar, which turns the horizon's ink in either appearance so the hills rise
+  from it; its contents take the look's dark palette, and its popovers the window's own.
+  The horizon draws once per size: still images and a path, no animation.
+- **Settings and empty states.** Settings › Appearance leads with the look's group under
+  the same horizon at banner size, under a night sky, and locks the surface tone, accent
+  and app icon rows it stands in for. The empty Library, and a Library or Workshop search
+  or filters that match nothing, show a papercut cameo (an empty easel, a cat with a
+  question-mark tail) in front of the moon instead of their symbol
+  (`PanelEmptyState.seasonalArt`); an error keeps its symbol. The look's cards in
+  Settings carry its moon and hills.
+
+The silhouette sheet was generated with OpenAI's GPT Image 2.5 (Flare) on fal.ai, and
+its ink and glow were separated from the white paper; each file carries its origin and
+the prompt in its image comment.
 
 ## Window material
 
@@ -46,8 +84,9 @@ Choices are stored in the app's defaults (`AppThemeStore`, the
 arrive. Changes apply immediately and
 are remembered for the next launch. An invalid accent (anything but `#rrggbb`) is
 rejected without overwriting the saved value. **Reset appearance** restores System, the
-default accent, the Neutral tone and the Day icon; it does not touch wallpapers,
-playback or display configuration.
+default accent, the Neutral tone, the Day icon and Halloween week; it does not touch
+wallpapers, playback or display configuration. Backups carry the Halloween choice with
+the rest of the theme.
 
 ## App icon
 
@@ -73,6 +112,7 @@ assets on macOS (it uses Quick Look, `sips`, and Xcode's Icon Composer and Swift
 
 ```sh
 python3 scripts/brand.py                           # app icon, Dock choices, tray icon, DMG background
+python3 scripts/brand.py --seasonal                # only the Halloween Dock icon
 python3 scripts/brand.py --website <site-checkout> # plus logo, favicons and manifest there
 ```
 
@@ -89,6 +129,11 @@ python3 scripts/brand.py --website <site-checkout> # plus logo, favicons and man
   newer preview default), keep a 100 px transparent outer margin and load as 512-point
   Retina images. The root README displays `day.png`; update its path there if the export
   is renamed.
+- The Halloween Dock icon (`AppIconHalloween.imageset/halloween.png`) is the Night tile
+  with `Resources/Seasonal/halloween-night.jpg` (a papercut night composed from the same
+  silhouettes) clipped to the screen panel and the
+  jack-o'-lantern (`PUMPKIN` in `brand.py`, the same outline as `AppMark`'s) in the
+  gear's place, clear of the frame's ends as the gear is.
 - The small-size mark is heavier and stays reserved for the menu bar; the panel shows the
   Dock icon images instead.
 - Website export writes `brand/logo.svg` (light backgrounds), `brand/logo-dark.svg`,

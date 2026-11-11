@@ -6,11 +6,15 @@ final class SurfacePaletteTests: XCTestCase {
   private let tones: [AppThemePreferences.Tone] = [.neutral, .warm, .cool]
   private let appearances: [PanelAppearance] = [.light, .dark]
 
-  func testTextAndSemanticColoursStayReadableInEveryToneAndAppearance() {
-    for tone in tones {
-      for appearance in appearances {
-        let palette = SurfacePalette(tone: tone, appearance: appearance)
-        let context = "\(tone) \(appearance)"
+  /// Every palette the panel can wear in `appearance`: each tone's and the Halloween look's.
+  private func palettes(_ appearance: PanelAppearance) -> [(String, SurfacePalette)] {
+    tones.map { ("\($0) \(appearance)", SurfacePalette(tone: $0, appearance: appearance)) }
+      + [("halloween \(appearance)", SurfacePalette(season: .halloween, appearance: appearance))]
+  }
+
+  func testTextAndSemanticColoursStayReadableInEveryToneSeasonAndAppearance() {
+    for appearance in appearances {
+      for (context, palette) in palettes(appearance) {
         for ground in [
           palette.background, palette.surface, palette.card, palette.raised, palette.well,
           palette.sunken,
@@ -48,10 +52,24 @@ final class SurfacePaletteTests: XCTestCase {
     XCTAssertEqual(SurfacePalette(tone: .cool, appearance: .light).well.hex, "#eef1f6")
   }
 
+  func testTheHalloweenLookHasItsOwnSurfacesInBothAppearances() {
+    for appearance in appearances {
+      let halloween = SurfacePalette(season: .halloween, appearance: appearance)
+      for tone in tones {
+        let everyday = SurfacePalette(tone: tone, appearance: appearance)
+        XCTAssertNotEqual(halloween.background, everyday.background, "\(tone) \(appearance)")
+        XCTAssertNotEqual(halloween.text, everyday.text, "\(tone) \(appearance)")
+      }
+    }
+    // Moonlit ink in the dark: violet, never the neutral grey; parchment in the light: warm.
+    let night = SurfacePalette(season: .halloween, appearance: .dark)
+    XCTAssertGreaterThan(blue(night.surface), red(night.surface))
+    let parchment = SurfacePalette(season: .halloween, appearance: .light)
+    XCTAssertGreaterThan(red(parchment.surface), blue(parchment.surface))
+  }
+
   func testOverlaysAreWhiteOnDarkSurfacesAndBlackOnLightOnes() {
-    for tone in tones {
-      let dark = SurfacePalette(tone: tone, appearance: .dark)
-      let light = SurfacePalette(tone: tone, appearance: .light)
+    for (dark, light) in zip(palettes(.dark).map(\.1), palettes(.light).map(\.1)) {
       for overlay in [dark.line, dark.divider, dark.hover, dark.pressed, dark.selected] {
         XCTAssertEqual(overlay.rgb, 0xffffff)
         XCTAssertLessThan(overlay.alpha, 0.2)

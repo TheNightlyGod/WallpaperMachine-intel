@@ -22,6 +22,9 @@ struct DiagnosticsBundle {
         /// noted. `crashReports` is searched for the same kinds of report as
         /// well, since older releases wrote them there.
         var systemReports: URL? = nil
+        /// What SteamCMD printed in the last runs that failed (`SteamCMDFailureLog`). Absent is the
+        /// normal case and is not noted; `nil` means the caller offers none.
+        var steamCMDFailures: URL? = nil
     }
 
     struct Limits {
@@ -59,7 +62,8 @@ struct DiagnosticsBundle {
             extensionLog: home.appending(path: LockScreenConfiguration.exchangeRelativePath).appending(path: "extension.log"),
             crashReports: CrashReportIndex.userReportsFolder(home: home),
             loadJournal: supportRoot.appending(path: loadJournalFileName),
-            systemReports: systemReports)
+            systemReports: systemReports,
+            steamCMDFailures: supportRoot.appending(path: SteamCMDFailureLog.fileName))
     }
 
     /// Local time, POSIX locale, so the name sorts and does not pick up a
@@ -89,6 +93,7 @@ struct DiagnosticsBundle {
         try collectLogs(into: staging, included: &included, missing: &missing)
         try collectExtensionLog(into: staging, included: &included, missing: &missing)
         try collectLoadJournal(into: staging, included: &included, missing: &missing)
+        try collectSteamCMDFailures(into: staging, included: &included)
         try collectCrashReports(into: staging, at: date, included: &included, missing: &missing)
         try collectResourceReports(into: staging, at: date, included: &included, missing: &missing)
         try write(
@@ -212,6 +217,15 @@ struct DiagnosticsBundle {
             return
         }
         try write(redactor.redact(String(decoding: data, as: UTF8.self)), to: staging.appending(path: relative))
+        included.append(relative)
+    }
+
+    /// Redacted when SteamCMD printed it, and once more here like every other file.
+    private func collectSteamCMDFailures(into staging: URL, included: inout [String]) throws {
+        guard let source = sources.steamCMDFailures,
+              let text = SteamCMDFailureLog(url: source).read() else { return }
+        let relative = "steamcmd-failures.txt"
+        try write(redactor.redact(text + "\n"), to: staging.appending(path: relative))
         included.append(relative)
     }
 
@@ -378,7 +392,7 @@ struct DiagnosticsBundle {
         Wallpaper Machine diagnostics
         Generated: \(generated)
 
-        This archive is for a bug report. It holds the newest application log sessions that fit in the export limit, the lock-screen extension log, the load journal (which wallpapers the app was opening when it last quit unexpectedly), recent crash reports, the resource, spin and hang reports macOS wrote about the app (too much CPU or disk use, or not responding), and the environment lines supplied at export.
+        This archive is for a bug report. It holds the newest application log sessions that fit in the export limit, the lock-screen extension log, the load journal (which wallpapers the app was opening when it last quit unexpectedly), what SteamCMD printed in the last Steam downloads and sign-ins that failed, recent crash reports, the resource, spin and hang reports macOS wrote about the app (too much CPU or disk use, or not responding), and the environment lines supplied at export.
 
         Home folder paths were replaced with ~. The macOS user name was replaced with <user>. Steam account names were replaced with <account>. The Mac's host name was left out of the file names of macOS reports, and their beta program identifier was removed.
 

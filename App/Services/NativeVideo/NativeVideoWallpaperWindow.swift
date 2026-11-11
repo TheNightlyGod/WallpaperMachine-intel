@@ -19,6 +19,9 @@ protocol NativeVideoSurface: AnyObject {
     /// this backend exactly as Compatibility draws them, so the surface never
     /// substitutes another mode, or a centred picture, for the one chosen.
     func setScaling(_ mode: BridgeScalingMode, factor: Double, pan: NativeVideoLayout.Pan)
+    /// Wallpaper Engine's per-wallpaper options (rate, flip, colour, image filter) and the
+    /// Fit-style border colour, applied to the running surface.
+    func setEngineOptions(_ options: WallpaperEngineOptions, lut: VideoLut?, borderColor: CGColor?)
     func setUserPaused(_ paused: Bool)
     func setPresentationSuspended(_ suspended: Bool)
     var isPlaying: Bool { get }
@@ -72,6 +75,14 @@ protocol NativeVideoSurface: AnyObject {
     /// gives the wallpaper up instead. Never changes the user's pause, the
     /// volume or the placement.
     func restartPlayback(reason: String) -> Bool
+    /// Calls `handler` once, later, when the clip reaches the end of the pass it is
+    /// in and starts over. False, and the handler is never called, when there is
+    /// no such end to wait for: the surface is stopped or has failed, its clip is
+    /// a still picture, or its file is still being opened. A later call replaces
+    /// the earlier watch; `cancelLoopWatch()` and `stop()` end it without a call.
+    /// Nothing is observed while no watch is set.
+    func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool
+    func cancelLoopWatch()
     /// Puts the surface on the desktop. Separate from construction so the
     /// caller decides when a surface becomes visible.
     func present()
@@ -87,9 +98,13 @@ protocol NativeVideoSurface: AnyObject {
 @objc(MWENativeVideoDesktopWindow)
 final class NativeVideoWallpaperWindow: NSWindow {
     let player: NativeVideoPlayer
+    /// The corrected copy the player reads instead of the clip (`DerivedVideoCache`), held until
+    /// the window stops: a rebuild or a poster opens the file again.
+    var copyLease: DerivedVideoCache.Lease?
     private var scalingMode: BridgeScalingMode = .fill
     private var scalingFactor = 1.0
     private var scalingPan = NativeVideoLayout.Pan.centered
+    private var borderColor: CGColor?
 
     init(frame: NSRect, player: NativeVideoPlayer) {
         self.player = player
@@ -109,13 +124,17 @@ final class NativeVideoWallpaperWindow: NSWindow {
 }
 
 extension NSWindow {
+    /// Match the scene window’s translucent composition during Mission Control.
+    nonisolated static let wallpaperVisibleAlpha: CGFloat = 0.995
+
     /// What every window that carries a plain video on the desktop shares: a borderless window at
     /// the desktop level that follows the Spaces, takes no input and cannot be hidden with the app.
     func configureAsDesktopVideoWindow() {
         isReleasedWhenClosed = false
         level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)))
         collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
-        isOpaque = true
+        isOpaque = false
+        alphaValue = Self.wallpaperVisibleAlpha
         hasShadow = false
         isMovable = false
         isRestorable = false
@@ -141,6 +160,10 @@ extension NativeVideoWallpaperWindow: NativeVideoSurface {
         scalingPan = pan
         player.setScaling(mode, factor: factor, pan: pan)
     }
+    func setEngineOptions(_ options: WallpaperEngineOptions, lut: VideoLut?, borderColor: CGColor?) {
+        self.borderColor = borderColor
+        player.setEngineOptions(options, lut: lut, borderColor: borderColor)
+    }
     func setUserPaused(_ paused: Bool) { player.setUserPaused(paused) }
     func setPresentationSuspended(_ suspended: Bool) {
         player.setPresentationSuspended(suspended)
@@ -156,20 +179,20 @@ extension NativeVideoWallpaperWindow: NativeVideoSurface {
         return Self.fittedPoster(image, pixelSize: CGSize(
             width: frame.width * backingScaleFactor, height: frame.height * backingScaleFactor),
             backingScale: backingScaleFactor, mode: scalingMode, factor: scalingFactor,
-            pan: scalingPan)
+            pan: scalingPan, borderColor: borderColor)
     }
 
     /// The desktop picture API stretches the supplied poster to the display.
     /// Draw the clip's frame where the live layer puts the picture first, so
-    /// other Spaces show the same crop, bars and zoom: Fit leaves black bars,
+    /// other Spaces show the same crop, scheme-colour bars and zoom: Fit leaves bars,
     /// Fill and Original size crop, a scale factor magnifies, and a position moves it.
     static func fittedPoster(
         _ image: CGImage, pixelSize: CGSize, backingScale: CGFloat, mode: BridgeScalingMode,
-        factor: Double, pan: NativeVideoLayout.Pan = .centered
+        factor: Double, pan: NativeVideoLayout.Pan = .centered, borderColor: CGColor? = nil
     ) -> CGImage? {
         NativeVideoLayout.composeFrame(
             image, pixelSize: pixelSize, backingScale: backingScale, mode: mode.layoutMode,
-            factor: factor, pan: pan)
+            factor: factor, pan: pan, borderColor: borderColor)
     }
     /// Forwarded straight to the player, which is what observes
     /// `AVPlayerItem.status` and knows its own surface generation.
@@ -188,9 +211,13 @@ extension NativeVideoWallpaperWindow: NativeVideoSurface {
     var stateSummary: String { player.stateSummary }
     func restartPlayback(reason: String) -> Bool { player.restartPlayback(reason: reason) }
     func verifyPlayback(reason: String) { player.verifyPlayback(reason: reason) }
+    func watchNextLoop(_ handler: @escaping @MainActor () -> Void) -> Bool { player.watchNextLoop(handler) }
+    func cancelLoopWatch() { player.cancelLoopWatch() }
     func present() { orderFrontRegardless() }
     func stop() {
         player.stop()
+        copyLease?.release()
+        copyLease = nil
         orderOut(nil)
         close()
     }

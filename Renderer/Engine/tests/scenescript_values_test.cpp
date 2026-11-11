@@ -8,6 +8,8 @@
 #include "scenescript_scenes.hpp"
 
 #include "Runtime/SceneRuntimeContext.hpp"
+#include "Scene/Scene.h"
+#include "Scene/SceneLight.hpp"
 
 #include <gtest/gtest.h>
 
@@ -247,6 +249,187 @@ TEST_P(ChoiceAsFlag, AShaderConstantBoundWithAConditionReadsOneOrZero)
     EXPECT_EQ(scene.EffectConstant(1, "g_Flag"), std::vector<float> { 1.0f });
 }
 
+// Wallpaper Engine shows a layer whose visibility names a property the project never declares
+// by its own authored value, with or without a condition: there is no choice to compare.
+TEST(ChoiceAsFlagUndeclared, AVisibilityBoundToAnUndeclaredPropertyKeepsItsOwnAuthoredValue)
+{
+    ScenePackage package;
+    const auto   model = ModelOf(package);
+    const auto   gated = [](const char* condition, bool authored) {
+        return Json { { "user", { { "name", "missing" }, { "condition", condition } } }, { "value", authored } };
+    };
+    Publish(package, { PlainImage(model, 1, "shown", { { "visible", gated("0", true) } }),
+                       PlainImage(model, 2, "hidden", { { "visible", gated("0", false) } }),
+                       PlainImage(model, 3, "plain", { { "visible", { { "user", "missing" }, { "value", false } } } }) },
+            { { "format", ComboProperty("1") } });
+
+    ScriptScene scene(package);
+    ASSERT_TRUE(scene.ok()) << scene.error();
+    scene.Tick();
+    EXPECT_TRUE(scene.Visible("shown"));
+    EXPECT_FALSE(scene.Visible("hidden"));
+    EXPECT_FALSE(scene.Visible("plain"));
+
+    // Once a document supplies the name, every binding follows it as a declared one would.
+    ASSERT_TRUE(scene.SetProperty("missing", Json("0")));
+    scene.Tick();
+    EXPECT_TRUE(scene.Visible("shown"));
+    EXPECT_TRUE(scene.Visible("hidden"));
+    EXPECT_FALSE(scene.Visible("plain"));
+    ASSERT_TRUE(scene.SetProperty("missing", Json(1)));
+    scene.Tick();
+    EXPECT_FALSE(scene.Visible("shown"));
+    EXPECT_FALSE(scene.Visible("hidden"));
+    EXPECT_TRUE(scene.Visible("plain"));
+}
+
 INSTANTIATE_TEST_SUITE_P(Choices, ChoiceAsFlag, ::testing::Values(true, false),
                          [](const auto& info) { return info.param ? "NumbersFromThePreview" : "TextFromThePreview"; });
 
+
+// ---- image layer members (we_ss_reg_ImageLayer 0x1401EE520) -------------------------------
+
+TEST(ScriptLayerFlags, TheMembersReadTheAuthoredImageLayer)
+{
+    ScenePackage package;
+    const auto   model  = ModelOf(package);
+    const auto   source = Join({ "export function update(value) {",
+                                 "  var t = thisScene.getLayer('target');",
+                                 "  t.origin = new Vec3(t.clampuvs === false ? 1 : 0, t.castshadow === true ? 1 : 0,",
+                                 "                      t.copybackground === true && t.perspective === false ? 1 : 0);",
+                                 "  return 1;",
+                                 "}" });
+    Publish(package, { PlainImage(model, 1, "target", { { "clampuvs", false }, { "castshadow", true } }),
+                       DriverLayer(model, source) });
+
+    ScriptScene scene(package);
+    ASSERT_TRUE(scene.ok()) << scene.error();
+    scene.Tick(2);
+    const auto origin = scene.Origin("target");
+    EXPECT_FLOAT_EQ(origin[0], 1.0f) << "clampuvs";
+    EXPECT_FLOAT_EQ(origin[1], 1.0f) << "castshadow";
+    EXPECT_FLOAT_EQ(origin[2], 1.0f) << "copybackground and perspective defaults";
+    EXPECT_TRUE(scene.ScriptErrors().empty()) << Describe(scene.ScriptErrors());
+}
+
+// `size` is a writable Vec2 (+752, setter 0x1401A4200) that the draw reads: a write stretches the card.
+TEST(ScriptLayerFlags, SizeWriteStretchesTheCard)
+{
+    ScenePackage package;
+    const auto   model  = ModelOf(package);
+    const auto   source = Join({ "export function update(value) {",
+                                 "  var t = thisScene.getLayer('target');",
+                                 "  t.size = new Vec2(128, 16);",
+                                 "  thisScene.getLayer('driver').origin = new Vec3(t.size.x, t.size.y, 0);",
+                                 "  return 1;",
+                                 "}" });
+    Publish(package, { PlainImage(model, 1, "target"), DriverLayer(model, source) });
+
+    ScriptScene scene(package);
+    ASSERT_TRUE(scene.ok()) << scene.error();
+    scene.Tick(2);
+    const auto size = scene.runtime().NodeSize("target");
+    EXPECT_FLOAT_EQ(size.x(), 128.0f);
+    EXPECT_FLOAT_EQ(size.y(), 16.0f);
+    const auto read = scene.Origin("driver");
+    EXPECT_FLOAT_EQ(read[0], 128.0f) << "and reads back";
+    EXPECT_FLOAT_EQ(read[1], 16.0f);
+    EXPECT_TRUE(scene.ScriptErrors().empty()) << Describe(scene.ScriptErrors());
+}
+
+// `sortorder` is an integer of every layer (@292, we_ss_reg_SceneObjectBase 0x1401E0530): it reads
+// the file's value and back what a script wrote; with `customsortorder` Wallpaper Engine sorts the
+// draw by it every frame, so a write there rebuilds the graph once.
+TEST(ScriptLayerFlags, SortOrderReadsBackWhatWasWritten)
+{
+    for (const bool custom : { false, true }) {
+        ScenePackage package;
+        const auto   model  = ModelOf(package);
+        const auto   source = Join({ "var authored;",
+                                     "export function update(value) {",
+                                     "  var t = thisScene.getLayer('target');",
+                                     "  if (authored === undefined) authored = t.sortorder;",
+                                     "  t.sortorder = 7.9;",
+                                     "  thisScene.getLayer('driver').origin = new Vec3(authored, t.sortorder,",
+                                     "                                                  thisScene.getLayer('driver').sortorder);",
+                                     "  return 1;",
+                                     "}" });
+        SceneGeneral general;
+        general.extra = { { "customsortorder", custom } };
+        package.SetProject(Json::object());
+        package.SetScene(SceneJson(general, { PlainImage(model, 1, "target", { { "sortorder", 5 } }),
+                                              DriverLayer(model, source) }));
+
+        ScriptScene scene(package);
+        ASSERT_TRUE(scene.ok()) << scene.error();
+        scene.Tick(3);
+        const auto read = scene.Origin("driver");
+        EXPECT_FLOAT_EQ(read[0], 5.0f) << "authored";
+        EXPECT_FLOAT_EQ(read[1], 7.0f) << "written, an integer";
+        EXPECT_FLOAT_EQ(read[2], 0.0f) << "a layer without one";
+        EXPECT_EQ(scene.runtime().NodeSortOrder("target"), 7);
+        const auto& reasons = scene.runtime().SceneGraphMutationReasonsForTests();
+        const auto  found   = reasons.find("sortorder");
+        EXPECT_EQ(found == reasons.end() ? 0 : found->second, custom ? 1 : 0) << "customsortorder " << custom;
+        EXPECT_TRUE(scene.ScriptErrors().empty()) << Describe(scene.ScriptErrors());
+    }
+}
+
+// ---- light layer members (we_ss_reg_LightLayer 0x14025DA80, decompiles/A-7g.md) ------------
+
+TEST(ScriptLights, IntensityWriteChangesPremultipliedColour)
+{
+    using wallpaper::SceneLight;
+    using wallpaper::SceneLightType;
+    ScenePackage package;
+    const auto   model  = ModelOf(package);
+    const auto   source = Join({ "var done = false, ok = 0;",
+                                 "export function update(value) {",
+                                 "  if (!done) {",
+                                 "    done = true;",
+                                 "    var lamp = thisScene.getLayer('lamp'), spot = thisScene.getLayer('spot');",
+                                 "    var read = lamp.intensity === 2 && lamp.radius === 10 && lamp.light === 'point' &&",
+                                 "               lamp.castshadow === false && lamp.density === 2 && lamp.color.y === 0.5;",
+                                 "    lamp.intensity = 3;",
+                                 "    lamp.color = new Vec3(0, 1, 0);",
+                                 "    spot.innercone = 15;",
+                                 "    spot.controlpoint = new Vec3(1, 2, 3);",
+                                 "    spot.castshadow = true;",
+                                 "    spot.usecookie = true;",
+                                 "    spot.density = 4;",
+                                 "    spot.cascadedistance1 = 12;",
+                                 "    spot.light = 'lspot';",
+                                 "    spot.visible = false;",
+                                 "    var back = lamp.intensity === 3 && spot.innercone === 15 && spot.castshadow === true &&",
+                                 "               spot.light === 'lspot' && spot.controlpoint.z === 3 && spot.usecookie === true;",
+                                 "    ok = read && back ? 1 : 0;",
+                                 "  }",
+                                 "  thisLayer.origin = new Vec3(ok, 0, 0);",
+                                 "  return 1;",
+                                 "}" });
+    const Json lamp = { { "id", 4 }, { "name", "lamp" }, { "light", "point" }, { "origin", "10 20 0" },
+                        { "color", "1 0.5 0.25" }, { "intensity", 2.0 }, { "radius", 10.0 } };
+    const Json spot = { { "id", 5 }, { "name", "spot" }, { "light", "lpoint" }, { "origin", "0 0 0" },
+                        { "color", "1 1 1" }, { "intensity", 1.0 }, { "radius", 10.0 } };
+    Publish(package, { lamp, spot, PlainImage(model, 3, "driver", { { "alpha", ScriptedValue(source, 1.0) } }) });
+
+    ScriptScene scene(package);
+    ASSERT_TRUE(scene.ok()) << scene.error();
+    scene.Tick(2);
+    EXPECT_FLOAT_EQ(scene.Origin("driver")[0], 1.0f) << "members read the file and back what was written";
+    EXPECT_TRUE(scene.ScriptErrors().empty()) << Describe(scene.ScriptErrors());
+    ASSERT_EQ(scene.scene().lights.size(), 2u);
+    const auto& first  = *scene.scene().lights[0];
+    const auto& second = *scene.scene().lights[1];
+    const auto  premultiplied = first.premultipliedColor();
+    EXPECT_FLOAT_EQ(premultiplied.x(), 0.0f);
+    EXPECT_FLOAT_EQ(premultiplied.y(), 3.0f * 100.0f) << "colour times intensity times radius squared";
+    EXPECT_EQ(second.type(), SceneLightType::Spot);
+    EXPECT_FLOAT_EQ(second.innerCone(), 15.0f);
+    EXPECT_FLOAT_EQ(second.controlPoint().z(), 3.0f);
+    EXPECT_NE(second.flags() & SceneLight::kCastShadow, 0u);
+    EXPECT_NE(second.flags() & SceneLight::kUseCookie, 0u);
+    EXPECT_FLOAT_EQ(second.density(), 4.0f);
+    EXPECT_FLOAT_EQ(second.cascadeDistances()[1], 12.0f);
+    EXPECT_FALSE(second.visible());
+}

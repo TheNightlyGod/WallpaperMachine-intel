@@ -175,11 +175,16 @@ in a host without one):
   the Space posters take, show the page and never the picture. A reconcile that keeps the
   page (the same entry file and an unchanged project revision: a property push, a frame-rate
   or volume change, a refresh that found nothing new) builds no window and takes nothing.
-- *Release.* The page's `didFinish` calls `contentReady(after:)` with
-  `WebWallpaperHost.firstPaintSettle`, 500 ms: `didFinish` comes before the first meaningful
-  paint, which is also why the poster is read again two seconds later. The picture then fades
-  out over the page, and the fade hides what is left of the lag. A page that fails to load
-  calls `contentReady` at once.
+- *Release.* `didFinish` comes before the page's first frame, which is also why the poster is
+  read again two seconds later, so after it the host asks the page to confirm a frame
+  (`WebWallpaperPage.confirmFrame`): a one-point snapshot taken after the pending screen
+  updates, which WebKit returns only once it has drawn and committed a frame of the
+  document. The answer calls `contentReady` at once, and so does no answer within
+  `WebWallpaperHost.firstFrameLimit` (3 s; a page holding its main thread, a display that
+  draws nothing). Only when WebKit refuses the snapshot does the picture wait the old fixed
+  `firstPaintSettle`, 500 ms. A committed frame is the page's first, not its finished
+  picture: a page that builds itself after load still draws in steps under the fade. A page
+  that fails to load calls `contentReady` at once.
 - *Closing.* A window closed to be replaced hands its veil to the successor through `adopt`
   (a second switch before the first page loads moves the picture to the newest window). A
   window closed with no web successor, because the display now shows another backend's
@@ -225,9 +230,10 @@ with it but leaves one that waits for another backend's window or sits on a scen
 refusal keeps it armed for the scene engine until the bridge has answered and then releases
 it (or lets the grace end it), the old clip keeps playing while the replacement's file is
 read, a pass overtaken meanwhile stops nothing, and a host without a hold opens as before.
-`WebWallpaperHostLifecycleTests` drive the web host against real offscreen pages with a fake
-window: the replacement window carries the veil when it is presented and keeps it after the
-page has loaded until the 500 ms settle has passed, a page that cannot load releases it at
+`WebWallpaperFrameConfirmationTests` show the confirmation waiting for a frame a page holds
+back and answering at its limit when none comes. `WebWallpaperHostLifecycleTests` drive the web host against real offscreen pages with a fake
+window: the replacement window carries the veil when it is presented and keeps it until the
+page has loaded and committed a frame, with no timer, a page that cannot load releases it at
 once, a window closed with no page to follow takes its own veil with it (also for an entry
 file outside the project) but leaves one that waits for another backend's window or sits on a
 scene, a reconcile that keeps the page creates no veil, and a host without a hold opens as
@@ -241,7 +247,7 @@ Not established by any test: that a sublayer above a `CAMetalLayer` composites o
 drawables and hides the black placeholder; that scene, web and native surfaces answer the
 request quickly, including a paused renderer; how the still compares with the live frame it
 replaces; whether `isReadyForDisplay` alone is late enough that the veil does not come off a
-frame early on a real clip; whether 500 ms after `didFinish` is enough for a typical web
-project's first paint; how long the system picture shows between a web window closing and the
+frame early on a real clip; how much of a typical web project's picture its first committed
+frame already shows; how long the system picture shows between a web window closing and the
 next one opening, and between a scene and the page that replaces it; the fade, Reduce Motion,
 multi-display and mirror behavior on a real desktop. The checklist is in [manual smoke](../testing/manual-smoke.md#wallpaper-switching).

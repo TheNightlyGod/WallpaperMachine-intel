@@ -43,7 +43,9 @@ sampler ranks of C2 R88, is gone: part D R46 ranks every namespace of a stage, s
 Step 5 (part D of the spec) is three modules and a pipeline. `backend` reads one legalized stage with
 naga's GLSL front end, builds the Metal binding map, validates, and runs the Metal writer
 (`StageCompiler`, `NagaBackend`, `compile_glsl`, `translate_module`). `reflect` describes the module
-that was translated (`StageReflector`, `NagaReflector`, `reflect_module`, `reflect_untranslated`).
+that was translated (`StageReflector`, `NagaReflector`, `reflect_module`, `reflect_untranslated`);
+`reflect::coverage` proves the two coverage facts of note 140 and the fragment colour of note 142,
+and `reflect::reads` the read uniforms of note 141.
 `nagair` holds what both need to know about the globals of a naga module. `pipeline` drives a request
 through `prepare`, `legalize`, the compiler and the reflector, merges the stage reflections, and
 computes the key (`Pipeline`, `compile`, `CompiledProgram`). The compiler and the reflector are the two
@@ -53,8 +55,8 @@ of section 5 (`ErrorCategory`).
 `tests/dialect_robustness.rs` is the hostile-input test of this part (run on a 2 MiB stack),
 `tests/gpu_probe.rs` the opt-in Metal probes (a Swift runner dispatches one compute thread; no window,
 no display): the smoothstep and `fmod` probe, and kernels written in the dialect that are converted,
-written as Metal through naga and evaluated, whose values are compared with HLSL's (matrix inverse of
-all sizes, remainder, truncation, bool and number conversions, `!`/`&&`, `mul` with `mat4x3`,
+written as Metal through naga and evaluated, whose values are compared with HLSL's (author-defined
+functions, signed and unsigned bit operations, remainder, truncation, bool and number conversions, `!`/`&&`, `mul` with `mat4x3`,
 `CAST3X3`, array-parameter specialisation, moved global initializers, float subscripts and loop
 bounds). Run them with `WM_SHADER_GPU_PROBES=1 cargo test -p wm-shader --test gpu_probe`; without the
 variable they print why they did nothing.
@@ -80,10 +82,10 @@ archive's exported symbols).
 
 ## Toolchain
 
-`rust-toolchain.toml` pins `nightly` with the Apple target. The development
-machine has Homebrew's stable cargo/rustc 1.98.1 and no rustup, which ignores
-the file; the crate uses no nightly feature and builds, tests and passes clippy
-(`cargo clippy --all-targets`, warnings denied) on that compiler.
+`rust-toolchain.toml` pins a stable release with the Apple target, which rustup
+installs and uses ([build prerequisites](../../docs/build.md#prerequisites)).
+The crate uses no nightly feature and builds, tests and passes clippy
+(`cargo clippy --all-targets`, warnings denied) on that release.
 
 ## Spec ambiguities and the choice made
 
@@ -218,7 +220,16 @@ Preprocessor and includes:
     Counts are digits with an optional `+`; everything else, a negative number
     included, is 0; digit strings too long for an integer count as 15. The block
     is fully unrolled with constant indices and writes its zero as
-    `vec3(0.0, 0.0, 0.0)` so it needs no dialect macro.
+    `vec3(0.0, 0.0, 0.0)` so it needs no dialect macro. The subset macros
+    (`LIGHTS_POINT_SHADOW`, `LIGHTS_SPOT_SHADOW`, `LIGHTS_SPOT_COOKIE`,
+    `LIGHTS_SPOT_SHADOW_COOKIE`, `LIGHTS_DIRECTIONAL_SHADOW`) are read the same way and
+    capped at 3; they place each light in Wallpaper Engine's partition of its array
+    (spot `[shadow cookie][cookie][shadow][plain]`, point and directional
+    `[shadow][plain]`, `sub_140169140`). Shadow subsets use the generated projection
+    and shadow helpers when `LIGHTS_SHADOW_MAPPING` is on; otherwise their shadow
+    factor is `1.0`. Cookie subsets project and sample `COOKIE_SAMPLER` even without
+    shadows. Their sampled RGB replaces the ordinary cone factor. Revision 7 adds
+    this cookie path; no cookie subset adds a fetch to an ordinary spot.
 
 Lexer, facts and items:
 
@@ -349,10 +360,11 @@ Design:
     vectors; R106 says nothing is rewritten then. Only the shape rules of R28 apply.
 55. **Helpers** (`convert/helpers.rs`) are emitted only when used, once each, ahead of the first
     function, under the prefix `_wm_` (or `_wm1_`, `_wm2_`... when the stage uses an identifier
-    that starts with it): `clip` for float and the vectors, the matrix `inverse` for 2, 3 and 4
-    (checked numerically against a reference; all three sizes are emitted when the argument
-    type is unknown), and the stand-in `PerformLighting_V1` (both overloads, under its own name,
+    that starts with it): `clip` for float and the vectors, and the stand-in
+    `PerformLighting_V1` (both overloads, under its own name,
     emitted when the stage calls it and nothing declares it).
+    The former matrix `inverse` helper was removed: Wallpaper Engine's HLSL rejects that
+    builtin, while a shader's own inverse function remains an ordinary function (note 129).
 56. **Array and sampler parameters** (R66, R67). A function with such a parameter is kept as a
     template and dropped from the output. Each call specialises it for the global array or sampler
     it passes: the clone is named `<name>_wm<N>` (N counts distinct specialisations), loses the
@@ -373,9 +385,10 @@ Design:
 59. **Reserved words** (R70) are renamed to `<name>_wm` (a taken spelling gets a number) for
     locals, parameters, struct fields, globals and function names, consistently across
     declaration and uses; `sample` is the qualifier only in a qualifier run in front of a type.
-60. **Alpha-to-coverage** (R83): the colour output is `gl_FragColor` or a fragment `out vec4`; the
-    form is matched on the tree, so spacing, parentheses and the order of the `saturate` wrapper
-    do not matter, and the constants compare by value (`0.5`, `0.0001`).
+60. **Alpha-to-coverage** (R83, revised in note 137): authored sharpening is ordinary
+    arithmetic and survives conversion, including derivatives and reads of the colour output.
+    The renderer applies its result as coverage. No alpha expression is replaced by a prior
+    source value.
 61. **Builtin variables** (R88): `gl_VertexID` and `gl_InstanceID` read as the `uint` builtins
     `gl_VertexIndex` and `gl_InstanceIndex`; a restating `in`/`attribute`/`varying uint
     gl_VertexID;` is dropped; any other `gl_` declaration is left as written.
@@ -431,11 +444,10 @@ Spec conflicts and the choice made:
     refusal and its pinned message are not reproduced; the stereo audio helpers that call one
     function with the left and the right spectrum work. A black-box port of the upstream refusal
     tests will fail on this and the spec should be amended.
-70. **R59 against C1 R83.** C2 R59 detects the sharpening idiom by what the right-hand side
-    contains (two reads of the colour alpha, a derivative call, `max`, two literals `0.5`); C1 R83
-    said "the shipped form and nothing broader". The converter now follows R59 (a superset: the
-    shipped `(a - 0.5) / max(fwidth(a), 0.0001) + 0.5` is one instance) and keeps whatever follows a
-    leading `saturate(...)` call.
+70. **R59 against C1 R83 (retired).** Both older specifications requested replacing alpha
+    sharpening with its source alpha, differing only in how broadly they matched it. That
+    replacement changes multisample coverage and can erase other sampling calls in the
+    expression. Revision 5 removes it; the authored formula is preserved (note 137).
 71. **R68 loop bounds, R65 `int` from `step`.** The converter compares a counter with a float
     bound as floats (`float(i) < n`, HLSL's meaning) and keeps `int(step(...))` as an integer with a
     cast, instead of C2's `int(n)` and `float q = step(...)`. Both compile and agree whenever the
@@ -779,8 +791,8 @@ reading chosen as the most consistent with it:
     the components of the fragment stage's varying inputs after the width reconciliation (scalar 1,
     vector N, matrix columns times rows, arrays multiply, a type it cannot size counts 4). It runs in
     the program numbering and when a fragment stage is legalized alone; a vertex stage alone, and vertex
-    outputs no fragment input names, are free. The failure is a `LegalizeError::Request` (category
-    `InvalidRequest`) naming the total, 124, the stage and the varying whose addition first crossed the
+    outputs no fragment input names, are free. The failure is a `LegalizeError::ComponentBudget` (category
+    `InvalidRequest`, note 143) naming the total, 124, the stage and the varying whose addition first crossed the
     limit. Location numbers of varyings are unbounded (running totals saturate instead of overflowing, so
     a hostile array bound cannot panic a debug build). The location cap of 31 stays for vertex inputs
     and fragment outputs, and reflection still refuses a vertex input above 30 (d R61), the stricter
@@ -893,6 +905,271 @@ steps had already done is noted; those tests passed before the change and stay a
 The shipped sweeps are unchanged (158 of 159 programs, 317 of 318 stages); the system Metal compiler accepted
 all 316 shipped stages. The workshop sweeps could not run in the worktree of this change (no unpacked
 copies): `lens_distorsion`, refused before by the preprocessor, now goes further and has to be checked there.
+
+## WE dialect parity (Wallpaper Engine 2.8.0.42 prelude)
+
+123. **Texel fetch, back buffer, comparison** (WE prelude `sub_1400D5070` / `sub_1400F5CB0`; supersedes the
+    R22 refusals of `texLoad2D`, `texSample2DBackBuffer`, `texSample2DCompare` and
+    `sampler2DComparison`). The reference prelude defines `texLoad2D(s, u, r)` as
+    `s.Load(int3((u) * (r), 0))`, written `texelFetch(s, ivec2((u) * (r)), 0)`;
+    `texSample2DCompare(s, u, d)` as `SampleCmpLevelZero`, written `textureLod(s, vec3(u, d), 0.0)`
+    on a `sampler2DShadow`; `texSample2DBackBuffer(s, u, r)` as `s.Load(int2((u) * (r)), 0)` of a
+    `Texture2DMS<float4>` under `BACKBUFFER_MS` and `texSample2D(s, u)` otherwise. The converter
+    renames `sampler2DComparison` to `sampler2DShadow` and `sampler2DBackBuffer` to `sampler2DMS` or
+    `sampler2D` before it converts (`ConvertOptions::backbuffer_ms`, set by the pipeline from the
+    effective `BACKBUFFER_MS` combo). `DECLARE_SAMPLER2D_COMPARE_PARAMETER` and
+    `MAKE_SAMPLER2D_COMPARE_ARGUMENT` are the comparison twins of the 2D parameter macros. Only
+    `textureCompare`, which the dialect does not have, is still refused among these sampling names.
+124. **Split kinds.** `TexKind` has `Shadow` (`texture2D` object, `samplerShadow` sampler, joined as
+    `sampler2DShadow`) and `D2Ms` (`texture2DMS`, joined as `sampler2DMS`); `TexturePlan::kind`
+    replaces `three_dimensional`. A `texelFetch` is left on the texture object, as Naga reads it.
+125. **Reflection says what to bind.** A sampled image carries `"dimension"` (`3d`, `2d_ms`,
+    `depth_2d`, `other`) when it is not a plain 2D texture, and a comparison sampler
+    `"comparison":true`; plain records are unchanged, so no golden reflection moved. The engine
+    binds a stand-in of the declared type, reading zero, when a slot's texture is of another type,
+    and a GREATER comparison sampler with a transparent border for a comparison slot.
+126. **Untyped operands** (R54, R55 widened). An operand of `!`, `&&`, `||` or a condition whose type
+    the converter does not work out (`ldexp`, an unresolved
+    macro name) is written `bool(x)`, the identity on a bool and "not zero" on a number; a store of
+    one into an `int`, `uint` or `float` is that type's constructor. Vectors are never wrapped.
+127. **Initial changes kept revision 2.** The shipped golden tables (`pipeline/tests/golden.rs`, `cache_key.rs`) are
+    unchanged by 123 to 126: no shipped program the tables pin uses the new names or an untyped
+    operand, and the reflection keys are written only when they say something. The current
+    translator changes use revision 3 (note 131).
+
+128. **`GLSL` is undefined** (Wallpaper Engine reference probe T5).
+    The reference prelude defines only `HLSL` and `HLSL_SM40`. The shipped `#if GLSL` blocks are the
+    `discard` below half alpha inside `#if ALPHATOCOVERAGE` (`clippingmaskimage4.frag`,
+    `generic3.frag`, `generic4.frag`, `genericimage3.frag`, `genericimage4.frag`,
+    `genericparticle.frag`, `genericropeparticle.frag`, `shadowcaster.frag`,
+    `shadowcasterfoliage4.frag`, `base/model_fragment_v1.h`), now not taken, so coverage decides
+    what is kept, and `puppettexturechannels.vert`'s `#ifdef GLSL` index, whose Direct3D form
+    `g_BlendMap[a_BlendIndices.x / 4.0][mod(a_BlendIndices.x, 4.0)]` is taken (float subscripts
+    convert to `int`, R39, the same values for the non-negative indices it gets). The local
+    workshop library (20 wallpapers, packaged and loose shaders) names `GLSL` only in a comment of
+    the eight copies of `Simple_Audio_Bars.frag` ("Same as GLSL's modulo function"). The shipped
+    sweeps compile the same counts with and without the define (167 legalized and compiled, 161 of
+    162 end to end). Revision 5 also preserves the authored alpha sharpening instead of
+    replacing it with the source alpha (note 137).
+
+129. **GLSL-only calls are refused.** Wallpaper Engine 2.8.0.42's HLSL prelude has no mapping
+    for `fract`, `inversesqrt`, two-argument `atan`, GLSL derivative spellings, matrix `inverse`,
+    component comparisons, bit reinterpretation/scan names, and the other entries in
+    `WE_REFUSED_GLSL_CALLS`. The stage uses its normal compiler-failure fallback, including when
+    the bad call is in an unused function. Reference probes T6/T13 distinguish those refusals
+    from the accepted HLSL controls. A function the author declares under one of those names
+    is called with the ordinary HLSL argument conversions, including scalar broadcasts and
+    vector truncation; it cannot accidentally resolve to the GLSL builtin instead.
+    `ConvertOptions::glsl_builtins` is only for reconverting our already-generated GLSL,
+    whose dialect operations use those GLSL names internally; the authored pipeline leaves it off.
+130. **HLSL bit operations keep their types.** `rsqrt`, `asuint`, `asint`, `asfloat`,
+    `countbits`, `firstbithigh` and `firstbitlow` lower to their GLSL operations while preserving
+    scalar/vector width and component kind. Unsigned scans explicitly convert the GLSL signed
+    result back to unsigned, so a zero input yields `0xffffffff` before subsequent arithmetic
+    or a float conversion. This follows the [HLSL firstbithigh overloads](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/firstbithigh)
+    and [firstbitlow contract](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/firstbitlow),
+    and GPU tests check the actual values, including unsigned comparisons against negative integers.
+131. **Pipeline revision 3.** The compiler identity and cache keys now include revision 3;
+    older rows in the dialect, Metal and cache-key golden tables remain unchanged. The dialect
+    digest uses `transpose` in the fixture that formerly called the now-invalid builtin `inverse`.
+    Texture-format/reflection changes, the absent `GLSL` define, and these call rules therefore
+    cannot reuse programs built under revision 2.
+132. **Material-property metadata.** A uniform alias whose annotation has
+    `"conversion":"rad2deg"` carries `"rad2deg":true`. False flags are absent from JSON. The C++ bridge treats absent fields as
+    false, keeps the last duplicate alias's flags with its uniform, and passes them through
+    `WPShaderInfo` as `alias_rad2deg`. Revision 3 also prevents old metadata without this
+    flag being reused.
+
+133. **T13 sampling vocabulary.** Authored `texture`, `texture2D`, `tex2D`, `textureLod`,
+    `texture2DLod`, `tex2DLod`, `texelFetch` and `textureSize` calls fail as in WE 2.8.0.42.
+    T13's follow-up distinguishes the dialect controls: `texSample2D` takes two arguments,
+    `texSample2DLod` three. Wrong counts fail instead of acquiring GLSL's optional bias.
+    Author-declared functions under the refused names retain their ordinary signatures.
+    Engine/test source inputs use `texSample*` or `texLoad2D`; generated GLSL still uses
+    `texture*`/`texelFetch` and reconverts with `glsl_builtins` enabled.
+134. **Type spellings depend on their position.** Measured local/uniform/function probes
+    reject `ivec2`, `ivec3`, `uvec2`, `uvec3` and `bvec2/3/4`. `ivec4` is accepted as a
+    uniform but not a local type; `uvec4` is accepted in uniforms, locals, functions and
+    constructors. Native HLSL `int2/3/4`, `uint2/3/4` and `bool2/3/4` are accepted. Their
+    spellings survive author validation before being emitted as canonical GLSL types,
+    so legal `int2` is not mistaken for authored `ivec2`. Internal generated types remain valid.
+135. **`modf` output arguments.** A generated helper truncates each floating component,
+    writes the integral part and returns `x - whole`. A scalar input broadcasts to a
+    vector output; an input vector cannot narrow into a smaller output. Scalar/vector
+    `int`, `uint` and `bool` outputs convert the whole part after computing the fraction
+    from its floating value. Floating matrices are processed by columns. WE accepts a
+    swizzle output and rejects duplicate swizzles, non-lvalues and wrong argument counts;
+    an author's matching `modf` definition takes precedence. Naga's GLSL front end lacks
+    this intrinsic and evaluates a helper's indexed out argument twice, so this lowering
+    captures the input and output indices in call-local temporaries before invoking it.
+    GPU tests pin single evaluation, integer/boolean outputs and matrix results.
+    Runtime texture probes show `modf(-0)` returning +0 with whole -0, +infinity producing
+    a NaN fraction with infinite whole, and NaN producing two NaNs. Constant-expression
+    probes differ for signed zero; this work pins runtime behavior, not every optimizer
+    folding choice or the separate hex-literal syntax gap.
+136. **Pipeline revision 4.** The type/call refusals and `modf` output change are identified
+    by revision 4. New cache-key, converted-text and MSL rows are appended; rows 1–3 are
+    retained byte-for-byte. The fixed converted/MSL examples keep their previous digests,
+    while the identity-dependent program key changes.
+
+137. **MSAA preserves alpha sharpening; pipeline revision 5.** Wallpaper Engine 2.8.0.42
+    at 4x gives raw alpha 0.25/0.75 one-quarter and three-quarter coverage. With its stock
+    `saturate((alpha - 0.5) / max(fwidth(alpha), 0.0001) + 0.5)` formula, those constant
+    values give zero and full coverage. The legacy R83 replacement therefore changed
+    visible pixels. The formula, its derivative and any nested texture read now remain
+    intact through dialect conversion and legalization. One-sample controls at 0.25 and
+    0.75 retain their rejected/covered results; the exact 0.5 threshold is not established
+    by that reference. The renderer uses A2C without also blending by the same alpha.
+    Revision 5 appends cache-key, converted-text and MSL rows without altering rows 1–4.
+    The fixed converted/MSL examples keep their digests, and the identity-dependent key changes.
+
+138. **Resolved back-buffer slots; pipeline revision 6.** A texture record can include
+    `sample_count` (1, 2, 4 or 8). Omitted preserves the existing declaration rules.
+    With `BACKBUFFER_MS=1`, a declared back buffer whose bound image has one physical
+    sample is emitted as a Metal 2D image, and its integer sample-zero read becomes
+    a mip-zero texel read. It stays unfiltered; the macro value remains available to
+    the author's conditionals. Other slots keep real multisample declarations and
+    sample-zero reads, including in the same program and through sampler helpers.
+    WE 2.8.0.42's cold-start model probe reports `Texture2DMS` with one sample for
+    `_rt_FullFrameBuffer` during 4x scene drawing: its ordinary reader and back-buffer
+    reader see the resolved colors. The internal `_rt_FullFrameBufferMultiSampled`
+    name is not exposed to that author texture lookup. This does not replace true
+    MS resources with a filtered resolved sample. Physical sample counts enter the
+    cache key when present, and revision 6 appends the three golden rows while
+    retaining revisions 1–5.
+
+`alpha_sharpening_compiles_with_the_system_metal_compiler` checks the preserved formula
+with the system compiler (`WM_SHADER_METAL_COMPILE=1`); the Engine MSAA pixel regression
+checks raw/sharpened coverage at 1x and 4x.
+
+`tests/we_parity_calls.rs` covers the observed T13/follow-up boundaries and the physical
+Metal output-argument checks (`WM_SHADER_GPU_PROBES=1`).
+`modf_output_conversions_compile_with_the_system_metal_compiler` exercises the actual render
+stages with the system compiler (`WM_SHADER_METAL_COMPILE=1`). These changes do not claim
+complete coverage of all remaining builtin names, constructor syntax or builtin uniforms.
+
+139. **Authored expression shapes; pipeline revision 8.** The 24-cell WE 2.8.0.42
+    probe rejects matrix/vector `*` in either order with X3020, including a bare
+    expression and results assigned to vectors or matrices. Matrix/matrix and
+    matrix/scalar products remain accepted. Author validation requires `mul` for
+    the rejected forms; its lowered GLSL matrix operators remain valid.
+    Float-vector constructors consume exactly their component count: WE rejects
+    `vec2(gray)`, `vec3(gray)`, `vec4(gray)` and `vec3(vec4(...))` with X3014, while
+    same-width copies and explicit component lists compile. `CAST3(gray)`,
+    `(vec3)gray` and `(float3)gray` broadcast the scalar. The parser preserves the
+    distinction between a cast and a constructor until conversion; internal
+    constructors and reconverted generated GLSL retain GLSL's broadcast and
+    truncation rules. Engine-owned shader source and test source use explicit
+    casts or `mul`. `tests/we_parity_shapes.rs` pins the rejection and positive
+    controls independently of shader names. Revision 8 appends cache-key,
+    converted-text and MSL rows without changing rows 1–7; fixed converted/MSL
+    digests remain unchanged after migrating their authored input syntax.
+140. **Coverage facts; pipeline revision 9.** The reflection document gains two keys,
+    written only when they hold so an older or newer reader takes their absence as "not
+    proven": `"vertex_position":{"input":…,"matrix":…}` and `"fragment_always_writes":true`
+    (`src/reflect/coverage.rs`). The engine opens a render pass with a clear instead of a
+    load when one draw provably writes every texel of its target, and these are the
+    shader half of that proof. The fragment fact: no `Kill` anywhere in the module, no
+    sample-mask output and a float `vec4` at location 0. The vertex fact: the entry point
+    returns its position from one top-level `return`, and that value is
+    `vec4(input.xyz, 1.0)` or a `mat4` uniform block member times it (matrix on the left, as
+    `mul(vec4(…), m)` lowers), followed through private and local variables that have
+    exactly one write, a whole store at the top level of its function, reached (no
+    `return`/`discard` before it) and ordered before the load: in the same function by
+    statement index, across the entry point and `main` through their single call site.
+    Any other statement kind in the module, any second or nested write, a pointer passed to
+    a call, a clip or cull distance output, or a component that is not the input's x, y, z
+    and the constant 1 leaves the fact out. Shipped effects: waterwaves, tint, spin (its
+    copy of `a_Position`), blur's gaussian kernels in every `#if` and skew, transform and
+    foliagesway in `MODE` 0 are proven; the last three in `MODE` 1 move the corners and are
+    not. Revision 9 appends cache-key, converted-text and MSL rows with the MSL and
+    converted digests unchanged; the parity goldens gained the two keys and nothing else.
+141. **Read uniforms; pipeline revision 10.** The reflection document gains
+    `"read_uniforms":[…]`, the names of the uniform block members anything the program
+    produces can depend on, ascending, written only when every stage answered so a reader
+    takes its absence as "every declared member is read" (`src/reflect/reads.rs`). A
+    declaration, and even a name in the translated text, is not a read: Wallpaper Engine's
+    `genericimage4.vert` forms `g_EyePosition - worldPos` in every variant and uses it only
+    when lit or fogged. The engine leaves a layer's world transform and the active camera out
+    of a reuse sample when no read uniform derives from them. The analysis is a backward
+    liveness over the module that is translated: the entry point's returned value and every
+    `If`, `Switch` and `break_if` condition of a reached function are used; a used expression
+    uses its operands; a used load of a variable (local, private, or a parameter) uses every
+    store into it in any reached function, its initializer and the stored element's indices;
+    a used `CallResult` uses the callee's returned values; a used parameter uses the argument
+    at every call; a pointer argument joins the caller's variable and the parameter both
+    ways; a member is read when a used `AccessIndex` selects it from a `Uniform` global, every
+    member when the global is used otherwise. It iterates to a fixed point and only ever
+    over-states the reads. Atomics, image stores, workgroup loads, subgroup, ray-query and
+    cooperative forms, or a store through a pointer not rooted in a variable or parameter,
+    leave the key out. Every shipped program of the sweep answers (161, 243 declared members
+    unread). Revision 10 appends cache-key, converted-text and MSL rows with the MSL and
+    converted digests unchanged; the parity goldens gained the key and nothing else.
+142. **Fragment colour; pipeline revision 10.** The reflection document gains
+    `"fragment_colour"`, an array of four channels (red, green, blue, alpha), each `null` or
+    the factors whose product the channel is: `{"uniform":member,"component":k}` for a
+    32-bit float uniform block member (a scalar's component is 0) and
+    `{"constant_bits":bits}` for a float constant, its bits so NaN and infinity survive. It
+    is written only when the alpha channel is proven. The analysis (`Prover::colour` in
+    `src/reflect/coverage.rs`) starts at the location-0 output of the entry point's single
+    final `return` (no dual-source output) and follows compositions, splats, swizzles,
+    component accesses, `*` of scalars and vectors channel by channel, float literals and
+    constants, loads of uniform block members (whole or one component) and the same
+    once-written private and local variables as the vertex fact; it needs the validated
+    module's expression types for the channel counts. Anything else (a texture sample, a
+    varying, a sum, a function call, a matrix, an array element, a second write) leaves that
+    channel `null`. The engine leaves out a draw whose frame's uniforms make the alpha 0 and
+    every factor finite, under a blend that keeps the destination at alpha 0. Wallpaper
+    Engine's `flat.frag` (the solid layer) without `VERTEXCOLOR` is proven. It shares
+    revision 10 with note 141.
+143. **One retry with `GLSL` for a program over the component budget** (issue #161). When
+    legalization refuses a program only because its fragment varyings exceed 124 components
+    (`LegalizeError::ComponentBudget`, note 110), `pipeline::prepare_and_legalize` prepares it
+    once more with `Prelude::Direct3DWithGlsl` (`HLSL`, `HLSL_SM40` and `GLSL` all 1) and
+    legalizes that. Workshop effects such as the audio oscilloscopes declare
+    `varying vec4 audioValue[RESOLUTION]` for Windows and a smaller array behind `#ifdef GLSL`
+    for tighter interpolator limits (`vec4[28]` at the default `RESOLUTION` 32: 120 components
+    where the Direct3D branch has 136). Wallpaper Engine's compiler gets under its own limit by
+    removing the unused array elements, which this layer does not do. A program that passes
+    the first time never sees `GLSL`, so note 128 holds for every program that already
+    compiled and their Metal text and cache keys are unchanged, with no revision bump. A refused
+    program was never stored. When the retry changes no stage text, fails to preprocess or is
+    still refused, the first refusal stands (`vec4[60]` at `RESOLUTION` 64 is still 248). The
+    retried program takes every `#if GLSL` branch, including the alpha-to-coverage `discard`
+    of note 128; that only matters for a program that could not compile otherwise. Tests:
+    `pipeline::tests::budget` (`a_program_over_the_budget_is_compiled_again_with_glsl_defined`,
+    `a_program_within_the_budget_never_sees_glsl`,
+    `a_program_still_over_the_budget_with_glsl_keeps_the_first_refusal`) and `preprocess`
+    `the_glsl_prelude_adds_glsl_to_the_direct3d_macros_without_writing_any`.
+
+The shipped sweeps now include `volumetricsfront` (167 programs legalized and compiled, 1 failing
+as before: `shadowcasterfoliage4`'s undeclared `g_Texture1Texel`); every `SHADOW`, `POINTLIGHT`
+and `BACKBUFFER_MS` combination of it compiles (`pins`).
+
+## Point geometry stages (WE's DX11 rope path)
+
+A request may carry `point_geometry` (`source`, `max_vertices`, `output_index_attribute`):
+an author geometry program with one point input (`IN[0]`) and a triangle-strip output
+(`OUT.Append`). `prepare` preprocesses it with the vertex stage's combos, and
+`point_geometry::lower` folds it into the vertex stage. The author's vertex `main` runs
+first and fills the input record. Then the geometry `main` runs, and its append keeps
+only the vertex whose ordinal is `int(<output_index_attribute>.x)`. Its outputs become
+the varyings the fragment stage reads. The caller draws `max_vertices` copies of each point,
+each naming its ordinal; the declared `maxvertexcount` must equal `max_vertices` after
+preprocessing, or the request is refused. Geometry-private globals and helpers get
+stage-private names, and a uniform both stages declare must have one type. The
+lowered program is ordinary vertex text from there on, so dialect rules (scalar
+swizzles and the rest) still apply to the author's geometry code. The geometry source
+and bounds are part of the cache key.
+
+Every invocation runs the whole geometry program to keep one vertex, so a strip of
+`n` vertices costs about `n` times one geometry run. The renderer uses it only for rope
+materials with a `.geom`: one record per pair, `4 + 2 * TRAILSUBDIVISION` invocations,
+as WE writes them (0x1402308A0). An offscreen probe of eight 1000-particle ropes at
+subdivision 32 (68 invocations per pair) took 2.94-3.04 s for 300 frames against
+2.99-3.08 s on the vertex-only path: no difference beyond run-to-run noise.
+`tests/point_geometry.rs` pins the contract; `metal_compile.rs` translates the shipped
+`genericropeparticle` with its geometry stage for 384 renderer combinations.
 
 ## Measurements (step 3)
 

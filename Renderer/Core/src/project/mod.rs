@@ -14,8 +14,8 @@ mod scene;
 pub use r#override::{FlatScenePropertyOverride, ScenePropertyOverrideError, SerdeValudeExt};
 pub use resolver::{SceneSourcePaths, SceneSourceResolution};
 pub use scene::{
-    ScalingMode, SceneDesc, SceneDescBuilder, SceneDescSliceExt, SceneFile, SceneFraming,
-    SceneHandle, SceneIr, SceneRenderTargetIr, SceneResult, SceneTemplate,
+    PostProcessing, QualityLevel, ScalingMode, SceneDesc, SceneDescBuilder, SceneDescSliceExt, SceneFile, SceneFraming,
+    SceneHandle, SceneIr, SceneQuality, SceneRenderTargetIr, SceneResult, SceneTemplate, SceneUserOptions,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

@@ -28,14 +28,17 @@ class DownloaderTestCase: XCTestCase {
     libraryName: String = "Library", rememberSession: Bool = true, item: WorkshopItem? = nil,
     networkMonitor: (any ProcessNetworkMonitoring)? = nil, checkpointDirectory: URL? = nil,
     freeSpace: (@Sendable (URL) -> Int64?)? = nil, retryDelays: [TimeInterval] = [0, 0, 0],
-    runtimeProvider: (any SteamCMDRuntimeProviding)? = nil
+    runtimeProvider: (any SteamCMDRuntimeProviding)? = nil,
+    presetBaseDetails: @escaping WorkshopDownloader.ItemDetails = { _ in nil },
+    downloadRegion: SteamCMDDownloadRegion = .steamsChoice
   ) -> WorkshopDownloader {
     let downloader = WorkshopDownloader(
       sessionDirectory: root.appendingPathComponent("SteamSession"),
       runtimeProvider: runtimeProvider ?? ShellRuntimeProvider(),
       networkMonitor: networkMonitor ?? FixtureNetworkMonitor(),
       checkpointDirectory: checkpointDirectory,
-      freeSpace: freeSpace ?? WorkshopDownloader.systemFreeSpace, retryDelays: retryDelays)
+      freeSpace: freeSpace ?? WorkshopDownloader.systemFreeSpace, retryDelays: retryDelays,
+      itemDetails: presetBaseDetails, downloadRegion: { downloadRegion })
     let requestedItem = item ?? WorkshopItem(
       id: itemID, title: "Session fixture", creator: "Test", summary: "", previewURL: nil,
       tags: ["Video"], size: 0, subscriptions: 0)
@@ -180,7 +183,7 @@ class DownloaderTestCase: XCTestCase {
     try Data(mode.utf8).write(to: root.appendingPathComponent("session-mode"))
   }
 
-  func authenticate(_ downloader: WorkshopDownloader, guardCode: Bool = true) async throws {
+  func authenticate(_ downloader: any WorkshopDownloadWorker, guardCode: Bool = true) async throws {
     do {
       try await waitUntil { downloader.prompt == .password || !downloader.isRunning }
       guard downloader.prompt == .password else {

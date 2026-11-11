@@ -1,11 +1,12 @@
 import Foundation
 
-/// The localized release history shipped with this copy, never the newest remote release.
+/// The localized release history: the `CHANGELOG.md` sections the update manifest carries, so
+/// the update window can show every version between the running one and the latest.
 struct AppReleaseHistory {
     enum Language: Int, CaseIterable, Hashable, Sendable {
         case english, chinese, korean
 
-        /// Native language identifiers shared by the changelog and translation picker.
+        /// The changelog's language headings, in each language's own name.
         var name: String {
             switch self {
             case .english: "English"
@@ -23,15 +24,6 @@ struct AppReleaseHistory {
                 self = .english
             }
         }
-
-        /// Prefer English for a missing Korean banner, never another release's picture.
-        var bannerFallbacks: [Self] {
-            switch self {
-            case .english: [.english, .chinese, .korean]
-            case .chinese: [.chinese, .english, .korean]
-            case .korean: [.korean, .english, .chinese]
-            }
-        }
     }
 
     struct Entry: Equatable, Sendable {
@@ -39,10 +31,10 @@ struct AppReleaseHistory {
         let english: ReleaseNotes
         let chinese: ReleaseNotes
         var korean: ReleaseNotes? = nil
-        /// The picture each translation opens with, if the release has one.
-        var englishBanner: Banner? = nil
-        var chineseBanner: Banner? = nil
-        var koreanBanner: Banner? = nil
+        /// The day it was published, as the heading writes it (`2026-10-24`).
+        var date: String? = nil
+        /// The heading's link: the comparison with the previous version.
+        var url: URL? = nil
 
         func notes(language: Language) -> ReleaseNotes {
             switch language {
@@ -51,42 +43,20 @@ struct AppReleaseHistory {
             case .korean: korean ?? english
             }
         }
-
-        func banner(language: Language) -> Banner? {
-            switch language {
-            case .english: englishBanner
-            case .chinese: chineseBanner
-            case .korean: koreanBanner
-            }
-        }
-    }
-
-    /// A file in the bundle's `ReleaseBanners` folder, and what it shows.
-    struct Banner: Equatable, Sendable {
-        static let directory = "ReleaseBanners"
-        let fileName: String
-        let description: String
     }
 
     enum InvalidHistory: Error {
-        case missingResource, invalidVersion, duplicateVersion, missingTranslation, invalidLanguageHeading
+        case invalidVersion, duplicateVersion, missingTranslation, invalidLanguageHeading
     }
 
     let entries: [Entry]
 
-    init(bundle: Bundle = .main) throws {
-        guard let url = bundle.url(forResource: "CHANGELOG", withExtension: "md") else {
-            throw InvalidHistory.missingResource
-        }
-        try self.init(markdown: String(contentsOf: url, encoding: .utf8))
-    }
-
     init(markdown: String) throws {
         var entries: [Entry] = []
         var version: SemanticVersion?
+        var heading: Heading?
         var bodies: [Language: String] = [:]
         var languages: [Language] = []
-        var banners: [Language: Banner] = [:]
         func finish() throws {
             guard let version else { return }
             guard !entries.contains(where: { $0.version == version }) else {
@@ -103,22 +73,18 @@ struct AppReleaseHistory {
                 throw InvalidHistory.missingTranslation
             }
             entries.append(Entry(version: version, english: en, chinese: zh, korean: ko,
-                                 englishBanner: banners[.english], chineseBanner: banners[.chinese],
-                                 koreanBanner: banners[.korean]))
+                                 date: heading?.date, url: heading?.url))
         }
         for line in markdown.components(separatedBy: .newlines) {
             if line.hasPrefix("## ") {
                 try finish()
                 // Every ## line is a release heading. Unreleased and headings inside
                 // notes fail the whole file; release publishing rejects the same lines.
-                guard let token = line.dropFirst(3).split(separator: " ").first,
-                      let parsed = SemanticVersion(String(token)) else {
-                    throw InvalidHistory.invalidVersion
-                }
-                version = parsed
+                guard let parsed = Heading(line) else { throw InvalidHistory.invalidVersion }
+                version = parsed.version
+                heading = parsed
                 bodies = [:]
                 languages = []
-                banners = [:]
             } else if version != nil, line.hasPrefix("###"), !line.hasPrefix("####") {
                 let heading = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
                 guard languages.count < Language.allCases.count,
@@ -129,27 +95,40 @@ struct AppReleaseHistory {
                 }
                 languages.append(next)
             } else if version != nil, let language = languages.last {
-                if let banner = Self.banner(line) {
-                    // A banner is shown above the notes, not read as one of them.
-                    banners[language] = banners[language] ?? banner
-                } else {
-                    bodies[language, default: ""] += line + "\n"
-                }
+                // A banner line is skipped by `ReleaseNotes`: it is a picture, not a change.
+                bodies[language, default: ""] += line + "\n"
             }
         }
         try finish()
         self.entries = entries.sorted { $0.version > $1.version }
     }
 
-    /// `![description](Resources/ReleaseBanners/name)`, the line `scripts/release_notes.py` writes.
-    private static func banner(_ line: String) -> Banner? {
-        let prefix = "](Resources/\(Banner.directory)/"
-        let text = line.trimmingCharacters(in: .whitespaces)
-        guard text.hasPrefix("!["), text.hasSuffix(")"), let middle = text.range(of: prefix) else { return nil }
-        let description = text[text.index(text.startIndex, offsetBy: 2)..<middle.lowerBound]
-        let fileName = text[middle.upperBound..<text.index(before: text.endIndex)]
-        guard !description.contains("]"), !fileName.isEmpty,
-              !fileName.contains(where: { $0 == "/" || $0 == ")" || $0.isWhitespace }) else { return nil }
-        return Banner(fileName: String(fileName), description: String(description))
+    /// `## [1.6.2](https://…/compare/v1.6.1...v1.6.2) (2026-10-24)`, the heading
+    /// `scripts/release_notes.py` writes, or the older `## 1.6.2 — 2026-10-24`.
+    private struct Heading {
+        let version: SemanticVersion
+        let url: URL?
+        let date: String?
+
+        init?(_ line: String) {
+            let rest = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+            let token: Substring
+            var tail: Substring
+            if rest.hasPrefix("["), let close = rest.range(of: "]("),
+               let end = rest[close.upperBound...].firstIndex(of: ")") {
+                token = rest[rest.index(after: rest.startIndex)..<close.lowerBound]
+                url = URL(string: String(rest[close.upperBound..<end]))
+                tail = rest[rest.index(after: end)...]
+            } else {
+                token = rest.split(separator: " ").first ?? ""
+                url = nil
+                tail = rest.dropFirst(token.count)
+            }
+            guard let version = SemanticVersion(String(token)) else { return nil }
+            self.version = version
+            tail = tail.drop(while: { $0 == " " || $0 == "—" || $0 == "(" })
+            let day = tail.prefix(while: { $0.isNumber || $0 == "-" })
+            date = day.isEmpty ? nil : String(day)
+        }
     }
 }

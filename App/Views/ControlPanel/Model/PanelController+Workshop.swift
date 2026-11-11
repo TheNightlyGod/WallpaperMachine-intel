@@ -13,7 +13,9 @@ extension PanelController {
   // MARK: State
 
   /// The page's list-level state: tiles, source, paging, the last load's outcome.
-  var workshopBrowse: WorkshopBrowseState { WorkshopBrowseState(workshop) }
+  var workshopBrowse: WorkshopBrowseState {
+    WorkshopBrowseState(workshop, isTranslatingSearch: searchTranslation.isTranslating)
+  }
 
   /// Everything one Discover tile wears. A tile calls this itself, so a progress tick re-renders
   /// only the tile whose job moved.
@@ -21,11 +23,12 @@ extension PanelController {
     WorkshopTile(
       item: item, isInstalled: mediaLibraryContains(item.id),
       isFavorite: favoriteIDs.contains(item.id),
+      isSubscribed: workshop.subscribedIDs.contains(item.id),
       download: item.isCollection
         ? nil
         : TileDownloadState.workshop(
           title: item.title, request: downloadRequestRow(for: item.id),
-          job: steamDownloadRow(for: item.id), setupIsReady: steamSetup.isReady))
+          job: steamDownloadRow(for: item.id), setupIsReady: steamDownloadsReady))
   }
 
   /// What the Discover inspector offers for the item's download, and what it says about it.
@@ -83,6 +86,10 @@ extension PanelController {
   /// Searches Steam: stores the query and starts it afresh from the first page. A repeat while a
   /// search is pending should use `.latestWins`, so the newest search is the one on show.
   ///
+  /// Text typed in another of the app's languages is searched in English when it can be
+  /// translated on this Mac (`WorkshopSearchTranslator`); the field keeps what was typed, and a
+  /// text the person chose to search as typed stays so until another text is searched.
+  ///
   /// `kind` is every type unless a caller narrows it; the panel narrows by tags alone. The limits
   /// are those the controls keep: 32 required and 64 excluded tags of at most 128 characters.
   func searchWorkshop(
@@ -92,8 +99,15 @@ extension PanelController {
     guard text.count <= Self.maxTextLength, tags.count <= 32, tags.allSatisfy({ $0.count <= 128 }),
       excludedTags.count <= 64, excludedTags.allSatisfy({ $0.count <= 128 })
     else { throw InvalidControlValue() }
+    let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    let translation: WorkshopSearchTranslation? =
+      if typed == workshop.declinedTranslationText { nil } else {
+        await searchTranslation.translation(for: text)
+      }
     try await run(.immediate) {
       workshop.searchText = text
+      workshop.searchTranslation = translation
+      if workshop.declinedTranslationText != typed { workshop.declinedTranslationText = nil }
       workshop.kind = kind
       workshop.sort = sort
       workshop.tags = tags
@@ -106,6 +120,14 @@ extension PanelController {
   /// Choosing the list already on show searches it again.
   func openWorkshop(_ list: WorkshopList) async throws {
     try await run(.immediate) { workshop.open(list.source) }
+  }
+
+  /// Lists Your favorites in another of Steam's orders, from the first page.
+  func sortWorkshopFavorites(_ order: WorkshopFavoritesOrder) async throws {
+    try await run(.immediate) {
+      workshop.favoritesOrder = order
+      if workshop.source == .favorites { workshop.search() }
+    }
   }
 
   /// Opens an author's wallpapers from a tile, so Back returns to the list it was opened from.
@@ -121,6 +143,23 @@ extension PanelController {
       throw InvalidControlValue()
     }
     try await run(.immediate) { workshop.open(.collection(id: id, title: title)) }
+  }
+
+  /// Installed's **Show in Steam Workshop**, for a Workshop link or id that is not installed:
+  /// Discover with the wallpapers list showing that one item, as pasting its link into the search
+  /// field does. The sort and the filters stay as they were; an item asked for by name ignores
+  /// them. `id` is a Workshop id that names its item alone (`WorkshopLink.isBareItemID(_:)`),
+  /// since the search field it is put in looks up nothing shorter; Installed offers no other.
+  func lookUpWorkshopItem(id: String) async throws {
+    guard WorkshopLink.isBareItemID(id) else { throw InvalidControlValue() }
+    try await run(.immediate) {
+      workshop.searchText = id
+      workshop.searchTranslation = nil
+      workshop.kind = .all
+      workshop.open(.browse)
+    }
+    // Opened after the search has started, so a first visit does not load the browse list too.
+    try await navigate(.workshop)
   }
 
   /// Returns to the source the shown one was opened from; nothing when it was not opened from one.
@@ -179,7 +218,70 @@ extension PanelController {
   /// the subscriptions: whoever signed in has found the feature.
   private func signInToSteamCommunity(_ obtain: @MainActor () async -> WebSignInCookies?) async throws {
     try await workshop.signInToSteamWeb(obtainCookies: obtain)
-    if workshop.steamWebSession != nil { store.supportPrompt?.recordSubscriptionsOffered() }
+    if workshop.steamWebSession != nil {
+      store.supportPrompt?.recordSubscriptionsOffered()
+      try? await workshop.refreshSubscribedIDs()
+    }
+  }
+
+  /// Reads what the signed-in account subscribes to, so the Workshop tiles mark it, and answers
+  /// the sign-in they were read with (nil signed out). A read that fails leaves the marks as they
+  /// were and throws, so the banner says what could not be read and why; an ended session is
+  /// forgotten as anywhere, and its own message already says to sign in again.
+  @discardableResult
+  func refreshWorkshopSubscriptions() async throws -> SteamWebSession? {
+    var read: SteamWebSession?
+    try await run(.direct) {
+      do {
+        read = try await workshop.refreshSubscribedIDs()
+      } catch let error where !(error is CancellationError) && !(error is SteamSignInRequired) {
+        let reason = error.localizedDescription
+        throw WorkshopFailure(message: L("Your Steam subscriptions could not be read, so the tiles do not mark them yet: \(reason)"))
+      }
+    }
+    return read
+  }
+
+  /// **Subscribe** and **Unsubscribe** in the Workshop inspector: changes the signed-in account's
+  /// subscriptions on Steam itself. A failure, or Steam ending the session, reaches the banner.
+  func setWorkshopSubscribed(_ subscribed: Bool, item: WorkshopItem) async throws {
+    try await run(.direct) { try await workshop.setSubscribed(subscribed, itemID: item.id) }
+  }
+
+  /// **Subscribe on Steam** and **Unsubscribe on Steam** in the Installed inspector's menu: the
+  /// same change for an installed Workshop wallpaper, named by its library id.
+  func setInstalledWorkshopSubscribed(_ subscribed: Bool, id: String) async throws {
+    guard let itemID = TelemetryWallpaper.workshopID(id) else { throw InvalidControlValue() }
+    try await run(.direct) { try await workshop.setSubscribed(subscribed, itemID: itemID) }
+  }
+
+  /// **More by this author** in the Installed inspector's menu: Discover with the author's
+  /// wallpapers, Back returning to the list it showed. The library keeps no author, so a wallpaper
+  /// Discover has not shown is looked up on Steam first.
+  func openInstalledWorkshopAuthor(id: String) async throws {
+    guard let itemID = TelemetryWallpaper.workshopID(id) else { throw InvalidControlValue() }
+    var item = workshop.workshopItem(id: itemID)
+    if item?.authorProfileID == nil {
+      // Asked outside the navigation key, so no other page waits for Steam; a page or wallpaper
+      // chosen while it answered wins, and the answer, or the failure, is dropped.
+      let page = navigation.selection
+      let wallpaper = selectedWallpaperID
+      let isCurrent = { self.navigation.selection == page && self.selectedWallpaperID == wallpaper }
+      do {
+        item = try await workshop.lookUpItem(id: itemID)
+      } catch {
+        guard isCurrent() else { return }
+        throw error
+      }
+      guard isCurrent() else { return }
+    }
+    guard let item, let author = item.authorProfileID else {
+      throw WorkshopFailure(
+        message: L("Steam did not say who made this wallpaper, so their other wallpapers can’t be shown."))
+    }
+    // Opened before the page is shown, so a first visit loads the author and not the browse list.
+    try await openWorkshopAuthor(id: author, name: item.creator)
+    try await navigate(.workshop)
   }
 
   /// **Import my subscriptions**, in the welcome guide and the one-time offer: signs in to Steam

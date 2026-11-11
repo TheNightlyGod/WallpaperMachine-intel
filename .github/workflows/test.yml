@@ -6,9 +6,9 @@
 # so only an unnarrowed run says the gate passes.
 #
 # A run tests the branch or tag it is started from ("Use workflow from", or
-# `gh workflow run test.yml --ref <branch>`), never a ref named in an input: its jobs
-# save caches under the ref they run from, and caches saved on main are restored by
-# every release. Started from main with another ref's code, a run would let that code
+# `gh workflow run test.yml --ref <branch>`), never a ref named in an input: only a run
+# started from main saves caches (other refs restore without saving), and caches
+# saved on main are restored by every release. Started from main with another ref's code, a run would let that code
 # write the caches a release builds from.
 #
 # Three jobs on three runners, because one after another they took over 40 minutes

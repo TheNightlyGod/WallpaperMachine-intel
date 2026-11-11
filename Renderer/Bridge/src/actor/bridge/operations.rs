@@ -60,6 +60,7 @@ struct ReconcileWork<E> {
     paused: bool,
     unloaded: bool,
     audio_suppressed: bool,
+    audio_gain: crate::engine::AudioGain,
     frame_rate_cap: Option<u32>,
     render_scale: f32,
     force_shader_refresh: bool,
@@ -82,6 +83,7 @@ impl<E: EngineFacade> ReconcileWork<E> {
             project_models: &self.models,
             frame_rate_cap: self.frame_rate_cap,
             audio_suppressed: self.audio_suppressed,
+            audio_gain: self.audio_gain,
             held: &self.held,
         }
     }
@@ -103,7 +105,12 @@ impl<E: EngineFacade> ReconcileWork<E> {
             .into_iter()
             .map(|(scene, owner)| {
                 (
-                    super::live_scene(scene, self.frame_rate_cap, self.audio_suppressed),
+                    super::live_scene(
+                        scene,
+                        self.frame_rate_cap,
+                        self.audio_suppressed,
+                        self.audio_gain,
+                    ),
                     owner,
                 )
             })
@@ -116,6 +123,12 @@ impl<E: EngineFacade> ReconcileWork<E> {
             .map(|(owner, scene)| (owner, scene.display.display_id))
             .collect();
         let ticket = self.journal.begin(openings);
+        // An empty scene list also means a video/web desktop now owns the display.
+        // Unload is stronger: release every prepared desktop independently of the
+        // host's asynchronous parking-plan update, then reconcile the empty slots.
+        if self.unloaded {
+            self.engine.close_all_scenes().await.map_err(engine_error)?;
+        }
         // The facade owns core/prune/readiness ordering. Keep the journal ticket
         // alive until every subsequent operation-layer poststep has succeeded.
         let results = self
@@ -360,6 +373,7 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
             paused: self.playback_paused(),
             unloaded: self.operation_unloaded(),
             audio_suppressed: self.operation_audio_suppressed(),
+            audio_gain: self.operation_audio_gain(),
             frame_rate_cap: self.active_target_fps_cap(),
             render_scale: self.effective_render_scale(),
             force_shader_refresh,
@@ -469,7 +483,7 @@ impl<E: EngineFacade + Clone> Message<ApplyWallpaperOptions> for BridgeActor<E> 
             .and_then(|display| display.stable_identity_selector());
         let candidate = match self
             .operation_values()
-            .prepare_apply(&msg.wallpaper_id, primary.as_ref())
+            .prepare_apply(&msg.wallpaper_id, primary.as_ref(), msg.user_initiated)
         {
             Ok(candidate) => candidate,
             Err(error) => return ctx.reply(Err(error)),
@@ -677,7 +691,7 @@ impl<E: EngineFacade + Clone> Message<CancelWallpaperOptions> for BridgeActor<E>
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         let draft = self.operation_values().wallpaper_draft(&msg.wallpaper_id)?;
-        self.show_wallpaper_properties(&msg.wallpaper_id, false, Vec::new())
+        self.show_wallpaper_properties(&msg.wallpaper_id, false, Vec::new(), Vec::new())
             .await?;
         let mut cancelled = draft.clone();
         cancelled.cancel();
@@ -1014,10 +1028,13 @@ impl<E: EngineFacade + Clone> BridgeActor<E> {
                     self.operation_engine().set_scaling_factor(handle, factor)
                 }
                 MirrorControl::TargetFps(_) => self.operation_engine().set_fps(handle, live_fps),
+                // The saved volume is `volume`; what plays is its share under the gain in force.
                 MirrorControl::Volume(volume) => self.operation_engine().set_audio_volume(
                     handle,
-                    wallpaper_core::media::audio::AudioVolume::try_from(volume)
-                        .map_err(|error| BridgeError::invalid_input(error.to_string()))?,
+                    self.operation_audio_gain().applied_to_volume(
+                        wallpaper_core::media::audio::AudioVolume::try_from(volume)
+                            .map_err(|error| BridgeError::invalid_input(error.to_string()))?,
+                    ),
                 ),
                 MirrorControl::Muted(muted) => self
                     .operation_engine()

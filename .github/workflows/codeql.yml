@@ -15,14 +15,16 @@
 # since the control panel became SwiftUI, and CodeQL fails a language it finds no code
 # for.
 #
+# Not on pull requests: the Swift job rebuilds the whole app with compile caching off for
+# about half an hour per run, and its findings were mostly false positives. Pushes to
+# main and the weekly run still report anything new.
+#
 # Default setup must be off (Settings -> Code security -> CodeQL analysis), or
 # GitHub rejects this workflow's uploads (docs/release.md).
 name: CodeQL
 
 on:
   push:
-    branches: [main]
-  pull_request:
     branches: [main]
   schedule:
     - cron: "41 4 * * 2"
@@ -33,7 +35,6 @@ permissions:
 
 concurrency:
   group: codeql-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
@@ -58,6 +59,12 @@ jobs:
 
       - if: matrix.language == 'swift'
         uses: ./.github/actions/prepare-build
+        with:
+          # Every push to main runs this, and a C++ object cache saved each time filled
+          # the repository's 10 GB cache limit and evicted the entries releases read.
+          save-object-cache: "false"
+          # Its cargo build is scripts/build.py's, so it may rebuild only what changed.
+          reuse-renderer-build: "true"
 
       - name: Build the renderer and bridge
         # Before init, so CodeQL neither traces nor slows the Rust and C++ build.
@@ -68,15 +75,31 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          # The renderer's Rust tests format fixture values (fake display UUIDs, raw
+          # test pointers) into panic messages, which the Rust queries report as
+          # sensitive logging and invalid pointer access. Rust has no build, so
+          # paths-ignore takes effect there; inline `#[cfg(test)]` modules still get
+          # scanned.
+          config: |
+            paths-ignore:
+              - Renderer/**/tests/**
+              - Renderer/**/tests.rs
+              - Renderer/**/*_tests/**
+              - Renderer/**/*_tests.rs
 
       - name: Build the app
         if: matrix.language == 'swift'
+        # Under CodeQL's build tracer Xcode 26 cannot find the Metal Toolchain that
+        # prepare-build installed (github/codeql-action#3978), so CompileMetalFile fails.
+        # The Metal sources carry no Swift, and their library is only loaded at run time,
+        # so the traced build leaves them out.
         run: |
           python3 scripts/build.py --swift-only \
             --xcode-setting CODE_SIGNING_ALLOWED=NO \
             --xcode-setting COMPILATION_CACHE_ENABLE_CACHING=NO \
             --xcode-setting SWIFT_ENABLE_COMPILE_CACHE=NO \
-            --xcode-setting SWIFT_USE_INTEGRATED_DRIVER=NO
+            --xcode-setting SWIFT_USE_INTEGRATED_DRIVER=NO \
+            --xcode-setting 'EXCLUDED_SOURCE_FILE_NAMES=*.metal'
 
       - uses: github/codeql-action/analyze@v4
         with:

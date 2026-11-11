@@ -22,7 +22,7 @@ final class SceneReportsTests: PanelTestCase {
       BridgeSceneBackendReport(
         displayId: id, displayName: display, wallpaperId: "w\(id)", wallpaperTitle: title,
         backend: backend, failureStage: failureStage,
-        failureReason: failureReason, videoPath: videoPath, optimizationApplied: applied))
+        failureReason: failureReason, videoPath: videoPath, optimizationApplied: applied, qualityInForce: nil))
   }
 
   /// A scene that failed before its first frame is stopped, not starting; the reasons are moot once
@@ -246,7 +246,7 @@ final class SceneReportsTests: PanelTestCase {
         sceneRenderers: [
           BridgeSceneBackendReport(
             displayId: 1, displayName: "Display 1", wallpaperId: "forest", wallpaperTitle: "Forest",
-            backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none", optimizationApplied: true)
+            backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "none", optimizationApplied: true, qualityInForce: nil)
         ])
       let performance = panel.controller.performanceSettings
       XCTAssertEqual(performance.sceneUpdates.map(\.canRetry), [true])

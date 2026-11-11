@@ -25,7 +25,7 @@ Wall = update_sponsors.Wall
 
 README = f"""# Title
 
-## Thank you. To every Supporter.
+## Thank you. To every Priority Support member.
 
 Intro.
 
@@ -92,17 +92,24 @@ class RenderTests(unittest.TestCase):
 
     def test_every_listed_name_and_the_count_are_in_the_alt_text(self):
         block = update_sponsors.render(Wall(("Alice", "Bob"), 1, "v1"))
-        self.assertIn('alt="WallpaperMachine Supporters: Alice, Bob. 2 Supporters on the wall. 1 more supports privately."', block)
+        self.assertIn(
+            'alt="WallpaperMachine Priority Support members: Alice, Bob. 2 Priority Support members on the wall.'
+            ' 1 more stays private."',
+            block,
+        )
 
     def test_counts_are_worded_as_the_website_words_them(self):
         count = update_sponsors.count_line
-        self.assertEqual(count(Wall(("Alice",), 0, "v")), "1 Supporter on the wall.")
-        self.assertEqual(count(Wall((), 3, "v")), "3 Supporters so far, all private.")
+        self.assertEqual(count(Wall(("Alice",), 0, "v")), "1 Priority Support member on the wall.")
+        self.assertEqual(
+            count(Wall(("Alice",), 2, "v")), "1 Priority Support member on the wall. 2 more stay private."
+        )
+        self.assertEqual(count(Wall((), 3, "v")), "3 Priority Support members so far, all private.")
         self.assertEqual(count(Wall((), 0, "v")), "No one is on the wall yet.")
 
-    def test_private_supporters_are_counted_not_named(self):
+    def test_private_members_are_counted_not_named(self):
         block = update_sponsors.render(Wall((), 3, "v1"))
-        self.assertIn('alt="WallpaperMachine Supporters. 3 Supporters so far, all private."', block)
+        self.assertIn('alt="WallpaperMachine Priority Support members. 3 Priority Support members so far, all private."', block)
 
     def test_a_name_can_never_become_markup(self):
         hostile = f'" onerror="x [x](https://evil) <img src=x> ![i](y) *b* `c` {update_sponsors.END}'
@@ -167,7 +174,8 @@ class MainTests(unittest.TestCase):
             return update_sponsors.main()
 
     def test_rewrites_every_readme(self):
-        readmes = [self.readme("README.md"), self.readme("README.zh-CN.md")]
+        readmes = [self.readme("README.md"), self.readme("README.zh-CN.md"), self.readme("README.pt-BR.md"),
+                   self.readme("README.ko.md")]
         self.assertEqual(self.main(readmes), 0)
         for readme in readmes:
             self.assertIn("Alice", readme.read_text(encoding="utf-8"))

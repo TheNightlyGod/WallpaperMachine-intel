@@ -10,6 +10,23 @@
 using namespace wallpaper;
 using namespace wallpaper::linalg;
 
+SceneCamera::SceneCamera(const SceneCamera& other) { *this = other; }
+
+SceneCamera& SceneCamera::operator=(const SceneCamera& other) {
+	if (this == &other) return *this;
+	std::tie(m_shake, m_perspective, m_aspect, m_fov, m_width, m_height,
+	         m_nearClip, m_farClip, m_zoom, m_fovLocked, m_isComposeLayer,
+	         m_node, m_imgEffect, m_cache, m_layerLocal, m_childrenUseSceneCamera,
+	         m_viewProjectionOverride) =
+	    std::tie(other.m_shake, other.m_perspective, other.m_aspect, other.m_fov,
+	             other.m_width, other.m_height, other.m_nearClip, other.m_farClip,
+	             other.m_zoom, other.m_fovLocked, other.m_isComposeLayer,
+	             other.m_node, other.m_imgEffect, other.m_cache, other.m_layerLocal,
+	             other.m_childrenUseSceneCamera, other.m_viewProjectionOverride);
+	m_rasterProjection.reset();
+	return *this;
+}
+
 Matrix4d SceneCamera::NodeModel() const {
 	if (! m_node) return Matrix4d::Identity();
 	m_node->UpdateTrans();
@@ -18,20 +35,31 @@ Matrix4d SceneCamera::NodeModel() const {
 
 const SceneCamera::Cache& SceneCamera::Refresh() const {
 	const Matrix4d model = NodeModel();
-	const double   inputs[8] = {
-		m_perspective ? 1.0 : 0.0, m_aspect, m_fov, m_nearClip, m_farClip, m_width, m_height, m_zoom
+	const double   inputs[10] = {
+		m_perspective ? 1.0 : 0.0, m_aspect, m_fov, m_nearClip, m_farClip, m_width, m_height, m_zoom,
+		m_lookBack, m_lookDistance
 	};
 	bool same = m_cache.valid && m_cache.shake == m_shake;
-	for (int i = 0; same && i < 8; ++i) same = m_cache.inputs[i] == inputs[i];
+	for (int i = 0; same && i < 10; ++i) same = m_cache.inputs[i] == inputs[i];
 	for (int c = 0; same && c < 4; ++c) {
 		for (int r = 0; same && r < 4; ++r) same = m_cache.model.coeff(r, c) == model.coeff(r, c);
 	}
 	if (same) return m_cache;
+	if (m_rasterProjection) m_rasterProjection->valid = false;
 
 	Matrix4d eye = Matrix4d::Identity();
 	eye.block<3, 1>(0, 3) = m_shake;
 	Matrix4d projection;
-	if (m_perspective) {
+	if (m_perspective && m_lookBack > 0.0) {
+		// The eye moved back along its axis to `m_lookBack` in front of the look-at point,
+		// and the lens scaled by that distance (x, y) so the look-at point keeps its framing.
+		const double back = m_lookBack - m_lookDistance;
+		eye.block<3, 1>(0, 3) += model.block<3, 1>(0, 2).normalized() * back;
+		const double far_padded = m_lookBack + std::max(m_farClip, 1.0);
+		projection = Perspective(Radians(m_fov), m_aspect, m_nearClip, far_padded);
+		projection.row(0) *= m_lookBack;
+		projection.row(1) *= m_lookBack;
+	} else if (m_perspective) {
 		const double far_padded = m_farClip + std::max(1.0, std::abs(m_farClip) * 0.001);
 		projection = Perspective(Radians(m_fov), m_aspect, m_nearClip, far_padded);
 	} else {
@@ -43,7 +71,7 @@ const SceneCamera::Cache& SceneCamera::Refresh() const {
 	m_cache.valid          = true;
 	m_cache.model          = model;
 	m_cache.shake          = m_shake;
-	for (int i = 0; i < 8; ++i) m_cache.inputs[i] = inputs[i];
+	for (int i = 0; i < 10; ++i) m_cache.inputs[i] = inputs[i];
 	m_cache.view           = Matrix4d(eye * model).inverse();
 	m_cache.viewProjection = projection * m_cache.view;
 	return m_cache;
@@ -71,7 +99,33 @@ Vector3d SceneCamera::GetRight() const {
 
 Matrix4d SceneCamera::GetViewMatrix() const { return Refresh().view; }
 
-Matrix4d SceneCamera::GetViewProjectionMatrix() const { return Refresh().viewProjection; }
+Matrix4d SceneCamera::GetViewProjectionMatrix() const {
+	if (m_viewProjectionOverride.has_value()) return *m_viewProjectionOverride;
+	return Refresh().viewProjection;
+}
+
+Matrix4d SceneCamera::GetRasterViewProjectionMatrix(const std::array<double, 4>& clip,
+                                                    uint64_t generation) const {
+	// Explicit shadow views already describe their atlas viewport.
+	if (m_viewProjectionOverride.has_value()) return *m_viewProjectionOverride;
+	const auto& authored = Refresh().viewProjection;
+	if (!m_rasterProjection) m_rasterProjection = std::make_unique<RasterProjection>();
+	auto& raster = *m_rasterProjection;
+	if (!raster.valid || raster.owner != &clip || raster.generation != generation) {
+		raster.matrix = authored;
+		raster.matrix.row(0) = clip[0] * authored.row(0) + clip[2] * authored.row(3);
+		raster.matrix.row(1) = clip[1] * authored.row(1) + clip[3] * authored.row(3);
+		raster.owner = &clip;
+		raster.generation = generation;
+		raster.valid = true;
+	}
+	return raster.matrix;
+}
+
+void SceneCamera::SetViewProjectionOverride(std::optional<Matrix4d> matrix) {
+	m_viewProjectionOverride = std::move(matrix);
+	if (m_rasterProjection) m_rasterProjection->valid = false;
+}
 
 void SceneCamera::Update() { (void)Refresh(); }
 
@@ -113,11 +167,19 @@ SceneCamera::Axes SceneCamera::GetAxes() const {
 
 std::optional<linalg::Vector3d> wallpaper::IntersectNdcWithNodePlane(
 	const SceneCamera& camera, SceneNode& node, double ndc_x, double ndc_y) {
+	return IntersectNdcWithNodePlane(camera,node,ndc_x,ndc_y,linalg::Vector2d::Zero());
+}
+
+std::optional<linalg::Vector3d> wallpaper::IntersectNdcWithNodePlane(
+	const SceneCamera& camera, SceneNode& node, double ndc_x, double ndc_y,
+	const linalg::Vector2d& translation) {
 	node.UpdateTrans();
 	// The plane of the node where it is drawn: its world matrix, and the draw offset
 	// a screen-anchored layer adds to where it is shown.
 	linalg::Matrix4d drawn = node.ModelTrans();
 	drawn.block<3, 1>(0, 3) += node.DrawOffset().cast<double>();
+	drawn(0,3) += translation.x();
+	drawn(1,3) += translation.y();
 	const linalg::Matrix4d clip_from_local = camera.GetViewProjectionMatrix() * drawn;
 	linalg::FullPivLU<linalg::Matrix4d> lu(clip_from_local);
 	if (! lu.isInvertible()) return std::nullopt;

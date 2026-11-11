@@ -247,6 +247,19 @@ enum WallpaperRuntime {
     try? handle.write(contentsOf: data)
   }
 
+  /// Tells the app whether macOS has closed every connection to this process, so that an
+  /// ending which follows is not counted as the renderer failing.
+  static func recordHostRelease(_ released: Bool) {
+    let file = exchange.appendingPathComponent(LockScreenHostRelease.fileName(processID: getpid()))
+    if released {
+      if !FileManager.default.createFile(atPath: file.path, contents: nil) {
+        log("Host release marker could not be written.")
+      }
+    } else {
+      try? FileManager.default.removeItem(at: file)
+    }
+  }
+
   /// Earlier releases published into this container, which made macOS ask the app
   /// for access to another app's data on every launch. Only the extension may
   /// clean it up without that prompt; the shader cache stays.

@@ -176,6 +176,7 @@ private struct DisplaysDesktopTile: View {
     .accessibilityIdentifier("displays.desktop.\(display.id).\(desktop.number)")
     .popover(isPresented: $choosing, arrowEdge: .bottom) {
       DesktopWallpaperChooser(display: display, desktop: desktop, desktopName: name) { choosing = false }
+        .panelPresentationLocale()
     }
   }
 

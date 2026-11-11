@@ -307,6 +307,52 @@ final class PixivServiceTests: XCTestCase {
         }
     }
 
+    func testCloudflareRefusalsAreToldApartFromPixivsOwnDenials() throws {
+        func failure(_ status: Int, server: String? = "cloudflare", headers: [String: String] = [:], body: String)
+            throws -> PixivFailure.Code?
+        {
+            var fields = headers
+            fields["Server"] = server
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: URL(string: "https://www.pixiv.net/ajax/illust/1/pages")!, statusCode: status,
+                httpVersion: "HTTP/2", headerFields: fields))
+            do {
+                try URLSessionPixivTransport.check(response, body: Data(body.utf8))
+                return nil
+            } catch {
+                return (error as? PixivFailure)?.code
+            }
+        }
+        // Cloudflare's plain block answer, and the styled page pixiv shows browsers instead.
+        XCTAssertEqual(try failure(403, body: "error code: 1010\n"), .blockedByProtection(reference: 1010))
+        let styled = """
+            <html><head><title>pixiv</title><style>._error_1xxx .cf-error-details>*{display:none}</style></head>
+            <body><div class="cf-error-details cf-error-1020"><h1>Access denied</h1><ul class="cferror_details">
+            <li>Ray ID: 0</li><li>Error reference number: 1020</li></ul></div></body></html>
+            """
+        XCTAssertEqual(try failure(403, body: styled), .blockedByProtection(reference: 1020))
+        // A browser check the app cannot pass.
+        XCTAssertEqual(
+            try failure(403, headers: ["cf-mitigated": "challenge"], body: "<html>Just a moment...</html>"),
+            .blockedByProtection(reference: nil))
+        // pixiv itself refusing (an R-18 ranking for a visitor it does not know) stays a 403, and
+        // so does a page that only looks like Cloudflare's but did not come from it.
+        XCTAssertEqual(
+            try failure(403, body: "<html><title>イラストコミュニケーションサービス[pixiv]</title></html>"), .status(403))
+        XCTAssertEqual(try failure(403, server: "nginx", body: "error code: 1010"), .status(403))
+        XCTAssertEqual(try failure(404, body: "error code: 1010"), .status(404))
+    }
+
+    func testCloudflareBlockOnAnR18RankingIsNotReportedAsASignInProblem() async {
+        let blocked = PixivFailure(code: .blockedByProtection(reference: 1010))
+        let transport = PixivFixtureTransport { _ in throw blocked }
+        let service = PixivService(transport: transport, minimumInterval: .zero)
+
+        await XCTAssertPixivFailure(try await service.page(1, of: .ranking(.dailyR18)), blocked.code)
+        await XCTAssertPixivFailure(
+            try await service.page(1, of: .ranking(.dailyR18), session: PixivFixtures.session), blocked.code)
+    }
+
     func testListingFailuresPreserveAccessDenialAndRateLimiting() async {
         for status in [403, 429, 503] {
             let transport = PixivFixtureTransport { _ in throw PixivFailure(code: .status(status)) }
@@ -366,6 +412,18 @@ final class PixivServiceTests: XCTestCase {
         XCTAssertNil(URLSessionPixivTransport.redirected(signed).value(forHTTPHeaderField: "Cookie"))
         signed.url = URL(string: "http://www.pixiv.net/ranking.php")
         XCTAssertNil(URLSessionPixivTransport.redirected(signed).value(forHTTPHeaderField: "Cookie"))
+    }
+
+    /// pixiv's Cloudflare front answers a signed-in request with a 403 browser check unless its
+    /// user agent has the `Mozilla/5.0` form browsers send; anonymous requests pass either way.
+    func testSignedInRequestsUseABrowserFormUserAgentThatNamesTheApp() throws {
+        let request = URLSessionPixivTransport.request(
+            URL(string: "https://www.pixiv.net/ajax/illust/1/pages")!, accept: "application/json",
+            session: PixivFixtures.session)
+        let agent = try XCTUnwrap(request.value(forHTTPHeaderField: "User-Agent"))
+        XCTAssertTrue(agent.hasPrefix("Mozilla/5.0 ("), agent)
+        XCTAssertTrue(agent.contains(" WallpaperMachine/"), agent)
+        XCTAssertFalse(agent.contains("Safari"), "the app does not claim to be Safari: \(agent)")
     }
 
     func testOnlySignedInSessionValuesAreAccepted() {

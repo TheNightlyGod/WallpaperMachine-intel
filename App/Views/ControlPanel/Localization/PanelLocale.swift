@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import Observation
+import SwiftUI
 
 /// The language the SwiftUI panel renders in, switchable while the app runs.
 ///
@@ -102,4 +103,19 @@ final class PanelLocale {
 @MainActor
 func L(_ value: String.LocalizationValue) -> String {
   PanelLocale.shared.string(value)
+}
+
+extension View {
+  /// Hands a sheet's or popover's content the panel's language again. Each opens in its own AppKit
+  /// window, whose `Text`, `Button` and `Toggle` literals otherwise resolve in the language the app
+  /// was launched in rather than the one chosen in the panel since.
+  func panelPresentationLocale() -> some View {
+    modifier(PanelPresentationLocale())
+  }
+}
+
+private struct PanelPresentationLocale: ViewModifier {
+  func body(content: Content) -> some View {
+    content.environment(\.locale, PanelLocale.shared.locale)
+  }
 }

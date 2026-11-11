@@ -5,16 +5,27 @@
 #include "Core/RendererCounters.hpp"
 #include "Presentation/WallpaperScaling.hpp"
 #include "SceneWallpaper.hpp"
+#include "SceneSourceResolver.hpp"
+#include "Fs/PhysicalFs.h"
+#include "Fs/VFS.h"
+#include "Scene/Parse/WPTexImageParser.hpp"
+#include "Scene/SceneCapabilityProbe.hpp"
 #include "Runtime/MediaArtwork.hpp"
 #include "SceneWallpaperSurface.hpp"
 #include "Utils/Logging.h"
+#include "MetalRender/MetalDisplayFraming.hpp"
+#include "MetalRender/MetalUpscaling.hpp"
 #include "MetalRender/MetalVideoSupport.hpp"
 #include "RenderCommon/StaticSubgraphCache.hpp"
 #include "Video/VideoFramePacing.hpp"
 
+#include <filesystem>
+#include <nlohmann/json.hpp>
+
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <atomic>
 #include <chrono>
@@ -370,9 +381,11 @@ const char* surface_argument_problem(void* layer, uint32_t width, uint32_t heigh
 // The surface description of one layer, with its own poster mailbox.
 wallpaper::RenderInitInfo make_surface_info(void* layer, uint32_t width, uint32_t height,
                                             uint32_t render_width, uint32_t render_height,
-                                            double display_scale_factor)
+                                            double display_scale_factor, bool display_hdr_allowed, uint32_t display_id)
 {
     wallpaper::RenderInitInfo info;
+    info.display_hdr_output_allowed = display_hdr_allowed;
+    info.display_id = display_id;
     info.offscreen   = false;
     info.metal_layer = layer;
     CFRetain(layer);
@@ -417,6 +430,8 @@ PropertyKind property_kind(std::string_view name)
         { PROPERTY_SCALINGMODE, PropertyKind::Int32 },
         { PROPERTY_SCALINGFACTOR, PropertyKind::Float },
         { PROPERTY_FRAMING, PropertyKind::Object },
+        { PROPERTY_SCENE_QUALITY, PropertyKind::Object },
+        { PROPERTY_WE_USER_OPTIONS, PropertyKind::Object },
         { PROPERTY_RENDER_SCALE, PropertyKind::Float },
         { PROPERTY_HORIZONTAL_FLIP, PropertyKind::Bool },
         { PROPERTY_SPEED, PropertyKind::Float },
@@ -478,6 +493,8 @@ struct owe_scene_wallpaper {
     // First member, at offset 0: the pull-only readers receive the handle's
     // address as a plain pointer to the scene.
     wallpaper::SceneWallpaper scene;
+    std::atomic<bool> display_hdr_output_allowed {true};
+    std::atomic<uint32_t> display_id {0};
 
     std::shared_ptr<FirstFrameRegistration> first_frame;
     std::shared_ptr<PointerRegistration>    pointer_input;
@@ -592,6 +609,25 @@ extern "C" int owe_scene_wallpaper_shutdown(owe_scene_wallpaper* scene)
     });
 }
 
+extern "C" int owe_scene_wallpaper_set_display_id(owe_scene_wallpaper* scene, uint32_t display_id)
+{
+    clear_last_error();
+    if (scene == nullptr) return fail("the scene host handle is NULL");
+    return guarded([&] {
+        scene->display_id.store(display_id,std::memory_order_relaxed);
+        if (scene->scene.inited()) scene->scene.setDisplayId(display_id);
+        return 0;
+    });
+}
+
+extern "C" int owe_scene_wallpaper_set_display_hdr_output_allowed(owe_scene_wallpaper* scene, bool allowed)
+{
+    clear_last_error();
+    if (scene == nullptr) return fail("the scene host handle is NULL");
+    scene->display_hdr_output_allowed.store(allowed, std::memory_order_relaxed);
+    return 0;
+}
+
 extern "C" int owe_scene_wallpaper_init_metal(
     owe_scene_wallpaper* scene,
     void* metal_layer,
@@ -611,7 +647,9 @@ extern "C" int owe_scene_wallpaper_init_metal(
     if (! scene->scene.inited()) return fail("the scene host is not initialised");
     return guarded([&] {
         scene->scene.initSurface(make_surface_info(metal_layer, width, height, render_width,
-                                                   render_height, display_scale_factor));
+                                                   render_height, display_scale_factor,
+                                                   scene->display_hdr_output_allowed.load(std::memory_order_relaxed),
+                                                   scene->display_id.load(std::memory_order_relaxed)));
         return 0;
     });
 }
@@ -646,7 +684,9 @@ extern "C" int owe_scene_wallpaper_finish_surface_reconfigure(
     if (! scene->scene.inited()) return fail("the scene host is not initialised");
     return guarded([&] {
         const auto info = make_surface_info(metal_layer, width, height, render_width,
-                                            render_height, display_scale_factor);
+                                            render_height, display_scale_factor,
+                                            scene->display_hdr_output_allowed.load(std::memory_order_relaxed),
+                                            scene->display_id.load(std::memory_order_relaxed));
         if (! scene->scene.finishSurfaceReconfigure(info)) {
             return fail("the surface could not be rebuilt on the new layer");
         }
@@ -734,6 +774,198 @@ extern "C" int owe_scene_wallpaper_set_framing(owe_scene_wallpaper* scene, doubl
     if (! std::isfinite(pan_x) || ! std::isfinite(pan_y)) return fail("the framing values must be finite");
     return guarded([&] {
         scene->scene.setFraming(wallpaper::WallpaperFraming { pan_x, pan_y });
+        return 0;
+    });
+}
+
+extern "C" int owe_scene_wallpaper_set_quality(owe_scene_wallpaper* scene,
+                                               const owe_scene_quality* quality)
+{
+    clear_last_error();
+    if (scene == nullptr) return fail("the scene host handle is NULL");
+    if (quality == nullptr) return fail("the scene quality is NULL");
+    const auto msaa = quality->msaa;
+    if (msaa != 0 && msaa != 2 && msaa != 4 && msaa != 8) return fail("the MSAA sample count must be 0, 2, 4 or 8");
+    const auto level = [](int32_t value) { return value >= OWE_QUALITY_OFF && value <= OWE_QUALITY_ULTRA; };
+    if (! level(quality->shadows) || ! level(quality->volumetrics)) return fail("a quality level is out of range");
+    const auto post = quality->post_processing;
+    if (post != OWE_POST_PROCESSING_DISABLED && post != OWE_POST_PROCESSING_ENABLED &&
+        post != OWE_POST_PROCESSING_ULTRA && post != OWE_POST_PROCESSING_DISPLAY_HDR) {
+        return fail("the post-processing level is out of range");
+    }
+    return guarded([&] {
+        wallpaper::SceneQuality value;
+        value.msaa            = msaa;
+        value.shadows         = quality->shadows;
+        value.volumetrics     = quality->volumetrics;
+        value.reflection      = quality->reflection;
+        value.post_processing = quality->post_processing;
+        scene->scene.setSceneQuality(value);
+        return 0;
+    });
+}
+
+extern "C" int owe_scene_wallpaper_set_storage(owe_scene_wallpaper* scene, const char* directory,
+                                               const char* screen_key, bool read_only)
+{
+    clear_last_error();
+    if (scene == nullptr) return fail("the scene host handle is NULL");
+    const std::string key = screen_key != nullptr ? screen_key : "";
+    for (const char c : key) {
+        const bool safe = std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '-' || c == '_' || c == '.';
+        if (! safe) return fail("the screen key may hold only letters, digits, '-', '_' and '.'");
+    }
+    if (directory != nullptr && *directory != '\0' && key.empty()) return fail("the screen key is empty");
+    return guarded([&] {
+        wallpaper::SceneScriptStorageConfig value;
+        value.directory  = directory != nullptr ? directory : "";
+        value.screen_key = key;
+        value.read_only  = read_only;
+        scene->scene.setSceneStorage(std::move(value));
+        return 0;
+    });
+}
+
+extern "C" int owe_scene_wallpaper_quality_in_force(void* scene, owe_scene_quality* out)
+{
+    auto* wallpaper_scene = static_cast<wallpaper::SceneWallpaper*>(scene);
+    if (wallpaper_scene == nullptr || out == nullptr) return -1;
+    const auto quality = wallpaper_scene->qualityInForce();
+    if (! quality.has_value()) return 1;
+    out->msaa            = quality->msaa;
+    out->shadows         = quality->shadows;
+    out->volumetrics     = quality->volumetrics;
+    out->reflection      = quality->reflection;
+    out->post_processing = quality->post_processing;
+    return 0;
+}
+
+namespace
+{
+// A LUT name the host may pass: a plain file stem, so it can never name a path.
+bool valid_lut_name(std::string_view name)
+{
+    if (name.empty() || name.size() > 64 || name == "." || name == "..") return false;
+    return std::all_of(name.begin(), name.end(), [](char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+               c == '.' || c == '_' || c == '-';
+    });
+}
+
+bool in_range(float value, float low, float high)
+{
+    return std::isfinite(value) && value >= low && value <= high;
+}
+
+// A `general` value as WE's sub_14010D850 reads it: the member, or its object's "value".
+const nlohmann::json* general_value(const nlohmann::json& general, const char* key)
+{
+    const auto found = general.find(key);
+    if (found == general.end()) return nullptr;
+    if (! found->is_object()) return &*found;
+    const auto value = found->find("value");
+    return value == found->end() ? nullptr : &*value;
+}
+} // namespace
+
+extern "C" int owe_scene_wallpaper_set_user_options(owe_scene_wallpaper* scene,
+                                                    const owe_user_options* options)
+{
+    clear_last_error();
+    if (scene == nullptr) return fail("the scene host handle is NULL");
+    if (options == nullptr) return fail("the user options are NULL");
+    for (const float slider : { options->brightness, options->contrast, options->saturation,
+                                options->hue, options->lut_strength }) {
+        if (! in_range(slider, 0.0f, 100.0f)) return fail("a user option slider is outside 0 to 100");
+    }
+    if (! in_range(options->playback_rate, 10.0f, 200.0f)) {
+        return fail("the playback rate must be between 10 and 200 percent");
+    }
+    const std::string_view lut = options->lut != nullptr ? std::string_view(options->lut) : std::string_view();
+    if (! lut.empty() && ! valid_lut_name(lut)) return fail("the image filter name is not a plain file name");
+    return guarded([&] {
+        wallpaper::WeUserOptions value;
+        value.color_enabled   = options->color_enabled;
+        value.brightness      = options->brightness;
+        value.contrast        = options->contrast;
+        value.saturation      = options->saturation;
+        value.hue             = options->hue;
+        value.lut             = std::string(lut);
+        value.lut_strength    = options->lut_strength;
+        value.flip_horizontal = options->flip_horizontal;
+        value.mouse_parallax  = options->mouse_parallax;
+        value.playback_rate   = options->playback_rate;
+        scene->scene.setUserOptions(value);
+        return 0;
+    });
+}
+
+extern "C" int owe_read_scene_traits(const char* project_json, owe_scene_traits* out)
+{
+    clear_last_error();
+    if (project_json == nullptr || *project_json == '\0') return fail("the project path is NULL or empty");
+    if (out == nullptr) return fail("the scene traits are NULL");
+    return guarded([&] {
+        wallpaper::SceneSourceResolution resolved;
+        std::string                      error;
+        if (! wallpaper::ResolveSceneSourcePaths(project_json, &resolved, &error)) {
+            return fail_detail("the project cannot be resolved: ", error);
+        }
+        if (resolved.kind != wallpaper::SceneSourceResolutionKind::Scene) {
+            return fail("the project is not a scene");
+        }
+        wallpaper::fs::VFS vfs;
+        if (! wallpaper::MountSceneSource(vfs, resolved.scene_source, &error)) {
+            return fail_detail("the scene cannot be mounted: ", error);
+        }
+        const std::string text =
+            wallpaper::fs::GetFileContent(vfs, "/assets/" + resolved.scene_source.pkg_entry);
+        const auto document = nlohmann::json::parse(text, nullptr, false);
+        if (document.is_discarded() || ! document.is_object()) return fail("the scene file is not a JSON object");
+        bool offered = false;
+        if (const auto general = document.find("general"); general != document.end() && general->is_object()) {
+            const auto* parallax  = general_value(*general, "cameraparallax");
+            const auto* influence = general_value(*general, "cameraparallaxmouseinfluence");
+            offered = parallax != nullptr && parallax->is_boolean() && parallax->get<bool>() &&
+                      influence != nullptr && influence->is_number() && influence->get<double>() != 0.0;
+        }
+        out->camera_parallax_offered = offered;
+        return 0;
+    });
+}
+
+extern "C" int owe_lut_load_rgba8(const char* tex_path, uint32_t* out_size, uint8_t* out_rgba,
+                                  size_t out_len)
+{
+    clear_last_error();
+    if (tex_path == nullptr || *tex_path == '\0') return fail("the LUT path is NULL or empty");
+    if (out_size == nullptr) return fail("the LUT size output is NULL");
+    return guarded([&] {
+        const std::filesystem::path path(tex_path);
+        if (path.extension() != ".tex") return fail("the LUT is not a .tex file");
+        wallpaper::fs::VFS vfs;
+        auto folder = wallpaper::fs::CreatePhysicalFs(path.parent_path().string());
+        if (folder == nullptr || ! vfs.Mount("/assets/materials/lut", std::move(folder))) {
+            return fail("the LUT's folder cannot be opened");
+        }
+        wallpaper::WPTexImageParser parser(&vfs);
+        const auto image = parser.Parse("lut/" + path.stem().string());
+        if (image == nullptr || image->slots.empty() || ! image->slots[0]) return fail("the LUT cannot be decoded");
+        const auto& slot  = image->slots[0];
+        const auto& level = slot.mipmaps[0];
+        if (image->header.format != wallpaper::TextureFormat::RGBA8 || slot.width <= 0 ||
+            slot.width != slot.height || slot.width != slot.depth) {
+            return fail("the LUT is not an RGBA8 cube");
+        }
+        const auto   edge  = static_cast<size_t>(slot.width);
+        const size_t bytes = edge * edge * edge * 4;
+        if (level.data == nullptr || static_cast<size_t>(level.size) < bytes) return fail("the LUT is cut short");
+        *out_size = static_cast<uint32_t>(edge);
+        if (out_rgba == nullptr) return 0;
+        if (out_len < bytes) return fail("the LUT buffer is too small");
+        // A volume level is laid out slice by slice, rows within a slice: x (red) fastest,
+        // then y (green), then z (blue), as texSample3D(lut, rgb) reads it.
+        std::memcpy(out_rgba, level.data.get(), bytes);
         return 0;
     });
 }
@@ -1162,6 +1394,26 @@ extern "C" bool owe_scene_video_plane_sampling_enabled(void)
     return wallpaper::metal::MetalVideoPlaneSamplingEnabled();
 }
 
+extern "C" void owe_set_scene_display_framing_enabled(bool enabled)
+{
+    wallpaper::metal::SetMetalSceneDisplayFramingEnabled(enabled);
+}
+
+extern "C" bool owe_scene_display_framing_enabled(void)
+{
+    return wallpaper::metal::MetalSceneDisplayFramingEnabled();
+}
+
+extern "C" void owe_set_metalfx_upscaling_enabled(bool enabled)
+{
+    wallpaper::metal::SetMetalUpscalingEnabled(enabled);
+}
+
+extern "C" bool owe_metalfx_upscaling_enabled(void)
+{
+    return wallpaper::metal::MetalUpscalingEnabled();
+}
+
 extern "C" int owe_scene_wallpaper_video_path(void* scene)
 {
     auto* wallpaper_scene = static_cast<wallpaper::SceneWallpaper*>(scene);
@@ -1312,6 +1564,36 @@ extern "C" int owe_renderer_shared_counters(
     if (written > 1) out_values[1] = analysis.accepted_frame_count;
     if (out_written != nullptr) *out_written = static_cast<uintptr_t>(written);
     return 0;
+}
+
+extern "C" int owe_scene_capability_probe(const char* project_file, const char* assets_dir,
+                                          const char* cache_dir, const char* property_override_json,
+                                          char** out_json)
+{
+    clear_last_error();
+    if (out_json == nullptr) return fail("the output pointer is NULL");
+    *out_json = nullptr;
+    if (project_file == nullptr || *project_file == '\0') return fail("the project file is empty");
+    if (assets_dir == nullptr || *assets_dir == '\0') return fail("the shared assets folder is empty");
+    return guarded([&] {
+        wallpaper::SceneCapabilityProbeRequest request;
+        request.project_file           = project_file;
+        request.assets                 = assets_dir;
+        request.cache                  = cache_dir != nullptr ? cache_dir : "";
+        request.property_override_json = property_override_json != nullptr ? property_override_json : "";
+        const std::string document =
+            wallpaper::SceneCapabilityProbeJson(wallpaper::ProbeSceneCapability(request));
+        char* copy = static_cast<char*>(std::malloc(document.size() + 1));
+        if (copy == nullptr) return fail("the probe's answer could not be allocated");
+        std::memcpy(copy, document.c_str(), document.size() + 1);
+        *out_json = copy;
+        return 0;
+    });
+}
+
+extern "C" void owe_free_string(char* value)
+{
+    std::free(value);
 }
 
 extern "C" const char* owe_last_error(void)

@@ -94,6 +94,25 @@ final class WallpaperPreviewLivePropertiesTests: XCTestCase {
         XCTAssertEqual(try value(try XCTUnwrap(hidden.surfaces.first?.applied.last), "size") as? Int, 20)
     }
 
+    func testAWallpaperEngineOptionChangeIsShownInPlaceOnceAndAnUnchangedOneIsNot() async throws {
+        let h = make()
+        await h.show()
+        let surface = try XCTUnwrap(h.surfaces.first)
+        h.session.propertiesDidChange(wallpaperID: "a")
+        await elapse(h)
+        XCTAssertTrue(surface.appliedEngineOptions.isEmpty, "the options equal what the preview started with")
+        h.engineOptions = BridgeSnapshotFixtures.engineOptionValues(flipHorizontal: true, playbackRate: 150)
+        h.session.propertiesDidChange(wallpaperID: "a")
+        await elapse(h)
+        XCTAssertEqual(surface.appliedEngineOptions.count, 1)
+        XCTAssertEqual(surface.appliedEngineOptions.last?.flipHorizontal, true)
+        XCTAssertEqual(surface.appliedEngineOptions.last?.playbackRate, 150)
+        XCTAssertTrue(surface.applied.isEmpty, "the properties did not change")
+        h.session.propertiesDidChange(wallpaperID: "a")
+        await elapse(h)
+        XCTAssertEqual(surface.appliedEngineOptions.count, 1, "options already shown are not sent again")
+    }
+
     func testIdenticalOrFrozenOnlyChangesPushNothing() async throws {
         let h = make()
         await h.show()
@@ -353,6 +372,8 @@ final class WallpaperPreviewLivePropertiesTests: XCTestCase {
 @MainActor
 private final class Harness {
     var draft: String
+    /// The draft's Wallpaper Engine options, as the bridge exports them.
+    var engineOptions: BridgeEngineOptionValues? = BridgeSnapshotFixtures.engineOptionValues()
     var frozen: Set<String>
     let kind: BridgeWallpaperKind
     var readiness = true
@@ -396,7 +417,8 @@ private final class Harness {
     func request() throws -> WallpaperPreviewRequest {
         var request = try WallpaperPreviewRequest(.init(wallpaperId: "a", title: "A", kind: kind,
             projectPath: "/fixture/a", entryFile: "scene.json", assetsPath: "/fixture/assets",
-            propertiesJson: draft, fps: 30, scalingMode: .fill, scalingFactor: 1, volume: 0.5))
+            propertiesJson: draft, fps: 30, scalingMode: .fill, scalingFactor: 1, volume: 0.5,
+            engineOptions: engineOptions, lutPath: nil, sceneQuality: .wallpaperEngineDefault))
         request.frozenPropertyIDs = frozen
         return request
     }
@@ -431,5 +453,7 @@ private final class RecordingSurface: WallpaperPreviewSurface {
         if failApply { throw WallpaperPreviewFailure(message: "The renderer refused the properties") }
         applied.append(json)
     }
+    var appliedEngineOptions: [WallpaperEngineOptions] = []
+    func applyEngineOptions(_ options: WallpaperEngineOptions) throws { appliedEngineOptions.append(options) }
     func stop() { stops += 1 }
 }

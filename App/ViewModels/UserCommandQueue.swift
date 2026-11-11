@@ -33,10 +33,25 @@ final class UserCommandQueue {
         func isChoice(for other: String) -> Bool { origin.isUserChoice && covers(other) }
     }
 
+    /// How a command ended, for a caller that has to tell who took its place (`runReporting`).
+    enum Outcome: Equatable, Sendable {
+        /// The operation ran.
+        case ran
+        /// Not run: the user already had a choice waiting or running in the slot.
+        case yieldedToUser
+        /// Not run: a newer command of the user's in the slot replaced it while it waited.
+        case replacedByUser
+        /// Not run: a newer command that is not the user's (a playlist, a rule, an update reload)
+        /// replaced it while it waited. No choice of the user's stands in its place, so an
+        /// automatic change that is still due may ask again.
+        case replacedByAutomatic
+    }
+
     private struct Waiter {
         let claim: Claim
         let subject: String?
-        let continuation: CheckedContinuation<Bool, Never>
+        /// Resumed with `.ran` when the command is handed the queue, or with why it never is.
+        let continuation: CheckedContinuation<Outcome, Never>
         var slot: String? { claim.slot }
     }
 
@@ -72,6 +87,10 @@ final class UserCommandQueue {
 
     func hasWaiting(slot: String) -> Bool { waiters.contains { $0.slot == slot } }
 
+    /// Whether a command for `slot` runs now or waits its turn: the menu bar panel says a display
+    /// is changing wallpaper while one does.
+    func isActive(slot: String) -> Bool { running?.covers(slot) == true || hasWaiting(slot: slot) }
+
     /// Runs `operation` once every earlier command has finished. Returns false without
     /// running it when a newer command in the same `slot` replaced it while it waited, or,
     /// for a command that is not the user's, when the user already has a choice waiting or
@@ -87,6 +106,17 @@ final class UserCommandQueue {
         choosing: [String] = [],
         _ operation: @MainActor () async throws -> Void
     ) async rethrows -> Bool {
+        try await runReporting(slot: slot, subject: subject, origin: origin, choosing: choosing, operation) == .ran
+    }
+
+    /// `run`, saying why a command that did not run gave way. An automatic change uses it to tell
+    /// a choice of the user's, which settles the matter, from another automatic command taking its
+    /// place in the line, which does not.
+    func runReporting(
+        slot: String? = nil, subject: String? = nil, origin: ActivationOrigin = .user,
+        choosing: [String] = [],
+        _ operation: @MainActor () async throws -> Void
+    ) async rethrows -> Outcome {
         let claim = Claim(slot: slot, origin: origin, choosing: choosing)
         if origin.isUserChoice { noteUserChoice(in: choosing) }
         if let slot {
@@ -95,25 +125,25 @@ final class UserCommandQueue {
             if !origin.isUserChoice, holdsUserChoice(in: slot) {
                 AppLog.info("activation yielded to a user choice: \(slot), \(origin.rawValue)"
                     + (subject.map { ", \($0)" } ?? ""))
-                return false
+                return .yieldedToUser
             }
             slotRevisions[slot, default: 0] &+= 1
             if origin.isUserChoice { userSlotRevisions[slot, default: 0] &+= 1 }
             supersede(slot: slot, by: origin)
         }
         if isBusy {
-            let admitted = await withCheckedContinuation { continuation in
+            let verdict = await withCheckedContinuation { continuation in
                 waiters.append(Waiter(claim: claim, subject: subject, continuation: continuation))
             }
             // The finishing command handed `isBusy` over without clearing it.
-            guard admitted else { return false }
+            guard verdict == .ran else { return verdict }
         } else {
             isBusy = true
             running = claim
         }
         defer { advance() }
         try await operation()
-        return true
+        return .ran
     }
 
     /// Whether the user has a choice in `slot`, waiting for its turn or running.
@@ -129,7 +159,8 @@ final class UserCommandQueue {
         let replaced = waiters.filter(replaces)
         guard !replaced.isEmpty else { return }
         waiters.removeAll(where: replaces)
-        for waiter in replaced { waiter.continuation.resume(returning: false) }
+        let verdict: Outcome = origin.isUserChoice ? .replacedByUser : .replacedByAutomatic
+        for waiter in replaced { waiter.continuation.resume(returning: verdict) }
     }
 
     private func advance() {
@@ -140,6 +171,6 @@ final class UserCommandQueue {
         }
         let next = waiters.removeFirst()
         running = next.claim
-        next.continuation.resume(returning: true)
+        next.continuation.resume(returning: .ran)
     }
 }

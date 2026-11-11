@@ -72,15 +72,13 @@ enum RuntimeCounter: String, CaseIterable, Sendable {
     /// count means the pipeline stalled, while on a share or a cloud file the
     /// file may only have been slow to arrive.
     case nativeVideoFirstFrameTimeout
-    /// A poster request was answered by a one-shot image generator instead of
-    /// the item that is playing, which is a second decode of a few frames.
-    /// Either the playing item produced no frame in time, or the clip is
-    /// rotated or mirrored and the generator is the only path that returns it
-    /// upright: for such a clip every poster counts here by design, so a
-    /// steady count on one is not a fault. Counted so a fallback that became
-    /// the normal path for an upright clip is visible instead of being
-    /// inferred from CPU use.
-    case nativeVideoPosterFallback
+    /// A poster request of the native video player was answered by a one-shot
+    /// image generator, a second decode of a few frames on its own copy of the
+    /// file. Every poster is one: reading the playing item instead would hold
+    /// its picture while a video output is attached (issue 110). Counted so the
+    /// cost of the desktop-picture sync on a plain video can be read rather
+    /// than inferred from CPU use.
+    case nativeVideoPosterDecode
     /// A clip that had shown a picture was checked after a long pause or a
     /// wake and its pipeline delivered none, although the player reported it
     /// was playing. Counted once per check, at the first look, before anything
@@ -96,6 +94,9 @@ enum RuntimeCounter: String, CaseIterable, Sendable {
     /// recovery allowance, like a first-frame restart does, but is counted
     /// apart from it.
     case nativeVideoPlaybackRebuild
+    /// A desktop surface opened an HEVC clip tagged `hev1` from its copy
+    /// retagged `hvc1` (`DerivedVideoCache`) instead of the file itself.
+    case nativeVideoHev1Retagged
 }
 
 /// Time-limited, aggregated runtime counters. Off by default: recording happens

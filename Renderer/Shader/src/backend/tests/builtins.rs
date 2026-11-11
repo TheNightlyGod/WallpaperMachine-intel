@@ -6,7 +6,7 @@
 use crate::pipeline::tests::support::ok;
 use crate::request::StageKind;
 
-const FRAGMENT: &str = "void main() { gl_FragColor = vec4(1.0); }";
+const FRAGMENT: &str = "void main() { gl_FragColor = CAST4(1.0); }";
 
 fn compiled(vertex: &str) -> crate::pipeline::CompiledProgram {
     ok(vertex, FRAGMENT)

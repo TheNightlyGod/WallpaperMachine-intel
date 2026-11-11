@@ -15,7 +15,7 @@ vec4 ret4(float s) { return s + 3.0; }
 vec3 ret3(float s) { return s; }",
         "vec3 a = uf;
 vec3 b; b = uf;
-vec4 c = vec4(0.0); c.rgb = uf; c.xy = i1;
+vec4 c = CAST4(0.0); c.rgb = uf; c.xy = i1;
 vec3 d = (uf > 0.5) ? uf : u3;
 vec3 e = up(0.5);
 vec3 f = ret3(uf);
@@ -80,11 +80,11 @@ fn narrowing_applies_to_variables_constructors_calls_arithmetic_and_samples() {
 vec3 b = vec4(i2, 0.0, 1.0);
 vec2 c = make();
 vec2 d = u4 * 2.0;
-vec3 e = texture(sampler2D(tx, sm), i2);
+vec3 e = texSample2D(sampler2D(tx, sm), i2);
 float f = u4;
 float g = i2 * 2.0;
-float h = texture(sampler2D(tx, sm), i2);
-o = vec4(a, b.xy) + vec4(c, d) + vec4(e, 1.0) + vec4(f + g + h);",
+float h = texSample2D(sampler2D(tx, sm), i2);
+o = vec4(a, b.xy) + vec4(c, d) + vec4(e, 1.0) + CAST4(f + g + h);",
     );
     assert_eq!(c.local_type("a"), "vec2<f32>");
     assert_eq!(c.local_type("b"), "vec3<f32>");
@@ -127,7 +127,7 @@ o = vec4(a + b + c + e + f + g, d.xy);",
 
 #[test]
 fn mixed_widths_inside_a_call_argument_have_no_target() {
-    let t = text("", "float k = length(i2 * u3); o = vec4(k);");
+    let t = text("", "float k = length(i2 * u3); o = CAST4(k);");
     assert!(t.contains("i2 * u3.xy"), "{t}");
     let t = text("", "vec2 v = max(u4 * i2, u2); o = vec4(v, 0.0, 1.0);");
     assert!(t.contains("u4.xy * i2"), "{t}");
@@ -147,19 +147,19 @@ fn equal_widths_and_a_swizzled_operand_are_untouched() {
 fn builtins_broadcast_scalars_and_cut_wide_peers() {
     let c = ok(
         "",
-        "vec2 a = mix(i2, vec2(5), 0.375);
+        "vec2 a = mix(i2, CAST2(5), 0.375);
 vec3 b = min(u4.rgb, 2.5);
 vec4 pq = u4; pq.xy = mix(pq, i2, uf);
 vec2 d = step(u3, i3);
 vec3 e = mix(0.25, 0.75, i3);
 vec3 f = pow(sqrt(uf), i3 + ug);
-float g = step(u4, vec4(3.0));
+float g = step(u4, CAST4(3.0));
 vec3 h = step(0.3, u3);
 vec3 i = smoothstep(0.1, 0.9, u3);
 vec3 j = clamp(u3, 0.0, 1.0);
 vec4 k = clamp(u4, 1, 5);
 vec3 l = pow(dot(u3, i3), u3);
-o = vec4(a, b.x, 1.0) + pq + vec4(d, e.x, f.x) + vec4(g) + vec4(h + i + j + l, 1.0) + k;",
+o = vec4(a, b.x, 1.0) + pq + vec4(d, e.x, f.x) + CAST4(g) + vec4(h + i + j + l, 1.0) + k;",
     );
     assert_eq!(c.local_type("a"), "vec2<f32>");
     assert_eq!(c.local_type("e"), "vec3<f32>");
@@ -168,10 +168,10 @@ o = vec4(a, b.x, 1.0) + pq + vec4(d, e.x, f.x) + vec4(g) + vec4(h + i + j + l, 1
 
 #[test]
 fn integer_literals_become_float_literals_for_float_builtins() {
-    let t = text("", "float a = smoothstep(2, 5, uf); float b = pow(uf, 3); float c = clamp(uf, 0, 8); float d = step(4, uf); o = vec4(a + b + c + d);");
+    let t = text("", "float a = smoothstep(2, 5, uf); float b = pow(uf, 3); float c = clamp(uf, 0, 8); float d = step(4, uf); o = CAST4(a + b + c + d);");
     assert!(t.contains("smoothstep(2.0, 5.0, uf)") || t.contains("smoothstep(2.0, 5.0"), "{t}");
     assert!(t.contains("pow(uf, 3.0)") && t.contains("clamp(uf, 0.0, 8.0)") && t.contains("step(4.0, uf)"), "{t}");
-    let t = text("", "int a = max(ui, 2); uint b = max(uu, 3u); o = vec4(float(a) + float(b));");
+    let t = text("", "int a = max(ui, 2); uint b = max(uu, 3u); o = CAST4(float(a) + float(b));");
     assert!(t.contains("max(ui, 2)") && t.contains("max(uu, 3u)"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
 }
@@ -208,7 +208,7 @@ fn a_struct_member_named_like_a_swizzle_is_a_member() {
 
 #[test]
 fn compound_assignments_cut_wider_values_and_broadcast_scalars() {
-    let decls = "float userFloat(float t) { return t * 2.0; }\nvec4 userVec4(float t) { return vec4(t); }";
+    let decls = "float userFloat(float t) { return t * 2.0; }\nvec4 userVec4(float t) { return CAST4(t); }";
     let c = ok(
         decls,
         "vec3 v3 = u3; v3 += u4; v3 += uf; v3 *= 2.0;
@@ -233,7 +233,7 @@ fn a_vec2_constructor_is_padded_in_a_vec3_sum_and_in_no_other_shape() {
     // guards: a swizzled vec3 stays two wide, a 2-vector variable is not padded, `*` is not a sum
     let t = text("", "vec2 d = u3.xy + vec2(1.0, 2.0); o = vec4(d, 0.0, 1.0);");
     assert!(!t.contains("0.0)"), "{t}");
-    let t = text("", "vec2 w = vec2(1.0); vec3 d = u3 + w; o = vec4(d, 1.0);");
+    let t = text("", "vec2 w = CAST2(1.0); vec3 d = u3 + w; o = vec4(d, 1.0);");
     assert!(!t.contains("vec3(w"), "{t}");
     let t = text("", "vec3 d = u3 * vec2(1.0, 2.0); o = vec4(d, 1.0);");
     assert!(!t.contains("vec3(vec2"), "{t}");
@@ -244,7 +244,7 @@ fn a_vec2_constructor_is_padded_in_a_vec3_sum_and_in_no_other_shape() {
 #[test]
 fn a_sampling_coordinate_keeps_its_leading_two_components() {
     let src = |coord: &str| format!("uniform sampler2D g_T; varying vec4 v_4; varying vec3 v_3; varying vec2 v_2; uniform vec4 g_U4;\nvec4 mk() {{ return g_U4; }}\nvoid main() {{ vec4 s = texSample2D(g_T, {coord}); gl_FragColor = s; }}");
-    for coord in ["v_4", "v_3", "v_4 * v_3", "mk()", "mk() * 2.0", "texSample2D(g_T, v_2).xyz", "v_2", "fract(v_4) - v_2"] {
+    for coord in ["v_4", "v_3", "v_4 * v_3", "mk()", "mk() * 2.0", "texSample2D(g_T, v_2).xyz", "v_2", "frac(v_4) - v_2"] {
         let c = legacy_frag(&src(coord));
         assert_eq!(c.local_type("s"), "vec4<f32>", "{coord}");
     }
@@ -258,7 +258,7 @@ fn a_sampling_coordinate_keeps_its_leading_two_components() {
 
 #[test]
 fn an_integer_vector_beside_a_float_vector_converts() {
-    let c = legacy_frag("uniform sampler2D g_T; varying vec2 v_T;\nvoid main() { vec2 size = textureSize(g_T, 0); vec2 px = v_T * size; ivec3 k = ivec3(1, 2, 3); vec3 w = k * vec3(0.5); gl_FragColor = vec4(px, w.xy); }");
+    let c = legacy_frag("uniform vec2 g_Size; varying vec2 v_T;\nvoid main() { vec2 size = g_Size; vec2 px = v_T * size; int3 k = int3(1, 2, 3); vec3 w = k * CAST3(0.5); gl_FragColor = vec4(px, w.xy); }");
     assert_eq!(c.local_type("px"), "vec2<f32>");
 }
 
@@ -281,14 +281,14 @@ o = vec4(float(a + b + c + e + f), float(d + g), 0.0, 1.0);",
         assert_eq!(c.local_type(v), "i32", "{v}");
     }
     assert_eq!(c.local_type("d"), "u32");
-    let t = text("", "int a = floor(uf * 32.0); int e = clamp(ui, 0, 5); int f = abs(ui); o = vec4(float(a + e + f));");
+    let t = text("", "int a = floor(uf * 32.0); int e = clamp(ui, 0, 5); int f = abs(ui); o = CAST4(float(a + e + f));");
     assert!(t.contains("int a = int(floor(uf * 32.0));"), "{t}");
     assert!(t.contains("int e = clamp(ui, 0, 5);") && t.contains("int f = abs(ui);"), "{t}");
 }
 
 #[test]
 fn integer_members_and_user_functions_are_left_alone() {
-    let t = text("struct Box { int tally; float w; };\nint count() { return 3; }", "Box b; b.tally = 2; int a = b.tally; int c = count(); o = vec4(float(a + c));");
+    let t = text("struct Box { int tally; float w; };\nint count() { return 3; }", "Box b; b.tally = 2; int a = b.tally; int c = count(); o = CAST4(float(a + c));");
     assert!(t.contains("int a = b.tally;") && t.contains("int c = count();"), "{t}");
 }
 
@@ -296,7 +296,7 @@ fn integer_members_and_user_functions_are_left_alone() {
 fn float_values_in_assignments_arguments_and_returns_truncate() {
     let c = ok(
         "int half_of(int n) { return n / 2; }\nint pick(float f) { return f * 2.0; }",
-        "int k = 2; k = uf * 3.0; int m = half_of(uf * 4.0); int p = pick(uf); o = vec4(float(k + m + p));",
+        "int k = 2; k = uf * 3.0; int m = half_of(uf * 4.0); int p = pick(uf); o = CAST4(float(k + m + p));",
     );
     assert_eq!(c.local_type("m"), "i32");
 }
@@ -309,16 +309,16 @@ fn float_indices_and_loop_headers_convert() {
 for (int i = uf; i < 4; i++) { acc += float(i); }
 for (int j = 0; j < 4.0; j++) { acc += 1.0; }
 for (float s = 1.0; s > 0.25; s -= 0.25) { acc += s; }
-o = vec4(w + acc);",
+o = CAST4(w + acc);",
     );
     let _ = c;
-    let t = text("", "float acc = 0.0; for (int i = uf; i < 4; i++) { acc += 1.0; } o = vec4(acc);");
+    let t = text("", "float acc = 0.0; for (int i = uf; i < 4; i++) { acc += 1.0; } o = CAST4(acc);");
     assert!(t.contains("int i = int(uf)"), "{t}");
-    let t = text("", "float acc = 0.0; for (int j = 0; j < 4.0; j++) { acc += 1.0; } for (float s = 1.0; s > 0.25; s -= 0.25) { acc += s; } o = vec4(acc);");
+    let t = text("", "float acc = 0.0; for (int j = 0; j < 4.0; j++) { acc += 1.0; } for (float s = 1.0; s > 0.25; s -= 0.25) { acc += s; } o = CAST4(acc);");
     assert!(t.contains("j < 4;"), "an integral float bound beside an integer counter compares as an integer: {t}");
     assert!(t.contains("for (float s = 1.0; s > 0.25; s -= 0.25)"), "a float counter header is untouched: {t}");
     // a non-integral bound compares in float
-    let t = text("", "float acc = 0.0; for (int j = 0; j < 2.5; j++) { acc += 1.0; } o = vec4(acc);");
+    let t = text("", "float acc = 0.0; for (int j = 0; j < 2.5; j++) { acc += 1.0; } o = CAST4(acc);");
     assert!(t.contains("float(j) < 2.5"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
 }
@@ -354,8 +354,8 @@ fn nearest_declaration_decides_whether_a_name_is_boolean() {
     let t = text(
         "",
         "bool active_ = uf > 0.5;
-{ float active_ = 2.0; float r = active_ * 3.0; o = vec4(r); }
-float hasGlow = 0.5; float z = hasGlow * 2.0; o += vec4(z);",
+{ float active_ = 2.0; float r = active_ * 3.0; o = CAST4(r); }
+float hasGlow = 0.5; float z = hasGlow * 2.0; o += CAST4(z);",
     );
     assert!(t.contains("active_ * 3.0") && !t.contains("float(active_) * 3.0"), "{t}");
     assert!(t.contains("hasGlow * 2.0") && !t.contains("float(hasGlow)"), "{t}");
@@ -366,7 +366,7 @@ float hasGlow = 0.5; float z = hasGlow * 2.0; o += vec4(z);",
 fn prototype_parameters_create_no_facts_and_definition_parameters_do() {
     let t = text(
         "float g(bool flag);\nfloat g(bool flag) { return flag * 2.0; }",
-        "bool flag = uf > 1.0; float f2 = g(flag); float v = flag * 3.0; o = vec4(f2 + v);",
+        "bool flag = uf > 1.0; float f2 = g(flag); float v = flag * 3.0; o = CAST4(f2 + v);",
     );
     assert!(t.contains("float(flag) * 2.0") && t.contains("float(flag) * 3.0"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
@@ -379,7 +379,7 @@ fn comparisons_that_remain_conditions_and_number_selecting_conditionals_are_unto
         "int i = ui; int j = 3; int n = 9;
 int k = (i > j ? i : j);
 while ((i < n) && (j >= 0)) { i++; j--; }
-o = vec4(float(k + i + j));",
+o = CAST4(float(k + i + j));",
     );
     assert!(t.contains("(i > j ? i : j)"), "{t}");
     assert!(t.contains("while ((i < n) && (j >= 0))"), "{t}");
@@ -398,7 +398,7 @@ int m = lit + 1;
 int r = lit % 2;
 int q = 0;
 if (lit) { q = 4; }
-o = vec4(float(m + r + q));",
+o = CAST4(float(m + r + q));",
     );
     for v in ["lit", "m", "r", "q"] {
         assert_eq!(c.local_type(v), "i32", "{v}");
@@ -407,7 +407,7 @@ o = vec4(float(m + r + q));",
 
 #[test]
 fn declaration_lists_with_qualifiers_keep_them() {
-    let t = text("", "float e = uf; float x = i1; const int a = 1, b = int(step(e, x)); highp /*q*/ int lvl = step(e, 0.75); o = vec4(float(a + b + lvl));");
+    let t = text("", "float e = uf; float x = i1; const int a = 1, b = int(step(e, x)); highp /*q*/ int lvl = step(e, 0.75); o = CAST4(float(a + b + lvl));");
     assert!(t.contains("const int a = 1, b = int(step(e, x));"), "{t}");
     assert!(t.contains("highp int lvl = int(step(e, 0.75));"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
@@ -420,7 +420,7 @@ fn int_beside_uint_is_unsigned_and_uint_into_int_converts() {
     let c = ok("", "int i = 3; uint u = 2u; uint a = i + u; int b = u; uint c = i + 1u; bool t = (i + u) > 0u; o = vec4(float(a) + float(b) + float(c), float(t), 0.0, 1.0);");
     assert_eq!(c.local_type("a"), "u32");
     assert_eq!(c.local_type("b"), "i32");
-    let t = text("", "int i = 3; uint u = 2u; if (i - u) { i = 1; } o = vec4(float(i));");
+    let t = text("", "int i = 3; uint u = 2u; if (i - u) { i = 1; } o = CAST4(float(i));");
     assert!(t.contains("i - u != 0u"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
 }

@@ -1,4 +1,5 @@
 import Observation
+import SwiftUI
 import XCTest
 
 @testable import WallpaperMachine
@@ -120,6 +121,40 @@ final class PanelLocaleTests: XCTestCase {
       japanese.catalogString("Author text 100% %@ %lld"), "Author text 100% %@ %lld",
       "An unknown phrase comes back as it was, format characters included")
     XCTAssertEqual(panel("en").catalogString("No action"), "No action")
+  }
+
+  /// Records the locale a view is rendered with.
+  private final class SeenLocale { var locale: Locale? }
+  private struct LocaleProbe: View {
+    let seen: SeenLocale
+    @Environment(\.locale) private var locale
+    var body: some View {
+      seen.locale = locale
+      return Text(verbatim: locale.identifier)
+    }
+  }
+
+  /// A sheet or popover opens in its own window, which carries the launch language rather than
+  /// the root's locale: the presentation modifier hands its content the panel's language, and
+  /// follows a language chosen while it is on screen.
+  func testPresentedContentFollowsThePanelLanguageRatherThanItsWindows() async throws {
+    addTeardownBlock { @MainActor in PanelLocale.shared.bind(to: .testHost) }
+    let source = try store("ja")
+    PanelLocale.shared.bind(to: source)
+    let seen = SeenLocale()
+    let hosting = NSHostingView(
+      rootView: LocaleProbe(seen: seen).panelPresentationLocale()
+        .environment(\.locale, Locale(identifier: "en_US")))
+    hosting.frame = NSRect(x: 0, y: 0, width: 200, height: 40)
+    hosting.layoutSubtreeIfNeeded()
+    XCTAssertEqual(seen.locale?.language.languageCode?.identifier, "ja")
+
+    try source.set("pt-BR")
+    for _ in 0..<50 where seen.locale?.language.languageCode?.identifier != "pt" {
+      try await Task.sleep(for: .milliseconds(20))
+      hosting.layoutSubtreeIfNeeded()
+    }
+    XCTAssertEqual(seen.locale?.language.languageCode?.identifier, "pt")
   }
 
   func testLocaleKeepsTheLanguageAndTheSystemRegion() {

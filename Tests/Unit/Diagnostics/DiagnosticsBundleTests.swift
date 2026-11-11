@@ -143,6 +143,26 @@ final class DiagnosticsBundleTests: XCTestCase {
         XCTAssertTrue(try text(exported, "README.txt").contains("load-journal.json"))
     }
 
+    func testSteamCMDFailureOutputIsIncludedRedactedAndAbsentWithoutANote() throws {
+        let logs = try makeLogs(["20260927-120000": ["0.log": "ok\n"]])
+        let failures = root.appendingPathComponent(SteamCMDFailureLog.fileName)
+        let quiet = try export(makeBundle(logs: logs, steamCMDFailures: failures))
+        XCTAssertFalse(quiet.report.included.contains("steamcmd-failures.txt"))
+        XCTAssertFalse(quiet.report.missing.contains { $0.contains("steamcmd") }, "No failure yet is the normal case")
+
+        SteamCMDFailureLog(url: failures).append("""
+            == SteamCMD sign-in: failed while signingIn
+            Logging in user 'steamalice' [U:1:5] to Steam Public...
+            Redirecting stderr to /Users/alice/Library/Application Support/Steam/logs/stderr.txt
+            """)
+        let exported = try export(makeBundle(logs: logs, steamCMDFailures: failures))
+        XCTAssertTrue(exported.report.included.contains("steamcmd-failures.txt"))
+        let written = try text(exported, "steamcmd-failures.txt")
+        XCTAssertTrue(written.contains("Logging in user '<account>'"), written)
+        XCTAssertTrue(written.contains("~/Library/Application Support/Steam"), written)
+        XCTAssertFalse(written.contains("alice"), written)
+    }
+
     func testMissingLoadJournalIsNotedAndTheRestIsStillExported() throws {
         let logs = try makeLogs(["20260927-120000": ["0.log": "ok\n"]])
         let journal = root.appendingPathComponent("never-written/load-journal.json")
@@ -367,6 +387,7 @@ final class DiagnosticsBundleTests: XCTestCase {
         crashes: URL? = nil,
         loadJournal: URL? = nil,
         systemReports: URL? = nil,
+        steamCMDFailures: URL? = nil,
         limits: DiagnosticsBundle.Limits = DiagnosticsBundle.Limits()
     ) -> DiagnosticsBundle {
         DiagnosticsBundle(
@@ -375,7 +396,8 @@ final class DiagnosticsBundleTests: XCTestCase {
                 extensionLog: extensionLog ?? root.appendingPathComponent("absent-extension.log"),
                 crashReports: crashes ?? root.appendingPathComponent("absent-crashes"),
                 loadJournal: loadJournal,
-                systemReports: systemReports),
+                systemReports: systemReports,
+                steamCMDFailures: steamCMDFailures),
             limits: limits,
             redactor: DiagnosticsRedactor(homeDirectory: "/Users/alice", userNames: ["alice"], secrets: ["steamalice"]))
     }

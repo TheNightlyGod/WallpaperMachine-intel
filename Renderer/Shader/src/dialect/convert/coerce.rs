@@ -78,7 +78,18 @@ impl Converter {
     /// vector), leave the value as it is.
     pub(super) fn coerce(&mut self, t: T, to: &Ty) -> Expr {
         let T { e, ty } = t;
-        if ty == *to || ty.is_unknown() || to.is_unknown() || matches!(to, Ty::Void) {
+        if ty.is_unknown() {
+            // A value whose type was not worked out (`ldexp`, unresolved macro calls, ...) stored
+            // into a scalar takes the scalar's constructor, which HLSL's implicit conversion is.
+            return match to {
+                Ty::Scalar(k @ (Sc::Int | Sc::Uint | Sc::Float)) => {
+                    let span = e.span.clone();
+                    Expr::ctor(k.name(), vec![e], span)
+                }
+                _ => e,
+            };
+        }
+        if ty == *to || to.is_unknown() || matches!(to, Ty::Void) {
             return e;
         }
         let span = e.span.clone();
@@ -111,6 +122,12 @@ impl Converter {
                 let zero = Expr::number(k.zero(), t.e.span.clone());
                 Expr::binary(Operator::Ne, t.e, zero)
             }
+            // An operand whose type was not worked out is tested as HLSL tests a number:
+            // `bool(x)` is the identity on a bool and "not zero" on a number.
+            Ty::Unknown => {
+                let span = t.e.span.clone();
+                Expr::ctor("bool", vec![t.e], span)
+            }
             _ => t.e,
         }
     }
@@ -121,6 +138,10 @@ impl Converter {
             Ty::Scalar(k) if k.is_numeric() => {
                 let zero = Expr::number(k.zero(), t.e.span.clone());
                 Expr::binary(Operator::Ne, t.e, zero).paren()
+            }
+            Ty::Unknown => {
+                let span = t.e.span.clone();
+                Expr::ctor("bool", vec![t.e], span)
             }
             _ => t.e,
         }

@@ -215,8 +215,8 @@ struct InspectorNote: View {
 
 // MARK: - Sections
 
-/// A titled card that folds away: Compatibility check, General configuration, Displays, Wallpaper
-/// properties. The open state is the view's own, so it starts as `isOpen` says when the section
+/// A titled card that folds away: Compatibility check, General configuration, Wallpaper properties,
+/// Displays. The open state is the view's own, so it starts as `isOpen` says when the section
 /// first appears and then belongs to the person; the inspector keys its content by the wallpaper,
 /// so a different wallpaper starts again from the defaults.
 struct InspectorSection<Accessory: View, Content: View>: View {

@@ -469,6 +469,7 @@ inline std::optional<CompileJob> BuildJob(const Expectation& expectation, const 
     job.shader_path = "shaders/" + job.shader_name;
 
     if (detail::StringOf(first, "blending") == "alphatocoverage") job.combos["ALPHATOCOVERAGE"] = "1";
+    if (detail::StringOf(first, "blending") == "additive") job.combos["ADDITIVE"] = "1";
     for (auto& [name, value] : detail::IntegerCombos(first.value("combos", json::object()))) job.combos[name] = value;
     for (const auto& [name, value] : expectation.scene_combos) job.combos[name] = value;
 

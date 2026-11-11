@@ -619,7 +619,7 @@ impl SurfaceReconfigure for NativeSurfaceReconfigure<'_> {
         self.window.update_layer(display.clone())
     }
     fn finish(&mut self, layer: Self::Layer, display: &DisplayDesc, render: (u32, u32)) -> Result<(), EngineError> {
-        self.renderer.finish_surface_reconfigure(layer, display.width, display.height, render.0, render.1, display.scale_factor)
+        self.renderer.finish_surface_reconfigure(layer, display, render.0, render.1)
     }
     fn pause(&mut self) -> Result<(), EngineError> { self.renderer.set_paused(true) }
     fn commit(&mut self, display: DisplayDesc) {
@@ -639,7 +639,15 @@ impl SceneRuntime {
         actor: WeakActorRef<EngineActor>,
     ) -> Result<Self, EngineError> {
         Self::open_in_registry_with(&SceneRegistry::shared(), || {
-            Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor)
+            Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor, false)
+        })
+    }
+
+    pub fn open_preloaded(backend: OweBackend, first_frame_callback: FirstFrameCallback,
+        handle: SceneHandle, desc: &SceneDesc, state: SceneRuntimeState, actor: WeakActorRef<EngineActor>,
+    ) -> Result<Self, EngineError> {
+        Self::open_in_registry_with(&SceneRegistry::shared(), || {
+            Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor, true)
         })
     }
 
@@ -650,11 +658,18 @@ impl SceneRuntime {
         desc: &SceneDesc,
         state: SceneRuntimeState,
         actor: WeakActorRef<EngineActor>,
+        preloaded: bool,
     ) -> Result<Self, EngineError> {
         // The window comes first, then the relays and the renderer. Anything
         // that fails afterwards drops what was built, which closes the window,
         // stops the relays and shuts the half-built renderer down.
-        let window = WallpaperWindow::builder(desc.display.clone()).open()?;
+        let mut builder = WallpaperWindow::builder(desc.display.clone());
+        if preloaded {
+            let id = std::path::Path::new(&desc.scene_path).parent().and_then(std::path::Path::file_name)
+                .and_then(std::ffi::OsStr::to_str).ok_or_else(|| EngineError::InvalidInput("preload scene has no wallpaper id".into()))?;
+            builder = builder.preloaded_wallpaper(id.to_owned());
+        }
+        let window = builder.open()?;
         let opened = OpenedRenderer::open(
             backend,
             &first_frame_callback,
@@ -688,7 +703,7 @@ impl SceneRuntime {
         previous: &mut Self,
     ) -> Result<Self, EngineError> {
         Self::open_replacement_with(previous,
-            || Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor),
+            || Self::prepare_open(backend, first_frame_callback, handle, desc, state, actor, false),
             |renderer, scale| renderer.set_render_scale(scale))
     }
 
@@ -1031,6 +1046,7 @@ impl SceneRuntime {
         move_window: impl FnOnce(&mut Option<WallpaperWindow>, &DisplayDesc) -> Result<(), EngineError>,
     ) -> Result<(), EngineError> {
         move_window(&mut self.window, &display)?;
+        self.renderer.set_display_id(display.display_id)?;
         self.pointer_input.delivery.invalidate();
         self.renderer.update_runtime_display(display.display_id);
         log::debug!(
@@ -1238,6 +1254,22 @@ impl SceneRuntime {
         preview_on_scene_of(&self.desc.scene_path, &mut self.renderer, expected_scene_path, flat_json)
     }
 
+    /// Shows per-wallpaper options that are not saved yet on the running scene,
+    /// like [`Self::preview_property_override_json`]: the descriptor keeps the
+    /// saved options, so a reload shows them. A scene that draws another
+    /// wallpaper than `expected_scene_path` is left alone.
+    pub fn preview_user_options(
+        &mut self,
+        expected_scene_path: &str,
+        options: &crate::project::SceneUserOptions,
+    ) -> Result<PropertyPreview, EngineError> {
+        if self.desc.scene_path != expected_scene_path {
+            return Ok(PropertyPreview::OtherWallpaper);
+        }
+        self.renderer.preview_user_options(options)?;
+        Ok(PropertyPreview::Shown)
+    }
+
     /// Stops the relays, closes the renderer, then closes and releases the
     /// window. The renderer's own error is returned after the window is gone.
     /// Closing again is harmless.
@@ -1345,6 +1377,13 @@ impl SceneRuntime {
             failure_relay,
         };
         Ok(Self::assemble(None, opened, handle, desc, state, Arc::new(|_| {}), actor, 1))
+    }
+
+    /// Enables the normal report lifetime/identity checks without a native window.
+    #[cfg(test)]
+    pub(crate) fn enable_audio_reports_for_test(&mut self) -> Arc<()> {
+        self.window = Some(WallpaperWindow::windowless_for_test());
+        self.audio_relay.renderer_instance.clone()
     }
 }
 
@@ -2346,6 +2385,26 @@ mod tests {
         assert_eq!(scene.desc, before_failure);
         assert!(Arc::ptr_eq(&token, &scene.renderer_instance()));
         assert_eq!(rows(&registry), vec![(73, 203)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn window_only_move_does_not_commit_when_display_output_rebind_fails() {
+        let mut scene = candidate(87, false);
+        let original = scene.desc.clone();
+        let token = scene.renderer_instance();
+        scene.renderer.close().unwrap();
+        let mut display = original.display.clone();
+        display.display_id = 203;
+        let mut moved = false;
+        let result = scene.update_window_display_with(display, |_, _| {
+            moved = true;
+            Ok(())
+        });
+        assert!(moved);
+        assert!(result.is_err());
+        assert_eq!(scene.desc, original);
+        assert_eq!(scene.generation, 1);
+        assert!(Arc::ptr_eq(&token, &scene.renderer_instance()));
     }
 
     #[tokio::test(flavor = "current_thread")]

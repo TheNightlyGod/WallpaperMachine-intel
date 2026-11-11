@@ -297,7 +297,7 @@ TEST_F(WorkshopDump, SceneDefaultsApplyToAnEmptyDocument) {
     }
     EXPECT_EQ(g.at("zoom"), 1.0);
     EXPECT_EQ(g.at("fov"), 50.0);
-    EXPECT_EQ(g.at("nearz").get<double>(), widen(0.01f));
+    EXPECT_EQ(g.at("nearz").get<double>(), widen(0.1f));
     EXPECT_EQ(g.at("farz"), 10000.0);
 }
 
@@ -549,9 +549,10 @@ TEST_F(WorkshopDump, LightRowReportsAuthoredAndDefaultValues) {
     EXPECT_EQ(set.at("visible_parsed"), true);
 
     const json& bare = *byId(rows, 2);
-    EXPECT_EQ(bare.at("color"), triple(1, 1, 1));
-    EXPECT_EQ(bare.at("radius"), 1000.0);
-    EXPECT_EQ(bare.at("intensity"), 1.0);
+    // Wallpaper Engine's light constructor (sub_14018FF60).
+    EXPECT_EQ(bare.at("color"), triple(0, 0, 0));
+    EXPECT_EQ(bare.at("radius"), 1.0);
+    EXPECT_EQ(bare.at("intensity"), 0.0);
 }
 
 TEST_F(WorkshopDump, ParticleRowCountsItsPartsAndTruncatesStartTime) {

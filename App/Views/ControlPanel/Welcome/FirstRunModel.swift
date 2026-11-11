@@ -192,9 +192,13 @@ final class FirstRunModel {
     guard !navigationBusy else { return }
     step = destination
     error = nil
-    // The Preferences page carries the performance data switch, so it answers the one-time
-    // question; someone who leaves the guide before reaching it is asked once later instead.
-    if destination == .preferences { controller.store.supportPrompt?.recordTelemetryAsked() }
+    // The Preferences page carries the performance data switch and the On battery choice, so it
+    // answers both one-time questions; someone who leaves the guide before reaching it is asked
+    // once later instead.
+    if destination == .preferences {
+      controller.store.supportPrompt?.recordTelemetryAsked()
+      controller.store.supportPrompt?.recordBatteryAsked()
+    }
   }
 
   func next() { if let next = step.next { go(to: next) } }
@@ -290,8 +294,9 @@ final class FirstRunModel {
   /// Whether Steam's answer is on its way, so the response field waits.
   func isAnswering(_ job: DownloadRow) -> Bool { controller.isBusy(Self.inputKey(for: job.id)) }
 
-  /// What **Sign in** checks before anything reaches Steam: a login name (letters, digits and
-  /// underscores, not `anonymous`) and a password. The password is not trimmed.
+  /// What **Sign in** checks before anything reaches Steam: a login name (the characters
+  /// `WorkshopDownloader.normalizedAccount` accepts, not `anonymous`) and a password. The
+  /// password is not trimmed.
   static func problem(account: String, password: String) -> Submission? {
     let trimmed = account.trimmingCharacters(in: .whitespacesAndNewlines)
     if WorkshopDownloader.normalizedAccount(trimmed) == nil { return .invalidAccount }
@@ -308,7 +313,7 @@ final class FirstRunModel {
     }
     error =
       problem == .invalidAccount
-      ? L("Enter your Steam account name: the login name, not the profile name. Letters, numbers and underscores only.")
+      ? L("Enter your Steam account name: the login name, not the profile name.")
       : L("Enter your Steam password.")
     return problem
   }

@@ -7,6 +7,7 @@
 
 #include "Particle/ParticleSystem.h"
 #include "Runtime/DynamicValue.hpp"
+#include "Scene/SceneMesh.h"
 #include "Scene/SceneNode.h"
 #include "Scene/SceneWallpaper.hpp"
 #include "WPPuppet.hpp"
@@ -44,10 +45,11 @@ Json MaterialFile(const std::string& shader)
 // ---- layers whose build fails ----------------------------------------------------------------
 
 constexpr const char* kMinimalVertex   = "attribute vec3 a_Position;\nvoid main() { gl_Position = vec4(a_Position, 1.0); }\n";
-constexpr const char* kMinimalFragment = "void main() { gl_FragColor = vec4(1.0); }\n";
-constexpr const char* kNotGlsl         = "this is not valid GLSL\n";
+constexpr const char* kMinimalFragment = "void main() { gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0); }\n";
 
-// A file set with one healthy shader and one whose fragment stage is not a shader at all.
+// A file set with one healthy shader and one whose shader files do not exist. (A shader that is
+// there but does not compile no longer fails its layer: Wallpaper Engine's fallback stage draws
+// it, `SceneFailurePolicy.AnEffectWhoseShaderCannotBeCompiledDrawsTheFallbackShader`.)
 FileMap BrokenShaderAssets()
 {
     FileMap files;
@@ -55,10 +57,6 @@ FileMap BrokenShaderAssets()
     for (const char* stem : { "validimage", "validparticle" }) {
         files[std::string("/shaders/") + stem + ".vert"] = kMinimalVertex;
         files[std::string("/shaders/") + stem + ".frag"] = kMinimalFragment;
-    }
-    for (const char* stem : { "brokenimage", "brokenparticle" }) {
-        files[std::string("/shaders/") + stem + ".vert"] = kMinimalVertex;
-        files[std::string("/shaders/") + stem + ".frag"] = kNotGlsl;
     }
     PutJson(files, "/valid_mat.json", MaterialFile("validimage"));
     PutJson(files, "/mat.json", MaterialFile("brokenimage"));
@@ -437,8 +435,20 @@ TEST_P(ChildOrigin, AChildSystemsOriginScalesWithTheLayerByTheTypeAndFlagsOfTheT
     ASSERT_EQ(layer->GetChildren().size(), 1u);
     SceneNode* child = layer->GetChildren().front().get();
     ASSERT_NE(child, nullptr);
+    ASSERT_NE(scene->paritileSys, nullptr);
+    scene->frameTime = 1.0 / 60.0;
+    scene->paritileSys->Emitt();
+    ASSERT_NE(child->Mesh(), nullptr);
+    ASSERT_EQ(child->Mesh()->VertexCount(), 1u);
+    ASSERT_GT(child->Mesh()->GetIndexArray(0).DrawIndexCount(), 0u);
+    const auto& vertices = child->Mesh()->GetVertexArray(0);
+    const float* position = vertices.Data();
     child->UpdateTrans();
-    const linalg::Vector4d placed = child->ModelTrans() * linalg::Vector4d(0.0, 0.0, 0.0, 1.0);
+    // A world parent's event child draws in its simulation frame. The authored
+    // node hierarchy still carries the layer scale, so test the generated
+    // particle and its draw matrix, as the renderer consumes them.
+    const linalg::Vector4d placed = child->RenderTrans() *
+        linalg::Vector4d(position[0], position[1], position[2], 1.0);
     EXPECT_NEAR(placed.x(), 320.0, 1e-3);
     EXPECT_NEAR(placed.y(), row.y, 1e-3);
 }
@@ -457,7 +467,8 @@ INSTANTIATE_TEST_SUITE_P(Rows, ChildOrigin,
 TEST(FailedLayerBuilds, APuppetLayerWhoseMaterialCannotBeBuiltLeavesItsAnimationControlsDead)
 {
     FileMap files = PuppetAssets();
-    files["/shaders/baseimage.frag"] = kNotGlsl;
+    files.erase("/shaders/baseimage.frag");
+    files.erase("/shaders/baseimage.vert");
     ParseRig rig(files);
     for (const char* name : { "visible", "rate", "blend" }) rig.properties()[name] = name == std::string("visible") ? RuntimeScalarValue::Bool(true) : RuntimeScalarValue::Float(1.0f);
 
@@ -570,6 +581,36 @@ export function cursorUp(event) { held = false; }
     rt.SetCursorButtons(0, 0, 0);
     rt.Tick(0.01);
     EXPECT_NEAR(rt.NodeScale("avanti").x(), 1.0f, 0.01f) << "released: the press owner is told wherever the cursor is";
+    EXPECT_EQ(rt.scriptErrorCount(), 0u);
+}
+
+// `CursorEvent.localPosition` is where the cursor is on the program's own layer, measured from
+// the corner of its box: 0 to its size on each axis while over it.
+TEST(CursorHitTest, ACursorEventSaysWhereOnItsLayerTheCursorIs)
+{
+    const std::string script = R"JS('use strict';
+var at = null;
+export function update(value) { return at ? new Vec3(at.x, at.y, 1) : value; }
+export function cursorDown(event) { at = event.localPosition; }
+)JS";
+    ParseRig rig(BasicAssets());
+    Json     pad = { { "id", 1 }, { "name", "pad" }, { "image", "image.json" }, { "origin", V3(200, 150, 0) }, { "size", V2(80, 80) },
+                     { "scale", { { "script", script }, { "value", "1.00000 1.00000 1.00000" } } }, { "visible", true } };
+    auto scene = rig.Parse(Canvas(Json::array({ pad }), { { "orthogonalprojection", { { "width", 400 }, { "height", 300 } } } }), ParseOptions { .live = true });
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    SceneRuntimeContext& rt = *scene->runtime;
+
+    rt.Tick(0.01);
+    rt.SetCursorInput(230.0f / 400.0f, 150.0f / 300.0f);
+    rt.SetCursorEnter(true);
+    rt.Tick(0.01);
+    rt.SetCursorButtons(1, 1, 0);
+    rt.DispatchCursorFrameEvents(true);
+    rt.SetCursorButtons(1, 0, 0);
+    rt.Tick(0.01);
+    EXPECT_NEAR(rt.NodeScale("pad").x(), 70.0f, 0.01f) << "30 right of the centre of an 80-wide box";
+    EXPECT_NEAR(rt.NodeScale("pad").y(), 40.0f, 0.01f) << "half way up it";
     EXPECT_EQ(rt.scriptErrorCount(), 0u);
 }
 

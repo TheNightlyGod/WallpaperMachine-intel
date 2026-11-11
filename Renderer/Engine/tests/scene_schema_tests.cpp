@@ -977,6 +977,283 @@ export function getDuration() {
     EXPECT_NEAR(runtime->NodeTranslate("Solid").x(), -17.0F, 0.5F);
 }
 
+TEST(SceneSchema, MediaWidgetTimeTextReadsZeroWithNoPlayer) {
+    // 3662790108's media time readout, verbatim. It prints "NaN / 0:00" once any media
+    // handler ran without a duration and "0:00 / 0:00" while none ran. Wallpaper Engine
+    // shows "0:00 / 0:00" on a desktop with no player: no media event reaches a scene until
+    // a player reports (`sub_140171440`), so none may be made up here either.
+    auto runtime = CreateSceneRuntimeContext(SceneRuntimeBootstrap {});
+    ASSERT_NE(runtime, nullptr);
+    runtime->RegisterTextLayer("mediactrl", TextLayerState { .text = "" });
+    runtime->RegisterTextValue("mediactrl", ResolveStringSetting(*runtime, {
+        {"value", ""}, {"script", R"JS('use strict';
+// Please note: Do not remove this line or asset references may break.
+export let __workshopId = '3637654840';
+
+export var scriptProperties = createScriptProperties()
+    .addCheckbox({
+        name: 'debug',
+        label: '启用调试信息',
+        value: false
+    })
+    .finish();
+
+let isPlaying = false;
+let estimatedPosition = 0;
+let totalDuration = 0;
+let lastUpdateTime = 0;
+let hasMedia = false;
+let mediaSupported = false;
+let logInterval = 0;
+
+export function init() {
+    isPlaying = false;
+    estimatedPosition = 0;
+    totalDuration = 0;
+    lastUpdateTime = Date.now();
+    hasMedia = false;
+    mediaSupported = false;
+    logInterval = 0;
+    
+    if (typeof shared !== 'undefined') {
+        shared.mediatimeline_total = 0;
+        shared.mediatimeline_current = 0;
+        shared.mediatimeline = 0;
+        shared.mediacolor1 = "0.2 0.5 1";
+        shared.mediacolor2 = "0.1 0.2 1";
+        shared.mediacolor3 = "1 1 1";
+        shared.mediaPlay = 2;
+        shared.mediatitle = "";
+        shared.mediaartist = "";
+        shared.mediacontentType = "";
+    }
+    
+    if (thisLayer.debug) {
+        console.log("=== 媒体脚本初始化 ===");
+    }
+}
+
+export function mediaPropertiesChanged(event) {
+    hasMedia = true;
+    estimatedPosition = 0;
+    
+    if (event.duration !== undefined && !isNaN(event.duration) && event.duration > 0) {
+        totalDuration = event.duration;
+        mediaSupported = true;
+    } else {
+        mediaSupported = false;
+    }
+    
+    if (typeof shared !== 'undefined') {
+        if (event.title !== undefined) {
+            shared.mediatitle = event.title;
+        }
+        if (event.artist !== undefined) {
+            shared.mediaartist = event.artist;
+        }
+        if (event.contentType !== undefined) {
+            shared.mediacontentType = event.contentType;
+        }
+    }
+    
+    if (thisLayer.debug) {
+        console.log("=== mediaPropertiesChanged ===");
+        console.log("title: " + event.title);
+        console.log("artist: " + event.artist);
+        console.log("contentType: " + event.contentType);
+        console.log("duration: " + event.duration);
+    }
+}
+
+export function mediaThumbnailChanged(event) {
+    hasMedia = true;
+    
+    if (totalDuration <= 0) {
+        mediaSupported = false;
+    }
+    
+    if (typeof shared !== 'undefined') {
+        if (event.primaryColor !== undefined) {
+            shared.mediacolor1 = event.primaryColor;
+        }
+        if (event.secondaryColor !== undefined) {
+            shared.mediacolor2 = event.secondaryColor;
+        }
+        if (event.tertiaryColor !== undefined) {
+            shared.mediacolor3 = event.tertiaryColor;
+        }
+    }
+    
+    if (thisLayer.debug) {
+        console.log("=== mediaThumbnailChanged ===");
+        console.log("primaryColor: " + event.primaryColor);
+        console.log("secondaryColor: " + event.secondaryColor);
+        console.log("tertiaryColor: " + event.tertiaryColor);
+    }
+}
+
+export function mediaTimelineChanged(event) {
+    hasMedia = true;
+    
+    if (event.duration !== undefined && !isNaN(event.duration) && event.duration > 0) {
+        totalDuration = event.duration;
+        mediaSupported = true;
+    }
+    
+    if (event.position !== undefined && !isNaN(event.position)) {
+        estimatedPosition = event.position;
+        mediaSupported = true;
+    }
+    
+    if (thisLayer.debug) {
+        console.log("=== mediaTimelineChanged ===");
+        console.log("position: " + event.position);
+        console.log("duration: " + event.duration);
+    }
+}
+
+export function mediaPlaybackChanged(event) {
+    hasMedia = true;
+    
+    let stateText = "";
+    switch (event.state) {
+        case 1:
+            isPlaying = true;
+            stateText = "播放";
+            if (typeof shared !== 'undefined') {
+                shared.mediaPlay = 0;
+            }
+            break;
+        case 2:
+            isPlaying = false;
+            stateText = "暂停";
+            if (typeof shared !== 'undefined') {
+                shared.mediaPlay = 1;
+            }
+            break;
+        case 0:
+            isPlaying = false;
+            stateText = "停止";
+            estimatedPosition = 0;
+            mediaSupported = false;
+            totalDuration = 0;
+            if (typeof shared !== 'undefined') {
+                shared.mediaPlay = 2;
+                shared.mediatitle = "";
+                shared.mediaartist = "";
+                shared.mediacontentType = "";
+            }
+            break;
+    }
+    
+    if (thisLayer.debug) {
+        console.log("=== mediaPlaybackChanged ===");
+        console.log("state: " + event.state + " (" + stateText + ")");
+    }
+}
+
+function formatTime(seconds) {
+    if (!seconds || isNaN(seconds) || seconds < 0) {
+        seconds = 0;
+    }
+    let mins = Math.floor(seconds / 60);
+    let secs = Math.floor(seconds % 60);
+    return mins + ":" + (secs < 10 ? "0" : "") + secs;
+}
+
+function logDebugInfo() {
+    console.log("========== 共享变量状态 ==========");
+    console.log("--- 基础状态 ---");
+    console.log("hasMedia: " + hasMedia);
+    console.log("mediaSupported: " + mediaSupported);
+    console.log("isPlaying: " + isPlaying);
+    
+    if (typeof shared !== 'undefined') {
+        console.log("--- 播放状态 ---");
+        console.log("mediaPlay: " + shared.mediaPlay);
+        
+        console.log("--- 时间信息 ---");
+        console.log("mediatimeline_current: " + shared.mediatimeline_current.toFixed(2) + "s (" + formatTime(shared.mediatimeline_current) + ")");
+        console.log("mediatimeline_total: " + shared.mediatimeline_total.toFixed(2) + "s (" + formatTime(shared.mediatimeline_total) + ")");
+        console.log("mediatimeline: " + shared.mediatimeline.toFixed(4) + " (" + (shared.mediatimeline * 100).toFixed(2) + "%)");
+        
+        console.log("--- 媒体信息 ---");
+        console.log("mediatitle: " + shared.mediatitle);
+        console.log("mediaartist: " + shared.mediaartist);
+        console.log("mediacontentType: " + shared.mediacontentType);
+        
+        console.log("--- 封面颜色 ---");
+        console.log("mediacolor1: " + shared.mediacolor1);
+        console.log("mediacolor2: " + shared.mediacolor2);
+        console.log("mediacolor3: " + shared.mediacolor3);
+    }
+    console.log("==================================");
+}
+
+export function update() {
+    let now = Date.now();
+    let deltaTime = (now - lastUpdateTime) / 1000;
+    lastUpdateTime = now;
+    
+    if (deltaTime > 1 || deltaTime < 0) {
+        deltaTime = 0;
+    }
+    
+    if (isPlaying && totalDuration > 0) {
+        estimatedPosition += deltaTime;
+        if (estimatedPosition > totalDuration) {
+            estimatedPosition = totalDuration;
+        }
+    }
+    
+    if (isNaN(estimatedPosition)) estimatedPosition = 0;
+    if (isNaN(totalDuration)) totalDuration = 0;
+    
+    if (typeof shared !== 'undefined') {
+        shared.mediatimeline_total = totalDuration;
+        shared.mediatimeline_current = estimatedPosition;
+        
+        if (mediaSupported && totalDuration > 0) {
+            shared.mediatimeline = estimatedPosition / totalDuration;
+            if (shared.mediatimeline > 1) shared.mediatimeline = 1;
+            if (shared.mediatimeline < 0) shared.mediatimeline = 0;
+        } else {
+            shared.mediatimeline = 0;
+        }
+    }
+    
+    // 调试信息（每秒输出一次）
+    if (thisLayer.debug) {
+        logInterval += deltaTime;
+        if (logInterval >= 1.0) {
+            logInterval = 0;
+            logDebugInfo();
+        }
+    }
+    
+    // 生成显示文本
+    let output;
+    
+    if (!hasMedia) {
+        output = "0:00 / 0:00";
+    } else if (!mediaSupported || totalDuration <= 0) {
+        output = "NaN / 0:00";
+    } else {
+        output = formatTime(estimatedPosition) + " / " + formatTime(totalDuration);
+    }
+    
+    if (thisLayer && thisLayer.text !== undefined) {
+        thisLayer.text = output;
+    }
+    shared.tttt=output;
+}
+)JS"}}, "mediactrl"), false);
+    runtime->Tick(1.0 / 60.0);
+    runtime->Tick(1.0 / 60.0);
+    EXPECT_EQ(runtime->NodeText("mediactrl"), "0:00 / 0:00");
+    EXPECT_EQ(runtime->scriptErrorCount(), 0u);
+}
+
 TEST(SceneSchema, APressedTransportButtonComesBackWhenItIsReleased) {
     // The reported symptom is a transport button stuck flattened after one
     // press. This wallpaper's own scale script shrinks a held button to the

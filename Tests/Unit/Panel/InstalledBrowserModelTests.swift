@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import XCTest
 
 @testable import WallpaperMachine
@@ -405,6 +406,35 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertEqual(titles(model).count, 5)
   }
 
+  func testLastUsedFollowsTheHistoryAndTheSearchReadsDescriptionsLinksAndCollectionNames()
+    async throws
+  {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try panel.installLibrary([
+      LibrarySpec("2077200001", "Zebra", preview: .none),
+      LibrarySpec("b", "Apple", preview: .none, description: "A café at night"),
+      LibrarySpec("c", "Mango", preview: .none),
+    ])
+    try await panel.loadLibrary()
+    try await panel.settleLibrary()
+
+    model.setSort(.lastUsed)
+    XCTAssertEqual(titles(model), ["Apple", "Mango", "Zebra"], "nothing used yet, so by name")
+    panel.store.history.recordSwitch(from: nil, to: "c", on: "primary")
+    XCTAssertEqual(
+      titles(model), ["Mango", "Apple", "Zebra"], "a wallpaper put on a display moves to the front")
+
+    model.setText("CAFE")
+    XCTAssertEqual(titles(model), ["Apple"], "the manifest's description counts, its accent folded")
+    model.setText("https://steamcommunity.com/sharedfiles/filedetails/?id=2077200001")
+    XCTAssertEqual(titles(model), ["Zebra"], "a Workshop link finds its item")
+    _ = try panel.collections.create(name: "Fruit", wallpaperIDs: ["b", "c"])
+    model.setText("fruit")
+    XCTAssertEqual(titles(model), ["Mango", "Apple"], "a collection's name finds its wallpapers")
+  }
+
   func testAClearedSearchAndEachEmptyStateRecovers() async throws {
     let panel = try makeController()
     defer { Task { await panel.shutdown() } }
@@ -413,6 +443,9 @@ final class InstalledBrowserModelTests: PanelTestCase {
     try await installNames(panel, count: 3)
     model.setText("zzz")
     XCTAssertEqual(model.emptyState, .search(text: "zzz"))
+    model.setText("https://steamcommunity.com/sharedfiles/filedetails/?id=3632513108")
+    XCTAssertEqual(
+      model.emptyState, .notInstalled(itemID: "3632513108"), "a link to an item not installed says so")
     model.clearSearch()
     model.setRequired("Customizable", true)
     XCTAssertEqual(model.emptyState, .filters(count: 1))
@@ -422,6 +455,35 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertNil(model.emptyState)
     panel.store.librarySnapshot.wallpapers = []
     XCTAssertEqual(model.emptyState, .emptyLibrary)
+  }
+
+  /// A Workshop id typed digit by digit is a search until it is complete: only an id pasted,
+  /// confirmed with Return or restored says the item is not installed.
+  func testATypedIdSaysItIsNotInstalledOnlyOnceItArrivedWhole() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try await installNames(panel, count: 3)
+    let id = "3632513108"
+    var typed = ""
+    for digit in id {
+      typed.append(digit)
+      model.setText(typed)
+      XCTAssertEqual(model.emptyState, .search(text: typed), "a prefix being typed names no item")
+    }
+    model.submitSearch()
+    XCTAssertEqual(model.emptyState, .notInstalled(itemID: id), "Return says the id is complete")
+    model.setText(id + "9")
+    XCTAssertEqual(model.emptyState, .search(text: id + "9"), "typing on makes it a prefix again")
+
+    model.clearSearch()
+    model.setText(id)
+    XCTAssertEqual(model.emptyState, .notInstalled(itemID: id), "a pasted id is whole")
+    model.flushViewState()
+    // The model holds its controller unowned, so the controller is kept alive while asked.
+    let reopened = panel.buildController()
+    XCTAssertEqual(
+      reopened.library.emptyState, .notInstalled(itemID: id), "and so is the one a window left")
   }
 
   func testSelectingAChipRequiresItsTagAndHidingItExcludesIt() async throws {
@@ -745,6 +807,36 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertEqual(model.selectedIDs, ["w02", "w00"], "the selection stays")
   }
 
+  /// Adding says how many were added. A playlist that is off, or plays something other than its
+  /// list, will not show them, so the notice says that too and offers the playlist's settings.
+  func testAddToPlaylistSaysWhatItDidAndWhetherThePlaylistPlaysTheList() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try await installNames(panel, count: 4)
+    model.toggleChecked("w00")
+    model.toggleChecked("w01")
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(
+      model.notice, L("Added \(2) wallpapers to this display’s list. Its playlist is not playing the list."))
+    XCTAssertEqual(model.noticeLink, .playlistSettings, "a playlist that is off is one click from its settings")
+
+    panel.playlists.update("primary") {
+      $0.mode = .rotate
+      $0.source = .list
+    }
+    model.toggleChecked("w02")
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(model.notice, L("Added 1 wallpaper to this display’s list."))
+    XCTAssertNil(model.noticeLink, "a playlist that rotates through its list needs no settings")
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(model.notice, L("Already on this display’s list."))
+
+    panel.playlists.update("primary") { $0.source = .all }
+    await model.addSelectionToPlaylist()?.value
+    XCTAssertEqual(model.noticeLink, .playlistSettings, "it plays the whole library, not the list")
+  }
+
   func testAddToPlaylistNeedsADisplayThatCanHaveOne() async throws {
     let panel = try makeController()
     defer { Task { await panel.shutdown() } }
@@ -1064,15 +1156,133 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertEqual(scrolled.count, count, "nothing scrolls once the press is over")
   }
 
-  // MARK: The animated preview
+  // MARK: The animated previews
 
-  func testTheOneTilePlayingIsTheOneThePointerRestedOnAndNothingElseAnimates() async throws {
+  func testScrollingPreviewChangesOnlyInvalidateTheAffectedTile() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    let changed = PreviewChangeFlag()
+    withObservationTracking {
+      _ = model.playingAnimation(for: "visible")
+    } onChange: { changed.set() }
+
+    model.gridAnimations["entering"] = Data([1])
+    model.gridAnimations["entering"] = nil
+    XCTAssertFalse(changed.isSet, "another preview entering or leaving must not redraw this tile")
+    model.gridAnimations["visible"] = Data([2])
+    XCTAssertTrue(changed.isSet, "the tile must redraw when its own preview arrives")
+
+    let released = PreviewChangeFlag()
+    withObservationTracking {
+      _ = model.playingAnimation(for: "visible")
+    } onChange: { released.set() }
+    model.releaseGridPreviews()
+    XCTAssertTrue(released.isSet, "releasing previews must notify the tiles that were playing")
+    XCTAssertNil(model.playingAnimation(for: "visible"))
+  }
+
+  private final class PreviewChangeFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
+  }
+
+  /// Turns on Settings › General › Play Library previews only on hover.
+  private func playOnHover(_ panel: PanelFixture) async throws {
+    try await panel.controller.setLibraryPreviewsOnHover(true)
+    XCTAssertTrue(panel.controller.library.playsPreviewsOnHover)
+  }
+
+  private func playing(_ model: InstalledBrowserModel, _ ids: String...) -> Bool {
+    ids.allSatisfy { model.playingAnimation(for: $0) != nil }
+  }
+
+  func testEveryAnimatedTileOnScreenPlaysWithoutAPointerAndOnlyWhileOnScreen() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    try panel.installLibrary([
+      LibrarySpec("gif1", "Aurora", preview: .animation),
+      LibrarySpec("gif2", "Breeze", preview: .animation),
+      LibrarySpec("gif3", "Cinder", preview: .animation),
+      LibrarySpec("png", "Dune", preview: .picture(0.3)),
+      LibrarySpec("none", "Ember", preview: .none),
+    ])
+    try await panel.loadLibrary()
+    try await panel.settleLibrary()
+    XCTAssertFalse(model.playsPreviewsOnHover, "every tile plays unless hover is turned on")
+
+    for id in ["gif1", "gif2", "png", "none"] { model.tileVisibilityChanged(id, isOnScreen: true) }
+    try await wait(panel, "both animations on screen") { playing(model, "gif1", "gif2") }
+    XCTAssertNil(model.playingAnimation(for: "gif3"), "a tile off screen loads nothing")
+    XCTAssertNil(model.playingAnimation(for: "png"), "a picture has nothing to animate")
+    XCTAssertNil(model.playingAnimation(for: "none"))
+    XCTAssertNil(model.livePreview, "no pointer is needed")
+
+    model.tileVisibilityChanged("gif1", isOnScreen: false)
+    XCTAssertNil(model.playingAnimation(for: "gif1"), "scrolling away releases it at once")
+    model.tileVisibilityChanged("gif3", isOnScreen: true)
+    try await wait(panel, "the tile scrolled in") { playing(model, "gif2", "gif3") }
+
+    model.setGridHidden(true)
+    XCTAssertTrue(model.gridAnimations.isEmpty, "a hidden window plays nothing")
+    model.setGridHidden(false)
+    try await wait(panel, "the same tiles once shown") { playing(model, "gif2", "gif3") }
+    model.windowWentAway()
+    XCTAssertTrue(playing(model, "gif2", "gif3"), "a window that is only not key keeps playing")
+
+    model.setText("Breeze")
+    model.releaseLivePreviewIfHidden()
+    XCTAssertNil(model.playingAnimation(for: "gif3"), "a tile filtered away stops playing")
+    XCTAssertTrue(playing(model, "gif2"))
+
+    model.leavePage()
+    XCTAssertTrue(model.gridAnimations.isEmpty, "leaving the page releases every animation")
+  }
+
+  func testTurningHoverOnStopsTheGridAndTurningItOffPlaysTheTilesOnScreenAgain() async throws {
     let panel = try makeController()
     defer { Task { await panel.shutdown() } }
     let model = panel.controller.library
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try panel.installLibrary([
+      LibrarySpec("gif1", "A", preview: .animation), LibrarySpec("gif2", "B", preview: .animation),
+    ])
+    try await panel.loadLibrary()
+    try await panel.settleLibrary()
+    model.tileVisibilityChanged("gif1", isOnScreen: true)
+    model.tileVisibilityChanged("gif2", isOnScreen: true)
+    try await wait(panel, "both animations") { playing(model, "gif1", "gif2") }
+
+    try await playOnHover(panel)
+    XCTAssertTrue(model.gridAnimations.isEmpty, "only the hovered tile plays now")
+    XCTAssertNil(model.playingAnimation(for: "gif1"))
+    model.pointerEntered("gif1")
+    try await timerRequested(clock)
+    clock.fireNext()
+    try await wait(panel, "the hovered tile") { model.livePreview?.id == "gif1" }
+    XCTAssertTrue(playing(model, "gif1"))
+    XCTAssertNil(model.playingAnimation(for: "gif2"))
+
+    try await panel.controller.setLibraryPreviewsOnHover(false)
+    XCTAssertNil(model.livePreview, "the hovered tile gives way to the grid")
+    try await wait(panel, "the tiles still on screen, without being reported again") {
+      playing(model, "gif1", "gif2")
+    }
+  }
+
+  func testOnHoverTheOneTilePlayingIsTheOneThePointerRestedOnAndNothingElseAnimates() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let model = panel.controller.library
+    let clock = ManualSleeper()
+    model.sleep = clock.closure
+    model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "Moving", preview: .animation),
       LibrarySpec("gif2", "Moving too", preview: .animation),
@@ -1115,6 +1325,7 @@ final class InstalledBrowserModelTests: PanelTestCase {
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "A", preview: .animation), LibrarySpec("gif2", "B", preview: .animation),
     ])
@@ -1142,6 +1353,7 @@ final class InstalledBrowserModelTests: PanelTestCase {
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "A", preview: .animation), LibrarySpec("gif2", "B", preview: .animation),
     ])
@@ -1177,6 +1389,7 @@ final class InstalledBrowserModelTests: PanelTestCase {
     let clock = ManualSleeper()
     model.sleep = clock.closure
     model.isMouseButtonDown = { false }
+    try await playOnHover(panel)
     try panel.installLibrary([
       LibrarySpec("gif1", "Moving", preview: .animation), LibrarySpec("other", "Other", preview: .none),
     ])
@@ -1261,6 +1474,56 @@ final class InstalledBrowserModelTests: PanelTestCase {
     XCTAssertTrue(ImportActivityPill.isActive(in: controller), "the popover keeps its anchor while it is open")
     model.closeImport()
     XCTAssertFalse(ImportActivityPill.isActive(in: controller), "it has been looked at")
+  }
+
+  /// Files and folders dropped on the page import as the picker's would, with no window to ask
+  /// in; a drop that holds no file is not taken.
+  func testFilesDroppedOnTheLibraryAreImportedAndADropWithoutFilesIsNotTaken() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let controller = panel.controller
+    let model = controller.library
+    XCTAssertNil(model.importDropped([try XCTUnwrap(URL(string: "https://example.com/wallpaper"))]))
+    XCTAssertNil(model.importDropped([]))
+
+    let source = panel.root.appendingPathComponent("dropped/123456")
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data("movie".utf8).write(to: source.appendingPathComponent("movie.mp4"))
+    try JSONSerialization.data(withJSONObject: ["title": "T", "type": "video", "file": "movie.mp4"])
+      .write(to: source.appendingPathComponent("project.json"))
+
+    await model.importDropped([source])?.value
+    try await panel.waitUntil(timeout: 10) { controller.importState.report != nil && !controller.imports.isBusy }
+    XCTAssertEqual(controller.importState.report?.failures.count, 0)
+    try await panel.waitUntil {
+      model.importPill.state.report != nil && !model.importPill.state.isBusy
+    }
+    XCTAssertEqual(model.importPill.label, L("1 imported · 0 skipped"))
+  }
+
+  /// The favorite tool makes the ticked wallpapers favorites, and takes them all out when every
+  /// one of them already is. The selection stays.
+  func testTheFavoriteToolFavoritesTheSelectionAndTakesAFullyFavoritedOneOut() async throws {
+    let panel = try makeController()
+    defer { Task { await panel.shutdown() } }
+    let controller = panel.controller
+    let model = controller.library
+    try await installNames(panel, count: 4)
+    XCTAssertNil(model.favoriteSelection(), "nothing is ticked")
+    try await controller.toggleFavorite("w00")
+    model.toggleChecked("w00")
+    model.toggleChecked("w01")
+    XCTAssertFalse(model.selectionIsAllFavorites, "one of the two is not a favorite yet")
+
+    await model.favoriteSelection()?.value
+    XCTAssertEqual(controller.favoriteIDs, ["w00", "w01"])
+    XCTAssertEqual(PanelPreferences.favorites(in: panel.defaults), ["w00", "w01"])
+    XCTAssertTrue(model.selectionIsAllFavorites)
+
+    await model.favoriteSelection()?.value
+    XCTAssertTrue(controller.favoriteIDs.isEmpty, "all favorites: the tool takes them out")
+    XCTAssertTrue(PanelPreferences.favorites(in: panel.defaults).isEmpty)
+    XCTAssertEqual(model.selectedIDs, ["w00", "w01"], "the selection stays")
   }
 
   func testAReportThatArrivesWhileThePopoverIsOpenNeedsNoPill() async throws {

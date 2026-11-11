@@ -24,6 +24,10 @@ namespace
 using namespace we_schema;
 using wallpaper::Scene;
 
+// Wallpaper Engine draws bloom only for a scene that has objects (sub_14017FA70);
+// one bare group is enough.
+Json OneObject() { return Json::array({ Json { { "id", 900 }, { "name", "anchor" }, { "origin", "0 0 0" }, { "visible", true } } }); }
+
 // ---- file system and bytes ---------------------------------------------------------------
 
 TEST(SchemaFixtures, MemoryFsServesExactlyTheMappedPaths)
@@ -195,9 +199,11 @@ TEST(SchemaFixtures, ModelFixturesParseWithTheDocumentedShape)
     ASSERT_EQ(mdl.meshes.size(), 2u);
     EXPECT_EQ(mdl.meshes[0].positions.size(), 3u);
     EXPECT_TRUE(mdl.meshes[0].blend_indices.empty());
-    ASSERT_EQ(mdl.meshes[0].texcoords.size(), 3u);
-    EXPECT_FLOAT_EQ(mdl.meshes[0].texcoords[1][0], 0.5f);
-    EXPECT_FLOAT_EQ(mdl.meshes[0].texcoords[1][1], 0.5f);
+    const auto* uv = mdl.meshes[0].FindStream(0x8);
+    ASSERT_NE(uv, nullptr);
+    ASSERT_EQ(uv->values.size(), 6u);
+    EXPECT_FLOAT_EQ(uv->values[2], 0.5f);
+    EXPECT_FLOAT_EQ(uv->values[3], 0.5f);
     EXPECT_EQ(mdl.puppet, nullptr) << "no skeleton at all";
 }
 
@@ -413,7 +419,7 @@ TEST(SchemaFixtures, LdrBloomStandInsCarryDistinctConstantsForTheSceneToOverwrit
 
 TEST(SchemaFixtures, LdrBloomAssetsBuildTheChainAndTheBrokenSetDoesNot)
 {
-    const Json bloom_scene = QuietScene(Json::array(), { { "bloom", true }, { "bloomstrength", 1.5 }, { "bloomthreshold", 0.25 }, { "bloomtint", Json::array({ 0.2, 0.4, 0.6 }) } });
+    const Json bloom_scene = QuietScene(OneObject(), { { "bloom", true }, { "bloomstrength", 1.5 }, { "bloomthreshold", 0.25 }, { "bloomtint", Json::array({ 0.2, 0.4, 0.6 }) } });
     {
         ParseRig rig(BloomAssets(BloomSet::Ldr));
         auto     scene = rig.Parse(bloom_scene);
@@ -439,7 +445,7 @@ TEST(SchemaFixtures, LdrBloomAssetsBuildTheChainAndTheBrokenSetDoesNot)
 TEST(SchemaFixtures, HdrBloomAssetsBuildTheHdrChain)
 {
     ParseRig rig(BloomAssets(BloomSet::Hdr));
-    auto     scene = rig.Parse(QuietScene(Json::array(), { { "bloom", true }, { "hdr", true } }));
+    auto     scene = rig.Parse(QuietScene(OneObject(), { { "bloom", true }, { "hdr", true } }));
     ASSERT_NE(scene, nullptr);
     ASSERT_EQ(scene->post_processes.size(), 1u);
     EXPECT_GE(scene->post_processes[0]->steps.size(), 3u);

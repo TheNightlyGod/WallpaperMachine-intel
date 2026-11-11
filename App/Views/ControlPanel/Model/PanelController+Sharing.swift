@@ -8,7 +8,7 @@ struct SharePayload: Equatable, Sendable {
   var message: String
 }
 
-/// Sharing a wallpaper or the app, and the About star link. Every link is built here from fixed
+/// Sharing a wallpaper or the app, and the About star and Discord links. Every link is built here from fixed
 /// parts and a Workshop id, so nothing a wallpaper or Steam says becomes a URL.
 extension PanelController {
   /// The website's home page in the panel's language (the Chinese page for either Chinese).
@@ -46,5 +46,15 @@ extension PanelController {
       throw WallpaperActionError(message: L("The link could not be opened. Please try again."))
     }
     store.supportPrompt?.recordStarChosen()
+  }
+
+  /// **Join Discord** in Settings › About and in the Discord invitation: MMFoundation's invite,
+  /// through the external-link allowlist and the `openSupportURL` seam. Opening it answers the
+  /// invitation, so it never comes up afterwards.
+  func joinDiscord() async throws {
+    guard ExternalLink.open(ExternalLink.discord, using: openSupportURL) else {
+      throw WallpaperActionError(message: L("The link could not be opened. Please try again."))
+    }
+    store.supportPrompt?.recordDiscordChosen()
   }
 }

@@ -56,6 +56,9 @@ struct PlaybackAppRuleRow: View {
   let rule: AppRule
 
   @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
+  /// The minus was clicked and waits for its answer.
+  @State private var confirmsRemoval = false
 
   var body: some View {
     let settings = controller.settings
@@ -77,17 +80,31 @@ struct PlaybackAppRuleRow: View {
         options: AppRuleAction.allCases.map { SettingsMenuOption(value: $0, title: $0.title) }
       ) { try await controller.updateAppRule(rule.id, action: $0) }
       .accessibilityLabel(Text(verbatim: L("Action for \(name)")))
-      Button {
-        settings.perform("rule-\(rule.id)-remove") { try await controller.removeAppRule(rule.id) }
-      } label: {
-        Image(systemName: "minus.circle")
-          .font(.system(size: 14))
+      if confirmsRemoval {
+        // A rule is removed for good, so the second click is the one that removes it.
+        Button("Cancel") { confirmsRemoval = false }
+          .buttonStyle(.borderless)
+        Button("Remove") {
+          confirmsRemoval = false
+          settings.perform("rule-\(rule.id)-remove") { try await controller.removeAppRule(rule.id) }
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(theme.surface.danger.color)
+        .disabled(settings.isLocked("rule-\(rule.id)-remove", whileRunning: true))
+        .accessibilityLabel(Text(verbatim: L("Remove the rule for \(name)")))
+      } else {
+        Button {
+          confirmsRemoval = true
+        } label: {
+          Image(systemName: "minus.circle")
+            .font(.system(size: 14))
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.secondary)
+        .disabled(settings.isLocked("rule-\(rule.id)-remove", whileRunning: true))
+        .help(L("Remove"))
+        .accessibilityLabel(Text(verbatim: L("Remove the rule for \(name)")))
       }
-      .buttonStyle(.borderless)
-      .foregroundStyle(.secondary)
-      .disabled(settings.isLocked("rule-\(rule.id)-remove", whileRunning: true))
-      .help(L("Remove"))
-      .accessibilityLabel(Text("Remove"))
     }
     .padding(.horizontal, 12)
     .padding(.vertical, 6)
@@ -97,15 +114,17 @@ struct PlaybackAppRuleRow: View {
   }
 }
 
-/// The icon of an app by its bundle identifier, found when the row appears, or a plain stand-in for
-/// an app that is not installed any more.
+/// The icon of an app by its bundle identifier, found when the row appears (`AppIconCache`), or a
+/// plain stand-in for an app that is not installed any more.
 private struct PlaybackAppIcon: View {
   let bundleIdentifier: String
-  @State private var icon: NSImage?
+
+  @Environment(PanelController.self) private var controller
 
   var body: some View {
+    let icons = controller.settings.appIcons
     Group {
-      if let icon {
+      if let icon = icons.icon(for: bundleIdentifier) {
         Image(nsImage: icon).resizable().interpolation(.high)
       } else {
         Image(systemName: "app.dashed").resizable().scaledToFit().foregroundStyle(.tertiary)
@@ -114,10 +133,6 @@ private struct PlaybackAppIcon: View {
     }
     .frame(width: 22, height: 22)
     .accessibilityHidden(true)
-    .task(id: bundleIdentifier) {
-      icon = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier).map {
-        NSWorkspace.shared.icon(forFile: $0.path)
-      }
-    }
+    .task(id: bundleIdentifier) { icons.load(bundleIdentifier) }
   }
 }

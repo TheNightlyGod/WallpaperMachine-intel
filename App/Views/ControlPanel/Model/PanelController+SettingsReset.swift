@@ -5,21 +5,24 @@ import Foundation
 ///
 /// What is the user's content rather than a setting stays: the library, favorites, playlists,
 /// collections, presets, the display arrangement and per-display wallpapers, the storage location
-/// and the Steam and pixiv sign-ins. macOS's own "Click wallpaper to reveal desktop", which a
-/// Desktop switch only mirrors, is the system's and stays too.
+/// and the Steam and pixiv sign-ins. macOS's own "Click wallpaper to reveal desktop" and Finder's
+/// desktop icons, which Desktop switches only mirror, are the system's and stay too.
 extension PanelController {
   /// The engine's defaults for the settings it owns, as `AppConfig::default()` in
   /// `Renderer/Bridge/src/config/app.rs` writes them.
   enum EngineSettingDefaults {
     static let batteryMode = BridgeBatteryMode.keepRunning
     static let renderScale: Float = 1
+    static let metalFXUpscaling = false
     static let frameRateCap: UInt32? = nil
     static let batteryRenderScale: Float = 0.75
     static let batteryTargetFps: UInt32 = 30
     static let sceneResolution = SceneResolutionMode.display
+    static let sceneQuality = BridgeSceneQuality.wallpaperEngineDefault
     static let sceneOptimization = true
     static let sceneOnDemand = false
     static let sceneVideoPlaneSampling = false
+    static let sceneDisplayFraming = false
     static let verboseLogging = false
   }
 
@@ -57,6 +60,11 @@ extension PanelController {
       await attempt { try await store.setLaunchAtLoginAsync(enabled: false) }
     }
     defaults.removeObject(forKey: PanelPreferences.hideAfterActivatingKey)
+    defaults.removeObject(forKey: PanelPreferences.libraryPreviewsOnHoverKey)
+    StatusItemClick.save(.panel, in: defaults)
+    library.previewModeChanged()
+    searchTranslation.resetPreference()
+    setTileZoom(0)
     if appLanguage.preference != AppLanguageStore.systemChoice {
       await attempt { try await setLanguage(nil) }
     }
@@ -71,6 +79,7 @@ extension PanelController {
       if lock.isRequested { lock.setEnabled(false) }
       if lock.screenSaverRequested { lock.setScreenSaverEnabled(false) }
     }
+    NotchMaskController.setEnabled(false, defaults: defaults)
     let wasShowingLiveEdits = LivePropertyEditing.isEnabled(defaults: defaults)
     LivePropertyEditing.setEnabled(LivePropertyEditing.buildDefault, defaults: defaults)
     if wasShowingLiveEdits && !LivePropertyEditing.buildDefault {
@@ -110,11 +119,17 @@ extension PanelController {
     if current().preferredRenderScale != D.renderScale {
       await attempt { try await store.setRenderScaleAsync(D.renderScale) }
     }
+    if current().metalfxUpscalingEnabled != D.metalFXUpscaling {
+      await attempt { try await store.setMetalFXUpscalingEnabledAsync(D.metalFXUpscaling) }
+    }
     if current().frameRateCap != D.frameRateCap {
       await attempt { try await store.setFrameRateCapAsync(D.frameRateCap) }
     }
     if current().sceneResolution != D.sceneResolution.rawValue {
       await attempt { try await store.setSceneResolutionAsync(D.sceneResolution.rawValue) }
+    }
+    if current().sceneQuality != D.sceneQuality {
+      await attempt { try await store.setSceneQualityAsync(D.sceneQuality) }
     }
     if current().sceneOptimizationEnabled != D.sceneOptimization {
       await attempt { try await store.setSceneOptimizationEnabledAsync(D.sceneOptimization) }
@@ -126,6 +141,9 @@ extension PanelController {
       await attempt {
         try await store.setSceneVideoPlaneSamplingEnabledAsync(D.sceneVideoPlaneSampling)
       }
+    }
+    if current().sceneDisplayFramingEnabled != D.sceneDisplayFraming {
+      await attempt { try await store.setSceneDisplayFramingEnabledAsync(D.sceneDisplayFraming) }
     }
     if current().verboseLogging != D.verboseLogging {
       await attempt { try await store.setVerboseLoggingAsync(enabled: D.verboseLogging) }

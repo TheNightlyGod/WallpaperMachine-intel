@@ -15,8 +15,11 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
   var batteryProfileCalls: [Profile] = []
   var sceneOptimizationCalls: [Bool] = []
   var sceneOnDemandCalls: [Bool] = []
+  var metalFXUpscalingCalls: [Bool] = []
   var sceneVideoPlaneSamplingCalls: [Bool] = []
+  var sceneDisplayFramingCalls: [Bool] = []
   var sceneResolutionCalls: [String] = []
+  var sceneQualityCalls: [BridgeSceneQuality] = []
   var verboseLoggingCalls: [Bool] = []
   /// Counted off the main actor: the store reads these synchronously.
   let clearShaderCacheCalls = SettingsCallCounter()
@@ -51,6 +54,12 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     try await record({ $0.sceneOnDemandCalls.append(enabled) }) { $0.sceneOnDemandEnabled = enabled }
   }
 
+  override func setMetalfxUpscalingEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
+    try await record({ $0.metalFXUpscalingCalls.append(enabled) }) {
+      $0.metalfxUpscalingEnabled = enabled
+    }
+  }
+
   override func setSceneVideoPlaneSamplingEnabled(enabled: Bool) async throws
     -> BridgeSnapshotBundle
   {
@@ -59,8 +68,18 @@ final class SettingsRecordingBridge: LayoutSnapshotBridge {
     }
   }
 
+  override func setSceneDisplayFramingEnabled(enabled: Bool) async throws -> BridgeSnapshotBundle {
+    try await record({ $0.sceneDisplayFramingCalls.append(enabled) }) {
+      $0.sceneDisplayFramingEnabled = enabled
+    }
+  }
+
   override func setSceneResolution(mode: String) async throws -> BridgeSnapshotBundle {
     try await record({ $0.sceneResolutionCalls.append(mode) }) { $0.sceneResolution = mode }
+  }
+
+  override func setSceneQuality(quality: BridgeSceneQuality) async throws -> BridgeSnapshotBundle {
+    try await record({ $0.sceneQualityCalls.append(quality) }) { $0.sceneQuality = quality }
   }
 
   override func setVerboseLogging(enabled: Bool) async throws -> BridgeSnapshotBundle {
@@ -157,13 +176,15 @@ extension PanelFixture {
   func buildSettingsController(
     updater: AppUpdateStore? = nil, energyUsage: EnergyUsageMonitor? = nil
   ) -> PanelController {
-    PanelController(
+    let language = AppLanguageStore.english()
+    return PanelController(
       store: store, navigation: navigation, workshop: workshop, pixiv: pixiv, updater: updater,
       presentation: presentation, theme: theme, defaults: defaults, dialogs: dialogs,
-      energyUsage: energyUsage, appLanguage: .english(),
+      energyUsage: energyUsage, appLanguage: language,
       playback: PlaybackPreferences(defaults: defaults), playlists: playlists,
       hotKeys: HotKeyPreferences(defaults: defaults), collections: collections, presets: presets,
       backup: backup, imagePlacement: imagePlacement, compatibility: compatibility,
-      automations: automations, spaces: spaces, systemConditions: systemConditions)
+      automations: automations, spaces: spaces, systemConditions: systemConditions,
+      searchTranslation: .fake(defaults: defaults, backend: translation, language: language))
   }
 }

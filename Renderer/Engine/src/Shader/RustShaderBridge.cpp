@@ -212,6 +212,12 @@ nlohmann::json BuildRustShaderRequestJson(const RustShaderRequest& request)
     json document = json::object();
     document["shader_name"] = request.shader_name;
     document["target"]      = "metal_msl";
+    if (request.point_geometry) {
+        const auto& geometry = *request.point_geometry;
+        document["point_geometry"] = { { "source", geometry.source },
+                                       { "max_vertices", geometry.max_vertices },
+                                       { "output_index_attribute", geometry.output_index_attribute } };
+    }
     if (request.cache_enabled) {
         document["cache_policy"] = { { "mode", "enabled" }, { "scene_id", request.scene_id } };
     } else {
@@ -246,6 +252,7 @@ nlohmann::json BuildRustShaderRequestJson(const RustShaderRequest& request)
         if (texture.video_planes == RustShaderVideoPlanes::Nv12Biplanar) {
             entry["video_planes"] = "nv12_biplanar";
         }
+        if (texture.sample_count) entry["sample_count"] = *texture.sample_count;
         textures.push_back(std::move(entry));
     }
     document["textures"] = std::move(textures);
@@ -268,13 +275,19 @@ void ApplyRustShaderMetadataJson(std::string_view metadata_json, RustShaderOutpu
     // Decode everything first so a malformed element leaves the output as it was.
     Combos                                combos;
     WPAliasValueDict                      aliases;
+    Set<std::string>                      angle_aliases;
     ShaderValueMap                        uniforms;
     WPDefaultTexs                         textures;
     for (const auto& entry : document.value("combos", none)) {
         combos[entry.at("name").get<std::string>()] = entry.at("value").get<std::string>();
     }
     for (const auto& entry : document.value("aliases", none)) {
-        aliases[entry.at("material").get<std::string>()] = entry.at("uniform").get<std::string>();
+        const auto material = entry.at("material").get<std::string>();
+        aliases[material] = entry.at("uniform").get<std::string>();
+        // Optional flags keep old metadata/cache documents compatible. For a
+        // duplicate alias the final entry supplies its uniform and conversion.
+        if (entry.value("rad2deg", false)) angle_aliases.insert(material);
+        else angle_aliases.erase(material);
     }
     for (const auto& entry : document.value("default_uniforms", none)) {
         uniforms.insert_or_assign(entry.at("name").get<std::string>(),
@@ -290,7 +303,11 @@ void ApplyRustShaderMetadataJson(std::string_view metadata_json, RustShaderOutpu
 
     auto& info = output.shader_info;
     for (auto& [k, v] : combos) info.combos[k] = std::move(v);
-    for (auto& [k, v] : aliases) info.alias[k] = std::move(v);
+    for (auto& [k, v] : aliases) {
+        info.alias[k] = std::move(v);
+        if (angle_aliases.contains(k)) info.alias_rad2deg.insert(k);
+        else info.alias_rad2deg.erase(k);
+    }
     for (auto& [k, v] : uniforms) info.svs.insert_or_assign(k, std::move(v));
     for (auto& t : textures) info.defTexs.push_back(std::move(t));
     output.fragment_preprocessor_info.active_tex_slots.insert(slots.begin(), slots.end());

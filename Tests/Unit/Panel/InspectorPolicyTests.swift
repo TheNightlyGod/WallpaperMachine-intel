@@ -23,7 +23,8 @@ class InspectorTestCase: PanelTestCase {
   ) -> LibraryRow {
     LibraryRow(
       id: id, title: title, kind: kind, previewFile: nil, cover: .none, canAnimate: false,
-      isActive: false, isSupported: supported, tags: [], isApproved: false, size: size,
+      isActive: false, isSupported: supported, tags: [],
+      searchText: LibraryRow.searchText(title: title, words: ""), isApproved: false, size: size,
       addedAt: nil, energy: energy, isUpdateAvailable: false, updatedAt: nil)
   }
 
@@ -53,10 +54,15 @@ final class InspectorPolicyTests: InspectorTestCase {
   }
 
   func testTheButtonRestartsWhatTheTargetShowsAndOtherwiseApplies() {
-    XCTAssertTrue(InspectorPolicy.reapplies("a", target: target(showing: "a")))
-    XCTAssertFalse(InspectorPolicy.reapplies("a", target: target(showing: "b")))
-    XCTAssertFalse(InspectorPolicy.reapplies("a", target: target()))
-    XCTAssertFalse(InspectorPolicy.reapplies("a", target: nil))
+    func reapplies(_ target: TargetDisplayOption?) -> Bool {
+      ApplyOffer(
+        wallpaperID: "a", shownID: target?.wallpaperID, canApply: true, isBusy: { _ in false }
+      ).reapplies
+    }
+    XCTAssertTrue(reapplies(target(showing: "a")))
+    XCTAssertFalse(reapplies(target(showing: "b")))
+    XCTAssertFalse(reapplies(target()))
+    XCTAssertFalse(reapplies(nil))
   }
 
   /// Port of `ControlPanelDisplayLayoutTests.testInspectorAppliesToEveryDisplay...` (offered with two

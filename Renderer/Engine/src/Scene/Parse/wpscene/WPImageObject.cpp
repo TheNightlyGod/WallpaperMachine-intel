@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <sstream>
 
 using namespace wallpaper::wpscene;
@@ -93,10 +94,92 @@ bool WPEffectCommand::FromJson(const nlohmann::json& json) {
     return true;
 }
 
+namespace
+{
+// A combo or condition value as Wallpaper Engine's JSON reads it as an integer: integers as
+// they are, a double truncated, anything else 0 (`sub_1401E63B0`).
+int ConditionInt(const nlohmann::json& value) {
+    if (value.is_number_integer()) return value.get<int>();
+    if (value.is_number_float()) return static_cast<int>(value.get<double>());
+    return 0;
+}
+
+// `clear` as `sub_1401E7170` reads it: an empty string clears to black; otherwise up to four
+// numbers separated by spaces, and only all four ask for the clear when the buffer is made.
+void ReadClear(const nlohmann::json& json, WPEffectFbo& fbo) {
+    const auto found = json.find("clear");
+    if (found == json.end() || ! found->is_string()) return;
+    const std::string& text = found->get_ref<const std::string&>();
+    const char*        at   = text.c_str();
+    if (*at == '\0') {
+        fbo.clear = true;
+        return;
+    }
+    for (std::size_t lane = 0; lane < 4; ++lane) {
+        fbo.clear_color[lane] = static_cast<float>(std::atof(at));
+        while (*at != '\0' && *at != ' ') ++at;
+        bool spaced = false;
+        while (*at == ' ') {
+            ++at;
+            spaced = true;
+        }
+        if (lane == 3) {
+            fbo.clear = true;
+            return;
+        }
+        if (! spaced) return;
+        if (*at == '\0' && lane < 2) return;
+        if (*at == '\0') {
+            // A trailing space after the third number: the fourth reads as 0 and counts.
+            fbo.clear_color[3] = 0.0f;
+            fbo.clear          = true;
+            return;
+        }
+    }
+}
+} // namespace
+
+bool wallpaper::wpscene::EffectConditionsHold(const nlohmann::json& conditions, const nlohmann::json* combos) {
+    if (! conditions.is_array()) return true;
+    for (const auto& element : conditions) {
+        if (! element.is_object()) continue;
+        bool holds = true;
+        for (const auto& [key, want] : element.items()) {
+            int have = 0;
+            if (combos != nullptr && combos->is_object()) {
+                if (const auto found = combos->find(key); found != combos->end()) have = ConditionInt(*found);
+            }
+            if (want.is_number()) {
+                holds = holds && have == ConditionInt(want);
+            } else if (want.is_object()) {
+                const auto value = want.find("value");
+                const int  v     = value != want.end() ? ConditionInt(*value) : 0;
+                const auto op    = want.find("op");
+                const std::string_view word =
+                    op != want.end() && op->is_string() ? std::string_view(op->get_ref<const std::string&>())
+                                                        : std::string_view();
+                if (word == "ge") holds = holds && have >= v;
+                else if (word == "gt") holds = holds && have > v;
+                else if (word == "le") holds = holds && have <= v;
+                else if (word == "lt") holds = holds && have < v;
+                else holds = holds && have == v;
+            }
+        }
+        if (! holds) return false;
+    }
+    return true;
+}
+
 bool WPEffectFbo::FromJson(const nlohmann::json& json) {
     if (! json.is_object()) return false;
-    ReadPlainString(json, "name", name);
-    ReadPlainString(json, "format", format);
+    const auto name_value   = json.find("name");
+    const auto format_value = json.find("format");
+    if (name_value == json.end() || ! name_value->is_string() || format_value == json.end() ||
+        ! format_value->is_string()) {
+        return false;
+    }
+    name   = name_value->get<std::string>();
+    format = format_value->get<std::string>();
     ReadUnsigned(json, "scale", scale);
     if (scale == 0) {
         LOG_INFO("effect buffer '%s' has a scale of 0, reading it as 1", name.c_str());
@@ -105,6 +188,13 @@ bool WPEffectFbo::FromJson(const nlohmann::json& json) {
     ReadUnsigned(json, "width", width);
     ReadUnsigned(json, "height", height);
     ReadUnsigned(json, "fit", fit);
+    if (const auto found = json.find("unique"); found != json.end() && found->is_boolean()) {
+        unique = found->get<bool>();
+    }
+    if (const auto found = json.find("uvs"); found != json.end() && found->is_string()) {
+        repeat = found->get_ref<const std::string&>() == "repeat";
+    }
+    ReadClear(json, *this);
     return true;
 }
 
@@ -117,6 +207,7 @@ bool WPImageEffect::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
     }
     if (const auto found = json.find("id"); found != json.end()) ReadNumberSetting(*found, id);
     ReadPlainString(json, "name", name);
+    instance_name = name;
     if (const auto found = json.find("visible"); found != json.end()) {
         ReadFlagSetting(*found, visible);
         // Only a binding is kept: a user property decides at load, a script
@@ -127,38 +218,42 @@ bool WPImageEffect::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
         }
     }
 
+    // The file's `conditions` read the instance's own `combos` (sub_1401E7170: a4["combos"]).
+    const auto      combos_found = json.find("combos");
+    const auto*     combos       = combos_found != json.end() ? &*combos_found : nullptr;
     nlohmann::json file_json;
-    if (! ReadAssetJson(vfs, file, file_json) || ! FromFileJson(file_json, vfs)) {
+    if (! ReadAssetJson(vfs, file, file_json) || ! FromFileJson(file_json, vfs, combos)) {
         LOG_ERROR("cannot load effect file %s", file.c_str());
         return false;
     }
 
-    // The i-th entry overrides the i-th material pass; entries beyond the
-    // effect's passes have nothing to apply to.
+    // The instance's i-th entry overrides the material of the file's i-th `passes` entry, the
+    // position Wallpaper Engine reads it by (sub_1401E7170), commands and dropped passes counted.
     if (const auto found = json.find("passes"); found != json.end() && found->is_array()) {
-        std::size_t index = 0;
-        for (const auto& entry : *found) {
-            if (index >= passes.size()) {
-                LOG_INFO("effect %s: more pass overrides than passes, ignoring the rest",
-                         file.c_str());
-                break;
-            }
+        for (std::size_t pass = 0; pass < passes.size() && pass < material_entries.size(); ++pass) {
+            const std::size_t entry = material_entries[pass];
+            if (entry >= found->size()) continue;
             WPMaterialPass override_pass;
-            if (override_pass.FromJson(entry)) passes[index].Update(override_pass);
-            ++index;
+            if (override_pass.FromJson((*found)[entry])) passes[pass].Update(override_pass);
         }
     }
     return true;
 }
 
-bool WPImageEffect::FromFileJson(const nlohmann::json& json, fs::VFS& vfs) {
+bool WPImageEffect::FromFileJson(const nlohmann::json& json, fs::VFS& vfs, const nlohmann::json* combos) {
     if (! json.is_object()) return false;
     if (const auto found = json.find("version"); found != json.end()) {
         ReadNumberSetting(*found, version);
     }
     ReadPlainString(json, "name", name);
+    // A buffer, a pass or a bind whose `conditions` do not hold is left out (sub_1401E7170).
+    const auto holds = [combos](const nlohmann::json& entry) {
+        const auto found = entry.find("conditions");
+        return found == entry.end() || EffectConditionsHold(*found, combos);
+    };
     if (const auto found = json.find("fbos"); found != json.end() && found->is_array()) {
         for (const auto& entry : *found) {
+            if (! entry.is_object() || ! holds(entry)) continue;
             WPEffectFbo fbo;
             if (fbo.FromJson(entry)) fbos.push_back(std::move(fbo));
         }
@@ -170,8 +265,10 @@ bool WPImageEffect::FromFileJson(const nlohmann::json& json, fs::VFS& vfs) {
         return false;
     }
     bool compose = false;
-    for (const auto& entry : *list) {
+    for (std::size_t position = 0; position < list->size(); ++position) {
+        const auto& entry = (*list)[position];
         if (! entry.is_object()) return false;
+        if (! holds(entry)) continue;
         std::string material_path;
         if (ReadPlainString(entry, "material", material_path)) {
             nlohmann::json material_json;
@@ -182,9 +279,25 @@ bool WPImageEffect::FromFileJson(const nlohmann::json& json, fs::VFS& vfs) {
                 return false;
             }
             WPMaterialPass pass;
-            pass.FromJson(entry);
+            const auto     binds = entry.find("bind");
+            if (binds != entry.end() && binds->is_array() &&
+                std::any_of(binds->begin(), binds->end(),
+                            [](const nlohmann::json& bind) { return bind.is_object() && bind.contains("conditions"); })) {
+                nlohmann::json kept = entry;
+                auto&          list_of_binds = kept["bind"];
+                list_of_binds.erase(std::remove_if(list_of_binds.begin(), list_of_binds.end(),
+                                                   [&holds](const nlohmann::json& bind) {
+                                                       return bind.is_object() && ! holds(bind);
+                                                   }),
+                                    list_of_binds.end());
+                pass.FromJson(kept);
+            } else {
+                pass.FromJson(entry);
+            }
             materials.push_back(std::move(material));
+            material_paths.push_back(material_path);
             passes.push_back(std::move(pass));
+            material_entries.push_back(position);
             if (const auto flag = entry.find("compose"); flag != entry.end()) {
                 bool value = false;
                 if (ReadFlagSetting(*flag, value) && value) compose = true;
@@ -192,12 +305,36 @@ bool WPImageEffect::FromFileJson(const nlohmann::json& json, fs::VFS& vfs) {
         } else if (entry.contains("command")) {
             WPEffectCommand command;
             command.FromJson(entry);
-            // It runs once this many material passes have been drawn.
+            // It runs once this many material passes have been drawn (passes left out do not count).
             command.afterpos = static_cast<i32>(materials.size());
             commands.push_back(std::move(command));
         } else {
             LOG_ERROR("effect pass has neither a material nor a command");
             return false;
+        }
+    }
+
+    // `functions`: a name a script runs, kept only for `"action": "clear"` with at least one of
+    // its `fbos` naming a buffer of the effect (sub_1401E7170).
+    if (const auto found = json.find("functions"); found != json.end() && found->is_object()) {
+        for (const auto& [function_name, function] : found->items()) {
+            if (function_name.empty() || ! function.is_object()) continue;
+            const auto action = function.find("action");
+            if (action == function.end() || ! action->is_string() ||
+                action->get_ref<const std::string&>() != "clear") {
+                continue;
+            }
+            const auto listed = function.find("fbos");
+            if (listed == function.end() || ! listed->is_array()) continue;
+            WPEffectFunction kept { .name = function_name, .fbos = {} };
+            for (const auto& buffer : *listed) {
+                if (! buffer.is_string()) continue;
+                const auto at = std::find_if(fbos.begin(), fbos.end(), [&buffer](const WPEffectFbo& fbo) {
+                    return fbo.name == buffer.get_ref<const std::string&>();
+                });
+                if (at != fbos.end()) kept.fbos.push_back(static_cast<uint32_t>(at - fbos.begin()));
+            }
+            if (! kept.fbos.empty()) functions.push_back(std::move(kept));
         }
     }
 
@@ -220,6 +357,7 @@ bool WPImageEffect::FromFileJson(const nlohmann::json& json, fs::VFS& vfs) {
         link.name   = buffer;
         link.format = "rgba_backbuffer";
         link.scale  = 1;
+        link.unique = true;
         fbos.push_back(std::move(link));
         passes[0].target = buffer;
         passes[0].bind.push_back({ kPreviousBuffer, 0 });
@@ -275,6 +413,8 @@ bool WPImageObject::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
     ReadPlainFlag(json, "clampuvs", clampuvs);
     ReadPlainFlag(json, "perspective", perspective);
     ReadPlainFlag(json, "nointerpolation", nointerpolation);
+    ReadPlainFlag(json, "ledsource", ledsource);
+    ReadPlainFlag(json, "castshadow", castshadow);
     ReadPlainFlag(json, "solid", solid);
     ReadPlainFlag(json, "disablepropagation", disablepropagation);
     ParseDependencies(json, dependencies);
@@ -296,7 +436,10 @@ bool WPImageObject::FromJson(const nlohmann::json& json, fs::VFS& vfs) {
     ReadPlainFlag(model_json, "projectlayer", projectlayer);
     ReadPlainFlag(model_json, "solidlayer", solidlayer);
     ReadPlainFlag(model_json, "nopadding", nopadding);
-    ReadPlainFlag(model_json, "passthrough", config.passthrough);
+    ReadPlainFlag(model_json, "instanced", instanced);
+    config.model_passthrough = false;
+    ReadPlainFlag(model_json, "passthrough", config.model_passthrough);
+    config.passthrough = config.model_passthrough;
     ReadPlainString(model_json, "puppet", puppet);
     if (const auto found = json.find("config"); found != json.end() && found->is_object()) {
         ReadPlainFlag(*found, "passthrough", config.passthrough);

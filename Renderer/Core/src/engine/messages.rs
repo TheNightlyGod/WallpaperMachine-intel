@@ -77,6 +77,9 @@ pub(super) struct TakeRenderFailuresForTest;
 
 pub struct Ping;
 
+pub struct PreloadScene { pub desc: SceneDesc, pub render_scale: f64 }
+pub struct FinishScenePreload { pub handle: SceneHandle, pub expired: bool }
+
 pub struct UpdateMedia {
     pub handle: SceneHandle,
     pub enabled: bool,
@@ -265,6 +268,14 @@ pub struct PreviewPropertyOverride {
     pub handle: SceneHandle,
     pub expected_scene_path: String,
     pub flat_json: String,
+}
+
+/// Shows Wallpaper Engine's per-wallpaper options on the running scene without
+/// keeping them, with the same wallpaper check as [`PreviewPropertyOverride`].
+pub struct PreviewUserOptions {
+    pub handle: SceneHandle,
+    pub expected_scene_path: String,
+    pub options: crate::project::SceneUserOptions,
 }
 
 pub struct CloseAllScenes;

@@ -85,6 +85,9 @@ final class WebWallpaperPreviewSurface: NSObject, WallpaperPreviewSurface, WKUID
     }
 
     /// The page already hands its listener only the properties whose values changed.
+    /// A web page has no Wallpaper Engine options.
+    func applyEngineOptions(_ options: WallpaperEngineOptions) throws {}
+
     func applyProperties(_ json: String) throws {
         guard !stopped else { return }
         page.applyUserProperties(json: WebWallpaperHost.substituting(replacements, in: json) ?? json)

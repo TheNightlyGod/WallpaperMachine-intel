@@ -29,14 +29,15 @@ using U4 = std::array<uint32_t, 4>;
 constexpr uint32_t kNone = 0xFFFFFFFFu;
 
 // Vertex layout bits of a mesh flag word.
+constexpr uint32_t kPosition = 0x1;
 constexpr uint32_t kNormal   = 0x2;
 constexpr uint32_t kTangent  = 0x4;
 constexpr uint32_t kUv       = 0x8;
 constexpr uint32_t kUvPair   = 0x20;
 constexpr uint32_t kSkinIdx  = 0x00800000;
 constexpr uint32_t kSkinWgt  = 0x01000000;
-// bones + weights + one texture coordinate
-constexpr uint32_t kSkinned = kSkinIdx | kSkinWgt | kUv;
+// position + bones + weights + one texture coordinate
+constexpr uint32_t kSkinned = kPosition | kSkinIdx | kSkinWgt | kUv;
 
 // ---- the data every standard triangle mesh carries ------------------------------------------
 
@@ -78,7 +79,9 @@ struct MaskSpec {
 
 struct MeshSpec {
     std::string material { "models/surface.json" };
-    uint32_t    flag { 0 };
+    uint32_t    flag { kPosition };
+    // The mesh flag word before the bounding box; bit 2 is followed by one more word (1).
+    uint32_t    flagA { 0 };
     uint32_t    vertices { 3 };
     // Position i is (i, 0, 0) instead of the standard triangle's positions.
     bool linePositions { false };
@@ -105,21 +108,34 @@ struct Marks {
     size_t vertexStart { 0 };
 };
 
+// Wallpaper Engine's vertex table (WPMdlVertexBits), summed for the set bits.
 inline uint32_t strideOf(uint32_t flag) {
-    uint32_t s = 12;
-    if (flag & kNormal) s += 12;
-    if (flag & kTangent) s += 16;
-    if (flag & 0x10000) s += 4;
-    if (flag & kSkinIdx) s += 16;
-    if (flag & kSkinWgt) s += 16;
-    if (flag & (kUv | kUvPair)) s += 8;
-    if (flag & kUvPair) s += 8;
+    uint32_t s = 0;
+    for (const auto& bit : wallpaper::WPMdlVertexBits())
+        if (flag & bit.mask) s += bit.bytes;
     return s;
+}
+
+// Lanes `lane`, `lane`+1 of the first texture-coordinate stream (0x8 or 0x20) a vertex.
+inline std::vector<F2> uvOf(const wallpaper::WPMdl::Mesh& m, int lane = 0) {
+    const auto* s = m.FindStream(kUv);
+    if (s == nullptr) s = m.FindStream(kUvPair);
+    std::vector<F2> out;
+    if (s == nullptr || lane + 2 > s->width) return out;
+    for (size_t v = 0; v * s->width < s->values.size(); ++v)
+        out.push_back({ s->values[v * s->width + lane], s->values[v * s->width + lane + 1] });
+    return out;
+}
+
+// The value float k of vertex i of a bit with no standard data: distinct per bit, vertex and lane.
+inline float streamValue(uint32_t mask, int i, int k) {
+    return static_cast<float>(__builtin_ctz(mask)) + 0.1f * static_cast<float>(i) + 0.01f * static_cast<float>(k);
 }
 
 inline void writeMesh(Bytes& b, int version, const MeshSpec& m, Marks* marks = nullptr) {
     b.cstr(m.material);
-    b.u32(0); // flag_a
+    b.u32(m.flagA);
+    if (m.flagA & 2) b.u32(1);
     if (version >= 17) {
         for (float v : m.boxMin) b.f32(v);
         for (float v : m.boxMax) b.f32(v);
@@ -129,18 +145,30 @@ inline void writeMesh(Bytes& b, int version, const MeshSpec& m, Marks* marks = n
     if (marks) marks->vertexStart = b.size();
     for (uint32_t k = 0; k < m.vertices; ++k) {
         const int i = static_cast<int>(k);
-        if (m.linePositions) {
-            b.f32(static_cast<float>(i)).f32(0.0f).f32(0.0f);
-        } else {
-            for (float v : stdPosition(i % 3)) b.f32(v);
+        // In the table's record order.
+        for (const auto& bit : wallpaper::WPMdlVertexBits()) {
+            if ((m.flag & bit.mask) == 0) continue;
+            switch (bit.mask) {
+            case kPosition:
+                if (m.linePositions) {
+                    b.f32(static_cast<float>(i)).f32(0.0f).f32(0.0f);
+                } else {
+                    for (float v : stdPosition(i % 3)) b.f32(v);
+                }
+                break;
+            case kNormal: for (float v : stdNormal(i)) b.f32(v); break;
+            case kTangent: for (float v : stdTangent(i)) b.f32(v); break;
+            case kSkinIdx: for (uint32_t v : stdBoneIdx(i)) b.u32(v); break;
+            case kSkinWgt: for (float v : stdBoneWgt(i)) b.f32(v); break;
+            case kUv: for (float v : stdUv(i)) b.f32(v); break;
+            case kUvPair:
+                for (float v : stdUv(i)) b.f32(v);
+                for (float v : stdUv2(i)) b.f32(v);
+                break;
+            default:
+                for (int f = 0; f < bit.bytes / 4; ++f) b.f32(streamValue(bit.mask, i, f));
+            }
         }
-        if (m.flag & kNormal) for (float v : stdNormal(i)) b.f32(v);
-        if (m.flag & kTangent) for (float v : stdTangent(i)) b.f32(v);
-        if (m.flag & 0x10000) b.u32(0);
-        if (m.flag & kSkinIdx) for (uint32_t v : stdBoneIdx(i)) b.u32(v);
-        if (m.flag & kSkinWgt) for (float v : stdBoneWgt(i)) b.f32(v);
-        if (m.flag & (kUv | kUvPair)) for (float v : stdUv(i)) b.f32(v);
-        if (m.flag & kUvPair) for (float v : stdUv2(i)) b.f32(v);
     }
     const bool wide = m.vertices > 65535;
     b.u32(static_cast<uint32_t>(m.indices.size()) * (wide ? 4 : 2));
@@ -201,6 +229,7 @@ struct BoneSpec {
     uint32_t    parent { kNone };
     F3          bind { 0, 0, 0 };
     F3          reference { 0, 0, 0 }; // version 2 reference pose
+    std::string simulation { "{}" };   // the bone's simulation JSON
 };
 
 // Returns the offset of the end-offset field.
@@ -214,36 +243,113 @@ inline void endBlock(Bytes& b, size_t at) {
     b.patchU32(at, static_cast<uint32_t>(b.size()));
 }
 
-// Opaque: a short blob after the kinematics header. Loud: a blob that would parse as a skin table
-// if anything read it.
-enum class IkTail { None, Opaque, Loud };
+// The MDLS tail of version 2 on, in Wallpaper Engine's layout (we_LoadMdlModel 0x140261880):
+// IK targets, the reference pose, link records, the K table and groups, the P chains, then the
+// skin table and the bone tables.
+struct IkTargetSpec {
+    std::string name;
+    uint32_t    bone { 0 };
+    uint32_t    type { 0 };
+    F3          at { 0, 0, 0 };
+    F3          reference { 0, 0, 0 };
+};
+struct LinkSpec {
+    uint32_t bone { 0 }, a { 0 }, b { 0 }, flags { 0 }, c { 0 };
+    float    w { 0 };
+};
+struct NeighbourSpec {
+    uint32_t bone { 0 };
+    F3       values { 0, 0, 0 };
+};
+struct ChainLinkSpec {
+    uint32_t              a { 0 }, flags { 0 }, b { 0 }, c { 0 };
+    std::vector<uint32_t> bones;
+};
+struct ChainSegmentSpec {
+    uint32_t                   bone { 0 };
+    std::vector<ChainLinkSpec> links;
+};
+struct ChainSpec {
+    uint32_t                      bone { 0 };
+    std::vector<uint32_t>         targets;
+    std::vector<ChainSegmentSpec> segments;
+};
+struct SkeletonTail {
+    std::vector<IkTargetSpec>               targets;
+    std::optional<bool>                     reference; // default: version 2 writes one
+    std::vector<LinkSpec>                   links;
+    std::vector<float>                      table;
+    std::vector<std::vector<NeighbourSpec>> groups; // one per table entry, missing = empty
+    std::vector<ChainSpec>                  chains;
+    bool                                    skin { false };
+    bool                                    boneTable { false };
+    bool                                    secondBoneTable { false };
+    std::vector<uint8_t>                    trailing; // bytes left inside the block
+};
 
 inline void writeSkeleton(Bytes& b, int version, const std::vector<BoneSpec>& bones,
-                          IkTail ik = IkTail::None) {
+                          const SkeletonTail& tail = {}, std::vector<uint32_t> boneFlags = {}) {
     const size_t end = beginBlock(b, "MDLS", version);
     b.u16(static_cast<uint32_t>(bones.size())).u16(0);
-    for (const auto& bone : bones) {
-        b.cstr(bone.name).i32(0).u32(bone.parent).u32(64);
+    for (size_t i = 0; i < bones.size(); ++i) {
+        const auto& bone = bones[i];
+        b.cstr(bone.name).u32(i < boneFlags.size() ? boneFlags[i] : 0).u32(bone.parent).u32(64);
         b.matrix(bone.bind[0], bone.bind[1], bone.bind[2]);
-        b.cstr("{}");
+        b.cstr(bone.simulation);
     }
     if (version == 1) {
         b.patchU32(end, 0);
         return;
     }
-    if (version == 2) {
-        b.u16(0).u8(1);
+    b.u16(static_cast<uint32_t>(tail.targets.size()));
+    for (const auto& t : tail.targets) b.cstr(t.name).u32(t.bone).u32(t.type).matrix(t.at[0], t.at[1], t.at[2]);
+    const bool reference = tail.reference.value_or(version == 2);
+    b.u8(reference ? 1 : 0);
+    if (reference) {
         for (const auto& bone : bones) b.matrix(bone.reference[0], bone.reference[1], bone.reference[2]);
-        b.fill(10, 0);
-    } else if (ik == IkTail::Opaque) {
-        b.u16(2).u8(0).u32(0).u32(0);
-        b.raw({ 0x00, 0x00, 0x7F, 0x7E, 0x7D });
-    } else if (ik == IkTail::Loud) {
-        b.u16(2).u8(0).u32(0).u32(0);
-        b.u8(1).fill(bones.size() * 76 + 16, 0x11);
-    } else {
-        b.u16(0).u8(0).u32(0).u32(0).u8(0).u8(0).u8(0);
+        for (const auto& t : tail.targets) b.matrix(t.reference[0], t.reference[1], t.reference[2]);
     }
+    b.u32(static_cast<uint32_t>(tail.links.size()));
+    for (const auto& l : tail.links) {
+        b.u32(l.bone).u32(l.a).u32(l.b);
+        if (version >= 4) b.u32(l.flags);
+        if (version >= 4 && (l.flags & 2)) b.u32(l.c).f32(l.w);
+    }
+    b.u16(static_cast<uint32_t>(tail.table.size()));
+    for (float v : tail.table) b.f32(v);
+    for (size_t k = 0; k < tail.table.size(); ++k) {
+        const auto none  = std::vector<NeighbourSpec> {};
+        const auto& list = k < tail.groups.size() ? tail.groups[k] : none;
+        b.u16(static_cast<uint32_t>(list.size()));
+        for (const auto& n : list) b.u32(n.bone).f32(n.values[0]).f32(n.values[1]).f32(n.values[2]);
+    }
+    b.u16(static_cast<uint32_t>(tail.chains.size()));
+    for (const auto& c : tail.chains) {
+        b.u32(c.bone).u32(static_cast<uint32_t>(c.targets.size()));
+        for (uint32_t t : c.targets) b.u32(t);
+        b.u16(static_cast<uint32_t>(c.segments.size()));
+        for (const auto& s : c.segments) {
+            b.u32(s.bone).u16(static_cast<uint32_t>(s.links.size()));
+            for (const auto& l : s.links) {
+                b.u32(l.a).u32(l.flags).u32(l.b).u32(l.c).u16(static_cast<uint32_t>(l.bones.size()));
+                for (uint32_t v : l.bones) b.u32(v);
+            }
+        }
+    }
+    b.u8(tail.skin ? 1 : 0);
+    if (tail.skin) {
+        for (size_t i = 0; i < bones.size(); ++i) {
+            b.f32(static_cast<float>(i)).f32(2).f32(3);
+            b.matrix(0, 0, 0);
+        }
+    }
+    b.u8(tail.boneTable ? 1 : 0);
+    if (tail.boneTable) for (size_t i = 0; i < bones.size(); ++i) b.u32(static_cast<uint32_t>(i));
+    if (version >= 3) {
+        b.u8(tail.secondBoneTable ? 1 : 0);
+        if (tail.secondBoneTable) for (size_t i = 0; i < bones.size(); ++i) b.u32(0);
+    }
+    b.raw(tail.trailing);
     endBlock(b, end);
 }
 
@@ -270,34 +376,55 @@ struct AnimSpec {
     bool     badSecondCurve { false };
     uint32_t jsonEventCount { 1 };
     bool     headerOnly { false }; // stop right after the track count
+    // Tracks stored after the declared ones (one per IK target of the skeleton), and one float
+    // curve per link record after those.
+    uint32_t storedExtraTracks { 0 };
+    uint32_t storedLinkCurves { 0 };
+    uint32_t linkCurveFlags { 0 };
+    uint32_t skeletonBones { 1 }; // the curve blocks hold one curve per bone
+    // The header word after the frame count (anim+80) and, when its bit 0 is set, the clip
+    // record after the version-6 curves: source, start, end, origin offset, root bone.
+    uint32_t                flags { 0 };
+    std::array<uint32_t, 5> clip { 0, 0, 0, 0, 0xFFFFFFFFu };
+    // Texture channel records in file order: the leading word, then one weight a frame.
+    std::vector<std::pair<uint32_t, std::vector<float>>> channels { { 0, { 0.0f, 1.0f } } };
 };
 
-inline void writeCurveBlock(Bytes& b) {
-    b.u8(1).u32(0).u32(8).f32(2.0f).f32(3.0f);
+inline void writeCurveBlock(Bytes& b, uint32_t bones = 1) {
+    b.u8(1);
+    for (uint32_t k = 0; k < bones; ++k) b.u32(0).u32(8).f32(2.0f).f32(3.0f);
 }
 
 // One animation record of an MDLA version 6 block for a one-bone skeleton.
 inline void writeAnim6(Bytes& b, const AnimSpec& a) {
-    b.i32(a.id).u32(0).cstr(a.name).cstr("loop").f32(30.0f).i32(1).i32(0).u32(a.trackCount);
+    b.i32(a.id).u32(0).cstr(a.name).cstr("loop").f32(30.0f).i32(1).u32(a.flags).u32(a.trackCount);
     if (a.headerOnly) return;
-    for (uint32_t t = 0; t < a.trackCount; ++t) {
+    for (uint32_t t = 0; t < a.trackCount + a.storedExtraTracks; ++t) {
+        const float x = t < a.trackCount ? static_cast<float>(a.id) : 1000.0f + static_cast<float>(t);
         b.i32(0).u32(36);
-        b.f32(static_cast<float>(a.id)).f32(0).f32(0); // position
-        b.f32(0).f32(0).f32(0);                        // angle
-        b.f32(1).f32(1).f32(1);                        // scale
+        b.f32(x).f32(0).f32(0);  // position
+        b.f32(0).f32(0).f32(0);  // angle
+        b.f32(1).f32(1).f32(1);  // scale
     }
-    b.u32(1);
-    b.u32(8).f32(0.0f).f32(1.0f).u32(0);
-    b.u32(8).f32(0.25f).f32(0.75f).u32(0);
-    writeCurveBlock(b);
-    b.u8(1).u32(1).f32(0.5f).u32(0).u32(8).f32(2.0f).f32(3.0f);
+    for (uint32_t k = 0; k < a.storedLinkCurves; ++k)
+        b.u32(a.linkCurveFlags).u32(8).f32(0.5f).f32(0.25f);
+    // Version 3: the texture channels (0x140261880: a count, then per channel a word the loader
+    // skips and one weight a frame).
+    b.u32(static_cast<uint32_t>(a.channels.size()));
+    for (const auto& [word, weights] : a.channels) {
+        b.u32(word).u32(static_cast<uint32_t>(weights.size() * 4));
+        for (float w : weights) b.f32(w);
+    }
+    writeCurveBlock(b, a.skeletonBones);
+    b.u8(1).u32(1).f32(0.5f).u16(1).u16(0).u32(8).f32(2.0f).f32(3.0f);
     b.f32(-1).f32(-1).f32(0).f32(1).f32(1).f32(0);
     if (a.badSecondCurve) {
         b.u8(1).u32(0).u32(6).f32(1.0f).u16(0);
         b.u32(0);
         return;
     }
-    writeCurveBlock(b);
+    writeCurveBlock(b, a.skeletonBones);
+    if ((a.flags & 1u) != 0) b.u16(a.clip[0]).u32(a.clip[1]).u32(a.clip[2]).u32(a.clip[3]).u32(a.clip[4]);
     b.u32(a.jsonEventCount);
     b.u32(12).cstr("{\"k\":\"v\"}");
 }

@@ -28,6 +28,8 @@ enum class ScalarAnimationMode
 {
     Single,
     Loop,
+    // Plays to the end, then back to the start, and over again (ping-pong).
+    Mirror,
 };
 
 // An authored timeline can carry named events. They belong to the timeline, not
@@ -56,9 +58,12 @@ struct ScalarAnimation
 struct ScalarAnimationPlayback
 {
     ScalarAnimation animation;
+    // The position in the timeline, 0 to its length, in every mode.
     double frame { 0.0 };
     double rate { 1.0 };
     bool playing { false };
+    // A mirror timeline on its way back from the end to the start.
+    bool reversing { false };
     // Markers crossed by the last Advance, in the order the playhead met them.
     // The runtime drains them each tick. A seek is an explicit jump, not
     // playback, so it reports nothing.

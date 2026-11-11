@@ -219,6 +219,24 @@ TEST_F(HorizontalFlipPointerTest, TheFlipSurvivesAGraphRebuild)
     EXPECT_TRUE(PointerArrivesAs(0.6, 0.5, { 0.4f, 0.5f }));
 }
 
+// Wallpaper Engine's per-wallpaper "flip horizontally" option goes through the same mirror,
+// so the pointer follows the picture.
+TEST_F(HorizontalFlipPointerTest, TheUserOptionsFlipMirrorsThePointer)
+{
+    Start();
+    owe_user_options options {};
+    options.brightness = options.contrast = options.saturation = options.hue = 50.0f;
+    options.lut_strength    = 100.0f;
+    options.mouse_parallax  = true;
+    options.playback_rate   = 100.0f;
+    options.flip_horizontal = true;
+    ASSERT_EQ(owe_scene_wallpaper_set_user_options(native_, &options), 0) << owe_last_error();
+    EXPECT_TRUE(PointerArrivesAs(0.25, 0.4, { 0.75f, 0.4f }));
+    options.flip_horizontal = false;
+    ASSERT_EQ(owe_scene_wallpaper_set_user_options(native_, &options), 0) << owe_last_error();
+    EXPECT_TRUE(PointerArrivesAs(0.25, 0.4, { 0.25f, 0.4f }));
+}
+
 TEST_F(HorizontalFlipPointerTest, ThePropertyIsABoolAndOtherKindsAreRefused)
 {
     EXPECT_NE(owe_scene_wallpaper_set_property_int32(native_, owe_property_horizontal_flip(), 1), 0);

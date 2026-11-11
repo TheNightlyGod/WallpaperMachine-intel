@@ -9,6 +9,16 @@ struct PlaylistPlanRow: Identifiable, Equatable, Sendable {
   let displayCount: Int
 }
 
+/// What adding wallpapers to a display's list did.
+struct PlaylistAddition: Equatable, Sendable {
+  /// How many of them were not on the list before.
+  var added: Int
+  /// Whether the display's playlist rotates through its list now, so what was added will be shown.
+  /// A playlist that is off, follows day and night, or plays the library, the favorites or a
+  /// collection keeps the list without playing it.
+  var isPlayed: Bool
+}
+
 extension PanelController {
   // MARK: Derived state
 
@@ -26,7 +36,7 @@ extension PanelController {
       ? 0 : store.librarySnapshot.wallpapers.reduce(0) { listed.contains($1.id) ? $0 + 1 : $0 }
     return PlaylistState(
       display: display, playlist: playlist, nextChange: playlists.nextChange[display],
-      isHeld: playlists.holds[display] != nil,
+      clipWaitLimit: playlists.clipWaits[display], isHeld: playlists.holds[display] != nil,
       skipped: (playlists.skipped[display] ?? [:]).sorted { $0.key < $1.key }.map {
         PlaylistState.SkippedWallpaper(id: $0.key, message: $0.value.message, retryAfter: $0.value.retryAfter)
       },
@@ -56,10 +66,21 @@ extension PanelController {
   }
 
   /// `playlistAdd`: the installed wallpapers of `ids`, each once, appended to the display's list.
-  func addToPlaylist(_ ids: [String], display: String? = nil) async throws {
+  /// Answers what that did, for the notice that follows: the list is only one of the things a
+  /// playlist can play, and a display's playlist is off until it is turned on.
+  @discardableResult
+  func addToPlaylist(_ ids: [String], display: String? = nil) async throws -> PlaylistAddition {
+    var addition = PlaylistAddition(added: 0, isPlayed: false)
     try await changePlaylist(display) { display in
-      playlists.add(try installedWallpaperIDs(ids), to: display)
+      let ids = try installedWallpaperIDs(ids)
+      let listed = Set(playlists.playlist(for: display).wallpaperIDs)
+      playlists.add(ids, to: display)
+      let playlist = playlists.playlist(for: display)
+      addition = PlaylistAddition(
+        added: ids.filter { !listed.contains($0) }.count,
+        isPlayed: playlist.mode == .rotate && playlist.source == .list)
     }
+    return addition
   }
 
   /// `playlistRemove`: the wallpaper leaves the display's list. It need not be installed.
@@ -100,6 +121,36 @@ extension PanelController {
   /// `playlistResume`: a playlist that waits because its display was emptied fills the display.
   func resumePlaylist(display: String? = nil) async throws {
     try await run(.immediate) { playlists.resumeHandler?(try standaloneDisplayID(display)) }
+  }
+
+  /// `playlistPlay`: Installed's Play button and a collection's Play and Shuffle. The display
+  /// rotates through `source` (`order`, or the order it already had), changes to its first
+  /// wallpaper at once, and keeps its interval or unlock trigger. A display the user emptied is
+  /// filled again. Refused, and nothing changes, when `source` holds no wallpaper that can play.
+  /// Counts as a manual choice for the automatic selection.
+  func playPlaylist(_ source: PlaylistSourceChoice, order: PlaylistOrder? = nil, display: String? = nil)
+    async throws
+  {
+    try await changePlaylist(display) { display in
+      var playlist = try rotation(through: source, from: playlists.playlist(for: display))
+      if let order { playlist.order = order }
+      guard hasPlayableWallpaper(playlist) else {
+        throw WallpaperActionError(message: L("None of these wallpapers can play on this Mac."))
+      }
+      playlists.update(display) { $0 = playlist }
+      // Already showing the only wallpaper it has is not a failure: the rotation is set either way.
+      if playlists.skipHandler?(display) != true { playlists.setHold(nil, on: display) }
+    }
+  }
+
+  /// Whether Installed's `source` (All wallpapers, Favorites or a collection; a display's own list
+  /// is not one) holds a wallpaper that can play: what Play and Shuffle are enabled on, by the same
+  /// rule `playPlaylist` refuses with, so a source of removed or unsupported wallpapers only offers
+  /// disabled buttons.
+  func canPlay(_ source: PlaylistSourceChoice) -> Bool {
+    _ = revisions.collections
+    guard let playlist = try? rotation(through: source, from: DisplayPlaylist()) else { return false }
+    return hasPlayableWallpaper(playlist)
   }
 
   /// `historyClear`: forgets what the display showed recently, so Previous has nothing to go back to.
@@ -199,17 +250,55 @@ extension PanelController {
         $0.interval = minutes
         $0.trigger = .interval
       }
+    case .waitsForClipEnd(let waits):
+      playlists.update(display) { $0.waitsForClipEnd = waits }
     case .dayWallpaper(let id):
       let id = try playableWallpaperID(id)
       playlists.update(display) { $0.dayWallpaperID = id }
     case .nightWallpaper(let id):
       let id = try playableWallpaperID(id)
       playlists.update(display) { $0.nightWallpaperID = id }
+    // A day that starts when the night does has no length: the planner would call every minute
+    // night and put the night wallpaper back each day.
     case .dayStart(let start):
+      guard start.minutes != playlists.playlist(for: display).nightStart else { throw Self.sameStartTimes() }
       playlists.update(display) { $0.dayStart = start.minutes }
     case .nightStart(let start):
+      guard start.minutes != playlists.playlist(for: display).dayStart else { throw Self.sameStartTimes() }
       playlists.update(display) { $0.nightStart = start.minutes }
     }
+  }
+
+  private static func sameStartTimes() -> WallpaperActionError {
+    WallpaperActionError(message: L("Day and night need different start times."))
+  }
+
+  /// `playlist` rotating through `source`. Throws when the source is a collection that is gone.
+  private func rotation(through source: PlaylistSourceChoice, from playlist: DisplayPlaylist) throws
+    -> DisplayPlaylist
+  {
+    var playlist = playlist
+    playlist.mode = .rotate
+    switch source {
+    case .all: playlist.source = .all
+    case .favorites: playlist.source = .favorites
+    case .list: playlist.source = .list
+    case .collection(let id):
+      guard collections.collection(id: id) != nil else { throw LibraryOrganizationError.missingCollection }
+      playlist.source = .collection
+      playlist.collectionID = id
+    case .missingCollection: throw LibraryOrganizationError.missingCollection
+    }
+    return playlist
+  }
+
+  /// Whether the rotation has a wallpaper to pick: installed, able to play, and in its source.
+  private func hasPlayableWallpaper(_ playlist: DisplayPlaylist) -> Bool {
+    let members = playlist.collectionID.flatMap { collections.collection(id: $0)?.wallpaperIDs } ?? []
+    return !PlaylistPlanner.candidates(
+      for: playlist, library: store.librarySnapshot.wallpapers.filter(\.supported).map(\.id),
+      favorites: favoriteIDs, collectionIDs: members
+    ).isEmpty
   }
 
   /// nil, which clears the choice, or an installed wallpaper that can play.

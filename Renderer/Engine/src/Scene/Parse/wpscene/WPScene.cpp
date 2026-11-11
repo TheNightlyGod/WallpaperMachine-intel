@@ -25,6 +25,11 @@ bool WPSceneCamera::FromJson(const nlohmann::json& json) {
     if (json.contains("center")) ReadStrictVec(json.at("center"), center);
     if (json.contains("eye")) ReadStrictVec(json.at("eye"), eye);
     if (json.contains("up")) ReadStrictVec(json.at("up"), up);
+    paths.clear();
+    if (const auto found = json.find("paths"); found != json.end() && found->is_array()) {
+        for (const auto& path : *found)
+            paths.push_back(path.is_string() ? path.get<std::string>() : std::string());
+    }
     return true;
 }
 
@@ -95,6 +100,7 @@ bool WPSceneGeneral::FromJson(const nlohmann::json& json, uint16_t pkg_version) 
         dynamic_clearcolor = SettingIsDriven(clearcolor_setting);
     }
     ReadPlainFlag(json, "clearenabled", clearenabled);
+    ReadPlainFlag(json, "camerafade", camerafade);
 
     if (const auto found = json.find("orthogonalprojection"); found != json.end()) {
         if (found->is_null()) {
@@ -158,18 +164,27 @@ bool WPSceneGeneral::FromJson(const nlohmann::json& json, uint16_t pkg_version) 
         ReadPlainNumber(json, "windstrength", windstrength);
         ReadPlainVec3(json, "gravitydirection", gravitydirection);
         ReadPlainNumber(json, "gravitystrength", gravitystrength);
+        for (const char* name : {"windenabled","winddirection","windstrength","gravitydirection","gravitystrength"}) {
+            if (const auto found=json.find(name); found!=json.end() && SettingIsDriven(*found)) {
+                if (!force_settings.is_object()) force_settings=nlohmann::json::object();
+                force_settings[name]=*found;
+            }
+        }
         if (const auto found = json.find("lightconfig"); found != json.end() && found->is_object()) {
             lightconfig = *found;
         }
     }
     if (reads(22)) {
         ReadPlainFlag(json, "transparentsorting", transparentsorting);
+        ReadPlainFlag(json, "customsortorder", customsortorder);
         ReadPlainFlag(json, "fogdistance", fogdistance);
-        ReadPlainNumber(json, "fogdistancestart", fogdistancestart);
-        ReadPlainNumber(json, "fogdistanceend", fogdistanceend);
-        ReadPlainNumber(json, "fogdistancestartdensity", fogdistancestartdensity);
-        ReadPlainNumber(json, "fogdistanceenddensity", fogdistanceenddensity);
-        ReadPlainVec3(json, "fogdistancecolor", fogdistancecolor);
+        ReadScalarSetting(json, "fogdistancestart", fogdistancestart, fogdistancestart_setting);
+        ReadScalarSetting(json, "fogdistanceend", fogdistanceend, fogdistanceend_setting);
+        ReadScalarSetting(json, "fogdistancestartdensity", fogdistancestartdensity,
+                          fogdistancestartdensity_setting);
+        ReadScalarSetting(json, "fogdistanceenddensity", fogdistanceenddensity,
+                          fogdistanceenddensity_setting);
+        ReadVec3Setting(json, "fogdistancecolor", fogdistancecolor, fogdistancecolor_setting);
     }
     // Height fog is read whenever the file has it, whatever package version saved it.
     ReadPlainFlag(json, "fogheight", fogheight);

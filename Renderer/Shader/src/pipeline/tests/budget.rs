@@ -26,6 +26,9 @@ fn write_all(names: &[(&str, &str)]) -> (String, String) {
 fn zero(ty: &str) -> String {
     match ty {
         "float" => "0.5".to_string(),
+        "vec2" => "CAST2(0.5)".to_string(),
+        "vec3" => "CAST3(0.5)".to_string(),
+        "vec4" => "CAST4(0.5)".to_string(),
         t => format!("{t}(0.5)"),
     }
 }
@@ -71,7 +74,7 @@ fn a_tap_array_past_location_31_compiles_and_nothing_mentions_a_location_cap() {
     let wide = Req::new(
         &vertex_with(
             &(0..40).map(|i| format!("varying vec4 v_Extra{i};")).collect::<Vec<_>>().join("\n"),
-            &(0..40).map(|i| format!("  v_Extra{i} = vec4(1.0);")).collect::<Vec<_>>().join("\n"),
+            &(0..40).map(|i| format!("  v_Extra{i} = CAST4(1.0);")).collect::<Vec<_>>().join("\n"),
         ),
         &fragment_with("varying vec4 v_Only;", "  c = v_Only;"),
     )
@@ -123,7 +126,7 @@ fn the_crossing_varying_is_found_in_source_order_not_by_size() {
 fn vertex_outputs_no_fragment_input_names_are_free() {
     let extra: Vec<(String, &'static str)> = (0..40).map(|i| (format!("v_X{i}"), "vec4")).collect();
     let vertex_declarations = format!("{}\nvarying vec2 v_Use;", declare(&named(&extra)));
-    let writes: String = extra.iter().map(|(n, _)| format!("  {n} = vec4(1.0);\n")).collect::<String>() + "  v_Use = a_Coord;\n";
+    let writes: String = extra.iter().map(|(n, _)| format!("  {n} = CAST4(1.0);\n")).collect::<String>() + "  v_Use = a_Coord;\n";
     let fragment = fragment_with("varying vec2 v_Use;\nvarying float v_Alone;", "  c = vec4(v_Use, v_Alone, 1.0);");
     let p = Req::new(&vertex_with(&vertex_declarations, &writes), &fragment).ok();
     assert!(p.stage(StageKind::Vertex).unwrap().glsl.contains("v_X39"));
@@ -140,7 +143,7 @@ fn vertex_outputs_no_fragment_input_names_are_free() {
 #[test]
 fn fragment_only_varyings_count_and_builtins_do_not() {
     // Fragment-only varyings get a synthesized vertex output and still count in full.
-    let text = components_error(&Req::new(&vertex_with("", ""), &fragment_with(&declare(&[("v_A", "vec4[31]"), ("v_B", "float")]), "  c = v_A[0] + vec4(v_B);")).err());
+    let text = components_error(&Req::new(&vertex_with("", ""), &fragment_with(&declare(&[("v_A", "vec4[31]"), ("v_B", "float")]), "  c = v_A[0] + CAST4(v_B);")).err());
     assert!(text.contains("125") && text.contains("v_B"), "{text}");
     // gl_FragCoord and friends are builtins: 31 vec4 plus a read of the fragment position is fine.
     let names = thirty_one_vec4();
@@ -172,8 +175,51 @@ fn vertex_input_locations_keep_their_cap_of_30() {
         let sum: Vec<String> = (0..n).map(|i| format!("a_{i}")).collect();
         format!("{declarations}void main() {{ gl_Position = {}; }}", sum.join(" + "))
     };
-    let fragment = "void main() { gl_FragColor = vec4(1.0); }";
+    let fragment = "void main() { gl_FragColor = CAST4(1.0); }";
     let p = ok(&many(31), fragment);
     assert_eq!(p.reflection.vertex_inputs.last().unwrap().location, 30);
     assert!(err(&many(32), fragment).to_string().contains("31"));
+}
+
+/// An effect that, like Wallpaper Engine's audio oscilloscopes, sizes a varying array by a combo and
+/// declares a smaller one behind `#ifdef GLSL` for tighter interpolator limits. The fragment stage
+/// marks which dialect branches it took with constants that survive into the legalized text.
+fn sized_by_resolution(glsl_elements: &str, resolution: &str) -> Req {
+    let declarations = format!(
+        "#ifdef GLSL\nvarying vec4 v_Audio[{glsl_elements}];\n#else\nvarying vec4 v_Audio[RESOLUTION];\n#endif\nvarying vec2 v_TexCoord;\nvarying vec3 v_PerspCoord;\nvarying vec3 v_ViewCoord;"
+    );
+    let writes = "  for (int i = 0; i < 7; i++) { v_Audio[i] = CAST4(0.5); }\n  v_TexCoord = a_Coord;\n  v_PerspCoord = vec3(a_Coord, 1.0);\n  v_ViewCoord = vec3(a_Coord, 1.0);\n#if HLSL\n  v_ViewCoord.y = -v_ViewCoord.y;\n#endif";
+    let reads = "  c = v_Audio[1] + vec4(v_TexCoord, v_PerspCoord.x, v_ViewCoord.y);\n#if HLSL && GLSL\n  c.y += 0.375;\n#endif\n#ifdef GLSL\n  c.z += 0.625;\n#endif";
+    Req::new(&vertex_with(&declarations, writes), &fragment_with(&declarations, reads)).combo("RESOLUTION", resolution)
+}
+
+#[test]
+fn a_program_over_the_budget_is_compiled_again_with_glsl_defined() {
+    // `vec4[32]` and 8 more components are 136: refused with Wallpaper Engine's macros. With `GLSL`
+    // also defined the author's `vec4[28]` makes 120, and `HLSL` still holds.
+    let p = sized_by_resolution("28", "32").ok();
+    let f = glsl_of(&p, StageKind::Fragment);
+    assert_eq!(declared_location(&f, "v_TexCoord"), Some(28), "{f}");
+    assert!(f.contains("0.375") && f.contains("0.625"), "both HLSL and GLSL are defined in the retry: {f}");
+    assert!(p.stage(StageKind::Fragment).unwrap().payload.msl_source.contains("v_Audio_27"));
+}
+
+#[test]
+fn a_program_within_the_budget_never_sees_glsl() {
+    // `vec4[16]` and 8 more are 72: the first compile passes and keeps the Direct3D branch.
+    let p = sized_by_resolution("12", "16").ok();
+    let f = glsl_of(&p, StageKind::Fragment);
+    assert_eq!(declared_location(&f, "v_TexCoord"), Some(16), "{f}");
+    assert!(!f.contains("0.375") && !f.contains("0.625"), "{f}");
+}
+
+#[test]
+fn a_program_still_over_the_budget_with_glsl_keeps_the_first_refusal() {
+    // `vec4[64]` is 264 in all; the `GLSL` branch's `vec4[60]` is still 248, so the program is
+    // refused, and the message describes the program Wallpaper Engine's macros select.
+    let text = components_error(&sized_by_resolution("60", "64").err());
+    assert!(text.contains("264") && text.contains("124") && text.contains("v_Audio"), "{text}");
+    // Without a `GLSL` branch the retry changes nothing and the refusal is the same.
+    let text = components_error(&program_of(&[("v_Ring", "vec2[63]")]).err());
+    assert!(text.contains("126") && text.contains("v_Ring"), "{text}");
 }

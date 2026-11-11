@@ -17,8 +17,10 @@ import VideoToolbox
 /// because software AV1 decoding of a wallpaper that runs all day is a cost this app does not
 /// take on. Matroska and WebM files, which AVFoundation never opens, are opened with the app's own
 /// reader (`WebMOpening`): H.264, HEVC and VP9 in them (and AV1 with hardware decoding) play through
-/// `WebMPlayer`, and every other codec, VP8 for one, is refused with its format named. There is no
-/// other player to hand a refused file to.
+/// `WebMPlayer`, and every other codec, VP8 for one, is refused with its format named. An MP4 or MOV
+/// whose HEVC is tagged `hev1`, which AVFoundation refuses, plays from a copy retagged `hvc1` when its
+/// sample descriptions carry the parameter sets (`HevcSampleEntryRetag`, `DerivedVideoCache`). There
+/// is no other player to hand a refused file to.
 enum VideoFormatSupport {
     /// A container and the video codec in it, as a person would name them.
     struct Format: Equatable, Sendable {
@@ -41,6 +43,10 @@ enum VideoFormatSupport {
         /// Matroska or WebM that AVFoundation cannot open and the app's own player plays. The file
         /// the check opened is kept for the surface (`WebMOpenedFiles`).
         case supportedWebM
+        /// HEVC tagged `hev1` that AVFoundation refuses, whose sample descriptions carry the
+        /// parameter sets: a copy retagged `hvc1` at the plan's offsets plays. The format names the
+        /// file should the copy fail.
+        case playableAfterRetag(Format, HevcSampleEntryRetag.Plan)
         case unsupported(Format, Reason)
         /// The file could not be read (a busy volume, a file still being written). Says nothing
         /// about the format, so nothing is refused for it.
@@ -63,12 +69,17 @@ enum VideoFormatSupport {
     }
 
     static let av1: FourCharCode = 0x6176_3031  // 'av01'
+    static let hev1: FourCharCode = 0x6865_7631  // 'hev1'
 
     // MARK: - The decision
 
-    /// The whole rule, as a pure function of what was read.
-    static func decide(container: Container, report: TrackReport, hardwareAV1: Bool) -> Verdict {
-        let codec = report.videoCodec.map(codecName)
+    /// The whole rule, as a pure function of what was read. `hev1` is what the sample descriptions
+    /// of an MP4 or MOV said, read only when AVFoundation refused its `hev1` track.
+    static func decide(
+        container: Container, report: TrackReport, hardwareAV1: Bool,
+        hev1 finding: HevcSampleEntryRetag.Finding = .none
+    ) -> Verdict {
+        let format = Format(container: container.name, codec: report.videoCodec.map(codecName))
         if report.isPlayable, report.hasVideoTrack {
             if report.videoCodec == av1, !hardwareAV1 {
                 return .unsupported(
@@ -76,7 +87,17 @@ enum VideoFormatSupport {
             }
             return .supported
         }
-        return .unsupported(Format(container: container.name, codec: codec), .notPlayable)
+        if needsHev1Finding(container: container, report: report), case let .retag(plan) = finding {
+            return .playableAfterRetag(format, plan)
+        }
+        return .unsupported(format, .notPlayable)
+    }
+
+    /// Whether the sample descriptions are worth reading: AVFoundation refused the `hev1` video
+    /// track of an MP4 or MOV.
+    static func needsHev1Finding(container: Container, report: TrackReport) -> Bool {
+        !report.isPlayable && report.hasVideoTrack && report.videoCodec == hev1
+            && container.family == .isoBaseMedia
     }
 
     /// Reads the file and decides. Nothing is decoded: this is the metadata AVFoundation loads
@@ -89,7 +110,14 @@ enum VideoFormatSupport {
         let outcome = await (read ?? readTracks)(url)
         switch outcome {
         case let .success(report):
-            let verdict = decide(container: container, report: report, hardwareAV1: hardwareAV1)
+            var finding = HevcSampleEntryRetag.Finding.none
+            if needsHev1Finding(container: container, report: report) {
+                do { finding = try HevcSampleEntryRetag.inspect(url: url) } catch {
+                    return .unreadable(error.localizedDescription)
+                }
+            }
+            let verdict = decide(
+                container: container, report: report, hardwareAV1: hardwareAV1, hev1: finding)
             // AVFoundation does not open Matroska at all; the app's own reader decides.
             if case .unsupported(_, .notPlayable) = verdict, container.family == .matroska {
                 return judgeWebM(url, container: container)
@@ -129,13 +157,43 @@ enum VideoFormatSupport {
     }
 
     /// The same verdict as an answer for the native host: `nil` to play it, a refusal that is final
-    /// for a format nothing can play, and an unsettled one for a file that could not be read.
-    static func refusal(url: URL) async -> NativeVideoRefusal? {
+    /// for a format nothing can play, and an unsettled one for a file that could not be read. An
+    /// `hev1` clip is answered once its retagged copy exists (the surface then plays the one
+    /// `derived.playableFile(for:)` hands it), so a copy that does not play is refused here, before
+    /// any window opens. A full copy is not waited for: the clip waits for it (`awaitingCopy`) and
+    /// the host opens it when `DerivedVideoCache.copiesChanged` says the copy is done.
+    static func refusal(url: URL, derived: DerivedVideoCache = .shared) async -> NativeVideoRefusal? {
         switch await inspect(url: url) {
         case .supported, .supportedWebM:
+            derived.forget(url)
             return nil
+        case let .playableAfterRetag(format, plan):
+            switch await derived.prepare(source: url, plan: plan, waiting: false) {
+            case .success:
+                return nil
+            case let .failure(failure):
+                return refusal(for: failure, format: format)
+            }
         case let .unsupported(format, reason):
             return .unsupportedFormat(message(for: format, reason: reason))
+        case let .unreadable(detail):
+            return .preparationFailed(detail)
+        }
+    }
+
+    /// What a copy that could not be had means for the clip: waiting while it is made or while
+    /// there is no room for it now, refused for good when it does not play or the clip is too
+    /// large for one, and unsettled when a file could not be read. The preview says the same.
+    static func refusal(for failure: DerivedVideoCache.Failure, format: Format) -> NativeVideoRefusal {
+        switch failure {
+        case .copying:
+            return .awaitingCopy(String(localized: "This HEVC video is tagged hev1, which macOS plays only from a corrected copy. The copy is being made, and the video plays when it’s ready."), making: true)
+        case .noRoomForCopy(.notNow):
+            return .awaitingCopy(String(localized: "This HEVC video is tagged hev1, which macOS plays only from a corrected copy. The video isn’t on this Mac’s startup disk, so the copy has to be a full one, and there isn’t room for it now: other videos’ copies are in use, or the startup disk is nearly full. Move the library to this Mac, or convert the video to H.264 or to HEVC tagged hvc1 and import it again."), making: false)
+        case .noRoomForCopy(.tooLarge):
+            return .unsupportedFormat(String(localized: "This HEVC video is tagged hev1, which macOS plays only from a corrected copy. The video isn’t on this Mac’s startup disk, so the copy would have to be a full one, and the video is too large for that. Move the library to this Mac, or convert the video to H.264 or to HEVC tagged hvc1 and import it again."))
+        case .notPlayable:
+            return .unsupportedFormat(message(for: format, reason: .notPlayable))
         case let .unreadable(detail):
             return .preparationFailed(detail)
         }
@@ -205,7 +263,12 @@ enum VideoFormatSupport {
 
     /// Whether the file's first bytes are Matroska or WebM, which AVFoundation never opens.
     static func isMatroska(_ url: URL) -> Bool {
-        sniff(head: readHead(of: url), fileExtension: url.pathExtension).family == .matroska
+        container(of: url).family == .matroska
+    }
+
+    /// The container the file's first bytes show.
+    static func container(of url: URL) -> Container {
+        sniff(head: readHead(of: url), fileExtension: url.pathExtension)
     }
 
     /// The first bytes of the file, enough to tell the containers apart. Empty when it cannot be read.
@@ -221,7 +284,7 @@ enum VideoFormatSupport {
     static func codecName(_ subtype: FourCharCode) -> String {
         switch subtype {
         case 0x6176_6331, 0x6176_6333: return "H.264"  // avc1, avc3
-        case 0x6876_6331, 0x6865_7631: return "HEVC"  // hvc1, hev1
+        case 0x6876_6331, hev1: return "HEVC"  // hvc1, hev1
         case 0x7670_3039: return "VP9"  // vp09
         case 0x7670_3038: return "VP8"  // vp08
         case av1: return "AV1"

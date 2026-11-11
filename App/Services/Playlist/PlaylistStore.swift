@@ -2,16 +2,19 @@ import Foundation
 
 /// Every display's playlist, saved in UserDefaults, and when each display that rotates or
 /// follows the day changes next. Mutations post `didChangeNotification` once; the scheduler
-/// and the panel follow it.
+/// and the panel follow it. The scheduler's note of a change waiting for a video (`clipWaits`)
+/// posts `clipWaitsDidChangeNotification` instead, which only the panel follows.
 @MainActor
 final class PlaylistStore {
     static let shared = PlaylistStore()
     static let didChangeNotification = Notification.Name("WallpaperMachine.playlistsDidChange")
-    private static let playlistsKey = "WallpaperMachine.playlists"
-    private static let nextChangeKey = "WallpaperMachine.playlistNextChange"
-    static let plansKey = "WallpaperMachine.playlistPlans"
+    static let clipWaitsDidChangeNotification = Notification.Name("WallpaperMachine.playlistClipWaitsDidChange")
+    nonisolated static let playlistsKey = "WallpaperMachine.playlists"
+    nonisolated static let nextChangeKey = "WallpaperMachine.playlistNextChange"
+    nonisolated static let plansKey = "WallpaperMachine.playlistPlans"
     private static let holdsKey = "WallpaperMachine.playlistHolds"
     private static let roundsKey = "WallpaperMachine.playlistRounds"
+    private static let settledKey = "WallpaperMachine.playlistSettledPeriods"
     /// The most wallpapers one saved round keeps. A round holds each wallpaper of the playlist
     /// at most once, so only a very large library gets near it.
     private static let roundLimit = 2048
@@ -19,6 +22,8 @@ final class PlaylistStore {
     private let defaults: UserDefaults
     private(set) var playlists: [String: DisplayPlaylist]
     private(set) var plans: [PlaylistPlan]
+    /// Saved plans this build could not read, as they were saved (`PreservedJSON`).
+    private var unreadPlans: [Data] = []
     /// When each display changes next. Kept across launches, so a relaunch neither restarts a
     /// long interval nor skips a change that fell due while the app was closed.
     private(set) var nextChange: [String: Date]
@@ -40,6 +45,16 @@ final class PlaylistStore {
     /// kept apart from `recent`: a display's own playlist round and its Random round never
     /// disturb each other. Saved with the shuffle rounds, and left out of backups the same way.
     private(set) var randomRounds: [String: [String]] = [:]
+    /// The boundary each day and night display is settled up to: its period's wallpaper was put
+    /// there, or one chosen by hand stays until then (`PlaylistScheduler`). Saved with the day and
+    /// night settings it was settled under, so a relaunch inside the period leaves a manual choice
+    /// alone while one made after another wallpaper or time was chosen does not. Run state, left
+    /// out of backups.
+    private struct SettledPeriod: Codable, Equatable {
+        var until: Date
+        var settings: String
+    }
+    private var settled: [String: SettledPeriod] = [:]
     private(set) var revisions: [String: UInt64] = [:]
     struct SkippedWallpaper: Equatable {
         let message: String
@@ -47,6 +62,11 @@ final class PlaylistStore {
     }
     /// Failures belong to this run only. An app update or relaunch starts with a fresh attempt.
     private(set) var skipped: [String: [String: SkippedWallpaper]] = [:]
+    /// The displays whose due change waits for the video on screen to finish
+    /// (`DisplayPlaylist.waitsForClipEnd`), and when each is made anyway. The scheduler notes it
+    /// for the panel, whose Next change would otherwise show a deadline that has passed. Run
+    /// state, kept only while the wait lasts and never saved.
+    private(set) var clipWaits: [String: Date] = [:]
     /// Changes a rotating display to its next wallpaper now, answering false when it does not
     /// rotate. The app delegate points it at the scheduler; the panel's Change now calls it.
     var skipHandler: (@MainActor (String) -> Bool)?
@@ -58,8 +78,10 @@ final class PlaylistStore {
         self.defaults = defaults
         playlists = (defaults.data(forKey: Self.playlistsKey))
             .flatMap { try? JSONDecoder().decode([String: DisplayPlaylist].self, from: $0) } ?? [:]
-        plans = defaults.data(forKey: Self.plansKey)
-            .flatMap { try? JSONDecoder().decode([PlaylistPlan].self, from: $0) } ?? []
+        // A plan this build cannot read stays as it was saved and is written back with the others.
+        let savedPlans = defaults.data(forKey: Self.plansKey).flatMap { PreservedJSON.readArray($0, as: PlaylistPlan.self) }
+        plans = savedPlans?.values ?? []
+        unreadPlans = savedPlans?.unread ?? []
         let stored = defaults.dictionary(forKey: Self.nextChangeKey) as? [String: Double] ?? [:]
         nextChange = stored.mapValues { Date(timeIntervalSince1970: $0) }
         let heldDisplays = defaults.dictionary(forKey: Self.holdsKey) as? [String: String] ?? [:]
@@ -67,6 +89,8 @@ final class PlaylistStore {
         let saved = Self.savedRounds(in: defaults)
         recent = Self.shuffleRounds(in: saved, for: playlists)
         randomRounds = Self.randomRounds(in: saved)
+        settled = defaults.data(forKey: Self.settledKey)
+            .flatMap { try? JSONDecoder().decode([String: SettledPeriod].self, from: $0) } ?? [:]
     }
 
     func playlist(for display: String) -> DisplayPlaylist {
@@ -196,6 +220,15 @@ final class PlaylistStore {
         persist()
     }
 
+    /// Notes that `display`'s due change waits for its video until `until`, or no longer (nil).
+    /// It posts `clipWaitsDidChangeNotification`, not `didChangeNotification`, so the evaluation
+    /// that starts or ends a wait is not run again from inside itself.
+    func setClipWait(_ until: Date?, on display: String) {
+        guard clipWaits[display] != until else { return }
+        clipWaits[display] = until
+        NotificationCenter.default.post(name: Self.clipWaitsDidChangeNotification, object: self)
+    }
+
     /// Makes a display's playlist wait (`hold`) or lets it carry on (nil). Setting what it
     /// already has is not a change, so the scheduler can lift a hold on every evaluation.
     func setHold(_ hold: Hold?, on display: String) {
@@ -205,6 +238,39 @@ final class PlaylistStore {
         // when the wait ends: the scheduler dates a fresh interval then.
         if hold != nil { nextChange[display] = nil }
         persist()
+    }
+
+    /// The boundary a day and night display was settled up to, when it was settled under the day
+    /// and night settings it has now; nil for any other display, or once those settings changed.
+    func settledPeriod(on display: String) -> Date? {
+        guard let saved = settled[display], let settings = Self.dayNightSettings(of: playlist(for: display)),
+              saved.settings == settings else { return nil }
+        return saved.until
+    }
+
+    /// Notes the boundary `display` is settled up to, or that it is not (nil). Saved at once and
+    /// without a notification, like a shuffle round: nothing on screen depends on it, and the
+    /// scheduler sets it on every evaluation, so the value it already has writes nothing.
+    func setSettledPeriod(_ until: Date?, on display: String) {
+        let next = until.flatMap { until in
+            Self.dayNightSettings(of: playlist(for: display)).map { SettledPeriod(until: until, settings: $0) }
+        }
+        guard settled[display] != next else { return }
+        settled[display] = next
+        if settled.isEmpty {
+            defaults.removeObject(forKey: Self.settledKey)
+        } else if let data = try? JSONEncoder().encode(settled) {
+            defaults.set(data, forKey: Self.settledKey)
+        }
+    }
+
+    /// What a settled period belongs to: the two start times and the two wallpapers. Nil for a
+    /// playlist that does not follow day and night.
+    private static func dayNightSettings(of playlist: DisplayPlaylist) -> String? {
+        guard playlist.mode == .dayNight else { return nil }
+        return [String(playlist.dayStart), String(playlist.nightStart),
+                playlist.dayWallpaperID ?? "", playlist.nightWallpaperID ?? ""]
+            .map { "\($0.utf8.count):\($0)" }.joined()
     }
 
     /// Remembers a pick for shuffle; see `PlaylistPlanner.remember(_:in:candidates:)`. A shuffled
@@ -255,7 +321,7 @@ final class PlaylistStore {
         playlist.planID = nil
         let plan = PlaylistPlan(id: UUID().uuidString, name: try WallpaperCollectionStore.validatedName(name), playlist: playlist)
         let updated = plans + [plan]
-        let data = try JSONEncoder().encode(updated)
+        let data = try PreservedJSON.writeArray(updated, keeping: unreadPlans)
         plans = updated
         defaults.set(data, forKey: Self.plansKey)
         persist()
@@ -268,7 +334,7 @@ final class PlaylistStore {
         guard plans[index].name != name else { return }
         var updated = plans
         updated[index].name = name
-        let data = try JSONEncoder().encode(updated)
+        let data = try PreservedJSON.writeArray(updated, keeping: unreadPlans)
         plans = updated
         defaults.set(data, forKey: Self.plansKey)
         persist()
@@ -278,7 +344,7 @@ final class PlaylistStore {
     func deletePlan(_ id: String) throws {
         guard plan(id: id) != nil else { throw LibraryOrganizationError.missingPlan }
         let updated = plans.filter { $0.id != id }
-        let data = try JSONEncoder().encode(updated)
+        let data = try PreservedJSON.writeArray(updated, keeping: unreadPlans)
         plans = updated
         defaults.set(data, forKey: Self.plansKey)
         for display in playlists.keys where playlists[display]?.planID == id {
@@ -340,7 +406,7 @@ final class PlaylistStore {
         if let data = try? JSONEncoder().encode(playlists) {
             defaults.set(data, forKey: Self.playlistsKey)
         }
-        if plansChanged, let data = try? JSONEncoder().encode(plans) {
+        if plansChanged, let data = try? PreservedJSON.writeArray(plans, keeping: unreadPlans) {
             defaults.set(data, forKey: Self.plansKey)
         }
         defaults.set(nextChange.mapValues(\.timeIntervalSince1970), forKey: Self.nextChangeKey)

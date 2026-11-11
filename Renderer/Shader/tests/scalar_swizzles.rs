@@ -25,11 +25,11 @@ fn a_scalar_swizzle_repeats_the_scalar_in_every_width_and_kind() {
   vec2 q = f.ss;
   float z = f.x + f.r + f.s;
   int n = int(data[1]);
-  ivec3 nv = n.xxx;
+  int3 nv = n.xxx;
   uint u = uint(data[1]);
-  uvec2 uu = u.rr;
+  uint2 uu = u.rr;
   bool b = data[0] > 1.0;
-  bvec2 bb = b.xx;
+  bool2 bb = b.xx;
   data[16] = v.x + v.y * 10.0 + v.z * 100.0;
   data[17] = w.x + w.w;
   data[18] = q.y;
@@ -97,7 +97,7 @@ fn a_vector_swizzle_keeps_its_component_mapping() {
 fn the_declaration_in_scope_decides_whether_a_name_is_a_scalar() {
     let src = format!(
         "{KERNEL_HEAD}vec3 k;
-float through(float k) {{ return dot(k.xxx, vec3(1.0)); }}
+float through(float k) {{ return dot(k.xxx, CAST3(1.0)); }}
 void main() {{
   float v = data[0];
   vec3 outer = v.xxx;
@@ -161,7 +161,7 @@ uniform float g_Brightness;
 uniform int g_Steps;
 void main() {
   vec3 c = g_Brightness.xxx;
-  ivec2 s = g_Steps.xx;
+  int2 s = g_Steps.xx;
   gl_FragColor = vec4(c * float(s.y), g_Brightness.r);
 }";
     let p = program_ok(fragment);
@@ -191,7 +191,7 @@ void main() {{
   float b = mix(s, o, 0.25) * 4.0 - 1.0;
   float c = swap(max(s, o));
   float d = abs(swap(s) - o);
-  float e = clamp(swap(s), o, vec4(0.6)) + min(s, o).y;
+  float e = clamp(swap(s), o, CAST4(0.6)) + min(s, o).y;
   data[16] = a; data[17] = b; data[18] = c; data[19] = d; data[20] = e;
 }}"
     );
@@ -210,7 +210,7 @@ fn a_sample_reaches_its_component_wise_consumer_whole_before_the_scalar_narrowin
 uniform sampler2D g_Texture0;
 uniform float g_Gain;
 void main() {
-  float a = max(texture2D(g_Texture0, v_TexCoord), vec4(0.5, 0.1, 0.8, 0.3)) * g_Gain + 0.25;
+  float a = max(texSample2D(g_Texture0, v_TexCoord), vec4(0.5, 0.1, 0.8, 0.3)) * g_Gain + 0.25;
   float b = mix(texSample2D(g_Texture0, v_TexCoord), vec4(1.0, 2.0, 3.0, 4.0), g_Gain);
   gl_FragColor = vec4(a, b, 0.0, 1.0);
 }";

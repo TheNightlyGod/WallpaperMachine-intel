@@ -2,20 +2,21 @@
 
 The app window is a native SwiftUI interface in
 [`App/Views/ControlPanel/`](../../App/Views/ControlPanel), hosted in an AppKit window.
-Menus, the status item, file pickers, confirmation sheets and the sign-in, preview and
-What's New windows are AppKit, and renderer content is never drawn into the panel. How it
+Menus, the status item, file pickers, confirmation sheets and the sign-in and preview
+windows are AppKit (the update window is SwiftUI in its own window), and renderer content is never drawn into the panel. How it
 runs (controller, typed actions, observation, window hosting) is in
 [architecture](../architecture.md#control-panel-swiftui).
 
 Documented separately: the [first-run guide and support prompt](first-run.md),
 [live preview, properties, presets, image placement, the compatibility check and
 the black-bar check](wallpaper-properties.md), [local backup and restore](backup-restore.md), and
-[app updates and What's New](updates.md).
+[app updates and the update window](updates.md).
 
 ## Language
 
 The app ships in English, Simplified Chinese (简体中文), Traditional Chinese
-(繁體中文), Japanese (日本語) and Korean (한국어), including navigation, filters, wallpaper options,
+(繁體中文), Japanese (日本語), Korean (한국어) and Brazilian Portuguese
+(Português), including navigation, filters, wallpaper options,
 download and sign-in guidance, settings, accessibility labels, menus and dialogs.
 **Settings → General → Language** offers **System (Auto)** (default, follows the
 macOS language list) and every shipped language under its own name.
@@ -34,6 +35,10 @@ macOS language list) and every shipped language under its own name.
   language, also in an inspector that is already open (see
   [Properties](wallpaper-properties.md#properties)). Steam filter
   values and identifiers do not change when labels are translated.
+- A Steam Workshop search typed in Chinese, Japanese or Korean (or Portuguese while
+  the app is in Portuguese) can be sent to Steam in English, translated on this Mac;
+  the search field keeps what was typed
+  ([Searching in another language](workshop-downloads.md#searching-in-another-language)).
 
 How the language is resolved, how the layers fit together and how to add a
 language: [Localization](../localization.md).
@@ -51,7 +56,7 @@ title bar is one colour across the whole window, the page's, inspector included
 | Name | Beside the traffic lights: the app's mark, **WallpaperMachine** and the version, as the web panel had them. Under 960 points only the mark stays, with the name and version as its tooltip; VoiceOver reads "WallpaperMachine" and the version |
 | Tabs | In the middle of the title bar: **Library** (Installed), **Steam Workshop**, **pixiv** and **Settings**, each as wide as its name; in a window under 960 points they show their symbols alone, with the names as tooltips and VoiceOver labels, so the toolbar's tools keep their places. The page on show is tinted with the accent; VoiceOver reads them as buttons, that one as selected, in a group named **Main navigation** ([Pages and Settings](#pages-and-settings)) |
 | Toolbar | The window title, not drawn in the title bar (the tabs stand for it) but used by the Window menu and Mission Control, names the place on show: **All wallpapers**, **Favorites**, the collection's name, **Steam Workshop**, **pixiv**, or the Settings section's name (**Search results** while searching Settings). The subtitle counts All wallpapers (with the number of updates), Favorites and a collection, and says nothing while the library loads. On the right: activity pills while there is something to report (an import in progress or a result not yet looked at, which opens Import; SteamCMD setup in progress; pixiv saves, which lead to the pixiv page), the target-display menu (named by the screen alone; its items, tooltip and VoiceOver value keep the renderer's full title, and two screens of one name keep it on the button too), the downloads button and **Wallpaper details**, which shows and hides the inspector; Settings shows neither the menu nor **Wallpaper details**. The downloads button appears once there is download activity, rings itself with the batch's mean progress while anything transfers, and carries the batch summary (status, percent, network speed, time left, **needs attention**) as its label and tooltip. |
-| Page | Installed, Steam Workshop and pixiv open with one full-width search bar at the top (Command-F puts the keyboard in it), which stays in place when moving between them; VoiceOver names it for what it searches (**Search installed wallpapers**, **Search Steam Workshop**, **Search pixiv by tag**). Settings' search field heads its section list instead. **Installed**: a row of view chips, **All wallpapers** (its count, and an accent dot while Workshop updates exist, whose tooltip and VoiceOver value say how many) and **Favorites** (its count; it is Installed's own Favorite filter), lit for the view on show, plus the shown collection's chip, which puts the collection away ([Local collections](#local-collections)); then a header row (**Filter** with its count, the sort menu and its direction, then **Select**, **Refresh** and **Import**; in a narrow column the controls keep their places and drop their words, which stay as tooltips and VoiceOver names), the tile grid and a footer (how many a search or filter leaves, **Update N wallpapers**, the selection tools, the drag-select tip, or *Loading your library…*; with none of these it is not shown, since the subtitle counts the view). **Steam Workshop** (the Discover page): a header with its lists (**Wallpapers**, **Collections**, **Your subscriptions**; one menu in the narrowest column), Filter, sort and Refresh (it searches from the page's search bar, which an author's or a collection's list leaves out); then the grid and a footer with the result summary and the pager (Previous, an editable page number with the number of pages, Next). A Workshop page is one Steam page of 30 tiles, at most 1,000 pages. **pixiv**: see [pixiv](pixiv.md#browsing) |
+| Page | Installed, Steam Workshop and pixiv open with one full-width search bar at the top (Command-F puts the keyboard in it), which stays in place when moving between them; VoiceOver names it for what it searches (**Search installed wallpapers**, **Search Steam Workshop**, **Search pixiv by tag**). Settings' search field heads its section list instead. **Installed**: a row of view chips, **All wallpapers** (its count, and an accent dot while Workshop updates exist, whose tooltip and VoiceOver value say how many) and **Favorites** (its count; it is Installed's own Favorite filter), lit for the view on show, plus the shown collection's chip, which puts the collection away ([Local collections](#local-collections)), and at the row's end **Play**, sharing one capsule with its order menu, which names the order (**In order** or **Shuffle**); they make the target display rotate through the view on show ([playlists](playlists.md#playing-from-installed)); then a header row (**Filter** with its count, the sort menu and its direction, then **Select**, **Refresh** and **Import**; in a narrow column the controls keep their places and drop their words, which stay as tooltips and VoiceOver names), the tile grid and a footer (how many a search or filter leaves, **Update N wallpapers**, the selection tools, the drag-select tip, what the last action did, or *Loading your library…*; with none of these it is not shown, since the subtitle counts the view). **Refresh** (also **File › Refresh Library**, `Command`-`R`) shows a progress ring while it rescans and the footer then says what it found (**Your library is up to date.**, or how many wallpapers were added and removed). A library that could not be read at all shows **Your wallpaper library could not be read** with the reason and **Try again**, never the empty-library invitation to import; a failed rescan of a library that was read before leaves its wallpapers on show and reports in the banner. **Steam Workshop** (the Discover page): a header with its lists (**Wallpapers**, **Collections**, **Your subscriptions**; one menu in the narrowest column), Filter, sort and Refresh (it searches from the page's search bar, which an author's or a collection's list leaves out); then the grid and a footer with the result summary and the pager (Previous, an editable page number with the number of pages, Next). A Workshop page is one Steam page of 30 tiles, at most 1,000 pages. **pixiv**: see [pixiv](pixiv.md#browsing) |
 | Filters sidebar | A floating panel at the page's leading edge, opened from the page's **Filter** button on Installed, Discover and pixiv ([Filtering](#filtering)) |
 | Inspector | A column of the page along its trailing edge (not the system's inspector column, which gave the title bar a second shade): preview, title, facts, actions, tags, and the selected wallpaper's options and properties ([wallpaper properties](wallpaper-properties.md)). 300 points wide; dragging its leading edge resizes it from 260 to 420. It starts open in a window 960 points wide or more and closed in a narrower one, and follows the width once a resize has settled, until the person opens or closes it with **Wallpaper details**: that choice then holds whatever the width, also across a visit to Settings, which has none. Nothing is stored. The top of an installed wallpaper's inspector is washed with a blurred copy of its still (never the animation); the sections below are collapsible cards |
 | Now Playing | The bar along the bottom of the window, on every page: the target display's wallpaper, which opens its details, and the playback controls ([Now Playing](#now-playing)) |
@@ -68,19 +73,35 @@ Download. Symbols are SF Symbols. Light/dark mode, surface tone and custom accen
 preferences continue to apply ([appearance](appearance.md)).
 
 Wallpapers appear as square, image-first tiles with the title (12 pt semibold) and the
-kind (11 pt) beneath. A tile lifts 2 points with a shadow on hover (not under Reduce
-Motion) and draws a focus ring under keyboard focus; selection is an accent ring with a
+kind (11 pt) beneath. A tile stays still on hover and draws a focus ring under
+keyboard focus; selection is an accent ring with a
 surface-coloured gap so blue artwork does not hide it. Each grid fills its width with as
 many columns as fit at a preferred tile size (140 points, 14-point gaps) that shrinks
 with the column, and never fewer than three, so a narrower window shows smaller tiles
-and more of them; the column count is a pure function of the width. The grids are lazy:
-only the rows near the screen are built. While a trackpad or wheel scroll (and its glide)
-is under way, tiles ignore the pointer: no lift, no hover controls, no live preview; they
+and more of them; the column count is a pure function of the width. **View → Zoom In**
+(⌘+), **Zoom Out** (⌘−) and **Actual Size** (⌘0) step the preferred size through 112,
+140, 176 and 220 points for every grid (Installed, Discover and pixiv) while the window is
+open (`TileGridLayout.zoomWidths`). The step is saved as `WallpaperMachine.tileZoom`
+(nothing at the standard size), travels with a [backup](backup-restore.md), and Reset all
+settings returns it to Actual Size. **Help → WallpaperMachine Guides** opens the website's
+guides, in Chinese for either Chinese and in English otherwise. The grids are lazy:
+only the rows near the screen are built. Installed uses an `NSCollectionView` with a
+bounded pool of reusable SwiftUI tile hosts. Its native clip view owns scrolling;
+scrolling does not invalidate the collection layout or rebuild the panel's SwiftUI grid.
+Each host receives only the panel appearance values its tile uses, and unchanged values
+do not invalidate its view graph. Pointer, visibility and size tracking belong to the
+native collection, so its tiles do not also run SwiftUI scroll-observation modifiers.
+The collection and press-and-sweep use the same cell geometry, including after zooming
+or resizing, and visible preview IDs are reported together as rows cross the viewport.
+While a trackpad or wheel scroll (and its glide)
+is under way, tiles ignore the pointer: no hover controls, no hover preview; they
 come back under the pointer when the scroll stops, so content moving under a still pointer
 does not cost frames. On Installed, the target display's tile wears an
 accent **Active** capsule with a small equalizer that moves only while playback runs
 and the window is on screen; a wallpaper that another enabled, independent display shows
 wears a dark **Other display** capsule.
+The equalizer paints its bars inside fixed bounds, so animation ticks do not resize
+SwiftUI child views and repeatedly lay out the surrounding panel while it scrolls.
 
 Discover tiles show cached still thumbnails first and then, for tiles on screen,
 Steam's animated preview once it loads; the animation lifecycle, and why the
@@ -88,10 +109,14 @@ panel never reads animation pixels back, are in
 [Workshop downloads](workshop-downloads.md#tile-thumbnails). An installed copy of
 the same wallpaper shows its library cover on Discover.
 
-Installed tiles are stills as well, so a library of animated GIF previews costs
-nothing at rest. Each wallpaper's own preview file becomes a 512 px JPEG cover,
-made once by a `WorkshopThumbnailCache` of its own (`Cache/LibraryThumbnails`,
-128 MiB, four at a time, no animation kept) through `LibraryPreviewFetcher`, which
+A still that cannot be loaded (its file is gone or unreadable, a download did not arrive)
+draws a small picture mark in its place, on every page and list that shows one
+(`PanelImage`), so it is told apart from a still that is on its way. A load that was only
+cancelled, by scrolling on or changing source, is not marked.
+
+Installed tiles start from stills as well. Each wallpaper's own preview file
+becomes a 512 px JPEG cover, made once by a `WorkshopThumbnailCache` of its own
+(`Cache/LibraryThumbnails`, 128 MiB, four at a time, no animation kept) through `LibraryPreviewFetcher`, which
 reads only an image inside the library up to 32 MiB and follows no symlink out of it,
 and `PanelImagePipeline` decodes it at the size the tile draws. A cover is keyed by
 the file's path, modification time and size, and the tile asks for it with a stamp of
@@ -105,14 +130,33 @@ copy of the preview file, and tries the cover again when the preview changes.
 Building the rows touches no file: a tile is offered an animation by its preview's
 extension alone (`gif`, `webp`, `apng`).
 
-An animated preview plays on one Installed tile at a time: the tile the pointer
+By default every Installed tile on screen plays its animated preview, as the Steam
+Workshop's grid does, with no pointer needed. `InstalledBrowserModel` reports each
+tile's visibility to the same `LivePreviewScheduler` that Discover uses: at most six
+animations load at once, in grid order, and a tile that scrolls away, a hidden window
+(not merely one that lost focus), filtering the tile away or leaving the page releases
+its animation. A preview that is a single picture or over the animation budget keeps
+its cover and is not asked again by scrolling. Only the tiles on screen and those still
+holding an animation are looked at, so a scroll through a large library never walks
+all of it. Animation bytes are observed by wallpaper ID: loading or releasing one
+preview during scrolling invalidates only that tile, rather than every visible tile.
+Animated preview metadata and display-ready pixels are prepared off the main thread;
+indexed frames are expanded and color-converted before Core Animation commits them.
+The player retains the current frame and one upcoming frame, with the same resolution,
+color and transparency, and discards preparation that finishes after its source changes.
+
+**Settings → General → Play Library previews only on hover** (off by default, stored as
+`WallpaperMachine.libraryPreviewsOnHover`, kept by a [backup](backup-restore.md) and
+cleared by Reset all settings) plays one tile at a time instead: the tile the pointer
 has rested on for 160 ms, or the tile keyboard focus is on (a mouse click alone
 does not count). Sweeping across the grid, dragging a selection and a preview
 that is a single picture start nothing, and moving between one tile's own buttons
-keeps it playing. Leaving the tile, hiding the window, filtering the tile away or
-changing page releases the animation. The inspector's artwork is the preview file
-itself, so the selected wallpaper still animates there while the window is on
-screen; hiding the window releases it, and showing the window reads the file again.
+keeps it playing. Leaving the tile, hiding the window or making it inactive,
+filtering the tile away or changing page releases the animation. Switching the
+setting applies to the grid at once.
+
+The inspector's artwork is the preview file itself, so the selected wallpaper still
+animates there while the window is on screen; hiding the window releases it, and showing the window reads the file again.
 
 The window never shrinks below a 760×560 content area (capped by the visible
 screen on small displays). `ControlPanelWindow.minimumContentSize` owns that
@@ -132,6 +176,11 @@ a sentence naming it, which VoiceOver reads out when the row appears, and **Try 
 Dismiss; it goes away when the wallpaper is retried or applied, and a retry the engine
 refuses shows the reason in the error line and keeps the row. The menu-bar menu repeats
 the state as a disabled line. See [crash recovery](crash-recovery.md).
+
+While the drive of a library kept on another disk is ejected or unplugged, a warning
+row under the error line names the library's folder and says its wallpapers come back
+when the drive is connected again; it has no button and goes once they play again
+([library location](library-location.md#a-drive-that-is-not-connected)).
 
 ## Pages and Settings
 
@@ -155,7 +204,7 @@ its search field (**Search settings**), each with a System Settings-style tile: 
 square. Settings opens on **Quick Settings** in every window; a section the app asks
 for (**Check for Updates…**, an update notice) is shown once, even when the window
 opens afterwards. The sections, in order, are Quick Settings, General, Appearance,
-Desktop & Lock Screen, Playback & Power, Performance, Displays, Keyboard shortcuts,
+Desktop & Lock Screen, Desktop Widgets, Playback & Power, Performance, Displays, Keyboard shortcuts,
 Library & Steam, Storage and About. Each section opens with a header: its tile at
 44 points, its name and a one-line purpose. Groups are titled cards of rows, as
 System Settings draws them: the title and its explanation on the left, the control
@@ -187,9 +236,13 @@ the rest opens in a popover from the ⓘ beside the title.
   overrides never reads as the one in force ([performance](performance.md)). On
   battery also names a low-battery, Low Power Mode or heat rule that pauses or stops
   wallpapers, and that rule's Playback & Power row says **In effect now**; Focus
-  filters and app rules keep to their own rows
+  filters, app rules and **When another app is in front** (its **Pause on battery**
+  included) keep to their own rows
   ([performance](performance.md#low-battery-low-power-mode-heat-and-focus)).
-- **General** starts with the [Language](#language) picker (Interface), then Startup
+- **General** starts with the [Language](#language) picker and **Clicking the menu bar icon**
+  ([menu bar panel](#menu-bar-panel)) under Interface, then Translation
+  (**Translate Workshop searches into English**, see
+  [Workshop](workshop-downloads.md#searching-in-another-language)), then Startup
   (**Launch at login** and **Hide window after applying a wallpaper**), Help (the
   [welcome guide](first-run.md), **Show again**) and Reset (**Reset all settings**,
   **Reset…**). Reset asks first; once confirmed, every setting the Settings pages
@@ -197,9 +250,10 @@ the rest opens in a popover from the ⓘ beside the title.
   at login, desktop and lock-screen switches, playback, power and app rules, the
   engine's performance and scene choices, logging, web inspection, Steam update checks
   and download count, and performance data. Content is kept: the library, favorites,
-  playlists, collections, presets, displays and their wallpapers, the storage location
-  and sign-ins, as is macOS's own "Click wallpaper to reveal desktop". A setting that
-  fails to reset does not stop the others; the first failure goes to the banner.
+  playlists, collections, presets, displays and their wallpapers, the desktop widgets, the
+  storage location and sign-ins, as are macOS's own "Click wallpaper to reveal desktop" and Finder's desktop
+  icons. A setting that fails to reset does not stop the others; the first failure goes to
+  the banner.
   **Launch at login** is disabled with its reason while the app is outside
   Applications. When the user has switched WallpaperMachine off in System Settings →
   General → Login Items, macOS keeps it off however often the app registers it
@@ -212,20 +266,27 @@ the rest opens in a popover from the ⓘ beside the title.
   coming back clears the note and the button. The first-run Preferences page carries
   the same note.
 - **Appearance** holds the window's look: appearance, accent color, surface tone,
-  app icon and **Reset appearance** ([appearance](appearance.md)).
+  app icon, the Halloween look and **Reset appearance** ([appearance](appearance.md)).
 - **Desktop & Lock Screen** holds the Desktop group (**Different wallpaper for each
   desktop** for the display the Library applies wallpapers to, named when there are several,
   with **Choose…** opening that display's card in Displays to pick each desktop's wallpaper;
   see [a different wallpaper for each desktop](spaces.md); the switch for using the
   wallpaper as the macOS desktop picture and the optional five-minute Mission Control
   picture update; see [desktop picture](desktop-picture.md#leaving-macoss-own-wallpaper-alone);
-  keeping windows in place when clicking the wallpaper; and the off-by-default switch
-  that lets the displays follow a wallpaper's pending property edits as they are made;
+  keeping windows in place when clicking the wallpaper; **Hide desktop icons** and **Hide
+  the notch**; see [desktop icons and the notch](desktop-picture.md#desktop-icons-and-the-notch);
+  and the off-by-default switch that lets the displays follow a wallpaper's pending property
+  edits as they are made;
   see [edits on the desktop](wallpaper-properties.md#showing-edits-on-the-desktop)),
   then the Lock screen and Screen saver groups.
+- **Desktop Widgets** adds clocks, dates and the other widgets drawn on the desktop over any
+  wallpaper, and arranges and styles them: a list of the widgets, a picture of the display to
+  drag one into place, position, look and format. Its controls never wait for the renderer. See
+  [desktop widgets](desktop-widgets.md).
 - **Playback & Power** holds the Playback group (mute all, occlusion, other-app
-  audio, display sleep, playing only on the display in use, battery, low battery,
-  Low Power Mode, heat, Focus, app rules) and the **What these settings change**
+  audio (pause, mute or a lower volume), another app in front (always, or only on battery), display sleep, an inactive Mac, playing only on
+  the display in use, battery, low battery, Low Power Mode, heat, Focus, app rules) and the **What these
+  settings change**
   disclosure. The battery, low-battery, Low Power Mode and heat choices can each
   lower quality instead of pausing, and the page names which one is lowering it. See
   [Performance settings](performance.md).
@@ -241,10 +302,20 @@ the rest opens in a popover from the ⓘ beside the title.
   links** disclosure (see [automation](automation.md)).
 - **About** opens with the app icon, name and version (`MARKETING_VERSION` in
   `project.yml`) and the Git revision. **Check for Updates** reads the latest GitHub
-  Release; download and restart-install happen only after confirmation (see
-  [updates](updates.md)). The application menu item **Check for Updates…** opens
-  this section. **Spread the word** has **Share WallpaperMachine…** and **Star on
+  Release. **Update mode** chooses notification only, automatic downloading with
+  manual restart, or full automatic installation while the Mac is locked/display
+  asleep. New installations default to full automatic; existing choices are preserved
+  (see [updates](updates.md)). The Updates card shows the status with the last
+  successful check and progress/cancel/retry; **Release notes** is a card of its own,
+  the newest version open and earlier ones folded. **Remind Me Later** defers this version
+  for 24 hours across launches, and **Skip This Version** prevents its automatic update.
+  The application menu item **Check for Updates…** opens this section. **Spread the word** has **Share WallpaperMachine…** and **Star on
   GitHub** ([one-time prompts](first-run.md#star-prompt-the-performance-data-question-and-the-subscriptions-offer)).
+  The section ends with the licence note and three links: **GNU General Public License
+  v3**, **MMFoundation**, the website of the organization that makes the app
+  (https://mmfoundation.dev/), and **Join Discord**, its Discord server
+  (https://mmfoundation.dev/discord, also in the Help menu;
+  [Discord invitation](first-run.md#discord-invitation)).
 - **Storage** opens with **Wallpaper library location**: where the installed
   wallpapers and downloads are kept, **Show in Finder**, **Move…** to another folder
   or an external drive and **Move to This Mac…** ([library location](library-location.md)).
@@ -283,7 +354,7 @@ fresh. Imports and Workshop downloads run in app-owned stores, so closing the wi
 never cancels them.
 
 The panel opens on the Space you are on rather than switching you to the Space it was
-last left on, and so do What's New, the wallpaper preview and the Steam and pixiv sign-in
+last left on, and so do the update window, the wallpaper preview and the Steam and pixiv sign-in
 windows. A minimized panel comes back from the Dock when it is opened from the status
 menu, the Dock icon or Command-comma, or when the app is activated; the green button still
 offers full screen. The app keeps its Dock icon while any of these windows is open, on screen
@@ -333,22 +404,47 @@ Installed and Discover tiles wear status marks as small round badges:
   for imported wallpapers.
 - A download arrow on Installed marks a Workshop wallpaper whose author has
   published an update ([Updates](workshop-downloads.md#updates)).
-- Discover also retains a check for items already in the library.
+- Discover also retains a check for items already in the library, marks what the
+  signed-in Steam account subscribes to with a bookmark
+  ([subscriptions](workshop-downloads.md#subscriptions)) and a Workshop preset with
+  sliders ([presets](workshop-downloads.md#workshop-presets)).
 
 On Discover the marks stack in the upper-left corner. On Installed the trophy and the
 update arrow sit in the lower-right corner, clear of the selection check in the
-upper-left corner, which the Active or Other display capsule sits beside. VoiceOver
-reads the marks with the tile.
+upper-left corner, which the Active or Other display capsule sits beside. Both draw
+each mark as the same small round chip: a glyph on a dark disc in either appearance
+(a bright green trophy), and an accent-filled disc for Discover's library check and
+Installed's update arrow. VoiceOver reads the marks with the tile.
 
 ## Selection versus apply
 
 Selecting a tile only selects it: the inspector updates and nothing changes on
 screen. Activation is explicit.
 
+A right click on an Installed tile opens the actions for that tile without selecting it
+first: **Apply wallpaper**, **Add to favorites** or **Remove from favorites**, then what
+the inspector's **More actions** menu offers (Preview, **Show in Finder**, **Apply to all
+displays**, the display's list, **Reinstall from Workshop…** and **Move wallpaper to
+Trash**), under the same rules. The two menus are one list of items
+(`WallpaperActionItems`); sharing, the Steam subscription, the author's page and the
+problem report stay in the inspector's. The menu acts on the tile that was clicked, never
+on the ticked selection, whose tools are in the bar under the grid. With the keyboard,
+`Return` or `Space` on a focused tile selects it and `Command`-`Return` applies it, as a
+double click does.
+
 - **Apply wallpaper** activates the selected wallpaper on the current target
   display; for the wallpaper already active there it reads **Reapply wallpaper**.
   An Installed tile shows an **Applying** spinner while its apply runs and a quiet
-  play mark while it waits behind another apply.
+  play mark while it waits behind another apply. A scene Native Metal refused with this
+  app version and these files, when it last ran or its
+  [Compatibility check](wallpaper-properties.md#compatibility-check) read it, asks first
+  (**Native Metal can’t draw this scene**, with the renderer's reason): applied, it would show
+  its preview picture instead of moving. The scene is read again first, since a refusal can depend
+  on things its remembered verdict is not keyed to (the shared resources, loose files in the
+  project, the saved options): one that now reads clean is applied without a question and
+  remembered that way, and one that cannot be read again asks with the remembered reason. **Apply Anyway** applies it; **Cancel** leaves the
+  display as it is. **Apply to all displays** asks the same; Reapply, choosing the scene a
+  display already shows, playlists, schedules and shortcuts never ask.
 - **Apply to all displays** (the inspector's **More actions** menu of an installed
   wallpaper, offered only when two or more enabled independent displays exist) puts the wallpaper on every one of
   them in a single step, whichever display is targeted, and is unavailable once they
@@ -406,7 +502,10 @@ The inspector follows Wallpaper Engine's hierarchy: preview (16:10, rounded), ti
 facts (kind and size; on Discover the creator and subscribers too), actions and tags.
 For an installed wallpaper the filled accent button is **Apply wallpaper** (or
 **Reapply wallpaper**), beside the favorite button and **More actions**, a menu with
-**Preview wallpaper**, **Show in Finder**, **Apply to all displays**, adding it to or
+**Preview wallpaper**, **Show in Finder**, **Share…**, **Subscribe on Steam** (signed in
+to Steam Community) and **More by this author** for a Workshop wallpaper (see
+[Collections, authors and subscriptions](workshop-downloads.md#collections-authors-and-subscriptions)),
+**Apply to all displays**, adding it to or
 removing it from the target display's playlist, **Reinstall from Workshop…** for a
 Workshop wallpaper (see
 [Reinstall from Workshop](workshop-downloads.md#reinstall-from-workshop)), **Report this
@@ -419,8 +518,14 @@ stay visible in a footer while editing. Its texts can be selected and copied.
 Below the compatibility note, an installed wallpaper that can run (not
 Application) shows **Not working? Report on GitHub**. It opens the repository's
 bug report form in the browser with the wallpaper's title, Workshop link or id,
-type, app version and, while it is on screen, the backend drawing it (with the
-renderer's fallback reason) pre-filled. The fields the form requires (what the
+type, app version, while it is on screen the backend drawing it (with the
+renderer's fallback reason) and, when its options are loaded in the inspector, the properties
+changed from the author's defaults pre-filled: each with its value and default, marked when the
+change is not applied yet, at most 20 with the rest counted. Typed text and the paths of chosen
+files are not included, only that they were changed. When the inspector's
+[Compatibility check](wallpaper-properties.md#compatibility-check) of the wallpaper found files
+the scene refers to that are not installed, the report lists each one's path and the layer that
+asked for it. The fields the form requires (what the
 user did, what went wrong, what they expected and the diagnostics report) are
 left for the user to fill in. When the panel saw this wallpaper fail
 (its download, or the last attempt to apply it), an error notice takes the link's
@@ -446,7 +551,8 @@ no Share: they have no page to share.
 
 The bar along the bottom of the window shows the target display's wallpaper: its
 still, its title, and the display's name beside a small equalizer that moves only
-while playback runs and the window is on screen. When the target display is empty it
+while playback runs and the window is on screen; while the display rotates, the name is
+followed by what it rotates through (All wallpapers, Favorites, its list or a collection). When the target display is empty it
 says **Nothing on this display** and the hint to pick a wallpaper; VoiceOver reads the
 global playback state (**Playback running** or **Playback paused**) as the bar's
 value. The wallpaper's part of the bar lights on hover and, clicked, opens its details
@@ -454,15 +560,28 @@ above it: the still at 16:9, a *Now Playing* caption, the title (selectable), it
 the display's full name, the playback state and **Show in library**, which shows the
 wallpaper selected on Installed. Its controls:
 
-- **Previous wallpaper**, play/pause, **Next wallpaper** and **Recently used**
+- **Previous wallpaper**, play/pause, **Next wallpaper**, **Playlist** and **Recently used**
   (below). Play/pause acts on every wallpaper and is enabled whenever any display
   has an assignment, even if the target display is empty; with no assignments it is
-  disabled and reports **No wallpaper playing**.
+  disabled and reports **No wallpaper playing**. The choice outlives a quit: it is
+  saved as `paused` under `[general]` in `config.toml`, and an app that quit paused
+  pauses again at its next launch once the first wallpaper has drawn its first frame,
+  so no display starts without a picture. Pressing play or pause before then wins. A
+  pause that a playback rule made (battery, Low Power Mode, another app's sound) is not
+  saved, and a saved pause with no wallpaper assigned is dropped, so it never holds
+  still a wallpaper applied later. Bridge tests: `Renderer/Bridge/src/tests/saved_pause.rs`.
 - **Next wallpaper** changes the target display the way Change now does when a
   rotating playlist runs there: it moves along at once with a fresh interval
   ([playlists](playlists.md#where-it-lives)). Otherwise it takes the library's next supported
   wallpaper, the rule of the Next wallpaper keyboard shortcut ([automation](automation.md)).
   A playlist with nothing else to change to says so.
+- **Playlist** is lit, with the order's symbol (repeat or shuffle), while the target
+  display rotates, and is unavailable for a mirror or a disabled display. It opens the
+  target display's playlist above the bar: what it rotates through, the order and how
+  often, when it changes next (or **Playlist paused**), **Change now** (or **Resume
+  playlist**), **Stop**, which turns the playlist off and leaves the wallpaper on screen,
+  and **Settings…**, which opens Settings → Displays. A display that does not rotate
+  says to press Play on Installed.
 
 ## Previous, next and recently used
 
@@ -475,18 +594,35 @@ keyboard shortcuts and [automation](automation.md) offer the same commands.
 **Recently used** on the bar opens a popover above it that lists up to 50 distinct
 wallpapers used on that display, newest use first, and applies one when chosen. The
 menu bar shows the latest ten. **Clear history** clears only the target display's
-recent list and back history. Neither action deletes wallpaper files. Successful
+recent list and back history, after asking in place (**Cancel** or **Clear history**): it
+cannot be undone, and it also forgets when each wallpaper was last used on that display,
+which Installed's **Last used** order sorts by. Neither action deletes wallpaper files.
+**Next wallpaper** says so when there is no other wallpaper to change to, whether or not
+the display rotates a playlist. Successful
 automatic playlist changes are included; reapplying an unchanged assignment adds
 nothing.
 
 ### Menu bar, one display at a time
 
-With one display that can show its own wallpaper the menu bar keeps a flat list:
+The menu bar menu opens on a right click or a Control-click on the icon (a left click opens the
+[menu bar panel](#menu-bar-panel) unless Settings says the menu). With one display that can show
+its own wallpaper it keeps a flat list:
 Previous Wallpaper, Next Wallpaper, Random Wallpaper and Recently used act on that display. Above
 them, after Play/Pause, **Mute Wallpapers** silences every wallpaper at once and is ticked while it
 is on ([Mute all wallpapers](performance.md#playback)); it is one item for the whole Mac, shown
 the same way with two or more displays, and shown while it is on even with nothing playing so it can
-be turned off. With two or more
+be turned off. On a Mac with an internal battery, an **On Battery** submenu follows it, in both
+layouts and whatever is playing: **Keep Running**, **Reduced Quality** and **Pause** set
+Settings → Playback & Power → **On battery** through the same engine setter as the row (with
+Settings open, the [Energy use](performance.md#energy-use) comparison restarts for it as it does
+for the row), with the current one ticked; after a separator, **Pause While Using Other Apps** switches **When another
+app is in front** between **Pause on battery** (ticked) and **Keep running**. A **Mute** or
+**Pause** chosen for that row in Settings, which acts on every power source, reads as unticked
+there, and choosing the item replaces it with **Pause on battery**
+([Pause on battery](performance.md#playback)). A Mac without a battery shows the submenu only
+while one of the two choices is not its default, so a choice a restored backup brought can be
+undone. A choice made there counts as having answered the
+[battery question](first-run.md#the-battery-question). With two or more displays
 (enabled, independent and connected; a mirror or a disabled display is not
 listed) the menu has one submenu per display, named as the panel names it and ordered
 the main display first, then left to right as the screens sit; screens with the same
@@ -501,13 +637,96 @@ display empty ([a display you cleared](playlists.md#a-display-you-cleared)); it 
 menu-only command and has no `wallpapermachine://` link. Choosing an item acts on the
 display named by its submenu, never on the panel's target display. Whichever layout, while
 Workshop downloads run a line under **Control Panel** counts them and opens Discover
-([the download queue](workshop-downloads.md#the-download-queue)).
+([the download queue](workshop-downloads.md#the-download-queue)). Whichever layout, **Hide
+Desktop Icons** comes just before Lock Screen: it hides Finder's desktop icons, or shows them
+again, after asking, since Finder restarts to apply it, and it is ticked while they are hidden,
+as Finder reports each time the menu opens
+([desktop icons and the notch](desktop-picture.md#desktop-icons-and-the-notch)).
 
 `WallpaperHistoryStore` saves per-display history in the
 `WallpaperMachine.wallpaperHistory` preference. It survives relaunch, is pruned
 when wallpapers are deleted in the app, and remains local to this Mac (it is not
-included in [backup packages](backup-restore.md)). History records successful assignment and saving; it
-does not certify every frame a wallpaper subsequently displays.
+included in [backup packages](backup-restore.md)). Beside the two lists, each display
+keeps when each of its last 1,000 distinct wallpapers was put on it, which Installed's
+**Last used** sort reads ([Filtering](#filtering)); **Clear history** clears those
+dates for the display too. History saved before dates were kept is dated once, when it
+first loads: each display's recent list keeps its order, its newest dated at that moment
+and each older one a second before, so the wallpaper on screen and those used before it
+sort ahead of the never-used ones and behind anything put on a display afterwards.
+History records successful assignment and saving; it does not certify every frame a
+wallpaper subsequently displays.
+
+### Menu bar panel
+
+A click on the menu bar icon opens a panel under it, which closes when you click anywhere
+else; a right click or a Control-click opens the [menu](#menu-bar-one-display-at-a-time)
+instead, and so does VoiceOver's **Show Menu** action on the icon. **Settings → General →
+Clicking the menu bar icon** chooses **Shows the panel** (the default) or **Shows the menu**,
+which makes a left click open the menu on the press, as before the panel existed. The choice is
+saved as `WallpaperMachine.statusItemClick`, kept by a [backup](backup-restore.md), and **Reset
+all settings** returns it to the panel.
+Opening the panel does not bring the app forward; the buttons that open a window or quit close
+it first.
+
+The panel is about one display at a time. With two or more displays that can show their own
+wallpaper (the menu's displays, in its order) it starts with a picker of their names, the
+renderer's `(id - Role)` left off unless two share a name. It opens on the display it showed
+last, else the control panel's target display, else the main one. Below the picker:
+
+- The display's wallpaper: its still at 16:9, its title, its kind and a state line. The line
+  says **Playback running**; **Playback paused** for your own Pause, named before any rule;
+  **Changing wallpaper…** while a switch for that display waits or runs. Of what else holds
+  every wallpaper, it names the most specific first: **The wallpaper library’s drive is
+  disconnected. Wallpapers are stopped.** while the [library's
+  drive](library-location.md#a-drive-that-is-not-connected) is ejected or unplugged; the rule's
+  own words when a Low Power Mode, heat, low-battery or inactivity rule (no input for the time
+  chosen) pauses or stops wallpapers, as Playback & Power says them; **On battery. Wallpapers
+  are paused.** for On battery's Pause; and **A playback rule is in effect. Wallpapers are
+  paused.** (or **stopped**) for an app rule, another app's sound or a Focus filter. While the
+  panel is open the line follows the drive and the condition rules at once; an app rule, another
+  app's sound or a Focus filter that starts then shows with the next change the panel sees. An
+  empty display says **Nothing on this display**. The heart adds the wallpaper to the favorites
+  or takes it out: the same favorites as Installed's, and an open control panel shows the change
+  at once.
+- **Previous wallpaper**, play/pause, **Next wallpaper** and **Random wallpaper**: the commands
+  of that display's items in the menu, run the same way, so they take the display's turn in the
+  command queue, and a failure shows under the panel and at the foot of the menu. Play/pause acts
+  on every display, as the menu's does.
+- The wallpaper's own sound: a mute button and a **Volume** slider, the inspector's **Mute this
+  wallpaper** and **Volume**, saved when the slider is let go or moved by a key. While **Mute
+  All** is on both are locked, the note says so, and **Unmute Wallpapers** turns it off. An open
+  control panel's inspector showing another wallpaper keeps its options, and a drag on them goes
+  on.
+- A quick switcher of eight wallpapers that can play (supported and not held back after a
+  crash), under **Favorites**, or **All wallpapers** when no favorite other than the shown one
+  can play. The shown wallpaper is always first and ringed; the others are shuffled. **Show
+  other wallpapers** draws eight others, and each opening of the panel draws ones the last did
+  not show while there are enough. A click applies the wallpaper to the display; the tiles and
+  their caption stay until the next draw, even when the click changes the pool a draw takes, and
+  **Show other wallpapers** then draws from that pool.
+- **Recently used**: the four wallpapers used on the display most recently, other than the one
+  it shows; a click applies one again.
+- A passive **update row** when an update is available, downloading, verifying, ready,
+  deferred, needs attention or was just installed. It opens Settings → About after
+  dismissing the popover. It remains available even if no display can play a wallpaper;
+  progress follows the same update store as the main panel, with no additional polling.
+- **Control Panel**, which opens the window with this display as its target, **Settings** and
+  **Quit WallpaperMachine**.
+
+The main control panel also keeps a passive update banner above its pages. Opening
+updates is a user action; background checks and installation results never activate
+another window. Dismiss the installed-result banner or postpone an available update;
+the menu bar and About remain reachable.
+
+Nothing of it runs while it is closed: it follows the stores, reads the stamps of the covers on
+show (from the Installed covers' cache, never a full-size preview or a live render) and reads
+the wallpaper's volume only from opening to closing, and each opening builds it again.
+`StatusPanelModel` (`App/Services/Automation/`) decides what it shows and the switcher's draw
+without AppKit; `StatusPanelController` and `StatusPanelView` (`App/Views/ControlPanel/MenuBar/`)
+hold and draw it; `AppDelegate+StatusPanel` routes the click and carries out its commands.
+The large cover ignores pointer hit testing so aspect-filled artwork cropped to 16:9 cannot
+intercept clicks on the display picker above it.
+Tests: `StatusPanelModelTests`, `StatusPanelControllerTests` and `StatusPanelRenderTests`.
 
 ## Deleting wallpapers
 
@@ -518,15 +737,22 @@ folder removed outside the app, can keep its assignment: once the library has be
 scanned the renderer leaves that display empty rather than failing every apply,
 and reinstalling the wallpaper brings the assignment back.
 
-- Single: **Move wallpaper to Trash** in the inspector's **More actions** menu, or
-  `Delete` (either key) on a focused tile.
+- Single: **Move wallpaper to Trash** in the inspector's **More actions** menu or the
+  tile's right-click menu, or `Delete` (either key, with or without `Command`, as in the
+  Finder) on a focused tile.
 - Batch: **Select** in Installed's header row switches the grid into selection
   mode, where every tile shows a check and clicking a tile toggles it;
   `Shift`-click extends across the shown order and **Select all** in the footer
   ticks every tile the current search and filters show. Outside selection mode the
   check appears on hover and `Command`-click (or `Control`-click) toggles it. The
-  footer shows the count with **Select all**, **Clear**, **Add to playlist**,
-  **Move N to Trash** and **Add to collection…**; `Delete` acts on the selection from
+  footer shows the count with **Select all**, **Clear**, **Add to playlist**, the
+  favorite tool, **Move N to Trash** and **Add to collection…**. **Add to playlist** says
+  how many wallpapers it added to the target display's list, and when that display's
+  playlist is off or plays something other than its list, says that too and links to
+  **Playlist settings** (Settings › Displays). The favorite tool reads **Add to
+  favorites** and makes every ticked wallpaper a favorite, or **Remove from favorites**
+  when they all are. A batch takes at most 4,096 wallpapers and says so when more are
+  ticked. `Delete` acts on the selection from
   the grid, and `Escape` or **Done** leaves selection mode and clears the selection.
   The selection survives a change of view, search or filter. One confirmation sheet
   covers the whole batch, every wallpaper is trashed independently, the library
@@ -612,6 +838,14 @@ main display had. `config.toml` records the display the row last described as
 `primary_display`; an older file without it hands nothing over until that record
 exists. Neither wallpaper reloads: the scenes stay on their displays.
 
+If a mirror temporarily becomes the main display and no independent wallpaper is
+chosen for it, its saved mirror source and any earlier wallpaper survive the handover
+back. It resumes following that source, including subsequent wallpaper changes.
+A playlist, rule or schedule changing the main display's wallpaper in that window
+counts as no choice: only the user's own apply replaces the mirror. Automatic
+applies preserve the mirror's physical-display alias as well as its saved source
+and earlier wallpaper, even when that earlier wallpaper is being applied.
+
 The renderer titles displays by CoreGraphics vendor and model numbers
 (`Vendor 1552 - Model 41055 (1 - Primary)`). `DisplayTitleResolver`
 (`App/Services/Desktop/`) replaces that label with `NSScreen.localizedName` — the
@@ -665,19 +899,37 @@ tags are not claimed to be represented by the sum of visible group counts.
   carries no resolution or Workshop category, so those boxes are Discover-only.
   The Show only boxes start unticked and a ticked one requires its tag; Type and Age
   rating are boxes that start ticked (a library hides nothing by default) and an unticked box hides
-  every wallpaper carrying that tag, case-insensitively. Search matches titles and
-  tags, and filtering never activates a wallpaper. The header's sort menu offers
-  Name, Type, Favorites, File size and Date added, with a direction button beside
-  it; choosing a key starts in the direction people ask for it (names A→Z;
-  favorites, largest and newest first), and names break ties. File size is the
-  wallpaper folder's total and Date added is when the folder entered the library
-  (download or import), both measured off the main thread by
-  `LibraryMetricsService` and re-checked only after a library reload; wallpapers
-  not yet measured sort last.
+  every wallpaper carrying that tag, case-insensitively. Search matches the title
+  and tags (as one text, joined by a space), the author the manifest names (its
+  `author`, or the one a [pixiv](pixiv.md) save records; a Workshop manifest names
+  none) and the first 8,000 characters of its `description`, ignoring case, accents
+  and character width (`cafe` finds *Café*, half-width katakana finds full-width;
+  kana keep their voicing marks). The manifest's words are read and folded off the
+  main thread by `LibraryMetricsService` (`LibrarySearchText`) and are only
+  searched, never shown. A Workshop link (a `steamcommunity.com` page or a
+  `steam://` link) finds that wallpaper by its id alone, never by a description
+  that mentions it, and so does a bare id of six digits or more that an installed
+  wallpaper has; a number no installed wallpaper has for its id is searched as
+  words (without the spaces around it), so a saved [pixiv](pixiv.md) work's artwork
+  id finds it through its description. A search that is a local collection's whole
+  name (case, accents and surrounding spaces aside) also shows that collection's
+  wallpapers. Filtering never activates a wallpaper. The header's
+  sort menu offers Name, Type, Favorites, File size, Date added and Last used, with
+  a direction button beside it; choosing a key starts in the direction people ask
+  for it (names A→Z; favorites, largest, newest and most recently used first), and
+  names break ties. File size is the wallpaper folder's total and Date added is when
+  the folder entered the library (download or import), both measured off the main
+  thread by `LibraryMetricsService` and re-checked only after a library reload;
+  wallpapers not yet measured sort last. Last used is when the wallpaper was last
+  put on a display, the newest across displays ([history](#previous-next-and-recently-used));
+  a wallpaper never used since that was recorded sorts last either way, and the
+  list sorts again when a wallpaper is applied.
 - **Discover:** the sidebar is Wallpaper Engine's own filter list — Show only
   (required tags), then Type, Age rating and Resolution as tick boxes whose
   unticked entries are excluded, and the Tags chips (see [workshop-downloads](workshop-downloads.md)).
   Sort opens on Most popular this year; the other orders are listed there too.
+  The sort and filters of the last search are kept across relaunches and app
+  updates (`WorkshopStore.browseFiltersKey`); the search text is not.
 - **pixiv:** the sidebar starts with the pixiv account (sign in, or who is signed
   in and **Log out**), then Orientation, Minimum size, Age rating and
   AI-generated; its Mature (R-18) box waits for a sign-in. The page's menu lists
@@ -686,7 +938,17 @@ tags are not claimed to be represented by the sum of visible group counts.
 
 An empty result offers recovery for the actual restriction: **Clear search**,
 **Clear filters** (plus **Show filters** while the sidebar is closed), or **Clear search and
-filters**. A Workshop response with no restrictions offers Refresh instead of an
+filters**; on Installed a search alone says no wallpaper matches it. A Workshop link
+whose item is not installed says so whatever the filters, and so does a bare id while no
+filter applies (under filters it may be words they hide) once it arrived whole: pasted,
+dropped, confirmed with Return or restored with the window. An id being typed stays an
+ordinary search, so its prefixes from six digits on never claim to be items. Either way it
+offers **Show in Steam Workshop** beside **Clear search**: Discover's wallpapers list with
+that item and its id in the search field, as pasting it there does
+([opening an item from a link or id](workshop-downloads.md#opening-an-item-from-a-link-or-id)).
+A link to an id shorter than six digits is an ordinary search, since Discover's field
+looks up no bare id that short.
+A Workshop response with no restrictions offers Refresh instead of an
 ineffective Clear. First loading, Workshop failure/Retry and an empty local library
 keep their own states; a refresh can leave existing results visible.
 
@@ -699,7 +961,8 @@ the Filter count includes it), choosing it again or pressing its chip shows ever
 wallpaper again, and a collection deleted while it is shown returns the page to All
 wallpapers. **New collection…** under the list creates one with an inline name field
 (a refused name says why under the field), and a collection's context menu
-(and its VoiceOver actions) offers **Rename…**, inline, and **Delete…**, which asks
+(and its VoiceOver actions) offers **Play** and **Shuffle**
+([playlists](playlists.md#playing-from-installed)), **Rename…**, inline, and **Delete…**, which asks
 in a confirmation sheet. Add selected wallpapers through **Add to collection…** in
 Installed's footer (or **New collection…** there, named from the selection), remove
 selected members of the shown collection, or toggle membership in the inspector's
@@ -716,7 +979,8 @@ Several tiles download at once and the toolbar's downloads button sums them (its
 ring and label carry the batch's progress and summary). The Downloads popover opens
 from that button, which appears while downloads exist, and from **Show in
 downloads** in the inspector; it always hangs from the toolbar button. The Import
-popover opens from **Import** in Installed's header row; imports copy source files
+popover opens from **Import** in Installed's header row, and **File › Import…**
+(`Command`-`O`) opens its file picker while the panel is open; imports copy source files
 into the library and leave the originals untouched, with a duplicate policy of
 **Skip duplicates**, **Keep both copies** or **Replace if changed**. Closing a
 popover, or the window,
@@ -727,8 +991,13 @@ An import takes Wallpaper Engine project folders, a Steam library, a Wallpaper
 Engine folder, a project's own files, videos (`mp4`, `m4v`, `mov`, `webm`, `mkv`,
 `avi`; importing never checks the format, so a file macOS cannot play is imported and
 refused when applied, [with its format named](performance.md#video-playback)), HTML
-files and pictures (`jpg`, `jpeg`, `png`, `gif`, `webp`, `heic`,
-`heif`, `tif`, `tiff`, `bmp`, `avif`, at most 512 MB). A picture becomes a still
+files and pictures. A video becomes a `video` wallpaper with the id `local-<file name>`
+and a 512 px `preview.jpg` (`VideoPoster`: the frame a tenth of the way in, at most
+3 s, past a fade-in), so its tile has a picture; a clip AVFoundation cannot decode is
+imported without one. At launch, a `local-` video project imported before posters
+existed, with no `preview` in its manifest, gets one and the library is rescanned.
+Pictures may be `jpg`, `jpeg`, `png`, `gif`, `webp`, `heic`,
+`heif`, `tif`, `tiff`, `bmp` or `avif`, at most 512 MB. A picture becomes a still
 `web` wallpaper with the id `image-<file name>`, packaged the way pixiv pages are
 (`StillImageWallpaper`; see [pixiv](pixiv.md#saving-a-page)): the original kept as
 `image.<ext>`, a 512 px `preview.jpg`, and a `display.jpg` shown instead when the
@@ -737,7 +1006,9 @@ long side exceeds 8,192 px. Its **Image fit** and **Background color** labels ar
 translated like pixiv's. A picture ImageIO cannot measure or scale is reported and
 not imported. A Workshop preset folder is imported as one self-contained wallpaper
 built on its base, found next to it (a Steam library) or already in the library; see
-[Workshop presets](workshop-downloads.md#workshop-presets). Files dropped on the
+[Workshop presets](workshop-downloads.md#workshop-presets). Files and folders dropped on
+the Installed page are imported with the popover's duplicate policy (the page shows an
+outline while they are over it, and refuses the drop while an import runs). Files dropped on the
 Dock icon, or opened with WallpaperMachine from Finder (`CFBundleDocumentTypes` in
 `Info.plist`, rank Alternate, so the app never becomes a default), are imported the
 same way with **Skip duplicates**, and the window opens on Installed with the

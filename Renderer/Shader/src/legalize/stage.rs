@@ -138,7 +138,12 @@ pub(crate) fn finish(input: StageInput<'_>) -> Result<LegalStage, LegalizeError>
     }
     for t in &textures {
         let b = bindings.textures[&t.name];
-        head.push_str(&format!("layout(set = 0, binding = {}) uniform sampler {};\n", b.sampler, sampler_name(&t.name)));
+        head.push_str(&format!(
+            "layout(set = 0, binding = {}) uniform {} {};\n",
+            b.sampler,
+            t.kind.sampler_type(),
+            sampler_name(&t.name)
+        ));
     }
     for slot in &found.sampled_planes {
         let b = bindings.planes[slot];

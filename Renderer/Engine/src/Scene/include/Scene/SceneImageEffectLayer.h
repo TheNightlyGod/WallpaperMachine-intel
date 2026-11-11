@@ -1,5 +1,6 @@
 // Clean-room implementation from the WallpaperMachine spec e1b-scene-model.md; written without access to the original source.
 #pragma once
+#include <array>
 #include <vector>
 #include <list>
 #include <memory>
@@ -32,6 +33,24 @@ struct SceneImageEffectNode {
     std::vector<std::string>   authored_textures;
 };
 
+/// What one step of an effect's function does: clear `target` to `color`.
+struct EffectFunctionAction {
+    enum class Kind
+    {
+        Clear,
+    };
+    Kind                 kind { Kind::Clear };
+    std::string          target;
+    std::array<float, 4> color { 0.0f, 0.0f, 0.0f, 0.0f };
+};
+
+/// A named function of an effect file (`functions`), which a script runs with
+/// `executeMaterialFunction(name)` (`SceneRuntimeContext::RunEffectFunction`).
+struct EffectFunction {
+    std::string                       name;
+    std::vector<EffectFunctionAction> actions;
+};
+
 struct SceneImageEffect {
     enum class CmdType
     {
@@ -46,6 +65,7 @@ struct SceneImageEffect {
         std::string authored_src;
     };
     std::vector<Command>            commands;
+    std::vector<EffectFunction>     functions;
     std::list<SceneImageEffectNode> nodes;
     /// Whether the effect runs: a script can switch it while the scene runs
     /// (`SceneRuntimeContext::RegisterEffectVisibility`), and the chain is then
@@ -85,10 +105,13 @@ public:
     /// sorts, which this engine draws in scene order. A layer that never sets
     /// them keeps the pass's own.
     void        SetFinalDepth(bool test, bool write) { m_final_depth = SceneDepthState { test, write }; }
-    /// How the last pass is drawn instead of the final blend while no effect of the chain runs
-    /// and the chain ends in its passthrough fallback (a script has switched every effect off).
-    /// Without it the final blend applies then too.
-    void        SetIdleFinalBlend(BlendMode m) { m_idle_final_blend = m; }
+    /// The depth test alone of the last pass, its depth write left as the pass authored it:
+    /// a text layer's (decompiles/G-F10.md).
+    void        SetFinalDepthTest(bool test) { m_final_depth_test = test; }
+    /// While set, the chain is not drawn and the layer that owns it draws straight onto the
+    /// scene, as a text layer does while none of its effects runs (Appendix G T.7.2).
+    void        SetDrawsOwnerDirectly(bool direct) { m_draws_owner_directly = direct; }
+    bool        DrawsOwnerDirectly() const { return m_draws_owner_directly; }
     /// The camera the chain's last pass draws its result through. Empty is the
     /// scene's active camera, which is right for a layer that sits in the
     /// scene; a fullscreen layer's result is the screen and must cover it
@@ -97,7 +120,14 @@ public:
 
     void ResolveEffect(const SceneMesh& defualt_mesh, std::string_view effect_cam);
 
+    /// Drawn into the first target right after the layer's card, before any effect: a
+    /// puppet's texture channels painting frames into its picture. Each draws only while
+    /// it is visible itself, which is decided frame by frame.
+    void AddCardOverlay(std::shared_ptr<SceneNode> node) { m_card_overlays.push_back(std::move(node)); }
+    const std::vector<std::shared_ptr<SceneNode>>& CardOverlays() const { return m_card_overlays; }
+
 private:
+    std::vector<std::shared_ptr<SceneNode>>        m_card_overlays;
     std::string                                    m_pingpong_a;
     std::string                                    m_pingpong_b;
     std::vector<std::shared_ptr<SceneImageEffect>> m_effects;
@@ -112,7 +142,8 @@ private:
     bool                                           m_logged_missing_material { false };
 
     std::string m_final_camera;
-    std::optional<BlendMode>   m_idle_final_blend;
+    bool                       m_draws_owner_directly { false };
+    std::optional<bool>        m_final_depth_test;
 
     /// The depth test and write the last pass is drawn with; empty keeps the
     /// ones its own material authored.

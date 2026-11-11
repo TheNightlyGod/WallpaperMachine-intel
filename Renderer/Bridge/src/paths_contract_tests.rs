@@ -88,6 +88,8 @@ fn assert_locations(
     assert_eq!(paths.user_assets_root(), user);
     assert_eq!(paths.shader_cache_root(), support.join("shader-cache"));
     assert_eq!(paths.logs_root(), support.join("Logs"));
+    assert_eq!(paths.scene_storage_root(), support.join("SceneStorage"));
+    assert_eq!(paths.scene_storage_dir("item-01"), support.join("SceneStorage/item-01"));
     assert_eq!(
         paths.log_session_root("session-01"),
         support.join("Logs/session-01")

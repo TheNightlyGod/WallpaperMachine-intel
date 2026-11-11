@@ -27,19 +27,21 @@ use futures_util::Future;
 pub use types::{
     BridgeAppSnapshot, BridgeAudioSpectrum, BridgeComboOption, BridgeDirectoryMode,
     BridgeDisplayConfigRow, BridgeDisplayMode, BridgeDisplayMutationBundle,
-    BridgeDisplaySettingsRow, BridgeFileFilter, BridgeFraming, BridgeLibraryScanStatus,
-    BridgeLibrarySnapshot,
+    BridgeDisplaySettingsRow, BridgeEngineOptionEdit, BridgeEngineOptionId, BridgeEngineOptionRow,
+    BridgeEngineOptionValues, BridgeRgb, BridgeEngineOptions, BridgeFileFilter, BridgeFraming,
+    BridgeLibraryScanStatus, BridgeLibrarySnapshot,
     BridgeLockScreenScene, BridgeLogLevel, BridgeLogStatus, BridgeMonitorInfoRow, BridgeWallpaperPreview,
     BridgeNativeVideoWallpaper, BridgeMediaSnapshot,
     BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgeBatteryMode, BridgePropertyDescriptor,
     BridgePropertyEdit, BridgePropertyKind, BridgePropertyValue, BridgeQualityThrottleCause,
     BridgeRendererCountersReport,
-    BridgeRendererSurfaceCounters, BridgeScalingMode, BridgeSceneBackendReport,
+    BridgeMsaa, BridgePostProcessing, BridgeQualityLevel, BridgeRendererSurfaceCounters, BridgeScalingMode,
+    BridgeSceneBackendReport, BridgeSceneCapability, BridgeSceneMissingFile, BridgeSceneQuality,
     BridgeSceneUpdateModeReport, BridgeSettingsSnapshot, BridgeUserShortcut,
     BridgeSliderMetadata, BridgeSnapshotBundle, BridgeStorageStatus, BridgeSurfaceCheck,
     BridgeVideoBackendReport, BridgeWallpaperEntry,
     BridgeWallpaperKind, BridgeWallpaperMutationBundle, BridgeWallpaperOptionsSnapshot,
-    BridgeSceneWindow, BridgeWebWallpaper,
+    BridgeDesktopPreload, BridgeSceneWindow, BridgeWebWallpaper,
 };
 
 impl From<crate::config::BatteryModeCfg> for BridgeBatteryMode {
@@ -81,26 +83,27 @@ use crate::{
         BridgeActorHandle,
         messages::{
             ApplyWallpaperOptions, Bootstrap, CancelWallpaperOptions, ClearShaderCache,
-            EditProperty, EjectWallpaperFromDisplay, GetAllSnapshots, GetAppSnapshot,
+            EditEngineOption, EditProperty, EjectWallpaperFromDisplay, GetAllSnapshots, GetAppSnapshot,
             GetLibrarySnapshot, GetLockScreenScenes, GetWallpaperPreview, GetMonitorInformationSnapshot,
-            GetSettingsSnapshot, GetWallpaperOptionsSnapshot, GetWebWallpapers,
+            GetSceneProbeRequest, GetSettingsSnapshot, GetWallpaperOptionsSnapshot, GetWebWallpapers,
             GetNativeVideoWallpapers, PollMousePosition, RendererCounters,
-            RefreshDisplays, RefreshLibrary, ReleaseHeldWallpaper, RestoreAllPropertyDefaults,
-            RestorePropertyDefault,
+            RefreshDisplays, RefreshLibrary, ReleaseHeldWallpaper, RestoreAllEngineOptionDefaults,
+            RestoreAllPropertyDefaults, RestoreEngineOptionDefault, RestorePropertyDefault,
             SelectWallpaper,
             SetAudioResponseEnabled, SetDisplayConfigEnabled, SetDisplayEnabled, SetDisplayMode,
             PreviewDisplayPosition, PreviewWallpaperProperties, SetDisplayPosition,
             SetDisplayParkedWallpapers, SetDisplayPresentationSuspended,
             SetFilter, SetGlobalPlayback, SetLaunchAtLogin, SetMirrorMuted, SetMirrorScalingFactor,
             SetMirrorScalingMode, SetMirrorTarget, SetMirrorTargetFps, SetMirrorVolume, SetMuted,
-            SetAudioSuppressed, SetBatteryMode, SetBatteryQualityProfile,
+            SetAudioGain, SetAudioSuppressed, SetBatteryMode, SetBatteryQualityProfile,
             SetFrameRateCap, SetLabelLanguages, SetMediaIntegrationEnabled,
-            SetPresentationUnloaded, SetPresentationSuspended, SetPropertyPath,
+            SetMetalFxUpscalingEnabled, SetPresentationUnloaded, SetPresentationSuspended,
+            SetPropertyPath,
             SetQualityThrottle, SetRenderScale,
             SetVerboseLogging,
             SetRendererCountersEnabled, SetScalingFactor, SetScalingMode,
-            SetSceneOnDemandEnabled, SetSceneOptimizationEnabled,
-            SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
+            SetSceneOnDemandEnabled, SetSceneOptimizationEnabled, SetSceneQuality,
+            SetSceneDisplayFramingEnabled, SetSceneResolution, SetSceneVideoPlaneSamplingEnabled,
             SetTargetFps, SetVolume,
             SetWebAudioSubscribed, Shutdown,
         },
@@ -302,8 +305,20 @@ impl<E: crate::engine::EngineFacade> BridgeBuilder<E> {
             config.quality.scene_resolution,
         );
         log::info!(
+            "Requested scene quality: {}",
+            config.quality.scene.to_scene().key(),
+        );
+        log::info!(
             "Requested video-plane sampling: {}",
             config.experimental.scene_video_plane_sampling,
+        );
+        log::info!(
+            "Requested SDR display framing: {}",
+            config.experimental.scene_display_framing,
+        );
+        log::info!(
+            "Requested MetalFX upscaling: {}",
+            config.quality.metalfx_upscaling_enabled,
         );
 
         let engine = ArcEngineFacade::new(engine);
@@ -793,6 +808,11 @@ impl EngineFacade for ArcEngineFacade {
         self.0.scene_windows()
     }
 
+    fn preload_scene(&self, desc: wallpaper_core::project::SceneDesc, render_scale: f64)
+        -> Pin<Box<dyn Future<Output = Result<(), wallpaper_core::EngineError>> + Send>> {
+        self.0.preload_scene(desc, render_scale)
+    }
+
     fn set_parked_scenes(
         &self,
         display_id: u32,
@@ -851,6 +871,20 @@ impl EngineFacade for ArcEngineFacade {
         self.0.set_scene_video_plane_sampling_enabled(enabled)
     }
 
+    fn set_scene_display_framing_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<(), wallpaper_core::EngineError> {
+        self.0.set_scene_display_framing_enabled(enabled)
+    }
+
+    fn set_metalfx_upscaling_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<(), wallpaper_core::EngineError> {
+        self.0.set_metalfx_upscaling_enabled(enabled)
+    }
+
     fn set_scene_resolution(
         &self,
         resolution: wallpaper_core::SceneResolution,
@@ -873,6 +907,13 @@ impl EngineFacade for ArcEngineFacade {
         >,
     > {
         self.0.recover_surface(display_id, reason)
+    }
+
+    fn probe_scene_capability(
+        &self,
+        request: crate::engine::SceneProbeRequest,
+    ) -> Result<wallpaper_core::SceneCapabilityProbe, wallpaper_core::EngineError> {
+        self.0.probe_scene_capability(request)
     }
 
     fn current_audio_spectrum(
@@ -1004,6 +1045,22 @@ impl EngineFacade for ArcEngineFacade {
         flat_json: String,
     ) -> Pin<Box<dyn Future<Output = Result<wallpaper_core::PropertyPreview, wallpaper_core::EngineError>> + Send>> {
         self.0.preview_property_override(handle, scene_path, flat_json)
+    }
+
+    fn preview_user_options(
+        &self,
+        handle: SceneHandle,
+        scene_path: String,
+        options: wallpaper_core::project::SceneUserOptions,
+    ) -> Pin<Box<dyn Future<Output = Result<wallpaper_core::PropertyPreview, wallpaper_core::EngineError>> + Send>> {
+        self.0.preview_user_options(handle, scene_path, options)
+    }
+
+    fn read_scene_traits(
+        &self,
+        project_json: &std::path::Path,
+    ) -> Result<wallpaper_core::SceneTraits, wallpaper_core::EngineError> {
+        self.0.read_scene_traits(project_json)
     }
 
     fn set_fps(
@@ -1158,14 +1215,20 @@ impl WallpaperBridge {
     /// order, for this export alone, so the draft, the dirty state and the
     /// snapshots stay as they are. An entry is checked like
     /// [`WallpaperBridge::edit_property`] checks its value.
+    /// `pending_engine_options` does the same for Wallpaper Engine's
+    /// per-wallpaper options, checked like
+    /// [`WallpaperBridge::edit_engine_option`] checks an edit.
     ///
     /// # Errors
     /// Returns an error for a missing or unsupported project, invalid input paths, or a
-    /// pending value the property does not accept. Nothing is exported then.
+    /// pending value the property or option does not accept. Nothing is exported then.
     pub async fn wallpaper_preview(
         &self, wallpaper_id: String, display_id: String, pending: Vec<BridgePropertyEdit>,
+        pending_engine_options: Vec<BridgeEngineOptionEdit>,
     ) -> Result<BridgeWallpaperPreview, BridgeError> {
-        self.actor.ask(GetWallpaperPreview { wallpaper_id, display_id, pending }).await
+        self.actor
+            .ask(GetWallpaperPreview { wallpaper_id, display_id, pending, pending_engine_options })
+            .await
     }
 
     /// Returns committed web wallpapers for the currently connected displays.
@@ -1308,6 +1371,34 @@ impl WallpaperBridge {
     /// Returns an error when any snapshot in the bundle cannot be produced.
     pub async fn all_snapshots(&self) -> Result<BridgeSnapshotBundle, BridgeError> {
         self.actor.ask(GetAllSnapshots).await
+    }
+
+    /// Reads an installed scene without drawing it, with its saved property choices: whether
+    /// Native Metal would refuse it, and which files its layers name and lack. Takes as long as
+    /// loading the scene's files and translating its shaders (seconds for a large scene), on a
+    /// thread of its own; nothing on screen changes and no other request waits for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper is not an installed scene, or the probe itself failed.
+    /// A scene that cannot be read is not an error: `read_error` says why.
+    pub async fn scene_capability(
+        &self,
+        wallpaper_id: String,
+    ) -> Result<BridgeSceneCapability, BridgeError> {
+        let request = self.actor.ask(GetSceneProbeRequest { wallpaper_id }).await?;
+        let engine = self.engine.clone();
+        // The parse blocks, so it runs where blocking is allowed, on the bridge's own runtime:
+        // the future the host polls is not running on one.
+        let probe = self
+            .actor
+            .run_on_runtime(async move {
+                tokio::task::spawn_blocking(move || engine.probe_scene_capability(request)).await
+            })
+            .await?
+            .map_err(|error| BridgeError::engine(format!("the scene probe stopped: {error}")))?
+            .map_err(|error| BridgeError::engine(error.to_string()))?;
+        Ok(probe.into())
     }
 
     /// # Errors
@@ -1574,6 +1665,11 @@ impl WallpaperBridge {
     /// `pending` stays at what is saved, like one in the draft. With `show`
     /// false it has no effect on what the scenes are given.
     ///
+    /// Wallpaper Engine's per-wallpaper options follow the same way:
+    /// `pending_engine_options` is made to the draft's options for this call
+    /// alone, each checked like [`WallpaperBridge::edit_engine_option`] checks
+    /// an edit, and the scenes are shown the result.
+    ///
     /// Asking for what the scenes already show, or for the saved look when they
     /// are showing it, sends the engine nothing. Cancelling the options puts
     /// the saved look back by itself, and applying them loads the scenes from
@@ -1592,12 +1688,14 @@ impl WallpaperBridge {
         wallpaper_id: String,
         show: bool,
         pending: Vec<BridgePropertyEdit>,
+        pending_engine_options: Vec<BridgeEngineOptionEdit>,
     ) -> Result<(), BridgeError> {
         self.actor
             .ask(PreviewWallpaperProperties {
                 wallpaper_id,
                 show,
                 pending,
+                pending_engine_options,
             })
             .await
     }
@@ -1829,6 +1927,22 @@ impl WallpaperBridge {
         self.actor.ask(SetAudioSuppressed { suppressed }).await
     }
 
+    /// Plays every wallpaper at `gain` times its saved volume: 1 restores the
+    /// saved volumes and 0 silences them. For a host that wants wallpapers
+    /// turned down without muting them, such as while another app plays
+    /// sound. Not persisted, and it never rewrites a saved volume: one the
+    /// user changes while a gain below 1 is set is saved whole and plays
+    /// reduced until the gain is lifted. Open scenes change live; the web and
+    /// native-video descriptors in the returned snapshots carry the product.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `gain` is not a number from 0 to 1, or when a
+    /// running scene rejects the volume.
+    pub async fn set_audio_gain(&self, gain: f32) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(SetAudioGain { gain }).await
+    }
+
     /// Names the languages a wallpaper's own translated labels are read in,
     /// most preferred first, as Wallpaper Engine locale codes such as `zh-chs`
     /// or `ja-jp`. English is added as the fallback. Not persisted: the host
@@ -1901,6 +2015,15 @@ impl WallpaperBridge {
             .await
     }
 
+    /// Prepares one desktop's saved wallpaper without selecting it or changing display assignments.
+    pub async fn preload_desktop_wallpaper(&self, display_id: u32, wallpaper_id: String) -> Result<BridgeDesktopPreload, BridgeError> {
+        self.actor.ask(crate::actor::messages::PreloadDesktopWallpaper { display_id, wallpaper_id }).await
+    }
+
+    pub async fn complete_desktop_preload(&self, display_id: u32, wallpaper_id: String, succeeded: bool) -> Result<(), BridgeError> {
+        self.actor.ask(crate::actor::messages::CompleteDesktopPreload { display_id, wallpaper_id, succeeded }).await
+    }
+
     /// The window of every open scene wallpaper, live and parked, so the host
     /// can keep each one on the desktops that show its wallpaper. Web and
     /// video windows are the host's own and are not listed.
@@ -1922,6 +2045,7 @@ impl WallpaperBridge {
                     wallpaper_id,
                     window_number: i64::try_from(window.window_number?).ok()?,
                     parked: window.parked,
+                    ready: window.ready,
                 })
             })
             .collect()
@@ -2105,6 +2229,69 @@ impl WallpaperBridge {
         self.actor
             .ask(SetSceneVideoPlaneSamplingEnabled { enabled })
             .await
+    }
+
+    /// Lets an SDR scene at Display resolution whose canvas overhangs the
+    /// display (Fill, or original size, crops it) draw only the part the
+    /// display shows, instead of its whole layout cropped.
+    ///
+    /// Off by default, and experimental: it saves GPU work and memory on a
+    /// scene whose shape differs from the display's, but the picture is not
+    /// byte-identical to the whole layout's. A running scene picks it up at
+    /// its next frame by sizing its render targets again in place; nothing is
+    /// reparsed or restarted. Fit, Stretch, Fit with blurred backdrop, a zoom
+    /// below 1 and a scene MetalFX upscales draw the whole layout whatever
+    /// this says; an HDR scene keeps its own framing to the display.
+    /// `WALLPAPER_MACHINE_SDR_FRAMING=1` or `=0` overrides it in the renderer
+    /// for a measurement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the setting cannot be saved or the renderer
+    /// rejects the call.
+    pub async fn set_scene_display_framing_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor
+            .ask(SetSceneDisplayFramingEnabled { enabled })
+            .await
+    }
+
+    /// Saves the scene quality (MSAA, shadows, volumetrics, reflections,
+    /// post-processing) and loads each running scene wallpaper once more with
+    /// it. An equal value changes nothing. Videos and web wallpapers are not
+    /// touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the setting cannot be saved or the reconcile fails.
+    pub async fn set_scene_quality(
+        &self,
+        quality: BridgeSceneQuality,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        let quality = crate::config::SceneQualityCfg::from_scene(quality.into());
+        self.actor.ask(SetSceneQuality { quality }).await
+    }
+
+    /// Brings a scene drawn below full resolution back to full size with
+    /// MetalFX's spatial upscaler instead of the composition's bilinear
+    /// stretch.
+    ///
+    /// Off by default. It costs nothing at render scale 1; below it each
+    /// presented frame of a scene runs one MetalFX pass and keeps one image the
+    /// size of the scene's full-resolution output. Running scenes pick it up at
+    /// their next presented frame. Web and video wallpapers are not affected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the setting cannot be saved or the renderer
+    /// rejects the call.
+    pub async fn set_metalfx_upscaling_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<BridgeSnapshotBundle, BridgeError> {
+        self.actor.ask(SetMetalFxUpscalingEnabled { enabled }).await
     }
 
     /// Chooses how many pixels a 2D scene wallpaper is rasterized with.
@@ -2444,6 +2631,69 @@ impl WallpaperBridge {
     ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
         self.actor
             .ask(RestoreAllPropertyDefaults { wallpaper_id })
+            .await
+    }
+
+    /// Stages one of Wallpaper Engine's per-wallpaper options (colour
+    /// adjustments, image filter, flip, mouse parallax, playback rate) for a
+    /// scene or video wallpaper: Apply changes keeps it and Revert undoes it,
+    /// like a property edit.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when the wallpaper id is unknown, the wallpaper
+    /// is not a scene or video, it does not offer the option (mouse parallax
+    /// for a scene whose camera does not follow the cursor, or any video), a
+    /// switch is given anything but a boolean, a slider a number that is not
+    /// finite or outside its range, or the image filter a name that is neither
+    /// empty nor one the shared assets offer.
+    pub async fn edit_engine_option(
+        &self,
+        wallpaper_id: String,
+        option: BridgeEngineOptionId,
+        value: BridgePropertyValue,
+    ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
+        self.actor
+            .ask(EditEngineOption {
+                wallpaper_id,
+                option,
+                value,
+            })
+            .await
+    }
+
+    /// Stages the default of one per-wallpaper option.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown or the wallpaper does
+    /// not offer the option.
+    pub async fn restore_engine_option_default(
+        &self,
+        wallpaper_id: String,
+        option: BridgeEngineOptionId,
+    ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
+        self.actor
+            .ask(RestoreEngineOptionDefault {
+                wallpaper_id,
+                option,
+            })
+            .await
+    }
+
+    /// Stages the default of every per-wallpaper option; Revert undoes it.
+    /// The authored properties, display settings and audio are not touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the wallpaper id is unknown or the wallpaper is
+    /// not a scene or video.
+    pub async fn restore_all_engine_option_defaults(
+        &self,
+        wallpaper_id: String,
+    ) -> Result<BridgeWallpaperMutationBundle, BridgeError> {
+        self.actor
+            .ask(RestoreAllEngineOptionDefaults { wallpaper_id })
             .await
     }
 

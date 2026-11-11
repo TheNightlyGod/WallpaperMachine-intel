@@ -128,6 +128,7 @@ fn wallpaper_by_display(
         project_models: &BTreeMap::new(),
         frame_rate_cap: None,
         audio_suppressed: false,
+        audio_gain: crate::engine::AudioGain::UNITY,
     }
     .build()
     .unwrap()

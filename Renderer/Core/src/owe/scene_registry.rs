@@ -122,6 +122,8 @@ impl SceneRegistry {
                         _ => None,
                     },
                     surface,
+                    // SAFETY: as above, the entry is alive while the lock is held.
+                    quality_in_force: unsafe { read_quality_in_force(raw) },
                 }
             })
             .collect()
@@ -206,4 +208,29 @@ mod tests {
         registry.unregister(7);
         assert!(registry.reports().is_empty());
     }
+}
+
+/// # Safety
+///
+/// `raw` must point at a live scene for the duration of the call.
+unsafe fn read_quality_in_force(raw: *mut std::ffi::c_void) -> Option<crate::project::SceneQuality> {
+    let mut out = sys::owe_scene_quality {
+        msaa: 0,
+        shadows: 0,
+        volumetrics: 0,
+        reflection: false,
+        post_processing: 0,
+    };
+    // SAFETY: the caller keeps `raw` alive; `out` is a valid local.
+    let status = unsafe { sys::owe_scene_wallpaper_quality_in_force(raw, &raw mut out) };
+    if status != 0 {
+        return None;
+    }
+    crate::project::SceneQuality::from_raw(
+        out.msaa,
+        out.shadows,
+        out.volumetrics,
+        out.reflection,
+        out.post_processing,
+    )
 }

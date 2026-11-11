@@ -10,7 +10,7 @@ async fn preview_reads_the_draft_without_selecting_applying_or_consuming_it() {
     bridge.select_wallpaper("preview".into()).await.unwrap();
     bridge.edit_property("preview".into(), "size".into(), BridgePropertyValue::Number { value: 25.0 }).await.unwrap();
     let before = bridge.all_snapshots().await.unwrap();
-    let preview = bridge.wallpaper_preview("preview".into(), "primary".into(), Vec::new()).await.unwrap();
+    let preview = bridge.wallpaper_preview("preview".into(), "primary".into(), Vec::new(), Vec::new()).await.unwrap();
     let properties: serde_json::Value = serde_json::from_str(&preview.properties_json).unwrap();
     assert_eq!(properties["size"].as_f64(), Some(25.0));
     assert!(preview.fps <= 30 && preview.fps > 0);
@@ -31,7 +31,7 @@ async fn web_preview_keeps_combo_json_types_and_can_preview_an_unselected_projec
         }}
     }"#).await;
     let before = bridge.app_snapshot().await.unwrap();
-    let preview = bridge.wallpaper_preview("web-preview".into(), "primary".into(), Vec::new()).await.unwrap();
+    let preview = bridge.wallpaper_preview("web-preview".into(), "primary".into(), Vec::new(), Vec::new()).await.unwrap();
     let properties: serde_json::Value = serde_json::from_str(&preview.properties_json).unwrap();
     assert_eq!(properties["number"]["value"], 2);
     assert_eq!(properties["flag"]["value"], true);
@@ -44,7 +44,7 @@ async fn web_preview_keeps_combo_json_types_and_can_preview_an_unselected_projec
 async fn preview_refuses_unknown_and_escaping_identifiers() {
     let bridge = WallpaperBridge::new_for_test();
     for id in ["missing", "../outside", "/absolute", ""] {
-        assert!(bridge.wallpaper_preview(id.into(), "primary".into(), Vec::new()).await.is_err());
+        assert!(bridge.wallpaper_preview(id.into(), "primary".into(), Vec::new(), Vec::new()).await.is_err());
     }
 }
 
@@ -72,7 +72,7 @@ async fn pending_values_are_exported_over_the_draft_and_the_draft_never_learns_o
     let preview = bridge.wallpaper_preview("preview".into(), "primary".into(), vec![
         pending("size", BridgePropertyValue::Number { value: 40.0 }),
         pending("tint", BridgePropertyValue::ColorRgb { red: 0.0, green: 0.5, blue: 1.0 }),
-    ]).await.unwrap();
+    ], Vec::new()).await.unwrap();
 
     let properties: serde_json::Value = serde_json::from_str(&preview.properties_json).unwrap();
     assert_eq!(properties["size"].as_f64(), Some(40.0), "the step wins over the draft's 25");
@@ -80,7 +80,7 @@ async fn pending_values_are_exported_over_the_draft_and_the_draft_never_learns_o
     assert_eq!(bridge.all_snapshots().await.unwrap(), before);
     assert_eq!(bridge.wallpaper_options_snapshot("preview".into()).await.unwrap(), options, "not even the draft's dirty marks move");
 
-    let after = bridge.wallpaper_preview("preview".into(), "primary".into(), Vec::new()).await.unwrap();
+    let after = bridge.wallpaper_preview("preview".into(), "primary".into(), Vec::new(), Vec::new()).await.unwrap();
     let properties: serde_json::Value = serde_json::from_str(&after.properties_json).unwrap();
     assert_eq!(properties["size"].as_f64(), Some(25.0), "the next export is the draft again");
     assert_eq!(properties["tint"], "1 1 1");
@@ -96,7 +96,7 @@ async fn a_web_preview_follows_pending_values_too() {
 
     let preview = bridge.wallpaper_preview("web-preview".into(), "primary".into(), vec![
         pending("flag", BridgePropertyValue::Bool { value: false }),
-    ]).await.unwrap();
+    ], Vec::new()).await.unwrap();
 
     let properties: serde_json::Value = serde_json::from_str(&preview.properties_json).unwrap();
     assert_eq!(properties["flag"]["value"], false);
@@ -124,7 +124,7 @@ async fn a_pending_value_is_refused_for_what_an_edit_is_refused_for_and_nothing_
         ("missing", BridgePropertyValue::Bool { value: true }),
     ] {
         let editing = bridge.edit_property("preview".into(), property.into(), value.clone()).await.unwrap_err();
-        let exporting = bridge.wallpaper_preview("preview".into(), "primary".into(), vec![pending(property, value.clone())])
+        let exporting = bridge.wallpaper_preview("preview".into(), "primary".into(), vec![pending(property, value.clone())], Vec::new())
             .await.unwrap_err();
         assert_eq!(exporting.kind(), BridgeErrorKind::InvalidInput, "{property} = {value:?}");
         assert_eq!(exporting.message(), editing.message(), "{property} = {value:?}");

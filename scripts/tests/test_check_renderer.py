@@ -130,15 +130,24 @@ class PerspectiveCornerPixelTests(unittest.TestCase):
 
 
 class CoveragePixelTests(unittest.TestCase):
-    def test_checks_source_over_and_single_sample_coverage_identically(self):
-        for index in (8, 11):
+    def test_checks_child_alpha_max_and_single_sample_coverage(self):
+        for index, values in ((8, (128, 128, 255)), (11, (0, 159, 255))):
             def coverage(u, v):
-                value = 128 if u < 0.375 else 191 if u < 0.625 else 255
+                value = values[0] if u < 0.375 else values[1] if u < 0.625 else values[2]
                 return bytes((value,) * 3)
             self.assertTrue(check_renderer.check_generated_pixels(ppm(coverage), index))
-            for wrong in (64, 128, 255):
+            for wrong in (0, 64, 128, 255):
                 self.assertFalse(check_renderer.check_generated_pixels(
                     ppm(lambda u, v: bytes((wrong,) * 3)), index))
+
+    def test_rejects_source_over_alpha_and_blended_single_sample_coverage(self):
+        def source_over(u, v):
+            value = 128 if u < 0.375 else 191 if u < 0.625 else 255
+            return bytes((value,) * 3)
+        for index in (8, 11):
+            self.assertFalse(check_renderer.check_generated_pixels(ppm(source_over), index))
+        self.assertFalse(check_renderer.check_generated_pixels(
+            ppm(lambda u, v: bytes((128 if u < 0.625 else 255,) * 3)), 11))
 
 
 class OriginCurtainPixelTests(unittest.TestCase):

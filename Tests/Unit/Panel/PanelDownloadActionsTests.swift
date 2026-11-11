@@ -391,6 +391,29 @@ final class PanelDownloadActionsTests: MediaPanelTestCase {
     }
   }
 
+  func testRetryFailedTriesEveryStoppedDownloadOfBothQueuesAgain() async throws {
+    try await withPanel { panel in
+      let controller = panel.controller
+      let job = try await startRunningJob(panel)
+      try await controller.cancelDownload(id: "222")
+      try await panel.waitUntil { !job.isPending }
+      let work = PixivWork(
+        id: "301", title: "Sky", authorID: "1", authorName: "A", thumbnailURL: nil, width: 1, height: 1,
+        pageCount: 1, rating: .everyone, aiGenerated: nil, tags: [], rank: nil)
+      let save = panel.pixiv.downloads.enqueue(work, page: 0)
+      try await controller.pixivCancel(id: "pixiv-301-p0")
+      try await panel.waitUntil(timeout: 10) { !save.isPending }
+      XCTAssertEqual(Set(controller.retryableDownloads.map(\.id)), ["222", "pixiv-301-p0"])
+
+      try await controller.retryFailedDownloads()
+      try await panel.waitUntil { panel.workshop.downloader.download(for: "222")?.isPending == true }
+      XCTAssertTrue(controller.retryableDownloads.allSatisfy { $0.id != "222" }, "the Steam job is back in line")
+      XCTAssertFalse(
+        controller.pixivDownloadRows.contains { $0.id == "pixiv-301-p0" && $0.status == .cancelled },
+        "and so is the pixiv save")
+    }
+  }
+
   func testLoggingOutAsksFirstAndTheDownloaderRefusesWhileDownloadsRun() async throws {
     try await withPanel { panel in
       let controller = panel.controller

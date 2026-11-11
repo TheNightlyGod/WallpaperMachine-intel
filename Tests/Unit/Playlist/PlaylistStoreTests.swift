@@ -16,6 +16,27 @@ final class PlaylistStoreTests: XCTestCase {
     }
 
 
+    /// One saved plan is not in a shape this build reads. The other still loads, and saving,
+    /// renaming or deleting plans leaves the unreadable one in the saved list.
+    func testAnUnreadablePlanSurvivesChangesToTheOthers() throws {
+        let playlist = String(decoding: try JSONEncoder().encode(DisplayPlaylist()), as: UTF8.self)
+        defaults.set(
+            Data(#"[{"id":"a","name":"Work","playlist":\#(playlist)},{"id":"b","name":7,"later":true}]"#.utf8),
+            forKey: PlaylistStore.plansKey)
+
+        let store = PlaylistStore(defaults: defaults)
+        XCTAssertEqual(store.plans.map(\.id), ["a"])
+        try store.renamePlan("a", name: "Office")
+        let added = try store.savePlan(from: "primary", name: "Home")
+        try store.deletePlan(added.id)
+
+        let saved = try XCTUnwrap(defaults.data(forKey: PlaylistStore.plansKey))
+        let plans = try XCTUnwrap(JSONSerialization.jsonObject(with: saved) as? [[String: Any]])
+        XCTAssertEqual(plans.map { $0["id"] as? String }, ["a", "b"])
+        XCTAssertEqual(plans.first?["name"] as? String, "Office")
+        XCTAssertEqual(plans.last?["later"] as? Bool, true)
+    }
+
     func testPlaylistsAndDatesOutliveTheApp() {
         let store = PlaylistStore(defaults: defaults)
         store.update("primary") {

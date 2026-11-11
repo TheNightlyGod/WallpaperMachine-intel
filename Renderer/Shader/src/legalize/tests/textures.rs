@@ -14,12 +14,12 @@ fn frag_with(decl_and_body: &str) -> String {
 }
 
 #[test]
-fn every_sampling_spelling_pairs_the_texture_with_its_sampler() {
-    for call in ["texture(g_Texture0, v_T)", "texture2D(g_Texture0, v_T)", "tex2D(g_Texture0, v_T)", "texSample2D(g_Texture0, v_T)"] {
+fn dialect_sampling_pairs_the_texture_with_its_sampler() {
+    for call in ["texSample2D(g_Texture0, v_T)"] {
         let t = frag(&frag_with(&format!("void main() {{ gl_FragColor = {call}; }}")));
         assert!(t.contains("texture(sampler2D(g_Texture0, _we_Sampler_g_Texture0), v_T)"), "{call}: {t}");
     }
-    for call in ["textureLod(g_Texture1, v_T, 2.0)", "texSample2DLod(g_Texture1, v_T, 2.0)", "texture2DLod(g_Texture1, v_T, 2.0)", "tex2DLod(g_Texture1, v_T, 2.0)"] {
+    for call in ["texSample2DLod(g_Texture1, v_T, 2.0)"] {
         let t = frag(&frag_with(&format!("void main() {{ gl_FragColor = {call}; }}")));
         assert!(t.contains("textureLod(sampler2D(g_Texture1, _we_Sampler_g_Texture1), v_T, 2.0)"), "{call}: {t}");
         let _ = compile_frag(&frag_with(&format!("void main() {{ gl_FragColor = {call}; }}")));
@@ -27,17 +27,17 @@ fn every_sampling_spelling_pairs_the_texture_with_its_sampler() {
 }
 
 #[test]
-fn texel_fetch_and_size_queries_use_the_separated_texture_object() {
-    let src = frag_with("void main() { ivec2 s = textureSize(g_Texture0, 0); vec4 c = texelFetch(g_Texture0, ivec2(1, 2), 0); gl_FragColor = c * float(s.x); }");
+fn a_dialect_texel_load_uses_the_separated_texture_object() {
+    let src = frag_with("uniform vec2 g_Size; void main() { gl_FragColor = texLoad2D(g_Texture0, v_T, g_Size); }");
     let t = frag(&src);
-    assert!(t.contains("textureSize(g_Texture0, 0)") && t.contains("texelFetch(g_Texture0, ivec2(1, 2), 0)"), "{t}");
+    assert!(t.contains("texelFetch(g_Texture0,") && !t.contains("sampler2D(g_Texture0,"), "{t}");
     let _ = compile_frag(&src);
 }
 
 #[test]
 fn sampling_inside_macro_bodies_and_through_an_alias_macro_is_translated() {
-    let direct = "uniform sampler2D g_Texture3; varying vec2 v_T;\nvoid main() { gl_FragColor = texSample2D(g_Texture3, v_T) + tex2D(g_Texture3, v_T * 2.0); }";
-    let via_macro = "uniform sampler2D g_Texture3; varying vec2 v_T;\n#define SAMPLE(uv) texSample2D(g_Texture3, uv)\n#define TEX g_Texture3\nvoid main() {\n#define LOCAL(uv) tex2D(TEX, uv)\n gl_FragColor = SAMPLE(v_T) + LOCAL(v_T * 2.0); }";
+    let direct = "uniform sampler2D g_Texture3; varying vec2 v_T;\nvoid main() { gl_FragColor = texSample2D(g_Texture3, v_T) + texSample2D(g_Texture3, v_T * 2.0); }";
+    let via_macro = "uniform sampler2D g_Texture3; varying vec2 v_T;\n#define SAMPLE(uv) texSample2D(g_Texture3, uv)\n#define TEX g_Texture3\nvoid main() {\n#define LOCAL(uv) texSample2D(TEX, uv)\n gl_FragColor = SAMPLE(v_T) + LOCAL(v_T * 2.0); }";
     let a = program(PASS_V, direct);
     let b = program(PASS_V, via_macro);
     assert_eq!(a.layout.textures, b.layout.textures, "the same descriptors");
@@ -66,7 +66,34 @@ fn a_three_dimensional_texture_is_split_like_a_two_dimensional_one() {
     let t = frag(src);
     assert!(t.contains("uniform texture3D lut;") && t.contains("texture(sampler3D(lut, _we_Sampler_lut), c)"), "{t}");
     let p = compile_program(PASS_V, src);
-    assert!(p.program.layout.textures.iter().any(|t| t.name == "lut" && t.three_dimensional));
+    assert!(p.program.layout.textures.iter().any(|t| t.name == "lut" && t.kind == crate::legalize::TexKind::D3));
+}
+
+#[test]
+fn a_comparison_texture_splits_into_a_texture_and_a_shadow_sampler() {
+    // E-D8: `Texture2D` + `SamplerComparisonState`, read with `SampleCmpLevelZero`.
+    let src = "uniform sampler2DComparison g_Texture6; varying vec2 v_T;\nvoid main() { float s = texSample2DCompare(g_Texture6, v_T, 0.5); gl_FragColor = CAST4(s); }";
+    let t = frag(src);
+    assert!(t.contains("uniform texture2D g_Texture6;") && t.contains("uniform samplerShadow _we_Sampler_g_Texture6;"), "{t}");
+    assert!(t.contains("textureLod(sampler2DShadow(g_Texture6, _we_Sampler_g_Texture6), vec3(v_T, 0.5), 0.0)"), "{t}");
+    let p = compile_program(PASS_V, src);
+    assert!(p.fragment.msl.contains("sample_compare"), "{}", p.fragment.msl);
+    assert!(p.program.layout.textures.iter().any(|t| t.name == "g_Texture6" && t.kind == crate::legalize::TexKind::Shadow));
+}
+
+#[test]
+fn a_multisampled_back_buffer_is_a_texture2d_ms() {
+    let src = "uniform sampler2DBackBuffer g_Texture1; uniform vec2 g_R; varying vec2 v_T;\nvoid main() { gl_FragColor = texSample2DBackBuffer(g_Texture1, v_T, g_R); }";
+    let input = crate::legalize::ProgramInput::program(PASS_V, src).with_backbuffer_ms(true);
+    let p = crate::legalize::legalize(&input).expect("legalizes");
+    let f = &p.fragment.as_ref().unwrap().text;
+    assert!(f.contains("uniform texture2DMS g_Texture1;") && f.contains("texelFetch(g_Texture1, ivec2("), "{f}");
+    let c = crate::dialect::tests::support::compile_glsl(StageKind::Fragment, f).unwrap_or_else(|e| panic!("{e}\n{f}"));
+    assert!(c.msl.contains("texture2d_ms"), "{}", c.msl);
+    assert!(p.layout.textures.iter().any(|t| t.name == "g_Texture1" && t.kind == crate::legalize::TexKind::D2Ms));
+    // Without BACKBUFFER_MS it is an ordinary texture, sampled at `u`.
+    let t = frag(src);
+    assert!(t.contains("uniform texture2D g_Texture1;") && t.contains("texture(sampler2D(g_Texture1, _we_Sampler_g_Texture1), v_T)"), "{t}");
 }
 
 // ----- NV12 planes -----
@@ -180,12 +207,9 @@ fn refused(f: &str) -> String {
 fn a_use_the_translation_cannot_reproduce_refuses_the_variant() {
     let cases = [
         ("a mip-level sample", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() { gl_FragColor = texSample2DLod(g_Texture0, v_T, 1.0); }"),
-        ("a size query", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() { gl_FragColor = vec4(float(textureSize(g_Texture0, 0).x)); }"),
-        ("surplus arguments", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() { gl_FragColor = texSample2D(g_Texture0, v_T, 0.5); }"),
-        ("a texel fetch", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() { gl_FragColor = texelFetch(g_Texture0, ivec2(1), 0); }"),
-        ("a call without a coordinate", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() { gl_FragColor = texture(g_Texture0); }"),
-        ("a macro body", "uniform sampler2D g_Texture0; varying vec2 v_T;\n#define SIZE textureSize(g_Texture0, 0)\nvoid main() { gl_FragColor = vec4(float(SIZE.x)); }"),
-        ("a helper function", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvec4 fetch(sampler2D s, vec2 uv) { return textureGrad(s, uv, vec2(0.0), vec2(0.0)); }\nvoid main() { gl_FragColor = fetch(g_Texture0, v_T); }"),
+        ("a texel load", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvoid main() { gl_FragColor = texLoad2D(g_Texture0, v_T, vec2(16.0,16.0)); }"),
+        ("a macro body", "uniform sampler2D g_Texture0; varying vec2 v_T;\n#define SAMPLE(uv) texSample2DLod(g_Texture0, uv, 1.0)\nvoid main() { gl_FragColor = SAMPLE(v_T); }"),
+        ("a helper function", "uniform sampler2D g_Texture0; varying vec2 v_T;\nvec4 fetch(sampler2D s, vec2 uv) { return texSample2DLod(s, uv, 1.0); }\nvoid main() { gl_FragColor = fetch(g_Texture0, v_T); }"),
     ];
     for (what, src) in cases {
         let message = refused(src);

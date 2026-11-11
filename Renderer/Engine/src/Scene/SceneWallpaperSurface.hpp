@@ -29,6 +29,9 @@ struct RenderInitInfo {
     uint16_t render_height { 0 };
     double   display_scale_factor { 1.0 };
     ReDrawCB redraw_callback;
+    /// Output capability only: does not change the saved post-processing quality.
+    bool display_hdr_output_allowed {true};
+    uint32_t display_id {0};
 
     std::function<bool()> wants_poster;
     std::function<void(std::span<const uint8_t>, uint32_t, uint32_t, bool)> poster_ready;

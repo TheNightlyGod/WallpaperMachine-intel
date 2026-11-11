@@ -108,7 +108,7 @@ extension PanelController {
     let settings = store.settingsSnapshot
     let displayID = navigation.targetDisplayID
     let display = settings.displays.first { $0.displayId == displayID }
-    let available = display?.enabled == true && display?.mode == .standalone
+    let available = display?.isIndependent == true
     let options = store.wallpaperOptionsSnapshot.flatMap { $0.wallpaperId == id ? $0 : nil }
     let configuration = options?.displayConfigurations.first { $0.displayId == displayID }
     var fps = min(configuration?.targetFps ?? display?.targetFps ?? 0, display?.maxFps ?? 0)
@@ -128,7 +128,7 @@ extension PanelController {
     // on the service actor, not through ClientPaths.assetsURL here.
     let assetsConfiguration =
       ProcessInfo.processInfo.environment["WALLPAPER_MACHINE_ASSETS_ROOT"]
-      ?? ClientPreferences.defaults.string(forKey: "WallpaperMachineAssetsPath") ?? ""
+      ?? ClientPreferences.defaults.string(forKey: ClientPaths.assetsPathKey) ?? ""
     return WallpaperCompatibilityContext(
       wallpaperID: id, displayID: displayID, kind: kind, supported: entry.supported,
       targetFPS: fps, targetAvailable: available && options != nil && fps > 0,

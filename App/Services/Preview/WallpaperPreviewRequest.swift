@@ -22,6 +22,10 @@ struct WallpaperPreviewRequest: Equatable, Sendable {
     let scalingMode: Int32
     var scalingFactor: Double
     let volume: Float
+    /// Wallpaper Engine's per-wallpaper options with the draft in them; nil for a web page.
+    let engineOptions: WallpaperEngineOptions?
+    /// The saved scene quality, for a scene preview.
+    let sceneQuality: SceneQualitySettings
 
     init(_ input: BridgeWallpaperPreview) throws {
         switch input.kind {
@@ -41,6 +45,8 @@ struct WallpaperPreviewRequest: Equatable, Sendable {
         scalingMode = input.scalingMode.rendererValue
         scalingFactor = input.scalingFactor
         volume = input.volume
+        engineOptions = input.engineOptions.map(WallpaperEngineOptions.init)
+        sceneQuality = SceneQualitySettings(input.sceneQuality)
     }
 }
 

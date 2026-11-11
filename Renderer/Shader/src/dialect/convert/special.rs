@@ -257,11 +257,9 @@ impl Converter {
         let globals = self.scopes[0].clone();
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![globals]);
         let saved_ret = self.cur_ret.take();
-        let saved_source = self.color_source.take();
         let converted = self.function(f);
         self.scopes = saved_scopes;
         self.cur_ret = saved_ret;
-        self.color_source = saved_source;
         let emitted = converted.map(|c| {
             let n = c.name.clone();
             self.pending.push(Item::Function(c));

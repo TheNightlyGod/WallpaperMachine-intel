@@ -25,7 +25,7 @@ struct UpdatePresentation: Equatable {
 
   /// The one thing the primary button does. Each maps to a `PanelController` method of the same name.
   enum Action: String, Sendable {
-    case checkForUpdates, downloadUpdate, installUpdate, cancelUpdate
+    case checkForUpdates, downloadUpdate, installUpdate, cancelUpdate, retryUpdate
   }
 
   struct Download: Equatable, Sendable {
@@ -58,15 +58,33 @@ struct UpdatePresentation: Equatable {
 
   var showsAction: Bool { action != nil }
 
+  /// The kind of news the status line brings, which the mark beside it shows.
+  enum Mark: Equatable, Sendable {
+    /// Nothing to install: up to date, or nothing published yet.
+    case current
+    /// A newer version is on offer, on its way or ready.
+    case update
+    /// A check or an installation is under way.
+    case working
+    case failed
+    /// Not checked yet, or a build that does not update itself.
+    case neutral
+  }
+
+  var mark: Mark {
+    switch status {
+    case .upToDate, .noRelease: .current
+    case .available, .manual, .downloading, .ready: .update
+    case .checking, .preparing: .working
+    case .error: .failed
+    case .idle, .unsupported: .neutral
+    }
+  }
+
   /// Whether the "What's new" disclosure has anything to show: some section carries an item.
   var hasNotes: Bool { notes.contains { !$0.items.isEmpty } }
 
   /// The fixed texts around the card.
-  @MainActor static var footnote: String {
-    L(
-      "Updates are checked against the latest published GitHub Release. Download and restart-install happen only after you confirm."
-    )
-  }
   @MainActor static var releasesLabel: String { L("Open GitHub Releases") }
   @MainActor static var revealLabel: String { L("Show in Finder") }
   @MainActor static var progressLabel: String { L("Update download progress") }
@@ -129,12 +147,14 @@ struct UpdatePresentation: Equatable {
       (action, actionLabel) = (.cancelUpdate, L("Cancel"))
     case .error(_, .install, _, let version) where version != nil:
       (action, actionLabel) = (.installUpdate, L("Retry installation"))
+    case .error(_, .download, _, _):
+      (action, actionLabel) = (.retryUpdate, L("Retry"))
     case .error:
       (action, actionLabel) = (.checkForUpdates, L("Retry"))
     case .upToDate, .noRelease:
       (action, actionLabel) = (.checkForUpdates, L("Check Again"))
-    case .downloading(_, _, let value, _, _, _):
-      (action, actionLabel) = (.downloadUpdate, L("Downloading \(Int(value.rounded())) percent"))
+    case .downloading:
+      (action, actionLabel) = (.cancelUpdate, L("Cancel"))
     case .checking, .idle:
       (action, actionLabel) = (.checkForUpdates, L("Check for Updates"))
     }
@@ -173,6 +193,8 @@ struct UpdatePresentation: Equatable {
       return L("The update couldn't be verified, so it wasn't installed.")
     case .permission:
       return L("The updater doesn't have permission to install this update.")
+    case .incompatible:
+      return L("This update requires a newer version of macOS or a different Mac architecture.")
     case .unknown:
       return L("The update couldn't be completed. Try again or install it from GitHub Releases.")
     }

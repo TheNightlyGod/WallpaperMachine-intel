@@ -2,8 +2,8 @@
 //
 // `clamp`, `min` and `max` on integers keep integer literals. The dialect lets an integer literal
 // stand where a float is wanted, but legacy shaders write `clamp(index, 0, 63)` on an `int` and
-// mean integer arithmetic: an `int` or `ivecN` operand (and no float one) selects the integer
-// overload, `uint`/`uvecN` operands the unsigned one, and only a float operand turns the literals
+// mean integer arithmetic: an `int` or `intN` operand (and no float one) selects the integer
+// overload, `uint`/`uintN` operands the unsigned one, and only a float operand turns the literals
 // into floats. An integer clamp whose result is used as a float clamps as an integer and converts.
 //
 // naga's types are checked always; the values with WM_SHADER_GPU_PROBES=1.
@@ -26,7 +26,7 @@ void main() {{
   data[16] = table[index];
   int low = clamp(int(data[1]), 0, 5);
   data[17] = float(low);
-  ivec2 pair = clamp(ivec2(int(data[0]), int(data[1])), 0, 5);
+  int2 pair = clamp(int2(int(data[0]), int(data[1])), 0, 5);
   data[18] = float(pair.x * 10 + pair.y);
   int m = max(int(data[1]), 2) + min(index, 4);
   data[19] = float(m);
@@ -49,7 +49,7 @@ fn unsigned_operands_select_the_unsigned_overload() {
   uint u = uint(data[0]);
   uint v = min(u, 3);
   uint w = clamp(u, 1, 4);
-  uvec2 uv = max(uvec2(u, 1u), 2);
+  uint2 uv = max(uint2(u, 1u), 2);
   data[16] = float(v);
   data[17] = float(w);
   data[18] = float(uv.x * 10u + uv.y);
@@ -144,7 +144,7 @@ void main() {
   int index = int(v_TexCoord.x * float(BANDS));
   index = clamp(index, 0, BANDS - 1);
   int other = clamp(g_Band, 0, BANDS - 1);
-  gl_FragColor = vec4(g_AudioSpectrum[index] + g_AudioSpectrum[other]);
+  gl_FragColor = CAST4(g_AudioSpectrum[index] + g_AudioSpectrum[other]);
 }";
     let p = program_ok(fragment);
     let ir = fragment_ir(&p);

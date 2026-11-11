@@ -46,6 +46,23 @@ TEST(SceneSettingDefaults, AbsentSettingsTakeWallpaperEnginesDefaults)
     EXPECT_EQ(general.bloomhdriterations, 8);
 }
 
+TEST(SceneGeneral, OmittedPhysicsAndNearPlaneTakeWallpaperEngineDefaults)
+{
+    // wallpaper64.exe sub_140186C90: nearz 0.1, gravity 1 along (0,-1,0), wind 1 along (0.707,0.707,0).
+    const Json document = { { "camera", { { "center", { 0, 0, 0 } }, { "eye", { 0, 0, 1 } }, { "up", { 0, 1, 0 } } } },
+                            { "general", { { "orthogonalprojection", { { "width", 640 }, { "height", 360 } } } } } };
+    WPScene     scene;
+    ASSERT_TRUE(scene.FromJson(document));
+    const auto& general = scene.general;
+    EXPECT_FLOAT_EQ(general.nearz, 0.1f);
+    EXPECT_FLOAT_EQ(general.gravitystrength, 1.0f);
+    EXPECT_FLOAT_EQ(general.gravitydirection[1], -1.0f);
+    EXPECT_FLOAT_EQ(general.windstrength, 1.0f);
+    EXPECT_NEAR(general.winddirection[0], 0.70710677f, 1e-6f);
+    EXPECT_NEAR(general.winddirection[1], 0.70710677f, 1e-6f);
+    EXPECT_FLOAT_EQ(general.winddirection[2], 0.0f);
+}
+
 TEST(SceneSettingDefaults, WrittenSettingsReplaceTheDefaults)
 {
     const Json document = { { "camera", { { "center", { 0, 0, 0 } }, { "eye", { 0, 0, 1 } }, { "up", { 0, 1, 0 } } } },

@@ -16,6 +16,7 @@ pub mod paths;
 mod power;
 pub mod project;
 pub mod state;
+pub mod steam_content;
 pub mod user_assets;
 
 #[doc(hidden)]
@@ -28,14 +29,18 @@ pub use api::{
     validate_backup_renderer_configuration,
     BridgeAppSnapshot, BridgeAudioSpectrum, BridgeComboOption, BridgeDirectoryMode,
     BridgeDisplayConfigRow, BridgeDisplayMode, BridgeDisplayMutationBundle,
-    BridgeDisplaySettingsRow, BridgeError, BridgeErrorKind, BridgeFileFilter, BridgeFraming,
+    BridgeDisplaySettingsRow, BridgeEngineOptionEdit, BridgeEngineOptionId, BridgeEngineOptionRow,
+    BridgeEngineOptionValues, BridgeRgb, BridgeEngineOptions, BridgeError, BridgeErrorKind, BridgeFileFilter,
+    BridgeFraming,
     BridgeLibraryScanStatus,
     BridgeLibrarySnapshot, BridgeLockScreenScene, BridgeLogLevel, BridgeLogStatus,
     BridgeMonitorInfoRow, BridgeMonitorInformationSnapshot, BridgePlaybackState, BridgeBatteryMode,
     BridgePropertyDescriptor, BridgePropertyEdit, BridgePropertyKind, BridgePropertyValue,
     BridgeQualityThrottleCause,
     BridgeScalingMode,
-    BridgeSceneBackendReport, BridgeSceneUpdateModeReport, BridgeSceneWindow, BridgeSettingsSnapshot,
+    BridgeMsaa, BridgePostProcessing, BridgeQualityLevel, BridgeSceneBackendReport, BridgeSceneCapability,
+    BridgeSceneMissingFile, BridgeSceneQuality,
+    BridgeSceneUpdateModeReport, BridgeSceneWindow, BridgeSettingsSnapshot,
     BridgeSliderMetadata, BridgeSnapshotBundle, BridgeStorageStatus, BridgeSurfaceCheck,
     BridgeVideoBackendReport, BridgeWallpaperEntry, BridgeWallpaperKind,
     BridgeWallpaperMutationBundle,

@@ -28,6 +28,10 @@ REPOSITORY_ENTITLEMENTS = {
     "com.apple.security.network.client": True,
     READ_ONLY: ["/opt/homebrew/"],
 }
+APPLE_EVENTS = "com.apple.security.automation.apple-events"
+GET_TASK_ALLOW = "com.apple.security.get-task-allow"
+# Stands in for Packaging/WallpaperMachine.entitlements.
+HOST_ENTITLEMENTS = {APPLE_EVENTS: True, "com.apple.security.device.audio-input": True}
 HOST_INFO = {
     "CFBundleIdentifier": "app.wallpapermachine",
     "LSMinimumSystemVersion": "15.0",
@@ -40,6 +44,8 @@ EXTENSION_INFO = {
     "EXAppExtensionAttributes": {"EXExtensionPointIdentifier": "com.apple.wallpaper"},
 }
 AD_HOC = Signature(adhoc=True, team=None)
+TEAM = "ABCDE12345"
+DEVELOPER_ID = Signature(adhoc=False, team=TEAM, developer_id=True, runtime=True)
 
 
 class SyntheticBundleTests(unittest.TestCase):
@@ -50,9 +56,16 @@ class SyntheticBundleTests(unittest.TestCase):
         self.extension = self.app / "Contents/Extensions/WallpaperMachineExtension.appex"
         self.host_info = copy.deepcopy(HOST_INFO)
         self.extension_info = copy.deepcopy(EXTENSION_INFO)
-        self.signatures = {self.app: AD_HOC, self.extension: AD_HOC}
-        self.entitlements = {self.app: {}, self.extension: copy.deepcopy(REPOSITORY_ENTITLEMENTS)}
+        self.library = self.app / "Contents/Frameworks/libfreetype.6.dylib"
+        self.framework = self.app / "Contents/Frameworks/MediaRemoteAdapter.framework"
+        self.signatures = {self.app: AD_HOC, self.extension: AD_HOC, self.library: AD_HOC, self.framework: AD_HOC}
+        self.entitlements = {self.app: copy.deepcopy(HOST_ENTITLEMENTS), self.extension: copy.deepcopy(REPOSITORY_ENTITLEMENTS)}
         self.minimum_system = "15.0"
+
+    def developer_id(self):
+        """Every component signed the way a notarized release is."""
+        for path in self.signatures:
+            self.signatures[path] = DEVELOPER_ID
 
     def write(self):
         for bundle, info in ((self.app, self.host_info), (self.extension, self.extension_info)):
@@ -61,10 +74,13 @@ class SyntheticBundleTests(unittest.TestCase):
                 with open(bundle / "Contents/Info.plist", "wb") as handle:
                     plistlib.dump(info, handle)
         (self.app / "Contents/Extensions").mkdir(parents=True, exist_ok=True)
+        self.framework.mkdir(parents=True, exist_ok=True)
+        self.library.write_bytes(b"")
 
     def readers(self, **overrides):
         return {"entitlements": lambda path: self.entitlements.get(path, {}), "signature": self.signatures.get,
-                "extension_entitlements": REPOSITORY_ENTITLEMENTS, "minimum_system": self.minimum_system, **overrides}
+                "extension_entitlements": REPOSITORY_ENTITLEMENTS, "host_entitlements": HOST_ENTITLEMENTS,
+                "minimum_system": self.minimum_system, **overrides}
 
     def findings(self, **overrides):
         self.write()
@@ -81,6 +97,8 @@ class SyntheticBundleTests(unittest.TestCase):
     def test_the_repositorys_own_entitlements_and_deployment_target_are_what_the_default_checks_read(self):
         with open(bundle_contract.EXTENSION_ENTITLEMENTS, "rb") as handle:
             self.entitlements[self.extension] = plistlib.load(handle)
+        with open(bundle_contract.HOST_ENTITLEMENTS, "rb") as handle:
+            self.entitlements[self.app] = plistlib.load(handle)
         self.host_info["LSMinimumSystemVersion"] = bundle_contract.deployment_target()
         self.write()
         errors, _ = bundle_contract.check_bundle(
@@ -178,8 +196,65 @@ class SyntheticBundleTests(unittest.TestCase):
         self.assertOneError("app.wallpapermachine")
 
     def test_a_sandboxed_host_fails(self):
-        self.entitlements[self.app] = {SANDBOX: True}
+        self.entitlements[self.app][SANDBOX] = True
         self.assertOneError("is sandboxed")
+
+    # --- the host's signature -------------------------------------------------------
+
+    def test_a_host_signed_without_a_repository_entitlement_fails(self):
+        del self.entitlements[self.app][APPLE_EVENTS]
+        self.assertOneError(f"lacks {APPLE_EVENTS}")
+
+    def test_the_host_is_held_to_the_entitlements_file_it_is_given(self):
+        self.assertOneError("com.apple.security.network.client", host_entitlements={
+            **HOST_ENTITLEMENTS, "com.apple.security.network.client": True})
+
+    def test_an_entitlement_added_to_the_host_only_warns(self):
+        self.entitlements[self.app][GET_TASK_ALLOW] = True
+        errors, warnings = self.findings()
+        self.assertEqual(errors, [])
+        self.assertIn(GET_TASK_ALLOW, warnings[0])
+
+    # --- a Developer ID signature, which is what gets notarized ---------------------
+
+    def test_a_bundle_signed_for_notarization_passes(self):
+        self.developer_id()
+        self.assertEqual(self.findings(), ([], []))
+
+    def test_a_developer_id_host_without_the_hardened_runtime_fails(self):
+        self.developer_id()
+        self.signatures[self.app] = DEVELOPER_ID._replace(runtime=False)
+        self.assertOneError("WallpaperMachine.app is signed with a Developer ID but without the hardened runtime")
+
+    def test_a_developer_id_extension_without_the_hardened_runtime_fails(self):
+        self.developer_id()
+        self.signatures[self.extension] = DEVELOPER_ID._replace(runtime=False)
+        self.assertOneError("WallpaperMachineExtension.appex is signed with a Developer ID but without the hardened runtime")
+
+    def test_a_debuggable_extension_under_developer_id_fails(self):
+        self.developer_id()
+        self.entitlements[self.extension][GET_TASK_ALLOW] = True
+        self.assertOneError(GET_TASK_ALLOW)
+
+    def test_an_ad_hoc_framework_in_a_developer_id_app_fails(self):
+        self.developer_id()
+        self.signatures[self.framework] = AD_HOC
+        self.assertOneError("MediaRemoteAdapter.framework is signed by an ad hoc signature")
+
+    def test_a_library_signed_by_another_team_fails(self):
+        self.developer_id()
+        self.signatures[self.library] = DEVELOPER_ID._replace(team="ZZZZZ99999")
+        self.assertOneError("libfreetype.6.dylib is signed by team ZZZZZ99999")
+
+    def test_an_unsigned_library_in_a_developer_id_app_fails(self):
+        self.developer_id()
+        del self.signatures[self.library]
+        self.assertOneError("libfreetype.6.dylib is signed by nothing")
+
+    def test_libraries_of_a_build_that_is_not_developer_id_signed_are_not_checked(self):
+        self.signatures[self.app] = self.signatures[self.extension] = Signature(adhoc=False, team=None)
+        del self.signatures[self.library]
+        self.assertEqual(self.findings(), ([], []))
 
     def test_every_finding_is_reported_together(self):
         del self.host_info["NSAudioCaptureUsageDescription"]
@@ -215,7 +290,7 @@ class SyntheticBundleTests(unittest.TestCase):
 
     def test_an_unsigned_host_fails_without_reading_its_entitlements(self):
         del self.signatures[self.app]
-        self.entitlements[self.app] = {SANDBOX: True}  # would be a second finding if it were read
+        self.entitlements[self.app] = {SANDBOX: True}  # would be more findings if it were read
         self.assertOneError("is not signed")
 
     # --- verify_bundle ------------------------------------------------------------
@@ -265,6 +340,11 @@ class CodesignReaderTests(unittest.TestCase):
     def test_an_ad_hoc_signature_has_no_team(self):
         self.assertEqual(bundle_contract.read_signature(self.binary("adhoc")), Signature(adhoc=True, team=None))
 
+    def test_the_hardened_runtime_flag_is_read(self):
+        path = self.binary("hardened")
+        subprocess.run(["codesign", "--force", "--sign", "-", "--options", "runtime", path], check=True, capture_output=True)
+        self.assertEqual(bundle_contract.read_signature(path), Signature(adhoc=True, team=None, runtime=True))
+
     def test_a_missing_file_is_an_error_not_an_empty_answer(self):
         with self.assertRaises(bundle_contract.BundleContractError):
             bundle_contract.read_signature(self.root / "absent")
@@ -289,22 +369,25 @@ class SignedBundleTests(unittest.TestCase):
                 plistlib.dump({**info, "CFBundleExecutable": name, "CFBundlePackageType": "APPL" if bundle == self.app else "XPC!"}, handle)
         self.entitlements = Path(scratch.name) / "extension.entitlements"
         self.entitlements.write_bytes(plistlib.dumps(REPOSITORY_ENTITLEMENTS))
+        self.host_entitlements = Path(scratch.name) / "host.entitlements"
+        self.host_entitlements.write_bytes(plistlib.dumps(HOST_ENTITLEMENTS))
 
     def sign(self, path, *options):
         subprocess.run(["codesign", "--force", "--sign", "-", *options, path], check=True, capture_output=True)
 
     def errors(self):
-        return bundle_contract.check_bundle(self.app, extension_entitlements=REPOSITORY_ENTITLEMENTS, minimum_system="15.0").errors
+        return bundle_contract.check_bundle(self.app, extension_entitlements=REPOSITORY_ENTITLEMENTS,
+                                            host_entitlements=HOST_ENTITLEMENTS, minimum_system="15.0").errors
 
     def test_a_bundle_signed_with_its_entitlements_passes(self):
         self.sign(self.extension, "--entitlements", self.entitlements)
-        self.sign(self.app, "--options", "0")
+        self.sign(self.app, "--options", "0", "--entitlements", self.host_entitlements)
         self.assertEqual(self.errors(), [])
 
     def test_resigning_the_extension_without_preserving_its_entitlements_fails(self):
         self.sign(self.extension, "--entitlements", self.entitlements)
         self.sign(self.extension)  # what dropping --preserve-metadata=entitlements does
-        self.sign(self.app, "--options", "0")
+        self.sign(self.app, "--options", "0", "--entitlements", self.host_entitlements)
         errors = self.errors()
         self.assertTrue(any(SANDBOX in error for error in errors), errors)
         self.assertTrue(any("com.apple.security.network.client" in error for error in errors), errors)
@@ -312,8 +395,13 @@ class SignedBundleTests(unittest.TestCase):
     def test_resigning_the_extension_with_preserved_entitlements_passes(self):
         self.sign(self.extension, "--entitlements", self.entitlements)
         self.sign(self.extension, "--preserve-metadata=entitlements")
-        self.sign(self.app, "--options", "0")
+        self.sign(self.app, "--options", "0", "--entitlements", self.host_entitlements)
         self.assertEqual(self.errors(), [])
+
+    def test_resigning_the_app_without_its_entitlements_fails(self):
+        self.sign(self.extension, "--entitlements", self.entitlements)
+        self.sign(self.app, "--options", "0")
+        self.assertTrue(any(APPLE_EVENTS in error for error in self.errors()), self.errors())
 
 
 if __name__ == "__main__":

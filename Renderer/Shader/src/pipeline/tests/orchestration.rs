@@ -93,7 +93,7 @@ fn added_defaults_reach_the_compiled_text_and_the_cache_key() {
 
 #[test]
 fn a_default_in_an_inactive_branch_is_not_added_but_is_reported() {
-    let f = "#if FANCY\n// [COMBO] {\"combo\":\"SPARKLE\",\"default\":3}\n#endif\nvoid main() { gl_FragColor = vec4(1.0); }\n";
+    let f = "#if FANCY\n// [COMBO] {\"combo\":\"SPARKLE\",\"default\":3}\n#endif\nvoid main() { gl_FragColor = CAST4(1.0); }\n";
     let p = Req::new(PASS_VERTEX, f).combo("FANCY", "0").ok();
     assert!(p.combos.iter().all(|c| c.name != "SPARKLE"), "{:?}", p.combos);
     assert!(p.metadata.combos.iter().any(|c| c.name == "SPARKLE"), "metadata is read from the conditional-preserving source");
@@ -103,7 +103,7 @@ fn a_default_in_an_inactive_branch_is_not_added_but_is_reported() {
 
 #[test]
 fn a_default_reachable_only_through_another_default_is_not_restored() {
-    let f = "// [COMBO] {\"combo\":\"A\",\"default\":1}\n#if A\n// [COMBO] {\"combo\":\"B\",\"default\":1}\n#endif\nvoid main() { gl_FragColor = vec4(1.0); }\n";
+    let f = "// [COMBO] {\"combo\":\"A\",\"default\":1}\n#if A\n// [COMBO] {\"combo\":\"B\",\"default\":1}\n#endif\nvoid main() { gl_FragColor = CAST4(1.0); }\n";
     let p = Req::new(PASS_VERTEX, f).ok();
     assert_eq!(p.combos.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["A"]);
     assert_eq!(p.metadata.combos.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
@@ -111,7 +111,7 @@ fn a_default_reachable_only_through_another_default_is_not_restored() {
 
 /// A sampler declared inside the very branch the combo it names controls, behind another
 /// switch, as an included file would declare it.
-const TEXTURE_SWITCH: &str = "varying vec2 v_TexCoord;\n#if SHARP\nvec4 tap(vec2 uv) { return vec4(0.5); }\n#elif DITHER\nuniform sampler2D g_Texture4; // {\"material\":\"noise\",\"combo\":\"DITHER\"}\nvec4 tap(vec2 uv) { return texSample2D(g_Texture4, uv); }\n#else\nvec4 tap(vec2 uv) { return vec4(0.25); }\n#endif\nvoid main() { gl_FragColor = tap(v_TexCoord); }\n";
+const TEXTURE_SWITCH: &str = "varying vec2 v_TexCoord;\n#if SHARP\nvec4 tap(vec2 uv) { return CAST4(0.5); }\n#elif DITHER\nuniform sampler2D g_Texture4; // {\"material\":\"noise\",\"combo\":\"DITHER\"}\nvec4 tap(vec2 uv) { return texSample2D(g_Texture4, uv); }\n#else\nvec4 tap(vec2 uv) { return CAST4(0.25); }\n#endif\nvoid main() { gl_FragColor = tap(v_TexCoord); }\n";
 
 fn declares_sampler(p: &crate::pipeline::CompiledProgram) -> bool {
     glsl_of(p, StageKind::Fragment).contains("g_Texture4")
@@ -156,7 +156,7 @@ fn metadata_is_reported_from_inactive_branches_and_includes() {
         "extra.h",
         "// [COMBO] {\"material\":\"extra\",\"combo\":\"EXTRA\",\"default\":1}\nuniform float g_Extra; // {\"material\":\"extra amount\",\"default\":0.5}\n",
     );
-    let f = "#include \"extra.h\"\n#if 0\nuniform sampler2D g_Texture1; // {\"default\":\"util/white\"}\n#endif\nuniform float g_Gain; // {\"material\":\"gain\",\"default\":2}\nvoid main() { gl_FragColor = vec4(g_Gain + g_Extra); }\n";
+    let f = "#include \"extra.h\"\n#if 0\nuniform sampler2D g_Texture1; // {\"default\":\"util/white\"}\n#endif\nuniform float g_Gain; // {\"material\":\"gain\",\"default\":2}\nvoid main() { gl_FragColor = CAST4(g_Gain + g_Extra); }\n";
     let p = Req::new(PASS_VERTEX, f).compile_with(&includes).unwrap();
     assert!(p.metadata.combos.iter().any(|c| c.name == "EXTRA"));
     let aliases: Vec<&str> = p.metadata.aliases.iter().map(|a| a.uniform.as_str()).collect();

@@ -47,6 +47,14 @@ final class WorkshopLinkTests: XCTestCase {
         XCTAssertEqual(WorkshopLink.itemID(in: "https://steamcommunity.com/sharedfiles/filedetails/?id=42"), "42")
     }
 
+    func testOnlyAnIdAsSteamWritesItLongEnoughToStandAloneNamesItsItemAlone() {
+        XCTAssertTrue(WorkshopLink.isBareItemID(id))
+        XCTAssertTrue(WorkshopLink.isBareItemID("123456"))
+        for text in ["42", "12345", "00123456", " \(id)", "https://steamcommunity.com/sharedfiles/filedetails/?id=\(id)"] {
+            XCTAssertFalse(WorkshopLink.isBareItemID(text), text)
+        }
+    }
+
     func testOnlyALinkIsALinkNotABareId() {
         XCTAssertNil(WorkshopLink.itemID(inLink: id))
         XCTAssertNil(WorkshopLink.itemID(inLink: ""))

@@ -5,7 +5,8 @@ import SwiftUI
 /// Top to bottom: the header (preview, name, facts, Apply, favorite, the menu, tags), what the app
 /// has to say about the wallpaper, the Compatibility check, Black bars (video) and Position on
 /// screen (a still image the app packaged), then the wallpaper's own settings: General
-/// configuration, Displays, Collections, Presets and the authored properties. A footer holds Revert
+/// configuration, Displays, Collections, Wallpaper Engine options, Presets and the authored
+/// properties. A footer holds Revert
 /// and Apply changes once the options are loaded.
 struct InstalledInspector: View {
   @Environment(PanelController.self) private var controller
@@ -69,9 +70,10 @@ private struct InspectorContent: View {
             }
           }
           GeneralConfigurationCard(options: options)
+          PropertiesCards(options: options)
           DisplaysCard(options: options)
           CollectionsCard(wallpaperID: id)
-          PropertiesCards(options: options)
+          EngineOptionsCard(options: options)
         } else {
           LoadingOptions()
           CollectionsCard(wallpaperID: id)

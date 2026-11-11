@@ -21,6 +21,7 @@ struct AppLanguage: Equatable, Sendable {
     AppLanguage(tag: "zh-Hant", name: "繁體中文", wallpaperEngineLocale: "zh-cht"),
     AppLanguage(tag: "ja", name: "日本語", wallpaperEngineLocale: "ja-jp"),
     AppLanguage(tag: "ko", name: "한국어", wallpaperEngineLocale: "ko-kr"),
+    AppLanguage(tag: "pt-BR", name: "Português", wallpaperEngineLocale: "pt-br"),
   ]
 
   /// The locales a wallpaper's label table is read in, most preferred first: this language,
@@ -52,8 +53,8 @@ struct AppLanguage: Equatable, Sendable {
 @MainActor
 final class AppLanguageStore: ObservableObject {
   static let shared = AppLanguageStore()
-  static let defaultsKey = "WallpaperMachine.appLanguage"
-  static let appleLanguagesKey = "AppleLanguages"
+  nonisolated static let defaultsKey = "WallpaperMachine.appLanguage"
+  nonisolated static let appleLanguagesKey = "AppleLanguages"
   static let systemChoice = "system"
 
   /// `system` or the tag of a shipped language.

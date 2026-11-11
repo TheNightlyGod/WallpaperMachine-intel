@@ -12,7 +12,8 @@ extension PanelController {
       launchAtLogin: LaunchAtLoginState(
         isOn: settings.launchAtLoginEnabled, isAvailable: settings.launchAtLoginAvailable,
         needsApproval: settings.launchAtLoginNeedsApproval),
-      hidesAfterActivating: hidesAfterActivating)
+      hidesAfterActivating: hidesAfterActivating,
+      playsLibraryPreviewsOnHover: PanelPreferences.playsLibraryPreviewsOnHover(in: defaults))
   }
 
   var desktopSettings: DesktopSettings {
@@ -23,6 +24,8 @@ extension PanelController {
       desktopPictureLocked: store.lockScreenWallpaper?.locksDesktopPictureChoice ?? false,
       refreshesDesktopPicture: playback.refreshesDesktopPicturePeriodically,
       keepsWindowsOnWallpaperClick: !DesktopClickRevealPreference.isEnabled,
+      hidesDesktopIcons: !FinderDesktopIcons().areShown,
+      hidesNotch: NotchMaskController.isEnabled(defaults: defaults),
       livePropertyEdits: LivePropertyEditing.isEnabled(defaults: defaults))
   }
 
@@ -45,15 +48,18 @@ extension PanelController {
     let focus = FocusFilterState.shared
     return PlaybackSettings(
       wallpapersMuted: playback.wallpapersMuted,
+      mutedWallpaperCount: Int(settings.mutedWallpaperCount),
       desktopCoveredAction: playback.desktopCoveredAction,
       playsOnlyOnActiveDisplay: playback.playsOnlyOnActiveDisplay,
-      otherAudioAction: playback.otherAudioAction, displaySleepAction: playback.displaySleepAction,
+      otherAudioAction: playback.otherAudioAction, otherAudioVolume: playback.otherAudioVolume,
+      otherAppInFrontAction: playback.otherAppInFrontAction, displaySleepAction: playback.displaySleepAction,
       batteryMode: settings.batteryMode, onBatteryPower: settings.onBatteryPower,
       batteryRenderScale: settings.batteryRenderScale,
       batteryTargetFps: Int(settings.batteryTargetFps),
       lowBatteryAction: playback.lowBatteryAction,
       lowBatteryThreshold: playback.lowBatteryThreshold,
       lowPowerModeAction: playback.lowPowerModeAction, thermalAction: playback.thermalAction,
+      inactivityAction: playback.inactivityAction, inactivityMinutes: playback.inactivityMinutes,
       batteryPercent: batteryPercent,
       lowPowerModeIsOn: ProcessInfo.processInfo.isLowPowerModeEnabled,
       thermalLevel: ThermalLevel(ProcessInfo.processInfo.thermalState),
@@ -83,9 +89,17 @@ extension PanelController {
         frameRateCap: settings.frameRateCap, preferredRenderScale: settings.preferredRenderScale),
       videoBackends: settings.videoBackends.map(VideoBackendReport.init),
       sceneResolution: SceneResolutionMode(rawValue: settings.sceneResolution) ?? .display,
+      sceneQuality: settings.sceneQuality,
+      sceneQualityInForce: settings.sceneRenderers.map {
+        SceneQualityInForceReport(
+          displayID: $0.displayId, display: $0.displayName,
+          wallpaperTitle: $0.wallpaperTitle.isEmpty ? $0.wallpaperId : $0.wallpaperTitle,
+          quality: $0.qualityInForce)
+      },
       sceneOptimization: settings.sceneOptimizationEnabled,
       sceneOnDemand: settings.sceneOnDemandEnabled,
       sceneVideoPlaneSampling: settings.sceneVideoPlaneSamplingEnabled,
+      sceneDisplayFraming: settings.sceneDisplayFramingEnabled,
       sceneUpdates: settings.sceneUpdateModes.map(SceneUpdateReport.init),
       sceneRenderers: settings.sceneRenderers.map(SceneRendererReport.init))
   }
@@ -141,8 +155,16 @@ extension PanelController {
 
   /// The About › Updates card for the updater's state. `locale` words the time a rate limit ends.
   func updatePresentation(locale: Locale = .current) -> UpdatePresentation {
-    UpdatePresentation(
+    var presentation = UpdatePresentation(
       state: updater.state, notes: updater.releaseNotes, rateLimitedUntil: updater.rateLimitedUntil,
       locale: locale)
+    presentation.isBusy = presentation.isBusy || updater.isChecking || updater.isRestoring
+    if updater.isVerifyingDownload { presentation.statusText = L("Verifying update…") }
+    if updater.hasDownloadedUpdate && !updater.state.isBusy {
+      presentation.action = updater.canInstallInPlace ? .installUpdate : nil
+      presentation.actionLabel = updater.canInstallInPlace ? L("Restart and Install") : ""
+      presentation.showsReveal = true
+    }
+    return presentation
   }
 }

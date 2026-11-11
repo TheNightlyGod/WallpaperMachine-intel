@@ -19,7 +19,7 @@ struct DisplaysLayoutsGroup: View {
     let locked = controller.isStoreBusy
     let groupMatches = settings.search.matches(settings.text(DisplaysSettingsSection.layouts.title ?? ""))
     let showsSave = groupMatches || settings.search.shows(DisplaysSettingsSection.layoutsSave)
-    let error = model.layoutError ?? state.loadError
+    let error = model.layoutOutcome?.failure ?? state.loadError
     SettingsGroup(DisplaysSettingsSection.layouts, in: .displays) {
       DisplaysItemNote(item: DisplaysSettingsSection.layoutsSave, forced: groupMatches)
       if state.layouts.isEmpty && showsSave {
@@ -36,12 +36,12 @@ struct DisplaysLayoutsGroup: View {
           .focusable()
           .focused($focus, equals: .error)
           .accessibilityIdentifier("displays.layout-error")
-      } else if let status = model.layoutStatus {
+      } else if let status = model.layoutOutcome?.status {
         DisplaysMessageRow(text: status)
           .accessibilityIdentifier("displays.layout-status")
       }
     }
-    .announcesChanges(of: error ?? model.layoutStatus)
+    .announcesChanges(of: error ?? model.layoutOutcome?.status)
     .onChange(of: model.layoutFocus, initial: true) { _, target in
       guard let target else { return }
       focus = target

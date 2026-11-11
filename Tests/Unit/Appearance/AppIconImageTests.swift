@@ -18,6 +18,19 @@ final class AppIconImageTests: XCTestCase {
     XCTAssertEqual(Set(artwork).count, artwork.count, "Each icon is its own artwork")
   }
 
+  func testTheHalloweenDockIconLoadsAtFullSizeAndIsItsOwnArtwork() throws {
+    let halloween = try AppThemePreferences.dockImage(named: Season.halloween.dockImageName)
+    XCTAssertEqual(halloween.size, NSSize(width: 512, height: 512))
+    let pixels = halloween.representations.map { max($0.pixelsWide, $0.pixelsHigh) }.max() ?? 0
+    XCTAssertGreaterThanOrEqual(pixels, 1024)
+    let artwork = try XCTUnwrap(halloween.tiffRepresentation)
+    for icon in AppThemePreferences.Icon.allCases {
+      XCTAssertNotEqual(try icon.image().tiffRepresentation, artwork, icon.rawValue)
+    }
+    XCTAssertThrowsError(
+      try AppThemePreferences.dockImage(named: Season.halloween.dockImageName, in: Bundle(for: Self.self)))
+  }
+
   func testLoadingTwiceHandsOutIndependentImages() throws {
     let first = try AppThemePreferences.Icon.day.image()
     first.size = NSSize(width: 16, height: 16)

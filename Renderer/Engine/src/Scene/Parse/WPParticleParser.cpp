@@ -1,5 +1,11 @@
 // Clean-room implementation from the WallpaperMachine spec e4-particle-simulation.md; written without access to the original source.
 #include "WPParticleParser.hpp"
+#include "ParticleLayerImage.hpp"
+#include "WPParticleRemap.hpp"
+
+#include <bit>
+
+#include "Particle/ParticleNoise.h"
 #include "Particle/ParticleEmitter.h"
 #include "Particle/ParticleModify.h"
 #include "Particle/ParticleSystem.h"
@@ -218,6 +224,12 @@ Vec3d ReadVec3(const Json& j, const char* key, const Vec3d& fallback) {
     return { value[0], value[1], value[2] };
 }
 
+std::array<double, 2> ReadVec2(const Json& j, const char* key, const std::array<double, 2>& fallback) {
+    std::array<float, 2> value { static_cast<float>(fallback[0]), static_cast<float>(fallback[1]) };
+    GET_JSON_NAME_VALUE_NOWARN(j, key, value);
+    return { value[0], value[1] };
+}
+
 /// Control point numbers: 0..6 name themselves, anything else names the last.
 std::size_t ClampPoint(int index) {
     return (index >= 0 && index <= 6) ? static_cast<std::size_t>(index) : 7u;
@@ -229,74 +241,6 @@ const ParticleControlpoint* PointOf(std::span<const ParticleControlpoint> points
 }
 
 double FiniteOr(double value, double fallback) { return std::isfinite(value) ? value : fallback; }
-
-// --- reference gradient noise (spec 3.12) ---------------------------------------
-
-constexpr std::array<std::uint8_t, 256> kPermutation = {
-    151, 160, 137, 91,  90,  15,  131, 13,  201, 95,  96,  53,  194, 233, 7,   225, 140, 36,  103,
-    30,  69,  142, 8,   99,  37,  240, 21,  10,  23,  190, 6,   148, 247, 120, 234, 75,  0,   26,
-    197, 62,  94,  252, 219, 203, 117, 35,  11,  32,  57,  177, 33,  88,  237, 149, 56,  87,  174,
-    20,  125, 136, 171, 168, 68,  175, 74,  165, 71,  134, 139, 48,  27,  166, 77,  146, 158, 231,
-    83,  111, 229, 122, 60,  211, 133, 230, 220, 105, 92,  41,  55,  46,  245, 40,  244, 102, 143,
-    54,  65,  25,  63,  161, 1,   216, 80,  73,  209, 76,  132, 187, 208, 89,  18,  169, 200, 196,
-    135, 130, 116, 188, 159, 86,  164, 100, 109, 198, 173, 186, 3,   64,  52,  217, 226, 250, 124,
-    123, 5,   202, 38,  147, 118, 126, 255, 82,  85,  212, 207, 206, 59,  227, 47,  16,  58,  17,
-    182, 189, 28,  42,  223, 183, 170, 213, 119, 248, 152, 2,   44,  154, 163, 70,  221, 153, 101,
-    155, 167, 43,  172, 9,   129, 22,  39,  253, 19,  98,  108, 110, 79,  113, 224, 232, 178, 185,
-    112, 104, 218, 246, 97,  228, 251, 34,  242, 193, 238, 210, 144, 12,  191, 179, 162, 241, 81,
-    51,  145, 235, 249, 14,  239, 107, 49,  192, 214, 31,  181, 199, 106, 157, 184, 84,  204, 176,
-    115, 121, 50,  45,  127, 4,   150, 254, 138, 236, 205, 93,  222, 114, 67,  29,  24,  72,  243,
-    141, 128, 195, 78,  66,  215, 61,  156, 180
-};
-
-int Hash(int i) { return kPermutation[static_cast<std::size_t>(i & 255)]; }
-
-double Fade(double t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
-
-double Gradient(int hash, double x, double y, double z) {
-    const int    h = hash & 15;
-    const double u = h < 8 ? x : y;
-    const double v = h < 4 ? y : ((h == 12 || h == 14) ? x : z);
-    return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
-}
-
-/// Perlin's improved noise in three dimensions: zero at lattice points, within
-/// -1..1, period 256 on each axis.
-double Noise3(double x, double y, double z) {
-    const double fx = std::floor(x), fy = std::floor(y), fz = std::floor(z);
-    // Reduce in double first so a huge coordinate cannot overflow the int cast.
-    const int cx = static_cast<int>(std::fmod(fx, 256.0));
-    const int cy = static_cast<int>(std::fmod(fy, 256.0));
-    const int cz = static_cast<int>(std::fmod(fz, 256.0));
-    const int X = cx & 255, Y = cy & 255, Z = cz & 255;
-    x -= fx;
-    y -= fy;
-    z -= fz;
-    const double u = Fade(x), v = Fade(y), w = Fade(z);
-    const int    A = Hash(X) + Y, AA = Hash(A) + Z, AB = Hash(A + 1) + Z;
-    const int    B = Hash(X + 1) + Y, BA = Hash(B) + Z, BB = Hash(B + 1) + Z;
-    return Lerp(
-        Lerp(Lerp(Gradient(Hash(AA), x, y, z), Gradient(Hash(BA), x - 1, y, z), u),
-             Lerp(Gradient(Hash(AB), x, y - 1, z), Gradient(Hash(BB), x - 1, y - 1, z), u), v),
-        Lerp(Lerp(Gradient(Hash(AA + 1), x, y, z - 1), Gradient(Hash(BA + 1), x - 1, y, z - 1), u),
-             Lerp(Gradient(Hash(AB + 1), x, y - 1, z - 1),
-                  Gradient(Hash(BB + 1), x - 1, y - 1, z - 1), u),
-             v),
-        w);
-}
-
-/// `octaves` layers of noise, frequency doubling and weight halving, divided by
-/// the weight sum: within -1..1.
-double FractalNoise(double a, double b, int octaves) {
-    double sum = 0.0, weights = 0.0, weight = 1.0, frequency = 1.0;
-    for (int i = 0; i < octaves; ++i) {
-        sum += weight * Noise3(a * frequency, b * frequency, 0.0);
-        weights += weight;
-        weight *= 0.5;
-        frequency *= 2.0;
-    }
-    return weights > 0.0 ? sum / weights : 0.0;
-}
 
 // --- colour ----------------------------------------------------------------------
 
@@ -355,6 +299,7 @@ public:
         }
         if (m_over->overColorn) {
             const auto& c = m_over->colorn;
+            if (c[0] < 0.0f) return std::nullopt; // native instance colour unset sentinel
             return Vec3d { c[0], c[1], c[2] };
         }
         return std::nullopt;
@@ -438,6 +383,116 @@ struct LastFinite {
     }
 };
 
+/// The selectors of `inheritinitialvaluefromevent` and `inheritvaluefromevent`
+/// (off_140484D90): "<mode><quantity>"; colour, opacity and size combine by set
+/// or multiply, velocity, rotation and angular velocity by set or add.
+enum class InheritQuantity { Colour, Opacity, ColourOpacity, Velocity, Size, Rotation, AngularVelocity };
+enum class InheritMode { Set, Multiply, Add };
+
+std::optional<std::pair<InheritQuantity, InheritMode>> InheritSelector(const std::string& name) {
+    static const std::map<std::string, std::pair<InheritQuantity, InheritMode>> kSelectors = [] {
+        std::map<std::string, std::pair<InheritQuantity, InheritMode>> table;
+        const std::pair<const char*, InheritQuantity> quantities[] = {
+            { "color", InheritQuantity::Colour },
+            { "opacity", InheritQuantity::Opacity },
+            { "coloropacity", InheritQuantity::ColourOpacity },
+            { "velocity", InheritQuantity::Velocity },
+            { "size", InheritQuantity::Size },
+            { "rotation", InheritQuantity::Rotation },
+            { "angularvelocity", InheritQuantity::AngularVelocity },
+        };
+        const std::pair<const char*, InheritMode> modes[] = { { "set", InheritMode::Set },
+                                                              { "multiply", InheritMode::Multiply },
+                                                              { "add", InheritMode::Add } };
+        for (const auto& [quantity_name, quantity] : quantities) {
+            for (const auto& [mode_name, mode] : modes) {
+                const bool scalable = quantity == InheritQuantity::Colour || quantity == InheritQuantity::Opacity ||
+                                      quantity == InheritQuantity::ColourOpacity || quantity == InheritQuantity::Size;
+                if ((mode == InheritMode::Multiply && ! scalable) || (mode == InheritMode::Add && scalable)) continue;
+                table[std::string(mode_name) + quantity_name] = { quantity, mode };
+            }
+        }
+        return table;
+    }();
+    const auto found = kSelectors.find(name);
+    if (found == kSelectors.end()) return std::nullopt;
+    return found->second;
+}
+
+/// Takes `quantity` of `parent` into `child`. At birth the birth values change
+/// too; each step (the operator) only the running values do.
+void Inherit(Particle& child, const Particle& parent, InheritQuantity quantity, InheritMode mode, bool birth) {
+    const bool assign = mode == InheritMode::Set;
+    const auto take_colour = [&] {
+        const Vec3d c = parent.color.cast<double>();
+        if (birth) {
+            if (assign) PM::InitColor(child, c.x(), c.y(), c.z());
+            else PM::MutiplyInitColor(child, c.x(), c.y(), c.z());
+        } else {
+            child.color = assign ? parent.color : Vector3f(child.color.cwiseProduct(parent.color));
+        }
+    };
+    const auto take_opacity = [&] {
+        if (birth) {
+            if (assign) PM::InitAlpha(child, parent.alpha);
+            else PM::MutiplyInitAlpha(child, parent.alpha);
+        } else {
+            child.alpha = assign ? parent.alpha : child.alpha * parent.alpha;
+        }
+    };
+    switch (quantity) {
+    case InheritQuantity::Colour: take_colour(); break;
+    case InheritQuantity::Opacity: take_opacity(); break;
+    case InheritQuantity::ColourOpacity:
+        take_colour();
+        take_opacity();
+        break;
+    case InheritQuantity::Velocity:
+        if (assign) PM::InitVelocity(child, parent.velocity.cast<double>());
+        else PM::ChangeVelocity(child, parent.velocity.cast<double>());
+        break;
+    case InheritQuantity::Size: {
+        // The engine's sizes are half of these: a product takes half of the parent's.
+        const double factor = static_cast<double>(parent.size) / kParticleSizeOverEngine;
+        if (birth) {
+            if (assign) PM::InitSize(child, parent.size);
+            else PM::MutiplyInitSize(child, factor);
+        } else {
+            child.size = assign ? parent.size : static_cast<float>(child.size * factor);
+        }
+        break;
+    }
+    case InheritQuantity::Rotation:
+        if (assign) child.rotation = parent.rotation;
+        else PM::Rotate(child, parent.rotation.cast<double>());
+        break;
+    case InheritQuantity::AngularVelocity:
+        if (assign) child.angularVelocity = parent.angularVelocity;
+        else PM::ChangeAngularVelocity(child, parent.angularVelocity.cast<double>());
+        break;
+    }
+}
+
+/// What an operator changed in `p` since `before`, weighed by `w`: the blend
+/// window of a blended opcode whose kernel did not decompile (F-D6) lerps the
+/// particle between its old and its new state.
+void BlendInto(Particle& p, const Particle& before, double w) {
+    if (w >= 1.0) return;
+    const auto mix3 = [w](const Vector3f& a, const Vector3f& b) {
+        return Vector3f((a.cast<double>() + (b.cast<double>() - a.cast<double>()) * w).cast<float>());
+    };
+    const auto mix = [w](float a, float b) { return static_cast<float>(a + (b - a) * w); };
+    p.position        = mix3(before.position, p.position);
+    p.velocity        = mix3(before.velocity, p.velocity);
+    p.color           = mix3(before.color, p.color);
+    p.rotation        = mix3(before.rotation, p.rotation);
+    p.angularVelocity = mix3(before.angularVelocity, p.angularVelocity);
+    p.alpha           = mix(before.alpha, p.alpha);
+    p.size            = mix(before.size, p.size);
+    p.lifetime        = mix(before.lifetime, p.lifetime);
+    p.init.lifetime   = mix(before.init.lifetime, p.init.lifetime);
+}
+
 } // namespace
 
 ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json& wpj) {
@@ -464,8 +519,13 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
 
     if (name == "lifetimerandom") {
         const double lo = ReadKey<double>(wpj, "min", 0.0), hi = ReadKey<double>(wpj, "max", 1.0);
-        return [=](Particle& p, double) {
-            const double life = std::max(Lerp(lo, hi, DrawShaped(exponent)), 0.001);
+        // The override lifetime is bound to this record only (field 216 on
+        // lifetimerandom, loader 0x1401C5490 L2605/L2620, guarded by file flag 64).
+        const auto over = ctx.lifetime_override ? ctx.over : nullptr;
+        LastFinite last;
+        return [=](Particle& p, double) mutable {
+            const double scale = (over && over->enabled) ? last(over->lifetime) : 1.0;
+            const double life  = std::max(scale * Lerp(lo, hi, DrawShaped(exponent)), 0.001);
             PM::InitLifetime(p, static_cast<float>(life));
         };
     }
@@ -512,7 +572,7 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
     if (name == "colorrandom") {
         const Vec3d lo = ReadVec3(wpj, "min", { 0, 0, 0 }) / 255.0;
         const Vec3d hi = ReadVec3(wpj, "max", { 255, 255, 255 }) / 255.0;
-        const OverrideTint tint(ctx.over, ctx.color);
+        const OverrideTint tint(ctx.colour_override ? ctx.over : nullptr, ctx.color);
         return [=](Particle& p, double) {
             Vec3d from = lo, to = hi;
             if (const auto moved = tint.Shifted()) {
@@ -532,7 +592,7 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
         const double sat_hi = ReadKey<double>(wpj, "saturationmax", 1.0);
         const double val_lo = ReadKey<double>(wpj, "valuemin", 0.5);
         const double val_hi = ReadKey<double>(wpj, "valuemax", 1.0);
-        const OverrideTint tint(ctx.over, ctx.color);
+        const OverrideTint tint(ctx.colour_override ? ctx.over : nullptr, ctx.color);
         return [=](Particle& p, double) {
             double hmin = hue_lo, hmax = hue_hi;
             double smin = sat_lo, smax = sat_hi, vmin = val_lo, vmax = val_hi;
@@ -569,7 +629,7 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
         const double hue_noise = ReadKey<double>(wpj, "huenoise", 0.0);
         const double sat_noise = ReadKey<double>(wpj, "saturationnoise", 0.0);
         const double val_noise = ReadKey<double>(wpj, "valuenoise", 0.0);
-        const OverrideTint tint(ctx.over, ctx.color);
+        const OverrideTint tint(ctx.colour_override ? ctx.over : nullptr, ctx.color);
         return [=](Particle& p, double) {
             const Vec3d& entry = entries[static_cast<std::size_t>(
                 Random::get<int>(0, static_cast<int>(entries.size()) - 1))];
@@ -582,55 +642,45 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
         };
     }
     if (name == "turbulentvelocityrandom") {
+        // 0x14023B340 case 9 (0x14023BDC0..0x14023BE84, F-D4.md):
+        //   ph  = r * phaseΔ * audio + phasemin + system time
+        //   a   = simplex1(ph * timescale * rate) * π * scale + offset
+        //   dir = forward turned about right by a;  v += dir * (speedmin + r2 * speedΔ)
         const double scale     = ReadKey<double>(wpj, "scale", 1.0);
-        const double timescale = std::max(ReadKey<double>(wpj, "timescale", 1.0), 1.0e-3);
+        const double timescale = ReadKey<double>(wpj, "timescale", 1.0);
         const double offset    = ReadKey<double>(wpj, "offset", 0.0);
         const double speed_lo  = ReadKey<double>(wpj, "speedmin", 100.0);
         const double speed_hi  = ReadKey<double>(wpj, "speedmax", 250.0);
+        const double phase_lo  = ReadKey<double>(wpj, "phasemin", 0.0);
+        const double phase_hi  = ReadKey<double>(wpj, "phasemax", 0.0);
         Vec3d forward = ReadVec3(wpj, "forward", { 0, 1, 0 });
         Vec3d right   = ReadVec3(wpj, "right", { 0, 0, 1 });
         forward = forward.norm() > 0.0 ? Vec3d(forward.normalized()) : Vec3d(0, 1, 0);
         right   = right.norm() > 0.0 ? Vec3d(right.normalized()) : Vec3d(0, 0, 1);
-        const double half_angle = std::min(std::max(scale, 0.0) * 0.5 * Pi, Pi);
-
-        const auto turn_about = [](const Vec3d& v, const Vec3d& axis, double angle) -> Vec3d {
+        const auto     over = ctx.over;
+        // The phase range is scaled by the record's audio level (+0x44).
+        const u32   audio_mode  = ReadKey<uint32_t>(wpj, "audioprocessingmode", 0u);
+        const auto  bounds      = ReadKey<std::array<float, 2>>(wpj, "audioprocessingbounds", { 0.8f, 1.0f });
+        const float audio_exp   = ReadKey<float>(wpj, "audioprocessingexponent", 2.0f);
+        const i32   band_first  = ReadKey<int32_t>(wpj, "audioprocessingfrequencystart", 0);
+        const i32   band_last   = ReadKey<int32_t>(wpj, "audioprocessingfrequencyend", 1);
+        const bool  audio_on    = audio_mode >= 1 && audio_mode <= 3;
+        const auto  spectrum    = ctx.spectrum;
+        if (audio_on && ctx.requires_audio) ctx.requires_audio();
+        LastFinite     last_rate;
+        return [=](Particle& p, double) mutable {
+            const double rate  = (over && over->enabled) ? std::fmax(0.01, last_rate(over->rate)) : 1.0;
+            const double level = ! audio_on ? 1.0
+                                 : spectrum ? AudioLevel(spectrum(), audio_mode, band_first, band_last,
+                                                         bounds[0], bounds[1], audio_exp)
+                                            : 0.0;
+            const double time  = spawn ? spawn->system_time : 0.0;
+            const double ph    = Draw01() * (phase_hi - phase_lo) * level + phase_lo + time;
+            const double angle =
+                ParticleNoise::Simplex1(static_cast<float>(ph * timescale * rate)) * Pi * scale + offset;
             const double c = std::cos(angle), s = std::sin(angle);
-            return v * c + axis.cross(v) * s + axis * (axis.dot(v) * (1.0 - c));
-        };
-        const auto random_unit = []() -> Vec3d {
-            for (int tries = 0; tries < 8; ++tries) {
-                const Vec3d v { Random::get(-1.0, 1.0), Random::get(-1.0, 1.0), Random::get(-1.0, 1.0) };
-                if (v.norm() > 1.0e-6) return v.normalized();
-            }
-            return { 0, 1, 0 };
-        };
-        // The heading wanders a little from one spawn to the next, so spawns
-        // close in time head the same way; a larger timescale slows the walk.
-        struct Walk {
-            Vec3d heading { 0, 1, 0 };
-            bool  started { false };
-        } walk;
-        return [=](Particle& p, double duration) mutable {
-            if (! walk.started) {
-                walk.heading = random_unit();
-                walk.started = true;
-            }
-            const double gap   = duration > 0.0 ? duration : 1.0 / 60.0;
-            const double sigma = std::sqrt(gap / timescale);
-            Vec3d        next  = walk.heading + Vec3d { Random::get(-1.0, 1.0), Random::get(-1.0, 1.0),
-                                                 Random::get(-1.0, 1.0) } * (sigma * 1.7);
-            walk.heading = next.norm() > 1.0e-9 ? Vec3d(next.normalized()) : random_unit();
-
-            // Squeeze the sphere of headings into the cone around `forward`.
-            const double angle = std::acos(std::clamp(walk.heading.dot(forward), -1.0, 1.0));
-            Vec3d        axis  = forward.cross(walk.heading);
-            Vec3d        dir   = forward;
-            if (axis.norm() > 1.0e-9 && half_angle > 0.0) {
-                dir = turn_about(forward, axis.normalized(), angle * (half_angle / Pi));
-            }
-            dir = turn_about(dir, right, offset);
-            const double speed = Lerp(speed_lo, speed_hi, Draw01());
-            PM::ChangeVelocity(p, through_layer(dir * speed));
+            const Vec3d  dir = forward * c + right.cross(forward) * s + right * (right.dot(forward) * (1.0 - c));
+            PM::ChangeVelocity(p, through_layer(dir * Lerp(speed_lo, speed_hi, Draw01())));
         };
     }
     if (name == "inheritcontrolpointvelocity") {
@@ -657,9 +707,11 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
             const double time = (spawn ? spawn->system_time : 0.0) * timescale;
             const Vec3d  pos  = PM::GetPos(p).cast<double>();
             Vec3d        shift {
-                FractalNoise(pos.x() * scale, time, octaves),
-                FractalNoise(time, pos.y() * scale, octaves),
-                FractalNoise(pos.z() * scale, -time, octaves),
+                // 0x14023B340 positionoffsetrandom: three fbm calls of the 2D
+                // simplex, arguments as listed (F-D3.md).
+                ParticleNoise::Fbm2(static_cast<float>(pos.x() * scale), static_cast<float>(time), octaves),
+                ParticleNoise::Fbm2(static_cast<float>(time), static_cast<float>(pos.y() * scale), octaves),
+                ParticleNoise::Fbm2(static_cast<float>(pos.z() * scale), static_cast<float>(-time), octaves),
             };
             for (int i = 0; i < 3; ++i) {
                 shift[i] *= directions[i] * distance;
@@ -774,81 +826,46 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
         };
     }
     if (name == "inheritinitialvaluefromevent") {
-        // The selector is "<mode><quantity>"; any string outside the table
-        // does nothing.
-        enum class Quantity { Colour, Opacity, ColourOpacity, Velocity, Size, Rotation, AngularVelocity };
-        enum class Mode { Set, Multiply, Add };
-        static const std::map<std::string, std::pair<Quantity, Mode>> kSelectors = [] {
-            std::map<std::string, std::pair<Quantity, Mode>> table;
-            const std::pair<const char*, Quantity> quantities[] = {
-                { "color", Quantity::Colour },
-                { "opacity", Quantity::Opacity },
-                { "coloropacity", Quantity::ColourOpacity },
-                { "velocity", Quantity::Velocity },
-                { "size", Quantity::Size },
-                { "rotation", Quantity::Rotation },
-                { "angularvelocity", Quantity::AngularVelocity },
-            };
-            const std::pair<const char*, Mode> modes[] = { { "set", Mode::Set },
-                                                           { "multiply", Mode::Multiply },
-                                                           { "add", Mode::Add } };
-            for (const auto& [quantity_name, quantity] : quantities) {
-                for (const auto& [mode_name, mode] : modes) {
-                    // Colour and opacity combine by set or multiply, velocity,
-                    // rotation and angular velocity by set or add, size by set
-                    // or multiply.
-                    const bool scaling = mode == Mode::Multiply;
-                    const bool offset  = mode == Mode::Add;
-                    const bool scalable = quantity == Quantity::Colour || quantity == Quantity::Opacity ||
-                                          quantity == Quantity::ColourOpacity || quantity == Quantity::Size;
-                    if ((scaling && ! scalable) || (offset && scalable)) continue;
-                    table[std::string(mode_name) + quantity_name] = { quantity, mode };
-                }
-            }
-            return table;
-        }();
-
-        const auto chosen = kSelectors.find(ReadKey<std::string>(wpj, "input", "setcolor"));
-        if (chosen == kSelectors.end()) return inert;
-        const auto [quantity, mode] = chosen->second;
+        // Any selector outside the table does nothing.
+        const auto chosen = InheritSelector(ReadKey<std::string>(wpj, "input", "setcolor"));
+        if (! chosen) return inert;
+        const auto [quantity, mode] = *chosen;
         return [=](Particle& p, double) {
             if (! spawn || spawn->parent == nullptr) return;
-            const Particle& parent = *spawn->parent;
-            const bool      assign = mode == Mode::Set;
-            const bool      scale  = mode == Mode::Multiply;
-            const auto take_colour = [&] {
-                const Vec3d c = parent.color.cast<double>();
-                if (assign) PM::InitColor(p, c.x(), c.y(), c.z());
-                else PM::MutiplyInitColor(p, c.x(), c.y(), c.z());
+            Inherit(p, *spawn->parent, quantity, mode, true);
+        };
+    }
+    if (name == "remapinitialvalue") {
+        // sub_14023B340 case 0xF (artifacts/we-parity/decompiles/F-D11.md).
+        const ParticleRemap::Config config = ParticleRemap::Read(wpj);
+        if (config.output == ParticleRemap::Quantity::ControlPoint) {
+            ParticleControlpoint* destination = config.output == ParticleRemap::Quantity::ControlPoint &&
+                static_cast<std::size_t>(config.output_point0) < ctx.writable_controlpoints.size()
+                ? &ctx.writable_controlpoints[config.output_point0] : nullptr;
+            return [=](Particle& p, double) {
+                ParticleRemap::Frame frame;
+                if (spawn) {
+                    frame.controlpoints = spawn->controlpoints;
+                    frame.world_space   = spawn->world_space;
+                    frame.system_time   = spawn->system_time;
+                    frame.layer_time    = spawn->layer_time;
+                    frame.time_of_day   = spawn->time_of_day;
+                    frame.layer_origin  = spawn->layer_origin;
+                }
+                ParticleRemap::Apply(config, p, frame, true, destination);
             };
-            const auto take_opacity = [&] {
-                if (assign) PM::InitAlpha(p, parent.alpha);
-                else PM::MutiplyInitAlpha(p, parent.alpha);
-            };
-            switch (quantity) {
-            case Quantity::Colour: take_colour(); break;
-            case Quantity::Opacity: take_opacity(); break;
-            case Quantity::ColourOpacity:
-                take_colour();
-                take_opacity();
-                break;
-            case Quantity::Velocity:
-                if (assign) PM::InitVelocity(p, parent.velocity.cast<double>());
-                else PM::ChangeVelocity(p, parent.velocity.cast<double>());
-                break;
-            case Quantity::Size:
-                if (scale) PM::MutiplyInitSize(p, static_cast<double>(parent.size) / kParticleSizeOverEngine);
-                else PM::InitSize(p, parent.size);
-                break;
-            case Quantity::Rotation:
-                if (assign) p.rotation = parent.rotation;
-                else PM::Rotate(p, parent.rotation.cast<double>());
-                break;
-            case Quantity::AngularVelocity:
-                if (assign) p.angularVelocity = parent.angularVelocity;
-                else PM::ChangeAngularVelocity(p, parent.angularVelocity.cast<double>());
-                break;
+        }
+        return [=](Particle& p, double) {
+            ParticleRemap::Frame frame;
+            if (spawn) {
+                frame.controlpoints = spawn->controlpoints;
+                frame.world_space   = spawn->world_space;
+                frame.system_time   = spawn->system_time;
+                frame.layer_time    = spawn->layer_time;
+                frame.time_of_day   = spawn->time_of_day;
+                frame.layer_origin  = spawn->layer_origin;
             }
+            ParticleRemap::Apply(config, p, frame, true);
         };
     }
     LogInertOnce("initializer", name);
@@ -857,16 +874,14 @@ ParticleInitOp WPParticleParser::genParticleInitOp(const nlohmann::json&        
 
 ParticleInitOp WPParticleParser::genOverrideInitOp(
     std::shared_ptr<const wpscene::ParticleInstanceoverride> over, ParticleColorDefinition def,
-    bool speed_override, bool size_override, bool tint_after_retint) {
-    LastFinite lifetime, alpha, size, speed, brightness;
+    bool speed_override, bool size_override, bool tint_after_retint, bool colour_override) {
+    LastFinite alpha, size, speed, brightness;
     const OverrideTint tint(over, def);
-    return [over = std::move(over), tint, speed_override, size_override, tint_after_retint, lifetime, alpha,
-            size, speed, brightness](Particle& p, double) mutable {
+    return [over = std::move(over), tint, speed_override, size_override, tint_after_retint, colour_override,
+            alpha, size, speed, brightness](Particle& p, double) mutable {
         if (! over || ! over->enabled) return;
         // The record is read now, so a property that moved it shows in the next birth.
-        const double life = lifetime(over->lifetime);
-        p.lifetime        = static_cast<float>(p.lifetime * life);
-        p.init.lifetime   = static_cast<float>(p.init.lifetime * life);
+        // The lifetime override reaches `lifetimerandom` only (see there).
         PM::MutiplyInitAlpha(p, alpha(over->alpha));
         if (size_override) PM::MutiplyInitSize(p, size(over->size));
         if (speed_override) PM::MutiplyVelocity(p, speed(over->speed));
@@ -875,10 +890,11 @@ ParticleInitOp WPParticleParser::genOverrideInitOp(
         // in a scene saved before version 5 the newborn is then multiplied by the
         // override itself, once. Nothing moved (override equal to the file's
         // colour) means no multiply either.
-        else if (const auto moved = tint.Shifted(); moved && tint_after_retint)
+        else if (const auto moved = tint.Shifted(); moved && tint_after_retint && colour_override)
             PM::MutiplyInitColor(p, moved->target.x(), moved->target.y(), moved->target.z());
         const double glow = brightness(over->brightness);
-        if (over->hdr && glow != 1.0) PM::MutiplyInitColor(p, glow, glow, glow);
+        // File flag 8 drops the brightness too (0x1401D15A0: tint = 1 when (flags & 8)).
+        if (colour_override && over->hdr && glow != 1.0) PM::MutiplyInitColor(p, glow, glow, glow);
     };
 }
 
@@ -896,9 +912,14 @@ struct OverrideReader {
     bool       size_applies { true };
     LastFinite last_speed;
     LastFinite last_size;
+    LastFinite last_rate;
 
     double Speed() {
         return (speed_applies && over && over->enabled) ? last_speed(over->speed) : 1.0;
+    }
+    /// The override rate, at least 0.01 as the engine clamps it (0x14022AF30).
+    double Rate() {
+        return (over && over->enabled) ? std::fmax(0.01, last_rate(over->rate)) : 1.0;
     }
     double Size() {
         return (size_applies && over && over->enabled) ? last_size(over->size) : 1.0;
@@ -997,15 +1018,42 @@ Collision CollisionOf(const std::string& name) {
     return Collision::Bounce;
 }
 
-/// What a surface does to a particle it has put back outside.
-void Respond(Particle& p, Collision how, double bounce, const Vec3d& normal) {
-    const double along = PM::GetVelocity(p).cast<double>().dot(normal);
-    switch (how) {
-    case Collision::Bounce: PM::ChangeVelocity(p, normal * (-(1.0 + bounce) * along)); break;
-    case Collision::Slide: PM::ChangeVelocity(p, normal * -along); break;
-    case Collision::Stop: p.velocity = Vector3f::Zero(); break;
-    case Collision::Delete: Remove(p); break;
+/// The keys every collision record shares (defaults sub_1401C00A0: bouncefactor
+/// 0.5, behaviour bounce, flags 0, control point 0) and the response to a hit.
+/// Flag 2 picks the response variant that also zeroes the angular velocity of
+/// every particle it hits, for every collision kind (the response thunks such as
+/// sub_14024F5E0 test `flags & 2`; artifacts/we-parity/decompiles/F-D13.md).
+struct CollisionResponse {
+    Collision how { Collision::Bounce };
+    double    bounce { 0.5 };
+    int       flags { 0 };
+    int       controlpoint { 0 };
+
+    static CollisionResponse Read(const nlohmann::json& wpj) {
+        CollisionResponse r;
+        r.how          = CollisionOf(ReadKey<std::string>(wpj, "collisionbehavior", "bounce"));
+        r.bounce       = ReadKey<double>(wpj, "bouncefactor", 0.5);
+        r.flags        = ReadKey<int32_t>(wpj, "flags", 0);
+        r.controlpoint = ReadKey<int32_t>(wpj, "controlpoint", 0);
+        return r;
     }
+    bool LocksToControlpoint() const { return (flags & 1) != 0; }
+
+    /// What the surface does to a particle it has put back outside.
+    void operator()(Particle& p, const Vec3d& normal) const {
+        const double along = PM::GetVelocity(p).cast<double>().dot(normal);
+        switch (how) {
+        case Collision::Bounce: PM::ChangeVelocity(p, normal * (-(1.0 + bounce) * along)); break;
+        case Collision::Slide: PM::ChangeVelocity(p, normal * -along); break;
+        case Collision::Stop: p.velocity = Vector3f::Zero(); break;
+        case Collision::Delete: Remove(p); break;
+        }
+        if (flags & 2) p.angularVelocity = Vector3f::Zero();
+    }
+};
+
+Vec3d TransformPoint(const linalg::Matrix4d& m, const Vec3d& p) {
+    return m.topLeftCorner<3, 3>() * p + m.topRightCorner<3, 1>();
 }
 
 } // namespace
@@ -1028,7 +1076,7 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
     }
     const std::string name  = wpj.at("name").get<std::string>();
     const bool        pixel = ctx.ortho;
-    OverrideReader    reader { ctx.over, ctx.speed_override, ctx.size_override, {}, {} };
+    OverrideReader    reader { ctx.over, ctx.speed_override, ctx.size_override, {}, {}, {} };
 
     if (name == "movement") {
         const double drag    = ReadKey<double>(wpj, "drag", 0.0);
@@ -1038,7 +1086,8 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
             const double dt = info.time_pass;
             Vec3d        g  = gravity * reader.Speed();
             if (flags & 1) g = info.world_to_local * g;
-            const double keep = 1.0 - std::min(drag * dt, 0.9999999);
+            // Case 1: drag over the scaled step, positions over the step (F-D5).
+            const double keep = 1.0 - std::min(drag * info.time_pass_scaled, 0.9999999);
             for (auto& p : info.particles) {
                 if (! PM::LifetimeOk(p)) continue;
                 if (info.track_previous_position) p.prev_position = p.position;
@@ -1051,14 +1100,19 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
     if (name == "angularmovement") {
         const double drag  = ReadKey<double>(wpj, "drag", 0.0);
         const Vec3d  force = ReadVec3(wpj, "force", { 0, 0, 0 });
+        // Blended opcode 28 (0x14023FBC0 case 0x1C): the window weight w takes the
+        // force, the turn and the drag, which is clamped before it is weighed.
+        const LifeEnvelope blend(wpj);
         return [=](const ParticleInfo& info) mutable {
             const double dt   = info.time_pass;
             const Vec3d  push = force * reader.Speed();
-            const double keep = 1.0 - std::min(drag * dt, 0.9999999);
+            const double damp = std::min(drag * info.time_pass_scaled, 0.9999999);
             for (auto& p : info.particles) {
                 if (! PM::LifetimeOk(p)) continue;
-                PM::AngularAccelerate(p, push, dt);
-                PM::RotateByTime(p, dt);
+                const double w    = blend.At(PM::LifetimePos(p));
+                const double keep = 1.0 - w * damp;
+                PM::AngularAccelerate(p, push * w, dt);
+                PM::RotateByTime(p, dt * w);
                 if (drag != 0.0) p.angularVelocity = (p.angularVelocity.cast<double>() * keep).cast<float>();
             }
         };
@@ -1081,7 +1135,7 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
         const double t0 = ReadKey<double>(wpj, "starttime", 0.0), t1 = ReadKey<double>(wpj, "endtime", 1.0);
         const Vec3d  from = ReadVec3(wpj, "startvalue", { 1, 1, 1 });
         const Vec3d  to   = ReadVec3(wpj, "endvalue", { 0, 0, 0 });
-        const OverrideTint tint(ctx.over, ctx.color);
+        const OverrideTint tint(ctx.colour_override ? ctx.over : nullptr, ctx.color);
         return [=](const ParticleInfo& info) mutable {
             Vec3d a = from, b = to;
             if (const auto moved = tint.Shifted()) {
@@ -1098,15 +1152,22 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
     if (name == "alphafade") {
         const double fade_in  = ReadKey<double>(wpj, "fadeintime", 0.5);
         const double fade_out = ReadKey<double>(wpj, "fadeouttime", 0.5);
+        // Case 3 of 0x14023FBC0: each fade is masked by its own test and the
+        // two masked factors are ORed bit for bit, 1 where neither test holds
+        // (artifacts/we-parity/decompiles/F-D8.md). WE takes approximate
+        // reciprocals (rcpps); we divide exactly.
+        const float in  = static_cast<float>(fade_in);
+        const float out = static_cast<float>(fade_out);
         return [=](const ParticleInfo& info) {
             for (auto& p : info.particles) {
-                const double t = PM::LifetimePos(p);
-                if (t <= fade_in) {
-                    if (fade_in > 0.0) PM::MutiplyAlpha(p, t / fade_in);
-                } else if (t > fade_out) {
-                    const double span = 1.0 - fade_out;
-                    PM::MutiplyAlpha(p, span > 0.0 ? 1.0 - (t - fade_out) / span : 0.0);
-                }
+                const float t       = static_cast<float>(PM::LifetimePos(p));
+                const bool  fading_in  = t < in;
+                const bool  fading_out = out < t;
+                if (! fading_in && ! fading_out) continue;
+                uint32_t bits = 0;
+                if (fading_in) bits |= std::bit_cast<uint32_t>(t / in);
+                if (fading_out) bits |= std::bit_cast<uint32_t>((1.0f - t) / (1.0f - out));
+                PM::MutiplyAlpha(p, std::bit_cast<float>(bits));
             }
         };
     }
@@ -1159,15 +1220,21 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
         const LifeEnvelope blend(wpj);
         const AudioGate   gate  = AudioGate::Read(wpj, ctx);
         return [=](const ParticleInfo& info) mutable {
-            const double dt    = info.time_pass;
+            const double dt    = info.time_pass_scaled;   // case 0xE takes the scaled step
             const double level = gate.Level() * reader.Speed();
+            const double rate  = reader.Rate();
             for (auto& p : info.particles) {
                 if (! PM::LifetimeOk(p)) continue;
                 const double seed  = p.seed;
-                const double phase = seed * (ph_hi - ph_lo) + info.time * timescale;
+                // The override rate is bound to the timescale (field 220) on top of the
+                // rate-scaled system time (Particles.md §3).
+                const double phase = seed * (ph_hi - ph_lo) + info.time * timescale * rate;
                 const Vec3d  q = (PM::GetPos(p).cast<double>() + Vec3d::Constant(phase)) * scale;
-                const Vec3d  field { Noise3(q.x(), q.y(), q.z()), Noise3(q.z(), q.x(), q.y()),
-                                     Noise3(q.y(), q.z(), q.x()) };
+                const float  x = static_cast<float>(q.x()), y = static_cast<float>(q.y()),
+                            z = static_cast<float>(q.z());
+                // 3D simplex x 32 (0x1400FC220), axes permuted per lane as case 0xE does.
+                const Vec3d field { ParticleNoise::Simplex3(x, y, z), ParticleNoise::Simplex3(z, x, y),
+                                    ParticleNoise::Simplex3(y, z, x) };
                 const double speed = Lerp(s_lo, s_hi, seed) * level * blend.At(PM::LifetimePos(p));
                 PM::ChangeVelocity(p, field.cwiseProduct(mask) * (speed * dt));
             }
@@ -1183,12 +1250,13 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
         const Vec3d  offset = ReadVec3(wpj, "offset", { 0, 0, 0 });
         Vec3d        axis   = ReadVec3(wpj, "axis", { 0, 0, 1 });
         if (axis.squaredNorm() >= 0.001) axis = axis.normalized();
-        const LifeEnvelope blend(wpj);
+        // No blend window: the vortex block of the loader (L6420-6590) never
+        // reads one (only vortex_v2 does).
         const AudioGate   gate  = AudioGate::Read(wpj, ctx);
         return [=](const ParticleInfo& info) mutable {
             const auto* point  = PointOf(info.controlpoints, index);
             const Vec3d centre = (point ? point->offset : Vec3d::Zero()) + offset;
-            const double dt    = info.time_pass;
+            const double dt    = info.time_pass_scaled;
             const double level = gate.Level() * reader.Speed();
             for (auto& p : info.particles) {
                 if (! PM::LifetimeOk(p)) continue;
@@ -1198,8 +1266,197 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
                 if (! (r > 1.0e-9)) continue;
                 const double t = outer > inner ? std::clamp((r - inner) / (outer - inner), 0.0, 1.0)
                                                : (r >= outer ? 1.0 : 0.0);
-                const double speed = level * blend.At(PM::LifetimePos(p)) * Lerp(speed_in, speed_out, t);
+                const double speed = level * Lerp(speed_in, speed_out, t);
                 PM::ChangeVelocity(p, d.cross(axis) / r * (speed * dt));
+            }
+        };
+    }
+    if (name == "vortex_v2") {
+        // Loader sub_1401BF2D0 / L5690, kernel 0x14023FBC0 case 0x10
+        // (artifacts/we-parity/decompiles/F-D9.md). Flags: 1 measures from the
+        // axis line (else from the point), 2 keeps the particle's distance with
+        // `centerforce`, 4 swirls about a ring and pulls toward it.
+        const int    flags = ReadKey<int32_t>(wpj, "flags", 0);
+        const int    index = std::clamp(ReadKey<int32_t>(wpj, "controlpoint", 0), 0, 7);
+        const double inner = ReadKey<double>(wpj, "distanceinner", pixel ? 500.0 : 1.0);
+        const double outer = ReadKey<double>(wpj, "distanceouter", pixel ? 650.0 : 2.0);
+        const double speed_in  = ReadKey<double>(wpj, "speedinner", pixel ? 2500.0 : 1.0);
+        const double speed_out = ReadKey<double>(wpj, "speedouter", 0.0);
+        const double centre_force = (flags & 2) ? ReadKey<double>(wpj, "centerforce", 1.0) : 0.0;
+        const double ring_radius  = ReadKey<double>(wpj, "ringradius", pixel ? 300.0 : 1.0);
+        const double ring_width   = ReadKey<double>(wpj, "ringwidth", pixel ? 50.0 : 0.2);
+        const double pull_reach   = ReadKey<double>(wpj, "ringpulldistance", pixel ? 50.0 : 0.25);
+        const double pull_force   = ReadKey<double>(wpj, "ringpullforce", pixel ? 10.0 : 0.05);
+        const bool   ring   = (flags & 4) != 0;
+        const bool   on_line = (flags & 1) != 0;
+        const double low    = ring ? ring_width : inner;
+        const double inv    = ring ? (pull_reach == 0.0 ? 1.0 : 1.0 / pull_reach)
+                                   : (outer == inner ? 1.0 : 1.0 / (outer - inner));
+        Vec3d        axis   = ReadVec3(wpj, "axis", { 0, 0, 1 });
+        axis = axis.norm() >= 0.001 ? Vec3d(axis.normalized()) : Vec3d(0, 0, 1);
+        // Blended opcode 37 did not decompile (F-D6): the window weighs the whole change.
+        const LifeEnvelope blend(wpj);
+        const AudioGate    gate = AudioGate::Read(wpj, ctx);
+        return [=](const ParticleInfo& info) mutable {
+            const auto* point = PointOf(info.controlpoints, index);
+            const Vec3d centre = point ? point->offset : Vec3d::Zero();
+            Vec3d       a      = axis;
+            if (point != nullptr && point->has_rotation) {
+                const Vec3d turned = point->rotation * axis;
+                if (turned.norm() > 0.0) a = turned.normalized();
+            }
+            const double dt    = info.time_pass;
+            const double a3    = info.time_pass_scaled;
+            const double level = gate.Level() * reader.Speed();
+            for (auto& p : info.particles) {
+                if (! PM::LifetimeOk(p)) continue;
+                const Vec3d  d     = PM::GetPos(p).cast<double>() - centre;
+                const double along = on_line ? d.dot(a) : 0.0;
+                const Vec3d  flat  = d - a * along;
+                const double r     = flat.norm();
+                if (! (r > 0.0)) continue;
+                const Vec3d  n = flat / r;
+                // Where the particle goes this step, measured the same way.
+                const Vec3d  q    = d + p.velocity.cast<double>() * dt - a * along;
+                const double qlen = q.norm();
+                double       radial = (qlen > 0.0 && dt > 0.0) ? (r / qlen - 1.0) * centre_force / dt : 0.0;
+                double       t;
+                if (ring) {
+                    const double gap = ring_radius - r;
+                    t                = std::clamp((std::abs(gap) - low) * inv, 0.0, 1.0);
+                    const double keep = 1.0 - t;
+                    const double pull = keep == 1.0 ? 0.0 : std::copysign(keep, gap);
+                    radial += pull * dt * pull_force;
+                } else {
+                    t = std::clamp((r - low) * inv, 0.0, 1.0);
+                }
+                const double speed = Lerp(speed_in, speed_out, t) * level * a3;
+                PM::ChangeVelocity(p, (n.cross(a) * speed + q * radial) * blend.At(PM::LifetimePos(p)));
+            }
+        };
+    }
+    if (name == "boids") {
+        // Loader sub_1401BF700, kernel 0x14023FBC0 case 0x11
+        // (artifacts/we-parity/decompiles/F-D10.md). No blend window, no audio.
+        const double separation_reach = ReadKey<double>(wpj, "separationthreshold", pixel ? 20.0 : 0.02);
+        const double neighbour_reach  = ReadKey<double>(wpj, "neighborthreshold", pixel ? 50.0 : 0.2);
+        const double max_speed        = ReadKey<double>(wpj, "maxspeed", pixel ? 500.0 : 1.0);
+        const double separation       = ReadKey<double>(wpj, "separationfactor", 15.0);
+        const double alignment        = ReadKey<double>(wpj, "alignmentfactor", 1.0);
+        const double cohesion         = ReadKey<double>(wpj, "cohesionfactor", 2.0);
+        const int    flags            = ReadKey<int32_t>(wpj, "flags", 0);
+        return [=](const ParticleInfo& info) {
+            auto&             slots = info.particles;
+            const std::size_t count = slots.size();
+            if (count == 0) return;
+            // The engine steers a slice of the particles each step, in blocks of
+            // four, against a slice of the others, and scales the steering by
+            // the number of slices: N = count / 200 + 1.
+            const std::size_t slices = count / 200 + 1;
+            const double      a3     = info.time_pass_scaled * static_cast<double>(slices);
+            const std::size_t blocks = (count + 3) / 4;
+            for (std::size_t b = info.step % slices; b < blocks; b += slices) {
+                for (std::size_t i = 4 * b; i < std::min(count, 4 * b + 4); ++i) {
+                    Particle& self = slots[i];
+                    if (! PM::LifetimeOk(self)) continue;
+                    const Vec3d pos = self.position.cast<double>();
+                    Vec3d       sep = Vec3d::Zero(), sum_v = Vec3d::Zero(), sum_p = Vec3d::Zero();
+                    double      near = 0.0, close = 0.0;
+                    for (std::size_t c = (4 * b + info.step) % slices; c < blocks; c += slices) {
+                        for (std::size_t j = 4 * c; j < std::min(count, 4 * c + 4); ++j) {
+                            const Particle& other = slots[j];
+                            if (! PM::LifetimeOk(other)) continue;
+                            const Vec3d  d    = pos - other.position.cast<double>();
+                            const double dist = d.norm();
+                            if (dist < neighbour_reach) {   // the particle itself included
+                                near += 1.0;
+                                sum_v += other.velocity.cast<double>();
+                                sum_p += other.position.cast<double>();
+                            }
+                            if (dist > 0.0 && dist < separation_reach) {
+                                close += 1.0;
+                                sep += d * (separation_reach / dist - 1.0);
+                            }
+                        }
+                    }
+                    const Vec3d v_old = self.velocity.cast<double>();
+                    Vec3d       v     = v_old;
+                    if (close > 0.0) v += sep * (separation * a3 / close);
+                    if (near > 0.0) {
+                        v += (sum_v / near - v_old) * (alignment * a3);
+                        v += (sum_p / near - pos) * (cohesion * a3);
+                    }
+                    if (flags & 1) {
+                        const double now2 = v.squaredNorm();
+                        if (std::max(v_old.squaredNorm(), max_speed * max_speed) < now2)
+                            v *= max_speed / std::sqrt(now2);
+                    }
+                    self.velocity = v.cast<float>();
+                }
+            }
+        };
+    }
+    if (name == "remapvalue") {
+        // Loader L6255, kernel 0x14023FBC0 case 0x13 (artifacts/we-parity/decompiles/F-D11.md).
+        const ParticleRemap::Config config = ParticleRemap::Read(wpj);
+        // Blended opcode 39 did not decompile (F-D6): the window lerps old and new.
+        const LifeEnvelope blend(wpj);
+        if (config.output == ParticleRemap::Quantity::ControlPoint) {
+            ParticleControlpoint* destination = static_cast<std::size_t>(config.output_point0) < ctx.writable_controlpoints.size()
+                ? &ctx.writable_controlpoints[config.output_point0] : nullptr;
+            return [=](const ParticleInfo& info) {
+                if (destination == nullptr) return;
+                const ParticleRemap::Frame frame { .controlpoints = info.controlpoints,
+                    .world_space = info.world_space, .system_time = info.time,
+                    .layer_time = info.layer_time, .time_of_day = info.time_of_day,
+                    .layer_origin = info.layer_origin };
+                // The native SIMD kernel broadcasts lane zero into the point.
+                for (std::size_t i = 0; i < info.particles.size(); i += 4) {
+                    auto& p = info.particles[i];
+                    const double weight = blend.At(PM::LifetimePos(p));
+                    if (weight <= 0) continue;
+                    const Vec3d before = destination->offset;
+                    ParticleRemap::Apply(config, p, frame, false, destination);
+                    if (weight < 1) destination->offset = before + (destination->offset - before) * weight;
+                }
+            };
+        }
+        return [=](const ParticleInfo& info) {
+            const ParticleRemap::Frame frame { .controlpoints = info.controlpoints,
+                                               .world_space = info.world_space,
+                                               .system_time   = info.time,
+                                               .layer_time    = info.layer_time,
+                                               .time_of_day   = info.time_of_day,
+                                               .layer_origin  = info.layer_origin };
+            for (auto& p : info.particles) {
+                if (! PM::LifetimeOk(p)) continue;
+                const double w = blend.At(PM::LifetimePos(p));
+                if (w >= 1.0) {
+                    ParticleRemap::Apply(config, p, frame, false);
+                    continue;
+                }
+                const Particle before = p;
+                ParticleRemap::Apply(config, p, frame, false);
+                BlendInto(p, before, w);
+            }
+        };
+    }
+    if (name == "inheritvaluefromevent") {
+        // Loader L5861 (default "setcoloropacity"), kernel 0x14023FBC0 case 0x14
+        // (artifacts/we-parity/decompiles/F-D12.md): each step an event child takes
+        // the quantity from its parent particle's running values while it lives.
+        const auto chosen = InheritSelector(ReadKey<std::string>(wpj, "input", "setcoloropacity"));
+        if (! chosen) return inert;
+        const auto [quantity, mode] = *chosen;
+        // Blended opcode 40 did not decompile (F-D6): the window lerps old and new.
+        const LifeEnvelope blend(wpj);
+        return [=](const ParticleInfo& info) {
+            if (info.parent == nullptr) return;
+            for (auto& p : info.particles) {
+                if (! PM::LifetimeOk(p)) continue;
+                const Particle before = p;
+                Inherit(p, *info.parent, quantity, mode, false);
+                BlendInto(p, before, blend.At(PM::LifetimePos(p)));
             }
         };
     }
@@ -1211,10 +1468,13 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
         else threshold = ReadKey<double>(wpj, "threadhold", threshold);
         const double delete_at = ReadKey<double>(wpj, "deletethreshold", pixel ? 15.0 : 0.5);
         const int    flags     = ReadKey<int32_t>(wpj, "flags", 0);
+        // Blended opcode 32 (0x14023FBC0 case 0x20): the window weighs the pull after
+        // flag 2 has capped it at the distance.
+        const LifeEnvelope blend(wpj);
         return [=](const ParticleInfo& info) mutable {
             const auto* point  = PointOf(info.controlpoints, index);
             const Vec3d centre = point ? point->offset : Vec3d::Zero();
-            const double dt    = info.time_pass;
+            const double dt    = info.time_pass_scaled;
             const double power = scale * reader.Speed();
             for (auto& p : info.particles) {
                 if (! PM::LifetimeOk(p)) continue;
@@ -1224,6 +1484,7 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
                 if (len > 0.0 && len < threshold) {
                     double k = (1.0 - len / threshold) * power * dt;
                     if ((flags & 2) && k > 0.0) k = std::min(k, len);
+                    k *= blend.At(PM::LifetimePos(p));
                     PM::ChangeVelocity(p, d / len * -k);
                 }
                 if ((flags & 1) &&
@@ -1252,6 +1513,8 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
         const double outer = ReadKey<double>(wpj, "distanceouter", pixel ? 350.0 : 1.0);
         const double r_in  = ReadKey<double>(wpj, "reductioninner", 100.0);
         const double r_out = ReadKey<double>(wpj, "reductionouter", 0.0);
+        // Blended opcode 35: the window weighs the reduction.
+        const LifeEnvelope blend(wpj);
         return [=](const ParticleInfo& info) {
             const auto* point  = PointOf(info.controlpoints, index);
             const Vec3d centre = point ? point->offset : Vec3d::Zero();
@@ -1263,7 +1526,7 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
                 const double s = outer > inner ? std::clamp((dist - inner) / (outer - inner), 0.0, 1.0)
                                                : (dist > inner ? 1.0 : 0.0);
                 const double reduction = std::clamp((r_in + s * span) * info.time_pass, 0.0, 1.0);
-                PM::MutiplyVelocity(p, 1.0 - reduction);
+                PM::MutiplyVelocity(p, 1.0 - reduction * blend.At(PM::LifetimePos(p)));
             }
         };
     }
@@ -1271,23 +1534,40 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
         const int    index    = ReadKey<int32_t>(wpj, "controlpoint", 0);
         const double distance = ReadKey<double>(wpj, "distance", pixel ? 200.0 : 1.0);
         const double variable = ReadKey<double>(wpj, "variablestrength", 0.0);
+        // Blended opcode 33: the window weighs the whole displacement.
+        const LifeEnvelope blend(wpj);
         return [=](const ParticleInfo& info) {
             const auto* point = PointOf(info.controlpoints, index);
             if (point == nullptr) return;
             const Vec3d ride   = point->offset - point->prev_offset;
             const double amount = variable == 0.0 ? 1.0 : std::clamp(variable * info.time_pass, 0.0, 1.0);
+            // Kernel 0xB (0x14024198B, artifacts/we-parity/decompiles/F-maintaindistance.md):
+            // the distance is measured in the control point's frame, through the
+            // inverse of its 3x3 (`sub_140228B00`), and the correction is applied in
+            // the particle's own frame. A world-space system's control point carries
+            // the layer's matrix, so a layer scaled by s keeps its particles
+            // s·distance away (a rotation leaves the length alone, so only that
+            // matrix counts).
+            linalg::Matrix3d to_point = linalg::Matrix3d::Identity();
+            if (point->has_world_linear) {
+                const linalg::Matrix3d back = point->world_linear.inverse();
+                if (back.allFinite()) to_point = back;
+            }
             for (auto& p : info.particles) {
                 if (! PM::LifetimeOk(p)) continue;
-                PM::Move(p, ride);
+                const double w = blend.At(PM::LifetimePos(p));
+                PM::Move(p, ride * w);
                 const Vec3d  rel = PM::GetPos(p).cast<double>() - point->offset;
-                const double len = rel.norm();
-                if (len > 0.0) PM::Move(p, rel * ((distance / len - 1.0) * amount));
+                const double len = (to_point * rel).norm();
+                if (len > 0.0) PM::Move(p, rel * ((distance / len - 1.0) * amount * w));
             }
         };
     }
     if (name == "maintaindistancebetweencontrolpoints") {
         const int first = ReadKey<int32_t>(wpj, "controlpointstart", 0);
         const int last  = ReadKey<int32_t>(wpj, "controlpointend", 1);
+        // Blended opcode 34: the window weighs the whole displacement.
+        const LifeEnvelope blend(wpj);
         return [=](const ParticleInfo& info) {
             const auto* a = PointOf(info.controlpoints, first);
             const auto* b = PointOf(info.controlpoints, last);
@@ -1299,23 +1579,21 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
             for (auto& p : info.particles) {
                 if (! PM::LifetimeOk(p)) continue;
                 const double along = (PM::GetPos(p).cast<double>() - a->prev_offset).dot(was) / was.squaredNorm();
-                PM::Move(p, slide + now * std::clamp(along, 0.0, 1.0) - was * along);
+                PM::Move(p, (slide + now * std::clamp(along, 0.0, 1.0) - was * along) * blend.At(PM::LifetimePos(p)));
             }
         };
     }
     if (name == "collisionplane" || name == "collisionsphere") {
         const bool   sphere   = name == "collisionsphere";
-        const int    index    = ReadKey<int32_t>(wpj, "controlpoint", 0);
-        const int    flags    = ReadKey<int32_t>(wpj, "flags", 0);
+        const auto   respond  = CollisionResponse::Read(wpj);
         const Vec3d  origin   = ReadVec3(wpj, "origin", pixel ? Vec3d { 0, -200, 0 } : Vec3d { 0, 0, 0 });
         const double distance = ReadKey<double>(wpj, "distance", pixel ? -150.0 : 0.0);
         const double radius   = ReadKey<double>(wpj, "radius", pixel ? 50.0 : 1.0);
-        const double bounce   = ReadKey<double>(wpj, "bouncefactor", 0.5);
-        const Collision how   = CollisionOf(ReadKey<std::string>(wpj, "collisionbehavior", "bounce"));
         Vec3d        plane    = ReadVec3(wpj, "plane", { 0, 1, 0 });
         plane = plane.norm() > 0.0 ? Vec3d(plane.normalized()) : Vec3d::Zero();
         return [=](const ParticleInfo& info) {
-            const auto* point = (flags & 1) ? PointOf(info.controlpoints, index) : nullptr;
+            const auto* point =
+                respond.LocksToControlpoint() ? PointOf(info.controlpoints, respond.controlpoint) : nullptr;
             if (sphere) {
                 const Vec3d centre = point ? point->offset : origin;
                 for (auto& p : info.particles) {
@@ -1325,7 +1603,7 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
                     if (! (len > 0.0) || len - radius >= 0.0) continue;
                     const Vec3d normal = rel / len;
                     PM::MoveTo(p, centre + normal * radius);
-                    Respond(p, how, bounce, normal);
+                    respond(p, normal);
                 }
             } else {
                 Vec3d normal = plane;
@@ -1339,8 +1617,141 @@ ParticleOperatorOp WPParticleParser::genParticleOperatorOp(const nlohmann::json&
                     const double depth = normal.dot(PM::GetPos(p).cast<double>()) - offset;
                     if (! (depth < 0.0)) continue;
                     PM::Move(p, normal * -depth);
-                    Respond(p, how, bounce, normal);
+                    respond(p, normal);
                 }
+            }
+        };
+    }
+    if (name == "collisionbox") {
+        // Wallpaper Engine loads the record (controlpoint only) and its kernel
+        // case 0x17 does nothing (0x1401C5490, F-D13.md).
+        return inert;
+    }
+    if (name == "collisionbounds") {
+        // Kernel 0x18 (sub_14024F660): four planes around the scene canvas,
+        // n = (1,0,0), (0,1,0), (-1,0,0), (0,-1,0) through the points (0,0,0),
+        // (0,0,0), (W,H,0), (W,H,0), both taken into the particles' frame (normals
+        // with w = 0, so a scaled layer leaves them unnormalised). Per particle the
+        // last plane in that order it is behind wins: pos -= (d - off)·n, then the
+        // response with that n.
+        const auto respond = CollisionResponse::Read(wpj);
+        return [respond](const ParticleInfo& info) {
+            const linalg::Matrix3d linear = info.scene_to_local.topLeftCorner<3, 3>();
+            const Vec3d            low    = TransformPoint(info.scene_to_local, Vec3d::Zero());
+            const Vec3d high = TransformPoint(info.scene_to_local, Vec3d(info.canvas.x(), info.canvas.y(), 0.0));
+            std::array<Vec3d, 4>  normals { linear * Vec3d(1, 0, 0), linear * Vec3d(0, 1, 0),
+                                           linear * Vec3d(-1, 0, 0), linear * Vec3d(0, -1, 0) };
+            std::array<double, 4> offsets { low.dot(normals[0]), low.dot(normals[1]), high.dot(normals[2]),
+                                            high.dot(normals[3]) };
+            for (auto& p : info.particles) {
+                if (! PM::LifetimeOk(p)) continue;
+                const Vec3d pos = PM::GetPos(p).cast<double>();
+                int         hit = -1;
+                double      depth = 0.0;
+                for (int k = 0; k < 4; ++k) {
+                    const double d = pos.dot(normals[k]) - offsets[k];
+                    if (d < 0.0) {
+                        hit   = k;
+                        depth = d;
+                    }
+                }
+                if (hit < 0) continue;
+                PM::Move(p, normals[hit] * -depth);
+                respond(p, normals[hit]);
+            }
+        };
+    }
+    if (name == "collisionquad") {
+        // Loader defaults sub_1401C0870 and kernel sub_140253F70 (F-D13.md): a
+        // particle that was in front of the quad's plane on the previous step and
+        // is now on or behind it, inside its extents, is pushed out by 1.05·depth
+        // (0x140492E70) along the normal. Flag 1 carries the quad with the control
+        // point's translation and rotation.
+        const auto respond = CollisionResponse::Read(wpj);
+        const Vec3d origin = ReadVec3(wpj, "origin", pixel ? Vec3d { 0, -150, 0 } : Vec3d { 0, 0, 0 });
+        Vec3d n = ReadVec3(wpj, "plane", { 0, 1, 0 });
+        Vec3d f = ReadVec3(wpj, "forward", { 0, 0, 1 });
+        const auto size = ReadVec2(wpj, "size", { 200.0, 200.0 });
+        if (n.norm() > 0.0) n.normalize();
+        if (f.norm() > 0.0) f.normalize();
+        Vec3d r = n.cross(f);
+        if (r.norm() > 0.0) r.normalize();
+        Vec3d up = r.cross(n);
+        if (up.norm() > 0.0) up.normalize();
+        const double half_x = size[0] * 0.5;
+        const double half_y = size[1] * 0.5;
+        return [=](const ParticleInfo& info) {
+            Vec3d centre = origin, normal = n, along_r = r, along_f = up;
+            if (respond.LocksToControlpoint()) {
+                if (const auto* point = PointOf(info.controlpoints, respond.controlpoint)) {
+                    centre = point->offset;
+                    if (point->has_rotation) {
+                        normal  = point->rotation * normal;
+                        along_r = point->rotation * along_r;
+                        along_f = point->rotation * along_f;
+                    }
+                }
+            }
+            for (auto& p : info.particles) {
+                if (! PM::LifetimeOk(p)) continue;
+                const Vec3d  rel  = PM::GetPos(p).cast<double>() - centre;
+                const double d    = rel.dot(normal);
+                const double was  = (p.prev_position.cast<double>() - centre).dot(normal);
+                if (! (was > 0.0 && d <= 0.0)) continue;
+                if (! (std::abs(rel.dot(along_f)) < half_y && std::abs(rel.dot(along_r)) < half_x)) continue;
+                PM::Move(p, normal * (-1.05 * d));
+                respond(p, normal);
+            }
+        };
+    }
+    if (name == "collisionmodel") {
+        // Kernel sub_1402508C0 (F-D13.md): capsules of the linked layer, rebuilt
+        // every step; particles in groups of four, one slice of them a step when a
+        // system holds 10000 or more (slice = step % (count / 10000 + 1)). The last
+        // capsule a particle is inside pushes it out to its surface.
+        const auto respond = CollisionResponse::Read(wpj);
+        auto source = std::make_shared<ParticleCollisionModelSource>();
+        if (ctx.links) ctx.links->slots.push_back({ ParticleLayerLinks::Kind::CollisionModel, source });
+        return [respond, source](const ParticleInfo& info) {
+            if (! source->fill) return;
+            auto& capsules = source->capsules;
+            capsules.clear();
+            source->fill(capsules);
+            if (capsules.empty()) return;
+            const linalg::Matrix3d linear = info.scene_to_local.topLeftCorner<3, 3>();
+            const double scale = std::cbrt(std::abs(linear.determinant()));
+            for (auto& c : capsules) {
+                c.a = TransformPoint(info.scene_to_local, c.a);
+                c.b = TransformPoint(info.scene_to_local, c.b);
+                c.radius *= scale;
+            }
+            const std::size_t count  = info.particles.size();
+            const std::size_t slices = count / 10000 + 1;
+            const std::size_t slice  = info.step % slices;
+            for (std::size_t i = 0; i < count; ++i) {
+                if ((i / 4) % slices != slice) continue;
+                auto& p = info.particles[i];
+                if (! PM::LifetimeOk(p)) continue;
+                const Vec3d pos = PM::GetPos(p).cast<double>();
+                const ParticleCapsule* hit = nullptr;
+                Vec3d                  hit_diff;
+                for (const auto& c : capsules) {
+                    const Vec3d  seg = c.b - c.a;
+                    const double len = seg.norm();
+                    const Vec3d  axis = len > 0.0 ? Vec3d(seg / len) : Vec3d::Zero();
+                    const double t = std::clamp((pos - c.a).dot(axis), 0.0, len);
+                    const Vec3d  diff = pos - (c.a + axis * t);
+                    if (diff.norm() < c.radius) {
+                        hit      = &c;
+                        hit_diff = diff;
+                    }
+                }
+                if (hit == nullptr) continue;
+                const double dist = hit_diff.norm();
+                if (! (dist > 0.0)) continue;
+                const Vec3d normal = hit_diff / dist;
+                PM::Move(p, normal * -(dist - hit->radius));
+                respond(p, normal);
             }
         };
     }
@@ -1352,7 +1763,8 @@ ParticleEmittOp WPParticleParser::genParticleEmittOp(
     const wpscene::Emitter& wpe, bool sort,
     std::shared_ptr<const wpscene::ParticleInstanceoverride> override,
     std::function<audio::AudioSpectrumSnapshot()>            audio_spectrum,
-    std::shared_ptr<ParticleSpawnContext>                    spawn) {
+    std::shared_ptr<ParticleSpawnContext>                    spawn,
+    std::shared_ptr<ParticleLayerLinks>                      links) {
     std::shared_ptr<const float> count;
     if (override) count = std::shared_ptr<const float>(override, &override->count);
 
@@ -1396,7 +1808,56 @@ ParticleEmittOp WPParticleParser::genParticleEmittOp(
         a.spawn           = std::move(spawn);
         return ParticleSphereEmitterArgs::MakeEmittOp(std::move(a));
     }
-    // Any other emitter (one stock file has `layerimage`) never emits.
+    if (wpe.name == "layerimage") {
+        auto link = std::make_shared<ParticleLayerImageLink>();
+        if (links) links->slots.push_back({ ParticleLayerLinks::Kind::EmitterImage, nullptr, link });
+        auto context = spawn ? spawn : std::make_shared<ParticleSpawnContext>();
+        ParticlePlacedEmitterArgs a;
+        a.emitSpeed = wpe.rate;
+        a.instantaneous = wpe.instantaneous;
+        a.one_per_frame = wpe.flags[wpscene::Emitter::FlagEnum::one_per_frame];
+        a.sort = sort;
+        a.controlpoint = wpe.controlpoint;
+        a.countMultiplier = std::move(count);
+        a.audioResponse = MakeAudioResponse(wpe, audio_spectrum);
+        a.timing = TimingOf(wpe);
+        a.spawn = spawn;
+        a.particle = [link, context, wpe]() -> std::optional<Particle> {
+            if (! link->source || link->source->samples.empty()) return std::nullopt;
+            const auto& source = *link->source;
+            const auto at = Random::get<std::size_t>(0, source.samples.size() - 1);
+            const auto& sample = source.samples[at];
+            Vec3d offset = Vec3d::Zero();
+            if (wpe.flags[wpscene::Emitter::FlagEnum::image_offsets]) {
+                for (int axis = 0; axis < 3; ++axis)
+                    offset[axis] = Lerp(wpe.offsetmin[axis], wpe.offsetmax[axis], Random::get(0.0, 1.0));
+            }
+            const Vec3d local = source.LocalPosition(sample, offset);
+            const Vec3d world = TransformPoint(source.world, local);
+            Particle particle;
+            PM::MoveTo(particle, TransformPoint(context->scene_to_local, world));
+            if (wpe.flags[wpscene::Emitter::FlagEnum::image_colour]) {
+                PM::InitColor(particle, sample.colour[0] / 255.0, sample.colour[1] / 255.0,
+                               sample.colour[2] / 255.0);
+            }
+            const double frame_time = context->scene_frame_time > 0.0 ? context->scene_frame_time : context->frame_time;
+            if (wpe.flags[wpscene::Emitter::FlagEnum::image_motion] && frame_time > 0.0) {
+                const Vec3d motion = (world - TransformPoint(source.previous_world, local)) / frame_time;
+                PM::InitVelocity(particle, context->scene_to_local.topLeftCorner<3, 3>() * motion *
+                                          Lerp(wpe.speedmin, wpe.speedmax, Random::get(0.0, 1.0)));
+            }
+            return particle;
+        };
+        auto emitter = ParticlePlacedEmitterArgs::MakeEmittOp(std::move(a));
+        return [emitter = std::move(emitter), link, context,
+                refresh = wpe.flags[wpscene::Emitter::FlagEnum::image_refresh]]
+            (std::vector<Particle>& particles, std::vector<ParticleInitOp>& initializers,
+             uint32_t maxcount, double dt, std::span<const ParticleControlpoint> points) mutable {
+            if (link->source) link->source->Prepare(context->layer_time, refresh);
+            emitter(particles, initializers, maxcount, dt, points);
+        };
+    }
+    // Other unrecognised records are inert.
     LogInertOnce("emitter", wpe.name);
     return [](std::vector<Particle>&, std::vector<ParticleInitOp>&, uint32_t, double,
               std::span<const ParticleControlpoint>) {};

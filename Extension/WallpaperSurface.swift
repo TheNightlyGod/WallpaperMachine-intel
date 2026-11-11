@@ -140,12 +140,14 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
     layer = metal
     CATransaction.flush()
     frameObserver = NotificationCenter.default.addObserver(
-      forName: .init("WallpaperMachine.desktopPosterReady"), object: metal, queue: .main
+      forName: DesktopPosterNotification.ready, object: metal, queue: .main
     ) { [weak self] notification in
       MainActor.assumeIsolated { self?.receive(notification) }
     }
     try check(owe_scene_wallpaper_new(&renderer))
     try check(owe_scene_wallpaper_init(renderer))
+    // Lock-screen output stays SDR; the saved HDR processing quality is preserved.
+    try check(owe_scene_wallpaper_set_display_hdr_output_allowed(renderer, false))
     try check(
       owe_scene_wallpaper_init_metal(
         renderer, Unmanaged.passUnretained(metal).toOpaque(), UInt32(metal.drawableSize.width),
@@ -154,6 +156,18 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
     try check(
       owe_scene_wallpaper_set_property_bool(
         renderer, owe_property_audio_response_enabled(), false))
+    // The scripts' localStorage as published with this revision, read-only (plan decision I3).
+    if let path = scene.sceneStoragePath, let key = scene.sceneStorageScreenKey {
+      let storage = try WallpaperRuntime.asset(path)
+      try check(owe_scene_wallpaper_set_storage(renderer, storage.path, key, true))
+    }
+    // The saved scene quality and Wallpaper Engine options, in force for the first frame.
+    if let quality = scene.sceneQuality, let renderer {
+      try check(SceneEngineOptionsBinding.apply(quality, to: renderer))
+    }
+    if let options = scene.engineOptions, let renderer {
+      try check(SceneEngineOptionsBinding.apply(options, to: renderer))
+    }
     try check(
       owe_scene_wallpaper_apply_config(
         renderer, project.path, assets.path, cache.path, scene.fps, false, 1, true, false,
@@ -364,15 +378,18 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
     let mode = NativeVideoScalingMode(rendererValue: scene.scalingMode) ?? .fill
     let pan = NativeVideoLayout.Pan(x: framing.panX, y: framing.panY)
     let player: LockScreenVideoPlaying
+    let options = scene.engineOptions ?? .identity
+    let lut = scene.lutFile.flatMap { try? WallpaperRuntime.asset($0) }.flatMap(VideoLutLoader.load)
+    let border = scene.borderCGColor
     switch path {
     case .avFoundation(let url):
       player = LockScreenVideoPlayer(
         url: url, mode: mode, factor: scene.scalingFactor, pan: pan, viewport: size,
-        backingScale: self.scale)
+        backingScale: self.scale, options: options, lut: lut, borderColor: border)
     case .webM(_, let file):
       player = LockScreenWebMPlayer(
         file: file, mode: mode, factor: scene.scalingFactor, pan: pan, viewport: size,
-        backingScale: self.scale)
+        backingScale: self.scale, options: options, lut: lut, borderColor: border)
     case .unplayable(let reason):
       return .unplayable(reason: reason)
     }
@@ -425,18 +442,14 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
   private func requestFrame() {
     if let layer {
       NotificationCenter.default.post(
-        name: .init("WallpaperMachine.requestDesktopPoster"), object: layer)
+        name: DesktopPosterNotification.request, object: layer)
     }
   }
 
   private func receive(_ notification: Notification) {
-    guard !stopped, let data = notification.userInfo?["pixels"] as? Data,
-      let width = notification.userInfo?["width"] as? Int,
-      let height = notification.userInfo?["height"] as? Int,
-      let bgra = notification.userInfo?["bgra"] as? Bool
-    else { return }
+    guard !stopped, let frame = DesktopPosterFrame(userInfo: notification.userInfo) else { return }
     do {
-      let snapshot = try Self.snapshot(data, width: width, height: height, bgra: bgra)
+      let snapshot = try Self.snapshot(frame.pixels, width: frame.width, height: frame.height, bgra: frame.bgra)
       try LockScreenFrameBacking.install(snapshot, on: root)
       latestSnapshot = snapshot
       contentFrameReady()
@@ -485,7 +498,11 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
       projectURL: project.deletingLastPathComponent(), entryFile: entry,
       readAccessURL: project.deletingLastPathComponent(),
       size: size, scale: scale, propertiesJSON: scene.propertiesJSON ?? "{}", fps: scene.fps,
-      paused: !WallpaperPresentationAuthority.suspensionReasons(for: authorityRequest).isEmpty)
+      // The page renders its readiness frame live, as a scene or a clip does; `applyPolicy`
+      // pauses it after that frame. Created paused it would hold its first frame while this
+      // surface counted it as playing, and the settling desktop and a lock in its first
+      // seconds would never resume it.
+      paused: rendererPaused)
     web = page
     firstFrameReply = completion
     page.onFrame = { [weak self] image in
@@ -573,8 +590,9 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
     }
     if let web {
       do {
+        // The page keeps the state this surface tracks; `applyPolicy` below changes both together.
         try web.update(propertiesJSON: scene.propertiesJSON ?? "{}", fps: scene.fps,
-          paused: !WallpaperPresentationAuthority.suspensionReasons(for: authorityRequest).isEmpty)
+          paused: rendererPaused)
       } catch {
         contentError = error
         web.stop()
@@ -590,20 +608,18 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
   /// window happens to stay open.
   private var authorityRequest: WallpaperPresentationAuthority.Request {
     // Native desktop holds a frame once it has settled; the ordinary desktop renderer remains live.
-    let locked =
-      (CGSessionCopyCurrentDictionary() as? [String: Any])?["CGSSessionScreenIsLocked"] as? Bool
-      ?? false
+    let session = WallpaperPresentationAuthority.SessionState.current()
     return WallpaperPresentationAuthority.Request(
       role: preview ? .preview : .lockScreen,
       userPaused: scene.paused,
       displaysAsleep: WallpaperController.shared.displayPower.displaysAsleep(for: displayID),
-      sessionLocked: locked,
+      sessionLocked: session.locked,
+      sessionOnConsole: session.onConsole,
       presentationMode: presentation,
       hostActivity: activity == "suspended" ? .suspended : .active,
       presentedFor: presentingSince.map { ContinuousClock.now - $0 },
       continuousPreviewRequested: continuousPreviewRequested,
-      lockScreenEnabled: scene.webEntryFile == nil
-        && (WallpaperController.shared.configuration?.lockScreenEnabled ?? false),
+      lockScreenEnabled: WallpaperController.shared.configuration?.lockScreenEnabled ?? false,
       screenSaverEnabled: WallpaperController.shared.configuration?.screenSaverEnabled ?? false)
   }
 
@@ -633,7 +649,7 @@ final class WallpaperSurface: LockScreenSurfaceLifecycle {
       if shouldPause, video != nil { refreshVideoFrame() }
       counters.record(shouldPause ? .presentationSuspended : .presentationAuthorized, for: surfaceKey)
       WallpaperRuntime.log(
-        "Playback display=\(scene.displayID) mode=\(presentation) activity=\(activity) locked=\(request.sessionLocked) paused=\(shouldPause) reasons=\(reasons.rawValue)"
+        "Playback display=\(scene.displayID) mode=\(presentation) activity=\(activity) locked=\(request.sessionLocked) console=\(request.sessionOnConsole) paused=\(shouldPause) reasons=\(reasons.rawValue)"
       )
     } catch { WallpaperRuntime.log(error.localizedDescription) }
   }

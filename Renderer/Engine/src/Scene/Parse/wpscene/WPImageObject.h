@@ -33,6 +33,8 @@ public:
     i32 afterpos { 0 };
 };
 
+/// One `fbos` entry of an effect file (Wallpaper Engine 2.8.0.42 `sub_1401E7170`): an entry
+/// without a `name` and a `format` string is not a buffer.
 class WPEffectFbo {
 public:
     bool        FromJson(const nlohmann::json&);
@@ -43,14 +45,42 @@ public:
     uint32_t    width { 0 };
     uint32_t    height { 0 };
     uint32_t    fit { 0 };
+    /// `unique`: a buffer of this effect instance alone. Without it every effect of the scene
+    /// that declares the same name at the same size and scale reads and writes one buffer
+    /// (`sub_1401EA500`).
+    bool                 unique { false };
+    /// `uvs: "repeat"`: sampled with wrapping instead of clamping.
+    bool                 repeat { false };
+    /// `clear`: an empty string or four numbers; the buffer is cleared to `clear_color` when it
+    /// is made (and remade), and by the effect's functions. One to three numbers set the colour
+    /// a function clears to without the clear at creation, as Wallpaper Engine reads them.
+    bool                 clear { false };
+    std::array<float, 4> clear_color { 0.0f, 0.0f, 0.0f, 0.0f };
 };
+
+/// One `functions` entry of an effect file that a script runs with
+/// `executeMaterialFunction(name)`: Wallpaper Engine keeps only `"action": "clear"`, with the
+/// positions in `fbos` of the buffers it names (`sub_1401E7170`).
+struct WPEffectFunction {
+    std::string           name;
+    std::vector<uint32_t> fbos;
+};
+
+/// Whether an effect file's `conditions` hold over the effect instance's `combos`
+/// (`sub_1401E63B0`): every object of the array must hold, each of its keys compares the
+/// combo (0 when missing) with a number, or with `{"value", "op": ge|gt|le|lt}` (anything else
+/// is equality). Not an array holds.
+bool EffectConditionsHold(const nlohmann::json& conditions, const nlohmann::json* combos);
 
 class WPImageEffect {
 public:
     bool                         FromJson(const nlohmann::json&, fs::VFS& vfs);
-    bool                         FromFileJson(const nlohmann::json&, fs::VFS& vfs);
+    /// `combos` is the instance's own `combos` object, which the file's `conditions` read.
+    bool                         FromFileJson(const nlohmann::json&, fs::VFS& vfs,
+                                              const nlohmann::json* combos = nullptr);
     int32_t                      id { 0 };
     std::string                  name;
+    std::string                  instance_name;
     bool                         visible { true };
     /// `visible` as written when a user property or a script decides it:
     /// `visible` above is then only the editor's default. A property's current
@@ -60,15 +90,21 @@ public:
     bool                         scripted_visible { false };
     int32_t                      version { 0 };
     std::vector<WPMaterial>      materials;
+    std::vector<std::string>     material_paths;
     std::vector<WPMaterialPass>  passes;
     std::vector<WPEffectCommand> commands;
     std::vector<WPEffectFbo>     fbos;
+    std::vector<WPEffectFunction> functions;
+    /// The position in the file's `passes` of each entry of `materials`: the instance's
+    /// `passes` entry of that position overrides it.
+    std::vector<std::size_t>     material_entries;
 };
 
 class WPImageObject {
 public:
     struct Config {
         bool passthrough { false };
+        bool model_passthrough { false };
     };
 
     bool FromJson(const nlohmann::json&, fs::VFS&);
@@ -94,6 +130,8 @@ public:
     float                      brightness { 1.0f };
     bool                       fullscreen { false };
     bool                       nopadding { false };
+    // The model's `instanced` flag (Wallpaper Engine `sub_1401FAC50`, layer flag 0x800).
+    bool                       instanced { false };
     // How the layer's texture (`_rt_imageLayerComposite_<id>`) is addressed
     // outside 0..1. Unspecified keeps the historical clamp.
     bool                       clampuvs { true };
@@ -103,6 +141,9 @@ public:
     // effects run through and the composite other layers read), as a texture
     // whose header asks for it is sampled. Off by default.
     bool                       nointerpolation { false };
+    // Script-visible members kept for their readers (an LED source, the shadow caster pass).
+    bool                       ledsource { false };
+    bool                       castshadow { false };
     // Cursor targeting: `solid` layers are hit-tested, on by default, and a layer
     // with `disablepropagation` hides the layers behind it from the cursor where
     // it is under it.

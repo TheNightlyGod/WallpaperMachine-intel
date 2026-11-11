@@ -117,6 +117,37 @@ TEST(HiddenLayerRetention, AHiddenImageNobodyDependsOnIsDropped)
     EXPECT_NE(FindRootChild(*scene, "bystander"), nullptr);
 }
 
+// A script that looks layers up by id reaches a hidden one through a number it holds, even
+// one read from its own data (issue #127); an id no script writes is still dropped.
+TEST(HiddenLayerRetention, AHiddenImageIsKeptWhenAScriptLooksItUpById)
+{
+    ParseRig   rig(BasicAssets());
+    const Json script = { { "value", true },
+                          { "script", "const config={\"ids\":[159]};\n"
+                                      "export function init(){config.ids.forEach(id=>thisScene.getLayerByID(String(id)));}\n"
+                                      "export function update(value){return value;}" } };
+    auto scene = rig.Parse(QuietScene(Json::array({ ImageLayer(159, "named", { { "visible", false } }),
+                                                    ImageLayer(1590, "unnamed", { { "visible", false } }),
+                                                    ImageLayer(160, "controller", { { "visible", script } }) })));
+    ASSERT_NE(scene, nullptr);
+    SceneNode* named = FindRootChild(*scene, "named");
+    ASSERT_NE(named, nullptr);
+    EXPECT_FALSE(named->Visible());
+    EXPECT_NE(named->Mesh(), nullptr);
+    EXPECT_EQ(FindRootChild(*scene, "unnamed"), nullptr);
+}
+
+TEST(HiddenLayerRetention, ANumberInAScriptThatNeverLooksUpByIdKeepsNothing)
+{
+    ParseRig   rig(BasicAssets());
+    const Json script = { { "value", true },
+                          { "script", "const delay=159;\nexport function update(value){return value;}" } };
+    auto scene = rig.Parse(QuietScene(Json::array({ ImageLayer(159, "loner", { { "visible", false } }),
+                                                    ImageLayer(160, "controller", { { "visible", script } }) })));
+    ASSERT_NE(scene, nullptr);
+    EXPECT_EQ(FindRootChild(*scene, "loner"), nullptr);
+}
+
 // ---- children of group-like parents ------------------------------------------------------------
 
 // R-2.17 / B-2.14

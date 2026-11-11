@@ -7,7 +7,9 @@ capture  serves the wallpapers to a worker inside the VM, which opens each one i
          and 15 s after opening. The VM's background poller starts the worker
          (install it once with the line `capture` prints), or run the worker line.
 render   draws the same wallpapers with Native Metal at the screenshots' size, scene
-         time and time of day (`metal_scene_draw_smoke`'s renderer comparison, Native Metal only).
+         time and time of day (`metal_scene_draw_smoke`'s renderer comparison, Native Metal only);
+         web pages in the app's own page host at the screenshots' size and moment
+         (`WebWallpaperReferenceRenderTests` through scripts/test.py), with their performance.
 compare  writes side-by-side sheets (Wallpaper Engine | each render | difference to the
          last render) cropped to the Windows work area, and coarse metrics.
 fetch    downloads Workshop items into a task folder with the app's SteamCMD and saved
@@ -526,20 +528,80 @@ def reference_tz(opened_ms: int, now: float, gmtoff: int) -> str:
     return f"REF{'-' if west < 0 else '+'}{hours}:{rest // 60:02d}:{rest % 60:02d}"
 
 
+def web_properties(project: dict) -> str:
+    """The `applyUserProperties` payload of a project's own values, `{ id: { value, type } }`,
+    as the desktop host first delivers it with no saved edits."""
+    properties = (project.get("general") or {}).get("properties") or {}
+    payload = {key: {"value": entry.get("value"), "type": entry.get("type")}
+               for key, entry in properties.items() if isinstance(entry, dict) and "value" in entry}
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def web_job(folder: Path, project: dict, meta: dict, out: Path) -> dict:
+    """One job of `WebWallpaperReferenceRenderTests`: the page at the shots' pixel size,
+    snapshotted at each shot's moment after loading."""
+    width, height = meta.get("screen", (1920, 1080))
+    return {
+        "name": folder.name, "project": str(folder), "entry": project.get("file") or "index.html",
+        "pixels": [width, height], "properties": web_properties(project),
+        "shots": [{"at": seconds, "out": str(out / f"{folder.name}-{k}.png")}
+                  for k, seconds in enumerate(scene_times(meta))],
+        "report": str(out / f"{folder.name}.json"),
+    }
+
+
+def render_web(jobs: list[dict], out: Path) -> int:
+    """Draws web wallpapers in the app's own page host (the opt-in test
+    `WebWallpaperReferenceRenderTests`, run inside the test host, never on the desktop)."""
+    if not jobs:
+        return 0
+    job_file = out / "web-jobs.json"
+    job_file.write_text(json.dumps({"jobs": jobs}, indent=1, ensure_ascii=False) + "\n")
+    env = dict(os.environ, WALLPAPER_MACHINE_WEB_REFERENCE=str(job_file.resolve()))
+    result = subprocess.run([sys.executable, str(Path(__file__).with_name("test.py")),
+                             "--only", "WebWallpaperReferenceRenderTests"], env=env)
+    status = 0 if result.returncode == 0 else 1
+    for job in jobs:
+        for shot in job["shots"]:
+            picture = Path(shot["out"])
+            if picture.exists():
+                print(f"{MARK.ok} {picture.stem}: web page at {shot['at']:g} s -> {picture}")
+            else:
+                print(f"{MARK.missing} {picture.stem}: no picture; see the test log above")
+                status = 1
+        report = Path(job["report"])
+        if report.exists():
+            data = json.loads(report.read_text())
+            page, perf = data.get("page", {}), data.get("performance", {})
+            print(f"  {job['name']}: viewport {page.get('innerWidth')}x{page.get('innerHeight')} "
+                  f"at {page.get('devicePixelRatio')}x, {len(page.get('errors', []))} page error(s), "
+                  f"WebContent {perf.get('webcontent_cpu', 0):.0%} CPU, GPU process {perf.get('gpu_process_cpu', 0):.0%} CPU, "
+                  f"GPU {perf.get('gpu_utilization', -1):.0%} busy, "
+                  f"{perf.get('raf_per_second', 0):.0f} frames/s, {perf.get('webcontent_footprint_mb', 0):.0f} MB "
+                  f"(peak {perf.get('webcontent_footprint_peak_mb', 0):.0f} MB)")
+    return status
+
+
 def render(args) -> int:
-    if not args.binary.is_file():
-        print(f"{MARK.missing} {args.binary} is missing; `python3 scripts/check_renderer.py` builds it")
-        return 1
     out = args.out / args.label
     out.mkdir(parents=True, exist_ok=True)
     status = 0
+    scenes, web = [], []
     for wallpaper in args.wallpapers:
         folder = resolve(wallpaper)
         meta = shot_meta(args.shots, folder.name)
         project = json.loads((folder / "project.json").read_text(encoding="utf-8-sig"))
-        if str(project.get("type", "")).lower() != "scene":
-            print(f"{MARK.warn} {folder.name}: a {project.get('type')} wallpaper, not a scene; skipped")
-            continue
+        kind = str(project.get("type", "")).lower()
+        if kind == "web":
+            web.append(web_job(folder, project, meta, out))
+        elif kind == "scene":
+            scenes.append((folder, meta))
+        else:
+            print(f"{MARK.warn} {folder.name}: a {project.get('type')} wallpaper, neither a scene nor a web page; skipped")
+    if scenes and not args.binary.is_file():
+        print(f"{MARK.missing} {args.binary} is missing; `python3 scripts/check_renderer.py` builds it")
+        return 1
+    for folder, meta in scenes:
         width, height = meta.get("screen", (1920, 1080))
         for k, seconds in enumerate(scene_times(meta)):
             work = Path(tempfile.mkdtemp(prefix=f"{folder.name}-{k}-", dir=out))
@@ -566,7 +628,7 @@ def render(args) -> int:
                 print(f"{MARK.missing} {folder.name}-{k}: no picture at {seconds:g} s; see {log}")
                 status = 1
             shutil.rmtree(work, ignore_errors=True)
-    return status
+    return max(status, render_web(web, out))
 
 
 def read_bmp(data: bytes) -> tuple[int, int, bytes]:

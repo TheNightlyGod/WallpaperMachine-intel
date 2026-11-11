@@ -110,13 +110,17 @@ fn write_expr(out: &mut String, e: &Expr, min: u8) {
             }
         }
         ExprKind::Call(callee, args) => {
+            let cast = matches!(callee, Callee::Cast(_));
+            if cast { out.push_str("(("); }
             match callee {
                 Callee::Name(n) => out.push_str(n),
-                Callee::Type(t) => write_type(out, t),
+                Callee::Type(t) | Callee::Cast(t) => write_type(out, t),
             }
+            if cast { out.push(')'); }
             out.push('(');
             write_list(out, args);
             out.push(')');
+            if cast { out.push(')'); }
         }
         ExprKind::Index(base, idx) => {
             write_expr(out, base, 16);

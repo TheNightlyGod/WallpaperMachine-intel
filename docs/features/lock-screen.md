@@ -8,7 +8,7 @@ what the user gets and the rules that keep the two native modes consistent.
 
 ## Enabling it
 
-Apply a video or live scene to a display, then enable **Settings → Desktop & Lock Screen →
+Apply a scene, video, web or still wallpaper to a display, then enable **Settings → Desktop & Lock Screen →
 Animate lock screen**, or the same switch on the welcome guide's Preferences page
 (it applies at once there too; the guide's **Skip** turns it back to what it was
 when the guide opened). A status row next to the Settings switch reports the
@@ -43,11 +43,15 @@ unchanged. A newly acquired surface or a changed wallpaper still needs an initia
 load, macOS can show its own cached snapshot before it presents the extension, and
 real lock/wake timing is OS-controlled.
 
-Whether the display is asleep and whether the session is locked are read from the
-system each time a surface decides, not remembered from a notification. A surface asks
-about its own display, so one monitor sleeping does not pause the surface on another,
-and a surface acquired while the displays sleep pauses as soon as its first frame
-exists. Display sleep and wake, system sleep and wake, lock, unlock and the wallpaper
+Whether the display is asleep, whether the session is locked and whether it is on the
+console are read from the system each time a surface decides, not remembered from a
+notification. A surface asks about its own display, so one monitor sleeping does not pause
+the surface on another, and a surface acquired while the displays sleep pauses as soon as
+its first frame exists. A session that fast user switching moved off the screens
+(`kCGSessionOnConsoleKey` false; a missing key counts as on the console) has no lock
+screen, screen saver or desktop picture on any of them, so its surfaces pause even when the
+session also reads as locked, and play again once it is back. Display sleep and wake,
+system sleep and wake, lock, unlock, a session switched away or back and the wallpaper
 service's wake notice only start a re-check: at once, and again 0.25, 0.75 and 2
 seconds later, because displays, the session and the video decoder do not all come
 back at the same moment. A notification that arrives early, late or not at all
@@ -111,7 +115,11 @@ video project as `plainVideo` and, when it finds the clip, its file as `nativeVi
 inside the project, only for a regular file that lies in it; a scene, a web page, a missing file
 or a configuration an older app wrote has none, and a copy of the extension that predates the
 keys ignores them). The extension plays the clip in an AVFoundation layer in its own layer
-tree, decoded in hardware. The configuration version is unchanged.
+tree, decoded in hardware. The configuration version is unchanged. An HEVC clip tagged `hev1`
+whose sample descriptions carry the parameter sets is staged retagged `hvc1`, the same repair the
+desktop plays ([performance](performance.md#hevc-tagged-hev1)): the tag is written on the
+project's copy in the exchange folder, never on the library's file, and such a revision has a
+fingerprint of its own, so one staged before the repair is not reused.
 
 The players take a clip only where the desktop's do: it is judged by the same
 admission rule (`NativeVideoAdmission`, compiled into both targets), which is about the file
@@ -263,8 +271,28 @@ Web and still wallpapers use a live WebKit layer tree, not a recorded video or a
 periodic screenshot. Only their staged project and referenced imports are granted file
 access. Audio, media integration, camera/microphone/display capture, interaction and
 author dialogs are disabled. Pause freezes page execution and retains the compositor
-tree; it does not resume playback the user paused. Web projects remain unsupported for
-**Animate lock screen**; that combination is reported as not applicable.
+tree; it does not resume playback the user paused. **Animate lock screen** takes them like
+a scene: the page loads and draws its first frame live, settles as the desktop picture,
+then holds a frame and runs again while the Mac is locked. The page's paused state is the
+one the surface tracks: a page loaded paused while the surface counted it as playing kept
+its first frame (often black or grey) through the settling and through a lock in its first
+seconds. A page with an audio listener hears silence (128 zeros) once a second while it
+plays, the desktop's spacing for a quiet stretch: Wallpaper Engine keeps calling the listener
+through silence, and a visualiser that starts its idle animation only after the first call
+otherwise never moves. Its `requestAnimationFrame` is held to the published frame rate,
+as on the desktop ([frame-rate limit](web-wallpapers.md#frame-rate-limit)), so a 30 fps
+cap or the reduced rate on battery applies here too instead of WebKit's cadence near 60.
+The page's scheduling window is never ordered on screen: the native host displays its
+exported layer tree. Where WebKit exposes window-occlusion control, the page ignores
+that hidden window and follows the host's explicit pause and resume instead, as a
+desktop web wallpaper does. The scheduling window must not throttle a visible exported page.
+The page is laid out in the display's device pixels as on the desktop
+([device-pixel layout](web-wallpapers.md#device-pixel-layout)), so it keeps its layout when the
+Mac locks. Pausing or resuming waits on the page itself for at most
+5 seconds (its properties, its media, the held frame) and then goes on without it: a heavy
+page can take longer to rebuild after a resume, especially when its WebKit process has
+reached its memory limit, and that is not a failure. Only WebKit not suspending or
+resuming the page within 15 seconds is, and it is reported like any other surface error.
 
 ## Caveats
 
@@ -503,7 +531,10 @@ monitoring the retained screen saver, and those checks never restart the failed
 lock-screen attempt; disabling the screen saver in that state stops the monitor until
 either mode is explicitly reactivated. A pending display-identity lookup does not
 clear an error and does not by itself start the monitor; with no error, the same timer
-retries an unchanged scene set when the identity resolves.
+retries an unchanged scene set when the identity resolves. Whether the Mac is locked,
+switched away from or dark (`displaysAreAway`, a window-server round trip) is asked only
+when a committed display is missing from the scenes, so the steady ticks that find every
+display still named do not ask it.
 
 A library refresh, explicit wallpaper reload or managed-asset change invalidates the
 content check even when project paths and options stayed identical. The publisher
@@ -533,7 +564,23 @@ renderer again, and waits for its first frame. A process macOS started in its pl
 that has already drawn the committed revision is watched instead. More than three
 exits within ten minutes restore the system wallpaper with "The lock-screen renderer
 stopped repeatedly" and **Retry**. An extension copy older than the field is not
-watched.
+watched. Publishing a new revision (applying another wallpaper, or one of these
+recoveries) reloads WallpaperAgent, which ends the processes that drew the old one, so
+the app stops watching them before it publishes. It also remembers their process IDs:
+an old process can draw and acknowledge the new manifest before the asynchronous reload
+ends it. That acknowledgement cannot confirm the replacement or re-arm the old process's
+exit watch, even when another refresh interrupts the readiness wait. Only a replacement
+process confirms the new revision, so our own reload does not start another recovery.
+
+While the Mac is unlocked, macOS also closes every connection to a renderer that is
+drawing nothing wrong and then ends its process, sometimes a few times within minutes.
+Once its last connection closes, the extension leaves an empty `released-<pid>` file in
+the exchange directory, and removes it when a host connects again. An exit that follows
+one is published again like any other but is not counted towards the limit, so a few
+of them cannot hand the lock screen back to macOS. The file shows the disconnection,
+not why the process then ended, so these exits have a limit of their own: past ten
+within ten minutes, each counts like any other exit. The app removes the file of the process that
+ended and any left by processes that are gone.
 
 Repeated checks do not rewrite an unchanged recovery journal. New Spaces, choices made
 in System Settings and wallpaper-service reloads all rewrite the system wallpaper
@@ -602,8 +649,9 @@ grep 'Re-checking presentation\|Playback display' ~/Library/Application\ Support
 ```
 
 `Re-checking presentation (display wake) surfaces=1` names the cause (`display sleep`,
-`display wake`, `system sleep`, `system wake`, `screen locked`, `screen unlocked` or
-`wallpaper service wake`). The `Playback ... paused=` line after it should match the real
+`display wake`, `system sleep`, `system wake`, `session switched away`, `session active`,
+`screen locked`, `screen unlocked` or `wallpaper service wake`); the `Playback` line
+carries `console=false` while another session has the screens. The `Playback ... paused=` line after it should match the real
 display state, including after a wake for which no `display wake` line appears.
 
 ### After a macOS update

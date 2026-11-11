@@ -165,7 +165,17 @@ pub(super) fn build_configured_scene(
     .media_integration_enabled(wallpaper.media_integration_enabled)
     .audio_volume(f32::from(volume))
     .audio_muted(wallpaper.audio.muted)
-    .force_shader_refresh(inputs.force_shader_refresh);
+    .force_shader_refresh(inputs.force_shader_refresh)
+    .quality(inputs.app_config.quality.scene.to_scene())
+    .scene_storage_dir(
+        inputs
+            .paths
+            .scene_storage_dir(wallpaper_id)
+            .to_string_lossy()
+            .into_owned(),
+    )
+    // Wallpaper Engine's per-wallpaper options, as saved for this wallpaper.
+    .user_options(wallpaper.engine_options.to_scene());
     if let Some(properties) = properties {
         builder = builder.property_override_json(properties);
     }
@@ -276,6 +286,7 @@ mod tests {
                 project_models: &self.models,
                 frame_rate_cap: None,
                 audio_suppressed: false,
+                audio_gain: crate::engine::AudioGain::UNITY,
                 held: &self.held,
             }
         }
@@ -1273,6 +1284,17 @@ mod tests {
         assert_eq!(scene.assets_path, source.assets_path);
         assert_eq!(scene.shader_cache_path, source.shader_cache_path);
         assert_eq!(scene.property_override_json, source.property_override_json);
+        assert_eq!(
+            source.scene_storage_dir.as_deref(),
+            Some(inputs.paths.scene_storage_dir("loaded").to_string_lossy().as_ref()),
+            "a scene keeps its scripts' storage in its wallpaper's folder"
+        );
+        assert_eq!(scene.scene_storage_dir, source.scene_storage_dir, "a mirror shares the folder");
+        assert_ne!(
+            scene.display.identity.storage_key(scene.display.display_id),
+            source.display.identity.storage_key(source.display.display_id),
+            "a mirror keeps its own display's screen file"
+        );
         assert_eq!(scene.audio_response_enabled, source.audio_response_enabled);
         assert_eq!(
             scene.media_integration_enabled,

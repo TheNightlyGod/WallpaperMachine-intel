@@ -205,7 +205,7 @@ fn sweep(files: &[(String, StageKind, String)], includes: &Layered, skip: impl F
                     }
                 };
                 // converting the output again changes nothing (R95)
-                match convert_stage(kind, &converted.text) {
+                match crate::dialect::convert_stage_with(kind, &converted.text, crate::dialect::ConvertOptions { glsl_builtins: true, ..Default::default() }) {
                     Ok(again) if again.text == converted.text => {}
                     Ok(again) => {
                         let first_diff = converted.text.lines().zip(again.text.lines()).find(|(a, b)| a != b).map(|(a, b)| format!("{a}  =>  {b}")).unwrap_or_default();
@@ -259,7 +259,7 @@ fn shipped_shaders_convert_and_compile_through_naga() {
     let files = shader_files(&root);
     let includes = Layered { dirs: vec![root.clone()] };
     // `HLSL/` holds real Direct3D programs for another path; the volumetric shader is out of scope (R22).
-    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/") || n.starts_with("volumetricsfront"));
+    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/"));
     report("shipped shaders", &s);
     // One shipped file reads a uniform no shipped file declares (`g_Texture1Texel` in the
     // shadow-caster vertex stage of the foliage model); nothing can translate it.

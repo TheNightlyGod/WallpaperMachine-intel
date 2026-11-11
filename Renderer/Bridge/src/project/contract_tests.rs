@@ -565,6 +565,32 @@ fn color_recognition_rounds_before_range_checks() {
 }
 
 #[test]
+fn authored_paths_of_file_and_directory_properties_are_no_default() {
+    // A path in project.json is the author's (or a Workshop preset's), never a pick of the
+    // user's: staging it would copy the user's own folder for the page to read. Absolute or
+    // relative, it is not the property's default.
+    let model = parse_properties(
+        r#"{"photos":{"type":"directory","mode":"fetchall","value":"/Users/someone/Pictures"},"cover":{"type":"file","value":"/Users/someone/Pictures/a.png"},"relative":{"type":"directory","value":"Users/someone/Movies"},"veil":{"type":"texture","value":"materials/veil.png"}}"#,
+    );
+    let none = BTreeMap::new();
+    for id in ["photos", "cover", "relative"] {
+        let property = property(&model, id);
+        assert_eq!(property.default_value, PropertyValue::String(String::new()), "{id}");
+        assert_eq!(property.effective_value(&none), PropertyValue::String(String::new()), "{id}");
+        // The user choosing that same path is a choice, kept as an override.
+        let picked = PropertyValue::String("/Users/someone/Pictures".to_owned());
+        assert!(!property.value_is_default(&picked), "{id}");
+        let overrides = BTreeMap::from([(id.to_owned(), picked.clone())]);
+        assert_eq!(property.effective_value(&overrides), picked, "{id}");
+    }
+    // A texture's authored value names a picture in the package, and stays its default.
+    assert_eq!(
+        property(&model, "veil").default_value,
+        PropertyValue::String("materials/veil.png".to_owned())
+    );
+}
+
+#[test]
 fn raw_defaults_and_kind_normalization_are_distinct() {
     let model = parse_properties(
         r#"{"combo":{"type":"combo","value":" 0.100000001 0.2 1 "},"input":{"type":"textinput","value":" 0.100000001 0.2 1 "},"file":{"type":"file"},"directory":{"type":"directory","value":null},"texture":{"type":"texture","value":null},"slider":{"type":"slider","value":2},"bool":{"type":"bool","value":true},"color":{"type":"color","value":"0 0.5 1"},"text":{"type":"text","value":"0 0.5 1"},"group":{"type":"group","value":false},"unknown":{"value":[1,2]},"missing":{"type":"bool"}}"#,
@@ -611,12 +637,16 @@ fn raw_defaults_and_kind_normalization_are_distinct() {
         property(&model, "missing").default_value,
         PropertyValue::Null
     );
-    for name in ["combo", "textinput", "file", "directory", "texture"] {
+    for name in ["combo", "textinput", "texture"] {
         let model = parse_properties(&json!({"v":{"type":name,"value":false}}).to_string());
         assert_eq!(
             model.properties[0].default_value(),
             PropertyValue::String("false".to_owned())
         );
+    }
+    for name in ["file", "directory"] {
+        let model = parse_properties(&json!({"v":{"type":name,"value":false}}).to_string());
+        assert_eq!(model.properties[0].default_value(), PropertyValue::String(String::new()));
     }
 }
 

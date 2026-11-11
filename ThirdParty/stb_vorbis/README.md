@@ -9,7 +9,8 @@ Ogg Vorbis decoder by Sean Barrett, version 1.22 (2021-07-11), one C source file
 - License: public domain (Unlicense) or MIT, at the user's choice; `LICENSE` is the
   repository's license file at the same commit, and the file's own notice is at the
   end of `stb_vorbis.c`.
-- Unchanged. It is built by `Renderer/Engine/Dependencies/CMakeLists.txt` as the static library
+- Patched against the GitHub Security Lab findings upstream has not fixed: see
+  `PATCHES.md`. It is built by `Renderer/Engine/Dependencies/CMakeLists.txt` as the static library
   `stb_vorbis` with `STB_VORBIS_NO_STDIO` and `STB_VORBIS_NO_PUSHDATA_API` (the
   decoder reads from memory and uses only the pull API), and used by
   `Renderer/Sound/Vorbis/VorbisDecoder.cpp`.

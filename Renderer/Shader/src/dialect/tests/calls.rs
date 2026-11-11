@@ -46,23 +46,23 @@ fn overloads_pick_the_matching_shape() {
 #[test]
 fn two_overloads_with_different_shapes_make_no_guess_and_an_ambiguous_call_is_left_to_naga() {
     let decls = "float pick(float a, vec2 b) { return a + b.x; }\nfloat pick(vec2 a, float b) { return a.x + b; }";
-    let t = text(decls, "float r = pick(uf, i2); o = vec4(r);");
+    let t = text(decls, "float r = pick(uf, i2); o = CAST4(r);");
     assert!(t.contains("pick(uf, i2)"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
     // equal costs on both: naga decides, the converter adds nothing
-    let t = text("float g(float a, int b) { return a; }\nfloat g(int a, float b) { return b; }", "float r = g(1, 2); o = vec4(r);");
+    let t = text("float g(float a, int b) { return a; }\nfloat g(int a, float b) { return b; }", "float r = g(1, 2); o = CAST4(r);");
     assert!(t.contains("g(1, 2)"), "{t}");
 }
 
 #[test]
 fn conflicting_return_shapes_give_an_unknown_call_that_is_not_wrapped() {
-    let t = text("float pick(float s) { return s; }\nvec4 pick(float s) { return vec4(s); }", "vec4 v = pick(uf); o = v;");
+    let t = text("float pick(float s) { return s; }\nvec4 pick(float s) { return CAST4(s); }", "vec4 v = pick(uf); o = v;");
     assert!(!t.contains("vec4(pick(uf))") && t.contains("vec4 v = pick(uf);"), "{t}");
 }
 
 #[test]
 fn out_inout_and_array_parameters_are_never_converted() {
-    let decls = "void split(float v, out vec2 o2, inout float acc) { o2 = vec2(v); acc += v; }";
+    let decls = "void split(float v, out vec2 o2, inout float acc) { o2 = CAST2(v); acc += v; }";
     let t = text(decls, "vec2 r; float a = 1.0; split(uf, r, a); o = vec4(r, a, 1.0);");
     assert!(t.contains("split(uf, r, a)"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
@@ -104,21 +104,21 @@ fn a_prototype_lets_an_earlier_call_check_and_a_void_list_has_no_arguments() {
     assert!(t.contains("later(u4)"), "{t}");
     assert!(t.contains("vec2 b = nothing().xy;"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
-    let t = text("vec2 userVec2();\nvec2 userVec2() { return u2; }", "float k = userVec2(); o = vec4(k);");
+    let t = text("vec2 userVec2();\nvec2 userVec2() { return u2; }", "float k = userVec2(); o = CAST4(k);");
     assert!(t.contains("userVec2().x"), "{t}");
 }
 
 #[test]
 fn no_operand_is_duplicated_dropped_or_reordered() {
-    let decls = "float n = 0.0;\nfloat tick() { n += 1.0; return n; }\nvec3 vtick() { n += 1.0; return vec3(n); }";
+    let decls = "float n = 0.0;\nfloat tick() { n += 1.0; return n; }\nvec3 vtick() { n += 1.0; return CAST3(n); }";
     let body = "float a = fmod(tick(), 3.0);
 float b = tick() % 2.0;
-vec3 c = mul(vec3(tick()), um3);
-vec3 d = mix(vtick(), vec3(1.0), tick());
-vec3 e = vec3(tick());
+vec3 c = mul(CAST3(tick()), um3);
+vec3 d = mix(vtick(), CAST3(1.0), tick());
+vec3 e = CAST3(tick());
 vec4 f = u4; f += vtick().xyzx;
 vec2 g = vtick() + u4.xyz * 2.0;
-o = vec4(a + b + c.x + d.x + e.x + f.x + g.x);";
+o = CAST4(a + b + c.x + d.x + e.x + f.x + g.x);";
     let source_calls = count(&stage(decls, body), "tick(");
     let t = text(decls, body);
     assert_eq!(count(&t, "tick("), source_calls, "{t}");
@@ -130,9 +130,9 @@ o = vec4(a + b + c.x + d.x + e.x + f.x + g.x);";
 #[test]
 fn an_array_parameter_is_specialised_for_the_global_array_a_call_passes() {
     let decls = "uniform float taps[8];\nfloat pool(float v[8], float scale) { float s = 0.0; for (int i = 0; i < 8; i++) { s += v[i] * scale; } return s; }";
-    let t = legacy_text(StageKind::Fragment, &format!("{decls}\nvoid main() {{ gl_FragColor = vec4(pool(taps, 0.5)); }}"));
+    let t = legacy_text(StageKind::Fragment, &format!("{decls}\nvoid main() {{ gl_FragColor = CAST4(pool(taps, 0.5)); }}"));
     assert!(!t.contains("float v[8]") && !t.contains("pool(taps"), "{t}");
-    let c = legacy_frag(&format!("{decls}\nvoid main() {{ gl_FragColor = vec4(pool(taps, 0.5)); }}"));
+    let c = legacy_frag(&format!("{decls}\nvoid main() {{ gl_FragColor = CAST4(pool(taps, 0.5)); }}"));
     assert!(c.has_function("pool_wm1"));
 }
 
@@ -140,7 +140,7 @@ fn an_array_parameter_is_specialised_for_the_global_array_a_call_passes() {
 fn different_arrays_at_different_calls_get_a_clone_each() {
     let src = "uniform float left[8]; uniform float right[8];
 float pool(float v[8], float scale) { return v[1] * scale + v[2]; }
-void main() { gl_FragColor = vec4(pool(left, 1.0) + pool(right, 2.0) + pool(left, 3.0)); }";
+void main() { gl_FragColor = CAST4(pool(left, 1.0) + pool(right, 2.0) + pool(left, 3.0)); }";
     let c = legacy_frag(src);
     assert!(c.has_function("pool_wm1") && c.has_function("pool_wm2"));
     assert!(!c.has_function("pool_wm3"));
@@ -151,7 +151,7 @@ fn a_same_name_scalar_overload_and_other_parameters_survive() {
     let src = "uniform float taps[4];
 float pool(float s) { return s * 2.0; }
 float pool(float v[4], float scale) { return v[0] * scale; }
-void main() { gl_FragColor = vec4(pool(taps, 0.5) + pool(3.0)); }";
+void main() { gl_FragColor = CAST4(pool(taps, 0.5) + pool(3.0)); }";
     let c = legacy_frag(src);
     assert!(c.has_function("pool"), "the scalar overload stays");
     assert!(c.has_function("pool_wm1"));
@@ -161,7 +161,7 @@ void main() { gl_FragColor = vec4(pool(taps, 0.5) + pool(3.0)); }";
 fn locals_and_struct_fields_named_like_an_array_parameter_are_not_rewritten() {
     let src = "uniform float taps[4]; struct S { float v; };
 float pool(float v[4]) { S s; s.v = 2.0; float acc = v[0] + s.v; { float v = 1.5; acc += v; } return acc; }
-void main() { gl_FragColor = vec4(pool(taps)); }";
+void main() { gl_FragColor = CAST4(pool(taps)); }";
     let t = legacy_text(StageKind::Fragment, src);
     assert!(t.contains("s.v = 2.0") && t.contains("float v = 1.5;") && t.contains("acc += v;"), "{t}");
     assert!(t.contains("taps[0]") && t.contains("+ s.v"), "{t}");
@@ -172,7 +172,7 @@ void main() { gl_FragColor = vec4(pool(taps)); }";
 fn an_array_parameter_the_body_writes_is_copied_into_a_local() {
     let src = "uniform float taps[4];
 float pool(float v[4]) { v[0] = 3.0; return v[0] + v[1]; }
-void main() { gl_FragColor = vec4(pool(taps)); }";
+void main() { gl_FragColor = CAST4(pool(taps)); }";
     let t = legacy_text(StageKind::Fragment, src);
     assert!(t.contains("float v[4] = float[4](taps[0].x, taps[1].x"), "{t}");
 }

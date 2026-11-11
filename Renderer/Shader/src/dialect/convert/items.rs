@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use crate::lexer::Operator;
 
 use super::super::ast::*;
-use super::super::builtins::{RESTATED_BUILTINS, unsupported_reason};
+use super::super::builtins::RESTATED_BUILTINS;
 use super::super::ty::*;
 use super::helpers::HelperKind;
 use super::{Converter, FnInfo, ParamInfo, StructInfo, VarKind};
@@ -100,7 +100,7 @@ impl Converter {
     pub(super) fn struct_def(&mut self, mut def: StructDef) -> StructDef {
         let mut fields_info: Vec<(String, Ty, String)> = Vec::new();
         for f in def.fields.iter_mut() {
-            if let Some(reason) = unsupported_reason(&f.ty.name) {
+            if let Some(reason) = self.unsupported_type(&f.ty.name, false) {
                 let span = f.span.clone();
                 self.error(&span, format!("unsupported construct `{}`: {reason}", f.ty.name));
             }
@@ -110,6 +110,7 @@ impl Converter {
                 fields_info.push((d.name.clone(), ty, emit.clone()));
                 d.name = emit;
             }
+            Self::emit_type_alias(&mut f.ty);
         }
         let info = StructInfo { name: def.name.clone().unwrap_or_default(), fields: fields_info };
         self.structs.push(info);
@@ -129,12 +130,16 @@ impl Converter {
     fn block_decl(&mut self, mut b: BlockDecl) -> BlockDecl {
         let mut fields_info = Vec::new();
         for f in b.fields.iter_mut() {
+            if let Some(reason) = self.unsupported_type(&f.ty.name, false) {
+                self.error(&f.span.clone(), format!("unsupported construct `{}`: {reason}", f.ty.name));
+            }
             for d in f.declarators.iter_mut() {
                 let ty = self.resolve_type(&f.ty, &d.dims);
                 let emit = self.emit_name(&d.name);
                 fields_info.push((d.name.clone(), ty, emit.clone()));
                 d.name = emit;
             }
+            Self::emit_type_alias(&mut f.ty);
         }
         match &b.instance {
             Some(inst) => {
@@ -163,14 +168,14 @@ impl Converter {
             ExprKind::Binary(_, a, b) | ExprKind::Index(a, b) => self.is_constant_expr(a) && self.is_constant_expr(b),
             ExprKind::Cond(a, b, c) => self.is_constant_expr(a) && self.is_constant_expr(b) && self.is_constant_expr(c),
             ExprKind::InitList(list) => list.iter().all(|x| self.is_constant_expr(x)),
-            ExprKind::Call(Callee::Type(_), args) => args.iter().all(|x| self.is_constant_expr(x)),
+            ExprKind::Call(Callee::Type(_) | Callee::Cast(_), args) => args.iter().all(|x| self.is_constant_expr(x)),
             ExprKind::Call(Callee::Name(n), args) => self.struct_by_name.contains_key(n) && args.iter().all(|x| self.is_constant_expr(x)),
             _ => false,
         }
     }
 
     fn global_var(&mut self, mut d: VarDecl) -> Vec<Item> {
-        if let Some(reason) = unsupported_reason(&d.ty.name) {
+        if let Some(reason) = self.unsupported_type(&d.ty.name, d.has_word("uniform")) {
             let span = d.span.clone();
             self.error(&span, format!("unsupported construct `{}`: {reason}", d.ty.name));
         }
@@ -189,7 +194,6 @@ impl Converter {
             }
         }
         let is_const = d.has_word("const");
-        let is_out = d.quals.iter().any(|q| q.is_word("out"));
         let is_input = match self.kind {
             crate::request::StageKind::Vertex => d.quals.iter().any(|q| q.is_word("attribute") || q.is_word("in")),
             crate::request::StageKind::Fragment => d.quals.iter().any(|q| q.is_word("varying") || q.is_word("in")),
@@ -211,9 +215,6 @@ impl Converter {
                 let id = self.lookup(&decl.name).map(|v| v.id).unwrap_or(0);
                 self.inputs.insert(id, decl.name.clone());
             }
-            if is_out && ty == Ty::vec(4) && self.kind == crate::request::StageKind::Fragment {
-                self.color_outputs.insert(emit.clone());
-            }
             decl.name = emit.clone();
             decl.dims = self.convert_dims(std::mem::take(&mut decl.dims));
             let relocate = !interface && self.has_main && init.is_some() && !init_const;
@@ -233,6 +234,7 @@ impl Converter {
             }
         }
         d.ty.dims = self.convert_dims(std::mem::take(&mut d.ty.dims));
+        Self::emit_type_alias(&mut d.ty);
         if !relocated_any {
             d.declarators = parts.into_iter().map(|(x, _)| x).collect();
             if super::stmt::needs_split(&d) {
@@ -262,17 +264,17 @@ impl Converter {
     // ----- functions -----
 
     pub(super) fn function(&mut self, mut f: Function) -> Option<Function> {
-        if let Some(reason) = unsupported_reason(&f.ret.name) {
+        if let Some(reason) = self.unsupported_type(&f.ret.name, false) {
             let span = f.span.clone();
             self.error(&span, format!("unsupported construct `{}`: {reason}", f.ret.name));
         }
         let ret = self.resolve_type(&f.ret, &[]);
         let mut infos = Vec::with_capacity(f.params.len());
         for p in &f.params {
-            if let Some(reason) = unsupported_reason(&p.ty.name) {
+            if let Some(reason) = self.unsupported_type(&p.ty.name, false) {
                 self.error(&p.span.clone(), format!("unsupported construct `{}`: {reason}", p.ty.name));
             }
-            let ty = if p.sampler_param { Ty::Sampler(SamplerKind::D2) } else { self.resolve_type(&p.ty, &p.dims) };
+            let ty = self.resolve_type(&p.ty, &p.dims);
             infos.push(ParamInfo { ty, dir: p.dir() });
         }
         let emit = self.emit_name(&f.name);
@@ -305,12 +307,15 @@ impl Converter {
                 }
                 p.dims = self.convert_dims(std::mem::take(&mut p.dims));
             }
-            let saved = (self.cur_ret.replace(ret), self.color_source.take());
+            let saved = self.cur_ret.replace(ret);
+            let outer_temps = std::mem::take(&mut self.call_temps);
             let converted = self.block_scoped(body);
-            self.cur_ret = saved.0;
-            self.color_source = saved.1;
+            let mut with_temps: Vec<Stmt> = std::mem::take(&mut self.call_temps).into_iter().map(Stmt::Decl).collect();
+            with_temps.extend(converted);
+            self.call_temps = outer_temps;
+            self.cur_ret = saved;
             self.pop_scope();
-            f.body = Some(converted);
+            f.body = Some(with_temps);
         } else {
             for p in f.params.iter_mut() {
                 if let Some(name) = &p.name {
@@ -318,6 +323,8 @@ impl Converter {
                 }
             }
         }
+        Self::emit_type_alias(&mut f.ret);
+        for p in &mut f.params { Self::emit_type_alias(&mut p.ty); }
         Some(f)
     }
 }

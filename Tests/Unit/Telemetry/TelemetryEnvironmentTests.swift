@@ -3,7 +3,7 @@ import XCTest
 
 @testable import WallpaperMachine
 
-/// A report calls a copy the release only when the project certificate signed it.
+/// A report calls a copy the release only when the project's Developer ID or the project certificate signed it.
 final class TelemetryEnvironmentTests: XCTestCase {
     /// The project certificate, as every release carries it in its signature.
     private static let projectCertificate = """
@@ -75,5 +75,26 @@ final class TelemetryEnvironmentTests: XCTestCase {
     func testUnreadableSignatureIsSource() {
         XCTAssertTrue(TelemetryEnvironment.isSource(signingInformation: nil))
         XCTAssertTrue(TelemetryEnvironment.isSource(signingInformation: [:]))
+    }
+
+    /// Notarized releases carry a Developer ID leaf, never the project certificate.
+    func testACopySignedWithTheDeveloperIDIsRelease() throws {
+        let information = signature(flags: [], certificates: [try certificate(Self.sameNameCertificate)])
+        XCTAssertFalse(TelemetryEnvironment.isSource(signingInformation: information, signedWithDeveloperID: true))
+        XCTAssertFalse(TelemetryEnvironment.isSource(signingInformation: nil, signedWithDeveloperID: true))
+    }
+
+    /// The test host is built here and signed ad hoc, so it must not pass as the Developer ID.
+    func testAnAdHocRunningCopyIsNotSignedWithTheDeveloperID() {
+        XCTAssertNotNil(TelemetryEnvironment.ownCode())
+        XCTAssertFalse(TelemetryEnvironment.signedWithDeveloperID(TelemetryEnvironment.ownCode()))
+        XCTAssertFalse(TelemetryEnvironment.signedWithDeveloperID(nil))
+    }
+
+    /// A requirement Security cannot compile would count every release as a build from source.
+    func testTheDeveloperIDRequirementCompiles() {
+        var requirement: SecRequirement?
+        XCTAssertEqual(SecRequirementCreateWithString(
+            AppUpdateConfiguration.developerIDRequirement as CFString, [], &requirement), errSecSuccess)
     }
 }

@@ -5,6 +5,7 @@
 #include "support/schema_fixtures.hpp"
 
 #include "Interface/IShaderValueUpdater.h"
+#include "RenderCommon/SceneRaster.hpp"
 #include "Runtime/ScalarAnimation.hpp"
 #include "Scene/SceneCamera.h"
 #include "Scene/SceneMaterial.h"
@@ -13,6 +14,7 @@
 #include "Scene/SpecTexs.hpp"
 #include "Video/VideoTextureSource.hpp"
 #include "WPShaderValueUpdater.hpp"
+#include "WPSceneParser.hpp"
 
 #include <gtest/gtest.h>
 
@@ -29,6 +31,10 @@ namespace
 
 using namespace we_schema;
 using namespace wallpaper;
+
+// Wallpaper Engine draws bloom only for a scene that has objects (sub_14017FA70);
+// one bare group is enough.
+Json OneObject() { return Json::array({ Json { { "id", 900 }, { "name", "anchor" }, { "origin", "0 0 0" }, { "visible", true } } }); }
 
 Json V2(double x, double y) { return Json::array({ x, y }); }
 Json V3(double x, double y, double z) { return Json::array({ x, y, z }); }
@@ -86,7 +92,7 @@ ExistsUniformOp OnlyUniform(std::string name)
 TEST(BloomLdr, TheChainIsBuiltFromTheUtilityMaterialsAndTakesTheScenesSettings)
 {
     ParseRig rig(BloomAssets(BloomSet::Ldr));
-    auto     scene = rig.Parse(QuietScene(Json::array(), BloomGeneral(false, { { "bloomstrength", 1.5 }, { "bloomthreshold", 0.25 }, { "bloomtint", V3(0.2, 0.4, 0.6) } })));
+    auto     scene = rig.Parse(QuietScene(OneObject(), BloomGeneral(false, { { "bloomstrength", 1.5 }, { "bloomthreshold", 0.25 }, { "bloomtint", V3(0.2, 0.4, 0.6) } })));
     ASSERT_NE(scene, nullptr);
 
     // row 1
@@ -161,10 +167,22 @@ TEST(BloomLdr, TheChainIsBuiltFromTheUtilityMaterialsAndTakesTheScenesSettings)
     EXPECT_EQ(combine->textures[1], "_rt_bloom_blur");
 }
 
+TEST(BloomLdr, AnEmptySceneHasNoBloom)
+{
+    // sub_14017FA70 draws bloom only while the scene's object list is not empty.
+    ParseRig rig(BloomAssets(BloomSet::Ldr));
+    auto     empty = rig.Parse(QuietScene(Json::array(), BloomGeneral(false)));
+    ASSERT_NE(empty, nullptr);
+    EXPECT_TRUE(empty->post_processes.empty());
+    auto with_object = rig.Parse(QuietScene(OneObject(), BloomGeneral(false)));
+    ASSERT_NE(with_object, nullptr);
+    EXPECT_EQ(with_object->post_processes.size(), 1u);
+}
+
 // R-6.06 / B-6.02
 TEST(BloomLdr, ABloomMaterialThatCannotLoadDropsTheWholeChainAndLeavesNoTrace)
 {
-    const Json scene_json = QuietScene(Json::array(), BloomGeneral(false, { { "bloomstrength", 1.5 }, { "bloomthreshold", 0.25 }, { "bloomtint", V3(0.2, 0.4, 0.6) } }));
+    const Json scene_json = QuietScene(OneObject(), BloomGeneral(false, { { "bloomstrength", 1.5 }, { "bloomthreshold", 0.25 }, { "bloomtint", V3(0.2, 0.4, 0.6) } }));
 
     {
         ParseRig rig(BloomAssets(BloomSet::LdrBroken));
@@ -184,11 +202,194 @@ TEST(BloomLdr, ABloomMaterialThatCannotLoadDropsTheWholeChainAndLeavesNoTrace)
     }
 }
 
+namespace {
+bool SetGeneral(Scene& scene, std::string_view name, float value) {
+    return scene.runtime->SetSceneGeneralValue(name, std::span(&value, 1));
+}
+}
+
+TEST(SceneGeneralModes, BloomStartsLazilyAndReleasesRetiredMaterialsAndTargets) {
+    ParseRig rig(BloomAssets(BloomSet::Ldr));
+    rig.properties()["strength"] = RuntimeScalarValue::Float(1.5f);
+    auto scene = rig.Parse(Canvas(OneObject(), {
+        {"bloomstrength", {{"user", "strength"}, {"value", 1.0}}}
+    }), {.live = true});
+    ASSERT_NE(scene, nullptr);
+    ASSERT_NE(scene->runtime, nullptr);
+    EXPECT_TRUE(scene->post_processes.empty());
+    const auto baseline_targets = scene->renderTargets.size();
+    for (const float strength : {2.0f, 3.0f, 4.0f}) {
+        scene->runtime->ApplyProjectPropertyOverride({{"strength", RuntimeScalarValue::Float(strength)}});
+        ASSERT_TRUE(SetGeneral(*scene, "bloom", 1));
+        scene->runtime->Tick(1.0 / 60.0);
+        ASSERT_EQ(scene->post_processes.size(), 1u);
+        EXPECT_EQ(scene->post_processes[0]->name, "__bloom");
+        const auto* extract = PassMaterial(*scene->post_processes[0], 0);
+        ASSERT_NE(extract, nullptr);
+        EXPECT_FLOAT_EQ(Constant(*extract, "g_BloomStrength"), strength);
+        std::weak_ptr<SceneMaterial> retired =
+            PassStep(*scene->post_processes[0], 0)->node->Mesh()->MaterialSlotPtr(0);
+        ASSERT_TRUE(SetGeneral(*scene, "bloom", 0));
+        scene->runtime->Tick(1.0 / 60.0);
+        EXPECT_TRUE(scene->post_processes.empty());
+        EXPECT_EQ(scene->renderTargets.size(), baseline_targets);
+        EXPECT_TRUE(retired.expired()) << "a removed chain must not be retained by a live binding";
+    }
+}
+
+TEST(SceneGeneralModes, CoalescedAndQualityDisabledBloomChangesDoNotRebuild) {
+    for (const auto quality : {PostProcessing::Enabled, PostProcessing::Disabled}) {
+        ParseRig rig(BloomAssets(BloomSet::Ldr));
+        ParseOptions options {.live = true};
+        options.quality.post_processing = static_cast<int>(quality);
+        auto scene = rig.Parse(Canvas(OneObject()), options);
+        ASSERT_NE(scene, nullptr);
+        scene->runtime->ConsumeSceneGraphMutationFlag();
+        ASSERT_TRUE(SetGeneral(*scene, "bloom", 1));
+        ASSERT_TRUE(SetGeneral(*scene, "bloom", 0));
+        scene->runtime->Tick(1.0 / 60.0);
+        EXPECT_TRUE(scene->post_processes.empty());
+        EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+        ASSERT_TRUE(SetGeneral(*scene, "bloom", 1));
+        scene->runtime->Tick(1.0 / 60.0);
+        EXPECT_EQ(scene->post_processes.size(), quality == PostProcessing::Disabled ? 0u : 1u);
+        EXPECT_EQ(scene->runtime->ConsumeSceneGraphMutationFlag(), quality != PostProcessing::Disabled);
+        const auto count = scene->renderTargets.size();
+        for (int tick = 0; tick != 3; ++tick) {
+            ASSERT_TRUE(SetGeneral(*scene, "bloom", 1));
+            ASSERT_TRUE(SetGeneral(*scene, "bloomstrength", 4));
+            scene->runtime->Tick(1.0 / 60.0);
+            EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+            EXPECT_EQ(scene->renderTargets.size(), count);
+        }
+        if (!scene->post_processes.empty())
+            EXPECT_FLOAT_EQ(Constant(*PassMaterial(*scene->post_processes[0], 0), "g_BloomStrength"), 4);
+        EXPECT_FLOAT_EQ((*scene->runtime->SceneGeneralValue("bloom"))[0], 1);
+    }
+}
+
+TEST(SceneGeneralModes, FailedLazyBloomLeavesTheCurrentSceneUsable) {
+    ParseRig rig(BloomAssets(BloomSet::LdrBroken));
+    auto scene = rig.Parse(Canvas(OneObject()), {.live = true});
+    ASSERT_NE(scene, nullptr);
+    const auto targets = scene->renderTargets.size();
+    scene->runtime->ConsumeSceneGraphMutationFlag();
+    ASSERT_TRUE(SetGeneral(*scene, "bloom", 1));
+    EXPECT_NO_THROW(scene->runtime->Tick(1.0 / 60.0));
+    EXPECT_TRUE(scene->post_processes.empty());
+    EXPECT_EQ(scene->renderTargets.size(), targets);
+    EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+    ASSERT_TRUE(SetGeneral(*scene, "clearenabled", 0));
+    EXPECT_FALSE(scene->clearEnabled);
+}
+
+TEST(SceneGeneralModes, HiddenAuthoredObjectsKeepTheirInitialBloomEligibilityAfterAToggle) {
+    ParseRig rig(BloomAssets(BloomSet::Ldr));
+    const Json objects = Json::array({{{"id", 1}, {"name", "hidden"},
+        {"image", "image.json"}, {"visible", false}, {"origin", "0 0 0"},
+        {"scale", "1 1 1"}, {"angles", "0 0 0"}}});
+    auto scene = rig.Parse(Canvas(objects, {{"bloom", true}}), {.live = true});
+    ASSERT_NE(scene, nullptr);
+    ASSERT_EQ(scene->runtime->LayerCount(), 0u);
+    ASSERT_EQ(scene->post_processes.size(), 1u);
+    ASSERT_TRUE(SetGeneral(*scene, "bloom", 0));
+    scene->runtime->Tick(1.0 / 60.0);
+    EXPECT_TRUE(scene->post_processes.empty());
+    ASSERT_TRUE(SetGeneral(*scene, "bloom", 1));
+    scene->runtime->Tick(1.0 / 60.0);
+    ASSERT_EQ(scene->post_processes.size(), 1u);
+    EXPECT_EQ(scene->post_processes[0]->name, "__bloom");
+}
+
+TEST(SceneGeneralModes, HdrScalarWritesAndBoundValuesUpdateTheExistingChain) {
+    ParseRig rig(BloomAssets(BloomSet::Hdr));
+    rig.properties()["strength"] = RuntimeScalarValue::Float(1);
+    auto scene = rig.Parse(Canvas(OneObject(), {{"bloom", true}, {"hdr", true},
+        {"bloomhdriterations", 3},
+        {"bloomhdrstrength", {{"user", "strength"}, {"value", 1}}}}), {.live = true});
+    ASSERT_NE(scene, nullptr);
+    ASSERT_TRUE(scene->hdr);
+    ASSERT_EQ(scene->post_processes.size(), 1u);
+    const auto post = scene->post_processes[0];
+    const auto* extract = PassMaterial(*post, 0);
+    ASSERT_NE(extract, nullptr);
+    scene->runtime->ConsumeSceneGraphMutationFlag();
+    ASSERT_TRUE(SetGeneral(*scene, "bloomhdrstrength", 4));
+    ASSERT_TRUE(SetGeneral(*scene, "bloomhdrscatter", 2));
+    ASSERT_TRUE(SetGeneral(*scene, "bloomhdrthreshold", 0.5f));
+    ASSERT_TRUE(SetGeneral(*scene, "bloomhdrfeather", 0.2f));
+    const std::array<float, 3> tint {0.25f, 0.5f, 0.75f};
+    ASSERT_TRUE(scene->runtime->SetSceneGeneralValue("bloomtint", tint));
+    EXPECT_NEAR(Constant(*extract, "g_BloomStrength"), 4.0f / 3.0f, 1e-6f);
+    EXPECT_FLOAT_EQ(Constant(*extract, "g_BloomBlendParams", 0), 0.5f);
+    EXPECT_FLOAT_EQ(Constant(*extract, "g_BloomBlendParams", 1), 0.4f);
+    EXPECT_FLOAT_EQ(Constant(*extract, "g_BloomBlendParams", 2), 0.2f);
+    EXPECT_NEAR(Constant(*extract, "g_BloomBlendParams", 3), 2.49975f, 1e-5f);
+    EXPECT_FLOAT_EQ(Constant(*extract, "g_BloomTint", 2), 0.75f);
+    EXPECT_FLOAT_EQ(Constant(*PassMaterial(*post, 3), "g_BloomScatter"), 2);
+    scene->runtime->ApplyProjectPropertyOverride({{"strength", RuntimeScalarValue::Float(3)}});
+    EXPECT_FLOAT_EQ(Constant(*extract, "g_BloomStrength"), 1);
+    EXPECT_FLOAT_EQ((*scene->runtime->SceneGeneralValue("bloomhdrstrength"))[0], 3);
+    scene->runtime->Tick(1.0 / 60.0);
+    EXPECT_EQ(scene->post_processes[0], post);
+    EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+}
+
+TEST(SceneGeneralModes, HdrIterationsReplaceOnlyTheRequiredChainAndReleaseOldTargets) {
+    ParseRig rig(BloomAssets(BloomSet::Hdr));
+    auto scene = rig.Parse(Canvas(OneObject(), {{"bloom", true}, {"hdr", true},
+        {"bloomhdriterations", 1}, {"bloomhdrstrength", 3}, {"bloomhdrscatter", 2}}), {.live = true});
+    ASSERT_NE(scene, nullptr);
+    ASSERT_EQ(scene->post_processes.size(), 1u);
+    const auto baseline_targets = scene->renderTargets.size() - 2;
+    scene->runtime->ConsumeSceneGraphMutationFlag();
+    for (const int levels : {3, 1, 6, 1}) {
+        std::weak_ptr<SceneMaterial> retired =
+            PassStep(*scene->post_processes[0], 0)->node->Mesh()->MaterialSlotPtr(0);
+        ASSERT_TRUE(SetGeneral(*scene, "bloomhdriterations", levels));
+        scene->runtime->Tick(1.0 / 60.0);
+        ASSERT_EQ(scene->post_processes.size(), 1u);
+        EXPECT_EQ(scene->post_processes[0]->steps.size(), std::size_t(2 * levels + 1));
+        EXPECT_EQ(scene->renderTargets.size(), baseline_targets + levels + 1);
+        EXPECT_TRUE(retired.expired());
+        EXPECT_TRUE(scene->runtime->ConsumeSceneGraphMutationFlag());
+        ASSERT_TRUE(SetGeneral(*scene, "bloomhdriterations", levels));
+        scene->runtime->Tick(1.0 / 60.0);
+        EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+    }
+    // Zero also resolves to one level: the raw readback changes, the renderer does not.
+    ASSERT_TRUE(SetGeneral(*scene, "bloomhdriterations", 0));
+    scene->runtime->Tick(1.0 / 60.0);
+    EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+    EXPECT_FLOAT_EQ((*scene->runtime->SceneGeneralValue("bloomhdriterations"))[0], 0);
+}
+
+TEST(SceneGeneralModes, FailedHdrIterationChangeRetainsTheWorkingChainAndItsBindings) {
+    auto files = BloomAssets(BloomSet::Hdr);
+    // One level never draws this pass; increasing the level count tries to load it.
+    files["/materials/util/hdr_downsample.json"] = "not valid JSON";
+    ParseRig rig(std::move(files));
+    auto scene = rig.Parse(Canvas(OneObject(), {{"bloom", true}, {"hdr", true},
+        {"bloomhdriterations", 1}}), {.live = true});
+    ASSERT_NE(scene, nullptr);
+    ASSERT_EQ(scene->post_processes.size(), 1u);
+    const auto original = scene->post_processes[0];
+    const auto targets = scene->renderTargets.size();
+    scene->runtime->ConsumeSceneGraphMutationFlag();
+    ASSERT_TRUE(SetGeneral(*scene, "bloomhdriterations", 3));
+    EXPECT_NO_THROW(scene->runtime->Tick(1.0 / 60.0));
+    EXPECT_EQ(scene->post_processes[0], original);
+    EXPECT_EQ(scene->renderTargets.size(), targets);
+    EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+    ASSERT_TRUE(SetGeneral(*scene, "bloomhdrstrength", 4));
+    EXPECT_FLOAT_EQ(Constant(*PassMaterial(*original, 0), "g_BloomStrength"), 2);
+}
+
 // ---- HDR bloom ------------------------------------------------------------------------------
 
 Json HdrScene(int iterations, bool bloom = true)
 {
-    return QuietScene(Json::array(), { { "bloom", bloom },
+    return QuietScene(OneObject(), { { "bloom", bloom },
                                        { "hdr", true },
                                        { "bloomhdrstrength", 3.0 },
                                        { "bloomhdrscatter", 2.0 },
@@ -197,12 +398,20 @@ Json HdrScene(int iterations, bool bloom = true)
                                        { "bloomhdriterations", iterations } });
 }
 
+// HDR bloom is drawn only at the Ultra / Display HDR post-processing levels.
+ParseOptions HdrQuality()
+{
+    ParseOptions options;
+    options.quality.post_processing = static_cast<int>(PostProcessing::Ultra);
+    return options;
+}
+
 // R-6.03 / B-6.03
 TEST(BloomHdr, TheLevelCountFollowsTheFrameAndTheIterationLimitAndWeighsEachPass)
 {
     {
         ParseRig rig(BloomAssets(BloomSet::Hdr));
-        auto     scene = rig.Parse(HdrScene(12));
+        auto     scene = rig.Parse(HdrScene(12), HdrQuality());
         ASSERT_NE(scene, nullptr);
         ASSERT_EQ(scene->post_processes.size(), 1u);
         const ScenePostProcess& chain = *scene->post_processes[0];
@@ -233,7 +442,7 @@ TEST(BloomHdr, TheLevelCountFollowsTheFrameAndTheIterationLimitAndWeighsEachPass
     }
     {
         ParseRig rig(BloomAssets(BloomSet::Hdr));
-        auto     scene = rig.Parse(HdrScene(3));
+        auto     scene = rig.Parse(HdrScene(3), HdrQuality());
         ASSERT_NE(scene, nullptr);
         ASSERT_EQ(scene->post_processes.size(), 1u);
         const ScenePostProcess& chain = *scene->post_processes[0];
@@ -248,13 +457,77 @@ TEST(BloomHdr, TheLevelCountFollowsTheFrameAndTheIterationLimitAndWeighsEachPass
     }
 }
 
+// Integer target allocation does not change the nominal screen-space bloom kernel.
+TEST(BloomHdr, SamplingOffsetsKeepTheFractionalPyramidExtentWhenTargetsRound)
+{
+    auto document = HdrScene(8);
+    document["general"]["orthogonalprojection"] = {{"width", 1055}, {"height", 659}};
+    ParseRig rig(BloomAssets(BloomSet::Hdr));
+    auto scene = rig.Parse(document, HdrQuality());
+    ASSERT_NE(scene, nullptr);
+    scene->resolution = SceneResolution::Canvas;
+    ASSERT_EQ(scene->post_processes.size(), 1u);
+    const auto& chain = *scene->post_processes.front();
+    ASSERT_EQ(chain.steps.size(), 17u);
+    for (const double scale : {1.0, 0.5}) {
+        SCOPED_TRACE(scale);
+        scene->render_scale = scale;
+        render::ResolveScreenBoundRenderTargetSizes(*scene, {1055, 659});
+        const auto* frame = scene->FindRenderTarget(SpecTex_Default);
+        ASSERT_NE(frame, nullptr);
+        // WE 0x140183610 scales the full-raster reciprocal by powers of two.
+        // Rounding/clamping the allocated levels must not change that kernel.
+        for (std::size_t step = 0; step < 15; ++step) {
+            const auto* material = PassMaterial(chain, step);
+            ASSERT_NE(material, nullptr);
+            const unsigned level = step < 8 ? unsigned(step) : unsigned(15 - step);
+            const float radius = float(1u << level);
+            EXPECT_FLOAT_EQ(Constant(*material, "g_RenderVar0", 0), radius / frame->width) << step;
+            EXPECT_FLOAT_EQ(Constant(*material, "g_RenderVar0", 1), radius / frame->height) << step;
+            EXPECT_FLOAT_EQ(Constant(*material, "g_RenderVar0", 2), -radius / frame->width) << step;
+            EXPECT_FLOAT_EQ(Constant(*material, "g_RenderVar0", 3), -radius / frame->height) << step;
+        }
+        const auto* combine = PassMaterial(chain, 15);
+        ASSERT_NE(combine, nullptr);
+        EXPECT_FLOAT_EQ(Constant(*combine, "g_RenderVar0", 0), 1.0f);
+        EXPECT_FLOAT_EQ(Constant(*combine, "g_RenderVar0", 1), 0.0f);
+    }
+}
+
+TEST(BloomHdr, NativePyramidAllocatesIntegerDivisionsWithATwoPixelMinimum)
+{
+    for (const auto extent : {Extent2D{4112, 2504}, Extent2D{1055, 659}, Extent2D{17, 11}}) {
+        SCOPED_TRACE(std::to_string(extent.width) + "x" + std::to_string(extent.height));
+        auto document = HdrScene(8);
+        document["general"]["orthogonalprojection"] = {{"width", extent.width}, {"height", extent.height}};
+        ParseRig rig(BloomAssets(BloomSet::Hdr));
+        auto scene = rig.Parse(document, HdrQuality());
+        ASSERT_NE(scene, nullptr);
+        scene->resolution = SceneResolution::Canvas;
+        scene->render_scale = 1.0;
+        render::ResolveScreenBoundRenderTargetSizes(*scene, extent);
+        const auto* frame = scene->FindRenderTarget(SpecTex_Default);
+        ASSERT_NE(frame, nullptr);
+        for (unsigned level = 0; level < 8; ++level) {
+            const auto* target = scene->FindRenderTarget("_rt_hdr_bloom_" + std::to_string(level));
+            if (target == nullptr) break;
+            const int divisor = 1 << (level + 1);
+            // WE's native framebuffer constructor (0x1400D2C60) divides the
+            // physical dimensions as integers, then clamps each side to two.
+            EXPECT_EQ(target->width, std::max(2, frame->width / divisor)) << level;
+            EXPECT_EQ(target->height, std::max(2, frame->height / divisor)) << level;
+            EXPECT_EQ(target->format, TextureFormat::RGBA16F);
+        }
+    }
+}
+
 // A frame large enough for more halvings than the cap allows still gets eight levels.
 TEST(BloomHdr, TheLevelCountIsCappedAtEightOnALargeFrame)
 {
     Json scene_json = HdrScene(12);
     scene_json["general"]["orthogonalprojection"] = { { "width", 2560 }, { "height", 1440 } };
     ParseRig rig(BloomAssets(BloomSet::Hdr));
-    auto     scene = rig.Parse(scene_json);
+    auto     scene = rig.Parse(scene_json, HdrQuality());
     ASSERT_NE(scene, nullptr);
     ASSERT_EQ(scene->post_processes.size(), 1u);
     EXPECT_EQ(scene->post_processes[0]->steps.size(), 17u);
@@ -267,7 +540,7 @@ TEST(BloomHdr, HdrNeedsBloomToo)
 {
     {
         ParseRig rig(BloomAssets(BloomSet::Hdr));
-        auto     scene = rig.Parse(HdrScene(8, false));
+        auto     scene = rig.Parse(HdrScene(8, false), HdrQuality());
         ASSERT_NE(scene, nullptr);
         EXPECT_FALSE(scene->hdr);
         const SceneRenderTarget* frame = scene->FindRenderTarget("_rt_default");
@@ -277,7 +550,7 @@ TEST(BloomHdr, HdrNeedsBloomToo)
     }
     {
         ParseRig rig(BloomAssets(BloomSet::Hdr));
-        auto     scene = rig.Parse(HdrScene(8, true));
+        auto     scene = rig.Parse(HdrScene(8, true), HdrQuality());
         ASSERT_NE(scene, nullptr);
         EXPECT_TRUE(scene->hdr);
         const SceneRenderTarget* frame = scene->FindRenderTarget("_rt_default");
@@ -291,11 +564,51 @@ TEST(BloomHdr, HdrNeedsBloomToo)
     }
 }
 
+// Plan Appendix D item 7, WE sub_14010DF40: "disabled" drops bloom, ultra and
+// displayhdr keep HDR, every other level is LDR bloom.
+TEST(BloomQuality, TheLevelDecidesBloomAndHdr)
+{
+    FileMap assets = BloomAssets(BloomSet::Ldr);
+    for (auto& [path, text] : BloomAssets(BloomSet::Hdr)) assets[path] = text;
+    struct Case { PostProcessing level; bool bloom; bool hdr; bool display_hdr; };
+    const Case cases[] = {
+        { PostProcessing::Disabled, false, false, false }, { PostProcessing::Enabled, true, false, false },
+        { PostProcessing::Ultra, true, true, false },      { PostProcessing::DisplayHdr, true, true, true },
+    };
+    for (const Case& c : cases) {
+        ParseRig     rig(assets);
+        ParseOptions options;
+        options.quality.post_processing = static_cast<int>(c.level);
+        auto scene = rig.Parse(HdrScene(8), options);
+        ASSERT_NE(scene, nullptr);
+        const int level = static_cast<int>(c.level);
+        EXPECT_EQ(scene->hdr, c.hdr) << level;
+        EXPECT_EQ(scene->display_hdr, c.display_hdr) << level;
+        if (! c.bloom) {
+            EXPECT_TRUE(scene->post_processes.empty()) << level;
+            continue;
+        }
+        ASSERT_EQ(scene->post_processes.size(), 1u) << level;
+        EXPECT_EQ(scene->post_processes[0]->name, c.hdr ? "__hdr_bloom" : "__bloom") << level;
+    }
+}
+
+TEST(BloomQuality, ReflectionQualityGatesTheMipMappedFrameBuffer)
+{
+    ParseRig     rig(BloomAssets(BloomSet::Ldr));
+    ParseOptions options;
+    options.quality.reflection = false;
+    auto scene = rig.Parse(QuietScene(), options);
+    ASSERT_NE(scene, nullptr);
+    EXPECT_FALSE(scene->reflection_enabled);
+    EXPECT_EQ(scene->quality, options.quality);
+}
+
 // R-6.05 / B-6.05
 TEST(BloomHdr, AnHdrSceneWithoutItsHdrMaterialsIsRefusedRatherThanDrawnWithTheLdrChain)
 {
     ParseRig rig(BloomAssets(BloomSet::Ldr));
-    EXPECT_THROW(rig.Parse(HdrScene(8)), std::runtime_error);
+    EXPECT_THROW(rig.Parse(HdrScene(8), HdrQuality()), std::runtime_error);
 }
 
 // ---- settings bound to user properties ------------------------------------------------------
@@ -322,7 +635,7 @@ TEST(BoundSceneSettings, LoadOnlySettingsReadOnceAndTheRestFollowTheirProperties
                            { "cameraparallaxamount", bound("depth", 0.2) },
                            { "cameraparallaxdelay", bound("lag", 0.5) },
                            { "zoom", bound("lens", 1.0) } };
-    auto scene = rig.Parse(QuietScene(Json::array(), general), ParseOptions { .live = true });
+    auto scene = rig.Parse(QuietScene(OneObject(), general), ParseOptions { .live = true });
     ASSERT_NE(scene, nullptr);
     ASSERT_NE(scene->runtime, nullptr);
 
@@ -458,6 +771,33 @@ TEST(PuppetSlots, AMeshWithAClippingMaskExpandsIntoSeveralSubmeshesAndSlots)
     EXPECT_EQ(mesh->MaterialForSlot(3)->textures[0], "eyes.tex");
 }
 
+TEST(PuppetSlots, ANestedMaskIsMultipliedIntoItsEnclosingMask)
+{
+    // sub_14020D6A0 multiplies a nested mask into the mask enclosing it with device
+    // flag 0x100 (DEST_COLOR / INV_SRC_ALPHA).
+    PuppetOptions options;
+    options.masked       = true;
+    options.nested_masks = true;
+    ParseRig rig(PuppetAssets(options));
+    auto     scene = rig.Parse(PuppetScene());
+    ASSERT_NE(scene, nullptr);
+    SceneMesh* mesh = PuppetMesh(*scene);
+    ASSERT_NE(mesh, nullptr);
+    // head, mask 0, clipped, [mask 0, mask 1, multiply, clipped], eyes
+    ASSERT_EQ(mesh->Submeshes().size(), 8u);
+    ASSERT_EQ(mesh->MaterialSlots().size(), 8u);
+    for (std::uint32_t i = 0; i < 8; ++i) ASSERT_NE(mesh->MaterialForSlot(i), nullptr) << i;
+    EXPECT_EQ(mesh->Submeshes()[4].output_override, "_rt_puppet_mask_intermediate");
+    EXPECT_EQ(mesh->Submeshes()[5].output_override, "_rt_puppet_mask");
+    const SceneMaterial* multiply = mesh->MaterialForSlot(5);
+    EXPECT_EQ(multiply->blenmode, BlendMode::Multiply);
+    ASSERT_FALSE(multiply->textures.empty());
+    EXPECT_EQ(multiply->textures[0], "_rt_puppet_mask_intermediate");
+    for (std::uint32_t i : { 0u, 1u, 2u, 3u, 4u, 6u, 7u })
+        EXPECT_NE(mesh->MaterialForSlot(i)->blenmode, BlendMode::Multiply) << i;
+    EXPECT_NE(scene->FindRenderTarget("_rt_puppet_mask_intermediate"), nullptr);
+}
+
 // R-6.10 / B-6.10
 TEST(PuppetSlots, ASkeletonLessPuppetsVerticesCarryOnlyPositionAndTextureCoordinate)
 {
@@ -479,7 +819,8 @@ TEST(PuppetSlots, ASkeletonLessPuppetsVerticesCarryOnlyPositionAndTextureCoordin
         EXPECT_EQ(attributes[1].type, VertexType::FLOAT2);
     }
     {
-        // A skinned model adds the bone indices and weights after them.
+        // A skinned model adds the bone indices and weights, in Wallpaper Engine's vertex record
+        // order (B-D7.1, mask table xmmword_140484A20): position, indices, weights, coordinate.
         ParseRig rig(PuppetAssets());
         auto     scene = rig.Parse(PuppetScene());
         ASSERT_NE(scene, nullptr);
@@ -489,12 +830,12 @@ TEST(PuppetSlots, ASkeletonLessPuppetsVerticesCarryOnlyPositionAndTextureCoordin
         ASSERT_EQ(attributes.size(), 4u);
         EXPECT_EQ(attributes[0].name, "a_Position");
         EXPECT_EQ(attributes[0].type, VertexType::FLOAT3);
-        EXPECT_EQ(attributes[1].name, "a_TexCoord");
-        EXPECT_EQ(attributes[1].type, VertexType::FLOAT2);
-        EXPECT_EQ(attributes[2].name, std::string(WE_IN_BLENDINDICES));
-        EXPECT_EQ(attributes[2].type, VertexType::UINT4);
-        EXPECT_EQ(attributes[3].name, std::string(WE_IN_BLENDWEIGHTS));
-        EXPECT_EQ(attributes[3].type, VertexType::FLOAT4);
+        EXPECT_EQ(attributes[1].name, std::string(WE_IN_BLENDINDICES));
+        EXPECT_EQ(attributes[1].type, VertexType::UINT4);
+        EXPECT_EQ(attributes[2].name, std::string(WE_IN_BLENDWEIGHTS));
+        EXPECT_EQ(attributes[2].type, VertexType::FLOAT4);
+        EXPECT_EQ(attributes[3].name, "a_TexCoord");
+        EXPECT_EQ(attributes[3].type, VertexType::FLOAT2);
     }
 }
 
@@ -826,7 +1167,7 @@ void main() {
 constexpr const char* kOpacityFragment = R"(varying vec2 v_TexCoord;
 uniform float u_Opacity; // {"material":"Opacity","default":1}
 void main() {
-    gl_FragColor = vec4(u_Opacity);
+    gl_FragColor = CAST4(u_Opacity);
 }
 )";
 
@@ -895,4 +1236,65 @@ TEST(VideoTextures, EveryVideoTextureOfAnImageMaterialAnswersToTheLayersControls
     EXPECT_FALSE(rt.SetNodeVideoTextureRate("no such layer", 2.0f));
 }
 
+} // namespace
+
+
+namespace {
+TEST(SceneMsaa, OnlyAModelSceneRequestsMultisampling)
+{
+    for (const int requested : { 0, 2, 4, 8 }) {
+        for (const bool model : { false, true }) {
+            SCOPED_TRACE(::testing::Message() << "requested=" << requested << ", model=" << model);
+            auto assets = BasicAssets();
+            Add(assets, LeafModelAssets());
+            ParseRig rig(std::move(assets));
+            ParseOptions options;
+            options.quality.msaa = requested;
+            Json objects = OneObject();
+            if (model) objects.push_back({ { "id", 1 }, { "name", "model" },
+                { "model", "planet.mdl" }, { "visible", true }, { "origin", "0 0 0" },
+                { "scale", "1 1 1" }, { "angles", "0 0 0" } });
+            auto scene = rig.Parse(Canvas(std::move(objects)), options);
+            ASSERT_NE(scene, nullptr);
+            const auto* target = scene->FindRenderTarget(SpecTex_Default);
+            ASSERT_NE(target, nullptr);
+            EXPECT_EQ(target->sample_count, model && requested > 1 ? requested : 1);
+        }
+    }
+}
+
+TEST(SceneMsaa, DeviceSelectionRunsOnlyForAnEligibleRequestBeforeTargetsAreFinal)
+{
+    for (const bool model : { false, true }) {
+        for (const int requested : { 0, 8 }) {
+            for (const uint32_t supported : { 1u, 4u }) {
+                SCOPED_TRACE(::testing::Message() << "model=" << model << ", request=" << requested
+                                                 << ", supported=" << supported);
+                auto assets = BasicAssets();
+                Add(assets, LeafModelAssets());
+                ParseRig rig(std::move(assets));
+                Json objects = OneObject();
+                if (model) objects.push_back({ { "id", 1 }, { "model", "planet.mdl" },
+                    { "name", "model" }, { "visible", true }, { "origin", "0 0 0" },
+                    { "scale", "1 1 1" }, { "angles", "0 0 0" } });
+                SceneParseRequest request;
+                request.scene_id = "msaa-device-selection";
+                request.quality.msaa = requested;
+                int calls = 0;
+                request.select_msaa_samples = [&](uint32_t count) {
+                    ++calls;
+                    EXPECT_EQ(count, 8u);
+                    return supported;
+                };
+                WPSceneParser parser;
+                const auto scene = parser.Parse(request, Canvas(std::move(objects)).dump(), rig.vfs(), rig.sound());
+                ASSERT_NE(scene, nullptr);
+                const auto* target = scene->FindRenderTarget(SpecTex_Default);
+                ASSERT_NE(target, nullptr);
+                EXPECT_EQ(target->sample_count, model && requested > 1 ? supported : 1u);
+                EXPECT_EQ(calls, model && requested > 1 ? 1 : 0);
+            }
+        }
+    }
+}
 } // namespace

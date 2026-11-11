@@ -98,6 +98,19 @@ pub fn program_key_with_identity(identity: &str, input: &ProgramKeyInput<'_>) ->
         s.bool(t.components.compo4);
         s.str(t.video_planes.name());
     }
+    // Preserve the stream of requests that do not describe physical samples.
+    // These optional counts change MS-resource legalization when they are supplied.
+    let mut samples: Vec<_> = request.textures().iter()
+        .filter_map(|t| t.sample_count.map(|count| (t.slot, count))).collect();
+    if !samples.is_empty() {
+        samples.sort_unstable();
+        s.tag("texture_sample_counts");
+        s.len(samples.len());
+        for (slot, count) in samples {
+            s.u8(slot);
+            s.u32(count);
+        }
+    }
 
     s.tag("properties");
     s.len(request.properties().len());
@@ -114,6 +127,14 @@ pub fn program_key_with_identity(identity: &str, input: &ProgramKeyInput<'_>) ->
             PropertyValue::Matrix4(v) => s.f64s(v),
             PropertyValue::None => {}
         }
+    }
+
+    // An absent geometry entry keeps the historical non-geometry key stream unchanged.
+    if let Some(geometry) = request.point_geometry() {
+        s.tag("point_geometry_v1");
+        s.str(&geometry.source);
+        s.u32(geometry.max_vertices);
+        s.str(&geometry.output_index_attribute);
     }
 
     s.tag("stages");
@@ -298,6 +319,7 @@ mod tests {
         assert_changes("compo3", |c| c.request.textures[0].components.compo3 = true);
         assert_changes("compo4", |c| c.request.textures[0].components.compo4 = true);
         assert_changes("the plane flag", |c| c.request.textures[0].video_planes = VideoPlanes::Nv12Biplanar);
+        assert_changes("physical texture samples", |c| c.request.textures[0].sample_count = Some(1));
         assert_changes("the plane flag on a slot the shader never declares", |c| {
             let mut t = TextureRecord::new(9);
             t.video_planes = VideoPlanes::Nv12Biplanar;
@@ -429,6 +451,7 @@ mod tests {
             format: TextureFormat::Unknown,
             components: Default::default(),
             video_planes: VideoPlanes::None,
+            sample_count: None,
         };
         assert_eq!(key(&a), key(&b));
     }
@@ -441,6 +464,14 @@ mod tests {
     const GOLDEN_KEYS: &[(&str, &str)] = &[
         ("1:naga-29.0.3-msl2.0-untransformed", "6f7ebe5f0135bd78c06498f63bf6494c"),
         ("2:naga-29.0.3-msl2.0-untransformed", "9d581ff6d5542ca737858b5baab20ae1"),
+        ("3:naga-29.0.3-msl2.0-untransformed", "0b03288c0d274251fd3e351ddd0be941"),
+        ("4:naga-29.0.3-msl2.0-untransformed", "d654186569a30535ff49abeb82982610"),
+        ("5:naga-29.0.3-msl2.0-untransformed", "ffc351bc94413b48ccdca769f104dc5b"),
+        ("6:naga-29.0.3-msl2.0-untransformed", "0b12c7d3fc1d67836dac0f5b10ebab30"),
+        ("7:naga-29.0.3-msl2.0-untransformed", "1c8d86f80c3cba5cec76cd37efc2aa1d"),
+        ("8:naga-29.0.3-msl2.0-untransformed", "f73f1acf150bcbe7bac00048b893a2df"),
+        ("9:naga-29.0.3-msl2.0-untransformed", "9c0500459f036c42802afaa18bb546f2"),
+        ("10:naga-29.0.3-msl2.0-untransformed", "a1284e92c4d9c9464dc281486f91274d"),
     ];
 
     fn golden_case() -> Case {

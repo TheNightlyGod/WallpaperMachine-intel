@@ -45,12 +45,12 @@ final class SettingsSectionsRenderTests: PanelTestCase {
         BridgeSceneBackendReport(
           displayId: 1, displayName: name, wallpaperId: "a", wallpaperTitle: name,
           backend: "native_metal", failureStage: nil, failureReason: nil, videoPath: "nv12_converted_preparing",
-          optimizationApplied: true),
+          optimizationApplied: true, qualityInForce: nil),
         BridgeSceneBackendReport(
           displayId: 2, displayName: name, wallpaperId: "b", wallpaperTitle: name,
           backend: "unknown", failureStage: "unsupported",
           failureReason: long ? longName : "Uses lit particles", videoPath: "none",
-          optimizationApplied: false),
+          optimizationApplied: false, qualityInForce: nil),
       ],
       renderScale: 0.75, preferredRenderScale: 1, frameRateCap: 45, onBatteryPower: true,
       qualityThrottle: [.lowPowerMode])

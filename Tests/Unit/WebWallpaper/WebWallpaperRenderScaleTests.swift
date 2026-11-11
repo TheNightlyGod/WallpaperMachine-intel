@@ -162,8 +162,9 @@ final class WebWallpaperRenderScaleTests: XCTestCase {
     XCTAssertEqual(WebWallpaperProtocol.clampedRenderScale(2), 1)
     XCTAssertEqual(WebWallpaperProtocol.clampedRenderScale(.nan), 1, "a value that is not a scale means full resolution")
     XCTAssertEqual(WebWallpaperProtocol.clampedRenderScale(.infinity), 1)
-    let script = WebWallpaperProtocol.makeHostScript(seed: .init(renderScale: .nan))
-    XCTAssertTrue(script.hasSuffix("renderScale: 1.0 })"), "only a number the script can read is interpolated")
+    let script = WebWallpaperProtocol.makeHostScript(seed: .init(renderScale: .nan, screenScale: .nan))
+    XCTAssertTrue(
+      script.hasSuffix("renderScale: 1.0, screenScale: 1.0 })"), "only a number the script can read is interpolated")
 
     let page = try await loadedPage()
     defer { page.stop() }

@@ -121,6 +121,14 @@ pub struct BridgeLockScreenScene {
     /// Flat renderer overrides, or decorated `{id: {value, type, ...}}` web options.
     pub properties_json: Option<String>,
     pub paused: bool,
+    /// Wallpaper Engine's per-wallpaper options as saved, for scenes and plain videos; `None`
+    /// for web pages, which have none.
+    pub engine_options: Option<BridgeEngineOptionValues>,
+    /// The scene quality the scene loads with; `None` for videos and web pages.
+    pub scene_quality: Option<BridgeSceneQuality>,
+    /// A plain video's border colour in Fit-style modes: the project's `schemecolor`
+    /// property (WE `sub_1400FFCB0`); `None` when the project has none, which is black.
+    pub border_color: Option<BridgeRgb>,
 }
 
 /// The window of one open scene wallpaper: the live scene of a display, or
@@ -134,6 +142,14 @@ pub struct BridgeSceneWindow {
     pub window_number: i64,
     /// Kept paused rather than shown as the display's live scene.
     pub parked: bool,
+    pub ready: bool,
+}
+
+/// Host-rendered content to prepare for an unvisited desktop; scenes are prepared by the engine.
+#[derive(Clone, Debug, Default, PartialEq, uniffi::Record)]
+pub struct BridgeDesktopPreload {
+    pub web: Option<BridgeWebWallpaper>,
+    pub video: Option<BridgeNativeVideoWallpaper>,
 }
 
 /// Committed inputs for a web wallpaper the host renders in a web view on one
@@ -324,6 +340,14 @@ pub struct BridgeWallpaperPreview {
     pub scaling_mode: BridgeScalingMode,
     pub scaling_factor: f64,
     pub volume: f32,
+    /// Wallpaper Engine's per-wallpaper options with the draft and the pending
+    /// values in them; `None` for a web page.
+    pub engine_options: Option<BridgeEngineOptionValues>,
+    /// The absolute path of the chosen image filter's `.tex` file, present
+    /// only when one is chosen and the file exists.
+    pub lut_path: Option<String>,
+    /// The saved scene quality settings, for a scene preview.
+    pub scene_quality: BridgeSceneQuality,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -453,6 +477,132 @@ pub struct BridgeWallpaperOptionsSnapshot {
     pub media_integration_enabled: bool,
     pub muted: bool,
     pub volume: f32,
+    /// Wallpaper Engine's per-wallpaper options for a scene or a video; `None`
+    /// for a web page and a wallpaper of unknown kind, which have none.
+    pub engine_options: Option<BridgeEngineOptions>,
+}
+
+/// One of Wallpaper Engine's per-wallpaper options (the properties
+/// `wallpaper64.exe` `sub_140104B60` injects into every scene and video).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+pub enum BridgeEngineOptionId {
+    ColorEnabled,
+    Brightness,
+    Contrast,
+    Saturation,
+    HueShift,
+    ImageFilter,
+    FilterStrength,
+    FlipHorizontal,
+    MouseParallax,
+    PlaybackRate,
+}
+
+/// One row of the per-wallpaper options, drawn like a property row.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct BridgeEngineOptionRow {
+    pub id: BridgeEngineOptionId,
+    /// The current value, pending edits included: `Bool` for a switch,
+    /// `Number` for a slider and `String` (a file stem, empty for none) for
+    /// the image filter.
+    pub value: BridgePropertyValue,
+    pub default_value: BridgePropertyValue,
+    /// Present for the sliders only.
+    pub slider: Option<BridgeSliderMetadata>,
+    /// The value differs from the default, like a property's `dirty`.
+    pub modified: bool,
+    /// False for the colour sliders while the colour switch is off and for the
+    /// filter strength while no image filter is chosen. Such a row is listed;
+    /// the host decides whether to show it.
+    pub enabled: bool,
+}
+
+/// The per-wallpaper options of one scene or video, and the image filters the
+/// shared assets offer.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct BridgeEngineOptions {
+    pub rows: Vec<BridgeEngineOptionRow>,
+    /// The file stems under the shared assets' `materials/lut`, sorted without
+    /// regard to case. A saved filter that is no longer there is not listed.
+    pub image_filters: Vec<String>,
+}
+
+/// A per-wallpaper option value a host is showing without having saved it,
+/// such as a slider being dragged. Checked like an edit and never one.
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct BridgeEngineOptionEdit {
+    pub option: BridgeEngineOptionId,
+    pub value: BridgePropertyValue,
+}
+
+/// Every per-wallpaper option value at once, for a renderer the host drives
+/// itself.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+pub struct BridgeEngineOptionValues {
+    pub color_enabled: bool,
+    pub brightness: f64,
+    pub contrast: f64,
+    pub saturation: f64,
+    pub hue_shift: f64,
+    pub image_filter: String,
+    pub filter_strength: f64,
+    pub flip_horizontal: bool,
+    pub mouse_parallax: bool,
+    pub playback_rate: f64,
+}
+
+impl From<&crate::config::EngineOptionsCfg> for BridgeEngineOptionValues {
+    fn from(options: &crate::config::EngineOptionsCfg) -> Self {
+        Self {
+            color_enabled: options.color_enabled,
+            brightness: options.brightness,
+            contrast: options.contrast,
+            saturation: options.saturation,
+            hue_shift: options.hue_shift,
+            image_filter: options.image_filter.clone(),
+            filter_strength: options.filter_strength,
+            flip_horizontal: options.flip_horizontal,
+            mouse_parallax: options.mouse_parallax,
+            playback_rate: options.playback_rate,
+        }
+    }
+}
+
+impl From<BridgeEngineOptionId> for crate::config::EngineOptionId {
+    fn from(id: BridgeEngineOptionId) -> Self {
+        use crate::config::EngineOptionId as Id;
+        match id {
+            BridgeEngineOptionId::ColorEnabled => Id::ColorEnabled,
+            BridgeEngineOptionId::Brightness => Id::Brightness,
+            BridgeEngineOptionId::Contrast => Id::Contrast,
+            BridgeEngineOptionId::Saturation => Id::Saturation,
+            BridgeEngineOptionId::HueShift => Id::HueShift,
+            BridgeEngineOptionId::ImageFilter => Id::ImageFilter,
+            BridgeEngineOptionId::FilterStrength => Id::FilterStrength,
+            BridgeEngineOptionId::FlipHorizontal => Id::FlipHorizontal,
+            BridgeEngineOptionId::MouseParallax => Id::MouseParallax,
+            BridgeEngineOptionId::PlaybackRate => Id::PlaybackRate,
+        }
+    }
+}
+
+impl From<crate::config::EngineOptionId> for BridgeEngineOptionId {
+    fn from(id: crate::config::EngineOptionId) -> Self {
+        use crate::config::EngineOptionId as Id;
+        match id {
+            Id::ColorEnabled => Self::ColorEnabled,
+            Id::Brightness => Self::Brightness,
+            Id::Contrast => Self::Contrast,
+            Id::Saturation => Self::Saturation,
+            Id::HueShift => Self::HueShift,
+            Id::ImageFilter => Self::ImageFilter,
+            Id::FilterStrength => Self::FilterStrength,
+            Id::FlipHorizontal => Self::FlipHorizontal,
+            Id::MouseParallax => Self::MouseParallax,
+            Id::PlaybackRate => Self::PlaybackRate,
+        }
+    }
 }
 
 /// One display's line in the monitor-information view.
@@ -628,6 +778,110 @@ pub struct BridgeSceneBackendReport {
     /// the previous value produced. `None` means the renderer could not say,
     /// which is not the same as "yes".
     pub optimization_applied: Option<bool>,
+    /// The scene quality the renderer actually draws: features it does not
+    /// draw yet (MSAA, shadows, volumetrics) read off. `None` before the scene
+    /// loaded or when the renderer could not say.
+    pub quality_in_force: Option<BridgeSceneQuality>,
+}
+
+/// MSAA sample count, Wallpaper Engine's words `none` / `x2` / `x4` / `x8`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum BridgeMsaa {
+    Off,
+    X2,
+    X4,
+    X8,
+}
+
+/// Shadow and volumetric quality, Wallpaper Engine's words `disabled` / `low` /
+/// `medium` / `high` / `ultra`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum BridgeQualityLevel {
+    Off,
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
+/// Post-processing level, Wallpaper Engine's words `disabled` / `enabled` /
+/// `ultra` / `displayhdr`. Only Ultra and Display HDR draw HDR bloom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum BridgePostProcessing {
+    Disabled,
+    Enabled,
+    Ultra,
+    DisplayHdr,
+}
+
+/// The scene quality settings. Changing them loads running scenes again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct BridgeSceneQuality {
+    pub msaa: BridgeMsaa,
+    pub shadows: BridgeQualityLevel,
+    pub volumetrics: BridgeQualityLevel,
+    pub reflections: bool,
+    pub post_processing: BridgePostProcessing,
+}
+
+impl From<wallpaper_core::project::SceneQuality> for BridgeSceneQuality {
+    fn from(quality: wallpaper_core::project::SceneQuality) -> Self {
+        use wallpaper_core::project::{PostProcessing, QualityLevel};
+        let level = |value: QualityLevel| match value {
+            QualityLevel::Off => BridgeQualityLevel::Off,
+            QualityLevel::Low => BridgeQualityLevel::Low,
+            QualityLevel::Medium => BridgeQualityLevel::Medium,
+            QualityLevel::High => BridgeQualityLevel::High,
+            QualityLevel::Ultra => BridgeQualityLevel::Ultra,
+        };
+        Self {
+            msaa: match quality.msaa {
+                2 => BridgeMsaa::X2,
+                4 => BridgeMsaa::X4,
+                8 => BridgeMsaa::X8,
+                _ => BridgeMsaa::Off,
+            },
+            shadows: level(quality.shadows),
+            volumetrics: level(quality.volumetrics),
+            reflections: quality.reflection,
+            post_processing: match quality.post_processing {
+                PostProcessing::Disabled => BridgePostProcessing::Disabled,
+                PostProcessing::Enabled => BridgePostProcessing::Enabled,
+                PostProcessing::Ultra => BridgePostProcessing::Ultra,
+                PostProcessing::DisplayHdr => BridgePostProcessing::DisplayHdr,
+            },
+        }
+    }
+}
+
+impl From<BridgeSceneQuality> for wallpaper_core::project::SceneQuality {
+    fn from(quality: BridgeSceneQuality) -> Self {
+        use wallpaper_core::project::{PostProcessing, QualityLevel};
+        let level = |value: BridgeQualityLevel| match value {
+            BridgeQualityLevel::Off => QualityLevel::Off,
+            BridgeQualityLevel::Low => QualityLevel::Low,
+            BridgeQualityLevel::Medium => QualityLevel::Medium,
+            BridgeQualityLevel::High => QualityLevel::High,
+            BridgeQualityLevel::Ultra => QualityLevel::Ultra,
+        };
+        Self {
+            msaa: match quality.msaa {
+                BridgeMsaa::Off => 0,
+                BridgeMsaa::X2 => 2,
+                BridgeMsaa::X4 => 4,
+                BridgeMsaa::X8 => 8,
+            },
+            shadows: level(quality.shadows),
+            volumetrics: level(quality.volumetrics),
+            reflection: quality.reflections,
+            post_processing: match quality.post_processing {
+                BridgePostProcessing::Disabled => PostProcessing::Disabled,
+                BridgePostProcessing::Enabled => PostProcessing::Enabled,
+                BridgePostProcessing::Ultra => PostProcessing::Ultra,
+                BridgePostProcessing::DisplayHdr => PostProcessing::DisplayHdr,
+            },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, uniffi::Record)]
@@ -657,16 +911,32 @@ pub struct BridgeSettingsSnapshot {
     /// default. A preference, not a read-back: `scene_update_modes` is where
     /// what actually happened shows up.
     pub scene_on_demand_enabled: bool,
+    /// The saved preference for bringing a scene drawn below full resolution
+    /// back to full size with MetalFX instead of a bilinear stretch. Off by
+    /// default. A preference, not a read-back: a scene at render scale 1, or one
+    /// whose image MetalFX does not take, is composed the old way.
+    pub metalfx_upscaling_enabled: bool,
     /// The saved preference for direct NV12 plane sampling inside native Metal
     /// scenes. Off by default, experimental. A preference, not a read-back:
     /// the `video_path` of each `scene_renderers` row is what actually
     /// happened.
     pub scene_video_plane_sampling_enabled: bool,
+    /// The saved preference for SDR display framing: an SDR scene at Display
+    /// resolution draws only the part of its canvas-cover layout the display
+    /// shows. Off by default, experimental. A preference, not a read-back:
+    /// `WALLPAPER_MACHINE_SDR_FRAMING` can override it, and a scene that
+    /// cannot be framed (Fit, a zoom below 1, one MetalFX upscales) draws the
+    /// whole layout whatever this says.
+    pub scene_display_framing_enabled: bool,
     /// `"display"` or `"canvas"`: how many pixels a 2D scene is rasterized
     /// with before the render scale divides them. The saved preference, which
     /// every running 2D scene follows; perspective scenes and plain videos
     /// ignore it.
     pub scene_resolution: String,
+    /// The saved scene quality (`[quality.scene]`). Reduced quality never
+    /// changes it; each `scene_renderers` row's `quality_in_force` is what
+    /// the renderer actually draws.
+    pub scene_quality: BridgeSceneQuality,
     /// Live per-scene state read back from the renderer on this rebuild. One
     /// row per running scene wallpaper; an empty vector means no scene
     /// wallpaper is running, and a row reading `unknown` means one is running
@@ -697,6 +967,10 @@ pub struct BridgeSettingsSnapshot {
     /// False when nothing running can honour an internal render scale, so the
     /// control describes a preference that changes nothing on screen today.
     pub render_scale_supported: bool,
+    /// How many installed wallpapers are muted in their own saved sound
+    /// settings. The host's mute of every wallpaper is layered on top and
+    /// never written into them, so the panel names these beside it.
+    pub muted_wallpaper_count: u32,
 }
 
 /// Everything the panel shows, in one answer.
@@ -733,7 +1007,7 @@ pub struct BridgeDisplayMutationBundle {
 /// Renderer work counters for one wallpaper surface.
 ///
 /// The fields are split on purpose. `timer_wakeups` through
-/// `presents_skipped_unchanged` are work this surface alone performs and must
+/// `present_gaps_3plus_vsync` are work this surface alone performs and must
 /// stop when nobody can see it.
 /// The `video_*` fields describe the decoded source, which may legitimately keep
 /// running while one of its consumers is hidden as long as another consumer
@@ -778,9 +1052,24 @@ pub struct BridgeRendererSurfaceCounters {
     /// because they would have put exactly the pixels already on the surface
     /// back. Neither a dropped draw nor a present request.
     pub presents_skipped_unchanged: u64,
+    /// Presented drawables the display reported as shown. Reports arrive a
+    /// refresh or two after the request, so a window's count trails
+    /// `present_requests` by the frames still in flight.
+    pub presented_frames: u64,
+    /// Presented drawables the display reported as never shown: replaced by a
+    /// newer frame or discarded before any refresh showed them.
+    pub presents_dropped: u64,
+    /// Time from one shown frame to the next, in refreshes of the display:
+    /// one, two, three or more. Zero while `vsync_period_micros` is unknown.
+    pub present_gaps_1_vsync: u64,
+    pub present_gaps_2_vsync: u64,
+    pub present_gaps_3plus_vsync: u64,
     pub tick_interval_micros: u64,
     /// 0 when the content cannot prove how often it changes.
     pub content_period_micros: u64,
+    /// Refresh period of the display the present gaps are measured in; 0 when
+    /// the renderer could not read it.
+    pub vsync_period_micros: u64,
     pub video_decode_outputs: u64,
     pub video_seeks: u64,
     pub video_frames_selected: u64,
@@ -814,9 +1103,9 @@ pub struct BridgeRendererCountersReport {
     /// Scenes that both enable audio response and are not paused for their own
     /// display. Zero means the capture tap has no consumer.
     pub audio_active_consumers: u32,
-    /// Whether the platform can report which frames were actually displayed.
-    /// This backend cannot, so present requests are never reported as
-    /// presented frames.
+    /// Whether the surfaces' `presented_frames`, `presents_dropped` and present
+    /// gaps come from the display's own reports. Present requests are never
+    /// reported as presented frames either way.
     pub presentation_feedback_available: bool,
 }
 
@@ -849,6 +1138,9 @@ pub struct BridgeNativeVideoWallpaper {
     pub display_id: u32,
     /// Reconcile revision to echo when this host finishes its initial load.
     pub startup_revision: u64,
+    /// Source display of this assignment: a mirror carries its source's, so the host can let one
+    /// member of the group be heard. Independent assignments of one clip remain separate.
+    pub audio_source_display_id: u32,
     pub wallpaper_id: String,
     pub title: String,
     /// Absolute path to the media file, already containment-checked against the
@@ -871,6 +1163,76 @@ pub struct BridgeNativeVideoWallpaper {
     pub muted: bool,
     pub scaling_mode: BridgeScalingMode,
     pub scaling_factor: f64,
+    /// Wallpaper Engine's per-wallpaper options as saved for this wallpaper.
+    pub engine_options: BridgeEngineOptionValues,
+    /// Absolute path of the chosen image filter's `.tex`, present only when the file exists.
+    pub lut_path: Option<String>,
+    /// The border colour in Fit-style modes: the project's `schemecolor` property (WE
+    /// `sub_1400FFCB0` packs it as the video's border colour); `None` → black.
+    pub border_color: Option<BridgeRgb>,
+}
+
+/// A colour as authored in a project, 0...1 sRGB red, green and blue.
+#[derive(Clone, Copy, Debug, PartialEq, uniffi::Record)]
+pub struct BridgeRgb {
+    pub red: f32,
+    pub green: f32,
+    pub blue: f32,
+}
+
+impl From<[f32; 3]> for BridgeRgb {
+    fn from([red, green, blue]: [f32; 3]) -> Self {
+        Self { red, green, blue }
+    }
+}
+
+/// A file an installed scene names that none of its file systems holds.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct BridgeSceneMissingFile {
+    /// The layer being built when the file was asked for, as the author named it; empty when none
+    /// was.
+    pub layer: String,
+    /// That layer's object id in the scene file, or -1.
+    pub object_id: i32,
+    /// The path below the scene's own space, such as `materials/rain.json`.
+    pub path: String,
+}
+
+/// What reading an installed scene, without drawing it, says about it
+/// (`WallpaperBridge::scene_capability`).
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct BridgeSceneCapability {
+    /// Why the scene could not be read at all, or `None` when it was. Nothing below is known
+    /// otherwise.
+    pub read_error: Option<String>,
+    /// `"unsupported"` or `"compile"` when Native Metal would refuse the scene, `None` when it
+    /// would not. A scene it accepts can still fail later, when its shaders are compiled for the
+    /// device or its render graph is built.
+    pub failure_stage: Option<String>,
+    /// The renderer's own English explanation of the refusal.
+    pub failure_reason: Option<String>,
+    /// At most 64, each once, in the order the parse asked for them.
+    pub missing_files: Vec<BridgeSceneMissingFile>,
+}
+
+impl From<wallpaper_core::SceneCapabilityProbe> for BridgeSceneCapability {
+    fn from(probe: wallpaper_core::SceneCapabilityProbe) -> Self {
+        let text = |value: String| (!value.is_empty()).then_some(value);
+        Self {
+            read_error: text(probe.read_error),
+            failure_stage: text(probe.failure_stage),
+            failure_reason: text(probe.failure_reason),
+            missing_files: probe
+                .missing_files
+                .into_iter()
+                .map(|file| BridgeSceneMissingFile {
+                    layer: file.layer,
+                    object_id: file.object_id,
+                    path: file.path,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// One `engine.openUserShortcut` request from a running wallpaper.

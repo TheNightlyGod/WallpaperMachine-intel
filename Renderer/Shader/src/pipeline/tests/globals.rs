@@ -49,7 +49,7 @@ fn legalized_fragment(vertex: &str, fragment: &str) -> String {
     glsl_of(&ok(vertex, fragment), StageKind::Fragment)
 }
 
-const VERTEX: &str = "void main() { gl_Position = vec4(1.0); }";
+const VERTEX: &str = "void main() { gl_Position = CAST4(1.0); }";
 
 #[test]
 fn a_chain_of_const_globals_that_read_a_uniform_is_stored_in_declaration_order() {
@@ -58,7 +58,7 @@ float depthSpan() { return u_Far - u_Near; }
 const float RANGE = depthSpan();
 const float HALF_RANGE = RANGE * 0.5;
 const float STEP = HALF_RANGE / 8.0;
-void main() { gl_FragColor = vec4(STEP + HALF_RANGE); }";
+void main() { gl_FragColor = CAST4(STEP + HALF_RANGE); }";
     let glsl = legalized_fragment(VERTEX, f);
     let stored = stores_in_main(&glsl, StageKind::Fragment);
     let pos = |name: &str| stored.iter().position(|n| n == name).unwrap_or_else(|| panic!("no store to {name}: {stored:?}\n{glsl}"));
@@ -70,7 +70,7 @@ void main() { gl_FragColor = vec4(STEP + HALF_RANGE); }";
 
 #[test]
 fn a_mutable_global_initialised_from_a_uniform_keeps_its_value() {
-    let f = "uniform float u_Level;\nfloat gain = u_Level * 3.0;\nvoid main() { gl_FragColor = vec4(gain); }";
+    let f = "uniform float u_Level;\nfloat gain = u_Level * 3.0;\nvoid main() { gl_FragColor = CAST4(gain); }";
     let glsl = legalized_fragment(VERTEX, f);
     let stored = stores_in_main(&glsl, StageKind::Fragment);
     assert!(stored.iter().any(|n| n == "gain"), "the front end drops a global initializer that reads a uniform, so main stores it: {stored:?}\n{glsl}");
@@ -89,7 +89,7 @@ fn the_store_comes_after_the_copies_of_written_inputs() {
 
 #[test]
 fn true_constant_initializers_stay_constants_and_bound_a_loop() {
-    let f = "#define STEPS 4\nconst int ROUNDS = STEPS * 2;\nuniform float u_X;\nvoid main() { float s = 0.0; for (int i = 0; i < ROUNDS; i++) { s += u_X; } gl_FragColor = vec4(s); }";
+    let f = "#define STEPS 4\nconst int ROUNDS = STEPS * 2;\nuniform float u_X;\nvoid main() { float s = 0.0; for (int i = 0; i < ROUNDS; i++) { s += u_X; } gl_FragColor = CAST4(s); }";
     let glsl = legalized_fragment(VERTEX, f);
     let stored = stores_in_main(&glsl, StageKind::Fragment);
     assert!(!stored.iter().any(|n| n == "ROUNDS"), "no run-time store for a constant expression: {stored:?}");
@@ -108,7 +108,7 @@ const LIT_FRAGMENT: &str = "#include \"lighting_stubs.h\"
 varying vec3 v_World; varying vec3 v_Normal;
 #require LightingV1
 void main() {
-  vec3 light = PerformLighting_V1(v_World, vec3(1.0), normalize(v_Normal), vec3(0.0, 0.0, 1.0), vec3(0.04), vec3(0.04), 0.5, 0.0);
+  vec3 light = PerformLighting_V1(v_World, CAST3(1.0), normalize(v_Normal), vec3(0.0, 0.0, 1.0), CAST3(0.04), CAST3(0.04), 0.5, 0.0);
   gl_FragColor = vec4(light, 1.0);
 }
 ";

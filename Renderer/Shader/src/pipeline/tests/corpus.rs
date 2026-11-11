@@ -25,6 +25,9 @@ struct Sweep {
     micros: Vec<u128>,
     /// The largest stack measure (`backend::depth`) of any translated stage.
     deepest: u32,
+    /// Programs whose read uniforms are known, and the declared members they leave out.
+    reads_known: usize,
+    unread_members: usize,
 }
 
 /// The names the host binds (spec D 2.4): the block, a material texture and its sampler, the
@@ -113,6 +116,14 @@ fn check_program(program: &CompiledProgram, label: &str, s: &mut Sweep) {
     for d in &program.reflection.descriptor_bindings {
         assert_eq!(d.count, 1, "{label}");
     }
+    // What a program reads is only ever a part of what its block declares.
+    if let Some(read) = &program.reflection.read_uniforms {
+        let declared: std::collections::BTreeSet<&str> =
+            program.reflection.uniform_blocks.iter().flat_map(|b| b.members.iter().map(|m| m.name.as_str())).collect();
+        assert!(read.iter().all(|name| declared.contains(name.as_str())), "{label}: {read:?}");
+        s.reads_known += 1;
+        s.unread_members += declared.len() - read.len();
+    }
 }
 
 fn report(title: &str, s: &Sweep) {
@@ -125,6 +136,7 @@ fn report(title: &str, s: &Sweep) {
         eprintln!("  compile time: median {median} us, worst {worst} us over {} programs", times.len());
     }
     eprintln!("  deepest stage by the stack measure: {} of {}", s.deepest, crate::backend::depth::STACK_BUDGET);
+    eprintln!("  read uniforms known for {} programs, {} declared members left unread", s.reads_known, s.unread_members);
     for (cause, labels) in &s.failures {
         eprintln!("  [{}] {cause}\n      e.g. {}", labels.len(), labels.iter().take(3).cloned().collect::<Vec<_>>().join(", "));
     }
@@ -143,7 +155,7 @@ fn shipped_programs_compile_end_to_end() {
     let includes = Layered { dirs: vec![root.clone()] };
     // `HLSL/` holds Direct3D programs for another path and the volumetric shader is out of scope
     // (spec C1 R22); both are left out of the sweep, as the earlier parts do.
-    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/") || n.starts_with("volumetricsfront"), &[]);
+    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/"), &[]);
     report("shipped programs", &s);
     for (cause, labels) in &s.failures {
         // The shadow-caster vertex stage of the foliage model reads `g_Texture1Texel`, which
@@ -152,6 +164,8 @@ fn shipped_programs_compile_end_to_end() {
         assert!(labels.iter().all(|l| l.starts_with("shadowcasterfoliage4 ")), "{labels:?}");
     }
     assert!(s.ok >= 158, "{} shipped programs compiled", s.ok);
+    // Every shipped program is in the forms the read analysis models (note 141).
+    assert_eq!(s.reads_known, s.ok, "a shipped program's read uniforms are unknown");
     // Amendment d R66 (7): no shipped program has more than 124 fragment components.
     assert!(s.failures.keys().all(|c| !c.contains("limit of 124")), "{:?}", s.failures.keys().collect::<Vec<_>>());
     assert!(s.deepest <= crate::backend::depth::STACK_BUDGET / 2, "a shipped stage is near the stack limit: {}", s.deepest);
@@ -166,7 +180,7 @@ fn shipped_programs_compile_as_the_video_plane_variant_when_they_can() {
     };
     let files = shader_files(&root);
     let includes = Layered { dirs: vec![root.clone()] };
-    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/") || n.starts_with("volumetricsfront"), &[0]);
+    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/"), &[0]);
     report("shipped programs, slot 0 as video planes", &s);
     assert!(s.ok >= 150, "{} plane variants compiled", s.ok);
     assert!(s.refused_names.is_empty(), "{:?}", s.refused_names.keys().collect::<Vec<_>>());

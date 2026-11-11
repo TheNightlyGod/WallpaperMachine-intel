@@ -33,6 +33,7 @@ extension PanelController {
       uniqueKeysWithValues: store.editorState.propertyTextDrafts
         .filter { $0.key.wallpaperID == wallpaperID }.map { ($0.key.fieldID, $0.value) })
     inputs.pendingValues = pendingPropertyValues[wallpaperID] ?? [:]
+    inputs.pendingEngineValues = pendingEngineOptionValues[wallpaperID] ?? [:]
     inputs.delivery = store.webWallpaperDeliveryStatus?()
     inputs.sceneMedia = store.sceneMediaAvailability?()
     // The displays macOS's own video player draws this wallpaper on, which cannot be moved.

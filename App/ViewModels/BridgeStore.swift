@@ -31,6 +31,9 @@ final class BridgeStore {
     var latestBridgeErrorRevision: UInt64
     var lockScreenWallpaper: LockScreenWallpaperService?
     @ObservationIgnored var onSnapshotApplied: (() -> Void)?
+    /// The panel's: a setting that changes rendering work was applied outside it (the menu bar's
+    /// On Battery choice), so its energy readout restarts its window as it does for its own rows.
+    @ObservationIgnored var onRenderingSettingAppliedElsewhere: (@MainActor () -> Void)?
     @ObservationIgnored var onWallpaperApplied: (@MainActor (_ wallpaperID: String, _ displayID: String) -> Void)?
     @ObservationIgnored var onUserWallpaperChoice: (@MainActor (_ wallpaperID: String, _ displayID: String) -> Void)?
     /// The user took a wallpaper off a display, and the display is empty now. Not called for the
@@ -86,6 +89,9 @@ final class BridgeStore {
     @ObservationIgnored var sceneMediaAvailability: (@MainActor () -> SystemMediaAvailability)?
     /// Per-wallpaper energy ratings, owned by the app delegate's background recorder.
     @ObservationIgnored var wallpaperEnergyRatings: WallpaperEnergyRatings?
+    /// What Native Metal last concluded about each scene. The app delegate records the running
+    /// scenes' reports into it; the panel's Compatibility check reads and adds to it.
+    @ObservationIgnored var sceneDrawVerdicts: SceneDrawVerdicts?
     let editorState = WallpaperEditorState()
     /// The user's commands, from the control panel and the menu bar, run through here.
     let commands = UserCommandQueue()
@@ -98,6 +104,15 @@ final class BridgeStore {
     @ObservationIgnored var willSwitchWallpaper: (@MainActor ([UInt32]) async -> Void)?
     @ObservationIgnored var didSettleWallpaperSwitch: (@MainActor ([UInt32]) -> Void)?
     @ObservationIgnored var didAbandonWallpaperSwitch: (@MainActor ([UInt32]) -> Void)?
+    /// A settled picture of what the wallpaper on a display (its live CoreGraphics id) draws, its
+    /// longer edge at most the given pixels, or why there is none ([DesktopWallpaperFrames]).
+    /// Unset, as in tests, nothing is asked of the desktop.
+    @ObservationIgnored var wallpaperFrame:
+        (@MainActor (_ displayID: UInt32, _ maxPixelSize: Int) async -> DesktopWallpaperFrames.Answer)?
+    /// Returns when the wallpaper on a display settles, starts or stops playing where it can be
+    /// seen, or is replaced ([WallpaperSettleClock]), or at once when the task is cancelled: when
+    /// asking `wallpaperFrame` again can give a settled frame. Unset, as in tests, nothing waits.
+    @ObservationIgnored var wallpaperSettleChange: (@MainActor (_ displayID: UInt32) async -> Void)?
     /// Reads a video file's format when it is about to be applied, so one nothing can play is
     /// refused with its format named before any display changes. A test stands in for the file read.
     @ObservationIgnored var videoFormatCheck: @Sendable (URL) async -> VideoFormatSupport.Verdict = {
@@ -372,7 +387,7 @@ final class BridgeStore {
             throw WallpaperActionError(message: String(localized: "No configuration is available for this display. Refresh Displays and retry."))
         }
         try validatePendingWallpaperEdits(id: id, options: options)
-        try await validateWallpaperForPlayback(id: id)
+        try await WallpaperPlaybackPreflight.check(wallpaperID: id, videoFormat: videoFormatCheck)
         try await commitPendingWallpaperEditsAsync(id: id)
         // Validation and async draft commits may outlive a display topology change.
         try validateActivationTarget(displayId)
@@ -451,7 +466,7 @@ final class BridgeStore {
             if let options = wallpaperOptionsSnapshot, options.wallpaperId == id {
                 try validatePendingWallpaperEdits(id: id, options: options)
             }
-            try await validateWallpaperForPlayback(id: id)
+            try await WallpaperPlaybackPreflight.check(wallpaperID: id, videoFormat: videoFormatCheck)
             try await ejectWallpaperFromDisplayAsync(displayId: displayId, wallpaperId: id)
             try await activateWallpaperAsync(id: id, displayId: displayId, origin: .user,
                                              recordsHistory: false, restarting: true)
@@ -543,7 +558,7 @@ final class BridgeStore {
     /// Refuses a display that cannot show its own wallpaper: gone, disabled or mirroring another.
     func validateActivationTarget(_ displayId: String) throws {
         guard let target = settingsSnapshot.displays.first(where: { $0.displayId == displayId }),
-              target.enabled, target.mode == .standalone else {
+              target.isIndependent else {
             throw WallpaperActionError(message: String(localized: "The selected display is unavailable, disabled, or mirroring another display. Choose an enabled independent display in Settings."))
         }
     }
@@ -654,7 +669,8 @@ final class BridgeStore {
         }
         // A slider or colour still being dragged shows in the preview as it does on the displays.
         let descriptor = try await bridge.wallpaperPreview(
-            wallpaperId: id, displayId: displayID, pending: editorState.propertyPreviews(wallpaperID: id))
+            wallpaperId: id, displayId: displayID, pending: editorState.propertyPreviews(wallpaperID: id),
+            pendingEngineOptions: editorState.engineOptionPreviews(wallpaperID: id))
         try Task.checkCancellation()
         var request = try WallpaperPreviewRequest(descriptor)
         request.frozenPropertyIDs = Set(options.properties.filter { Self.previewHoldsAtLoadedValue($0.kind) }.map(\.id))
@@ -694,18 +710,22 @@ final class BridgeStore {
         apply(bundle)
     }
 
-    func setVolumeAsync(wallpaperId: String, volume: Float) async throws {
+    /// `keepingOpenOptions` is for an edit made outside the inspector (the menu bar panel): the
+    /// options the inspector has open stay when they are another wallpaper's, instead of giving way
+    /// to the edited one's (see `apply(_:keepingOpenOptions:)`).
+    func setVolumeAsync(wallpaperId: String, volume: Float, keepingOpenOptions: Bool = false) async throws {
         beginWallpaperEdit(wallpaperId)
         defer { endWallpaperEdit(wallpaperId) }
         let bundle = try await bridge.setVolume(wallpaperId: wallpaperId, volume: volume)
-        apply(bundle)
+        apply(bundle, keepingOpenOptions: keepingOpenOptions)
     }
 
-    func setMutedAsync(wallpaperId: String, muted: Bool) async throws {
+    /// `keepingOpenOptions` as for `setVolumeAsync`.
+    func setMutedAsync(wallpaperId: String, muted: Bool, keepingOpenOptions: Bool = false) async throws {
         beginWallpaperEdit(wallpaperId)
         defer { endWallpaperEdit(wallpaperId) }
         let bundle = try await bridge.setMuted(wallpaperId: wallpaperId, muted: muted)
-        apply(bundle)
+        apply(bundle, keepingOpenOptions: keepingOpenOptions)
     }
 
     func setAudioResponseEnabledAsync(wallpaperId: String, enabled: Bool) async throws {
@@ -820,7 +840,7 @@ final class BridgeStore {
         propertyId: String,
         value: BridgePropertyValue
     ) async throws {
-        try await changeDraftProperties(wallpaperId, replacing: propertyId) {
+        try await changeDraftProperties(wallpaperId, replacing: .property(propertyId)) {
             try await self.bridge.editProperty(wallpaperId: wallpaperId, propertyId: propertyId, value: value)
         }
     }
@@ -855,7 +875,7 @@ final class BridgeStore {
     }
 
     func restorePropertyDefaultAsync(wallpaperId: String, propertyId: String) async throws {
-        try await changeDraftProperties(wallpaperId, replacing: propertyId) {
+        try await changeDraftProperties(wallpaperId, replacing: .property(propertyId)) {
             try await self.bridge.restorePropertyDefault(wallpaperId: wallpaperId, propertyId: propertyId)
         }
     }
@@ -863,9 +883,54 @@ final class BridgeStore {
     /// Stages the authored default for every property except the files and folders the user chose,
     /// which are saved as they are picked and keep their own Clear. Revert undoes it.
     func restoreAllPropertyDefaultsAsync(wallpaperId: String) async throws {
-        try await changeDraftProperties(wallpaperId, replacing: nil) {
+        try await changeDraftProperties(wallpaperId, replacing: .everyProperty) {
             try await self.bridge.restoreAllPropertyDefaults(wallpaperId: wallpaperId)
         }
+    }
+
+    /// Stages one of Wallpaper Engine's per-wallpaper options, like a property edit: pending until
+    /// Apply changes, undone by Revert, and with the choice on shown on the displays once the edits
+    /// pause.
+    func editEngineOptionAsync(
+        wallpaperId: String, option: BridgeEngineOptionId, value: BridgePropertyValue
+    ) async throws {
+        try await changeDraftProperties(wallpaperId, replacing: .engineOption(option)) {
+            try await self.bridge.editEngineOption(wallpaperId: wallpaperId, option: option, value: value)
+        }
+    }
+
+    /// Shows the value a Wallpaper Engine option's slider is being dragged to, without making it an
+    /// edit, as ``previewPropertyAsync(wallpaperId:propertyId:value:)`` does for a property.
+    func previewEngineOptionAsync(
+        wallpaperId: String, option: BridgeEngineOptionId, value: BridgePropertyValue
+    ) async {
+        guard applyingWallpaperID != wallpaperId else { return }
+        editorState.setEngineOptionPreview(value, key: .init(wallpaperID: wallpaperId, option: option))
+        onPropertyDragged?(wallpaperId)
+        guard canShowEditsOnDesktop(wallpaperId) else { return }
+        await showPropertyEditsOnDesktop(wallpaperId)
+    }
+
+    func restoreEngineOptionDefaultAsync(wallpaperId: String, option: BridgeEngineOptionId) async throws {
+        try await changeDraftProperties(wallpaperId, replacing: .engineOption(option)) {
+            try await self.bridge.restoreEngineOptionDefault(wallpaperId: wallpaperId, option: option)
+        }
+    }
+
+    /// Stages the default of every Wallpaper Engine option of the wallpaper. Revert undoes it.
+    func restoreAllEngineOptionDefaultsAsync(wallpaperId: String) async throws {
+        try await changeDraftProperties(wallpaperId, replacing: .everyEngineOption) {
+            try await self.bridge.restoreAllEngineOptionDefaults(wallpaperId: wallpaperId)
+        }
+    }
+
+    /// What a call that changes the pending properties replaces: the value of one property or
+    /// Wallpaper Engine option, or of all of them.
+    private enum DraftReplacement {
+        case property(String)
+        case engineOption(BridgeEngineOptionId)
+        case everyProperty
+        case everyEngineOption
     }
 
     /// Runs a call that changes the wallpaper's pending properties. What the call replaces, the
@@ -873,7 +938,7 @@ final class BridgeStore {
     /// the call took or was refused: the draft is what the previews follow from then on.
     private func changeDraftProperties(
         _ wallpaperId: String,
-        replacing propertyId: String?,
+        replacing replaced: DraftReplacement,
         _ call: () async throws -> BridgeWallpaperMutationBundle
     ) async throws {
         beginWallpaperEdit(wallpaperId)
@@ -882,18 +947,30 @@ final class BridgeStore {
         do {
             bundle = try await call()
         } catch {
-            if dropPropertyPreviews(wallpaperId, propertyId: propertyId) { propertyDraftEdited(wallpaperId) }
+            if dropPropertyPreviews(wallpaperId, replaced) { propertyDraftEdited(wallpaperId) }
             throw error
         }
-        dropPropertyPreviews(wallpaperId, propertyId: propertyId)
+        dropPropertyPreviews(wallpaperId, replaced)
         apply(bundle)
         propertyDraftEdited(wallpaperId)
     }
 
     @discardableResult
-    private func dropPropertyPreviews(_ wallpaperId: String, propertyId: String?) -> Bool {
-        guard let propertyId else { return editorState.clearPropertyPreviews(wallpaperID: wallpaperId) }
-        return editorState.clearPropertyPreview(.init(wallpaperID: wallpaperId, fieldID: propertyId))
+    private func dropPropertyPreviews(_ wallpaperId: String, _ replaced: DraftReplacement) -> Bool {
+        switch replaced {
+        case .property(let propertyId):
+            return editorState.clearPropertyPreview(.init(wallpaperID: wallpaperId, fieldID: propertyId))
+        case .engineOption(let option):
+            return editorState.clearEngineOptionPreview(.init(wallpaperID: wallpaperId, option: option))
+        case .everyProperty:
+            var dropped = false
+            for key in editorState.propertyPreviewValues.keys where key.wallpaperID == wallpaperId {
+                dropped = editorState.clearPropertyPreview(key) || dropped
+            }
+            return dropped
+        case .everyEngineOption:
+            return editorState.clearEngineOptionPreviews(wallpaperID: wallpaperId)
+        }
     }
 
     /// An edit changed the wallpaper's pending properties: tells whatever follows the draft, and
@@ -935,7 +1012,8 @@ final class BridgeStore {
         propertyEditsOnDesktop.insert(wallpaperId)
         do {
             try await bridge.previewWallpaperProperties(
-                wallpaperId: wallpaperId, show: true, pending: editorState.propertyPreviews(wallpaperID: wallpaperId))
+                wallpaperId: wallpaperId, show: true, pending: editorState.propertyPreviews(wallpaperID: wallpaperId),
+                pendingEngineOptions: editorState.engineOptionPreviews(wallpaperID: wallpaperId))
             desktopPreviewProblems.removeValue(forKey: wallpaperId)
         } catch {
             let problem = "properties: \(wallpaperId) could not show its pending edits on the desktop: \(error.localizedDescription)"
@@ -950,7 +1028,8 @@ final class BridgeStore {
         desktopPropertyPreviews.cancelAll()
         for wallpaperId in propertyEditsOnDesktop.sorted() {
             do {
-                try await bridge.previewWallpaperProperties(wallpaperId: wallpaperId, show: false, pending: [])
+                try await bridge.previewWallpaperProperties(
+                    wallpaperId: wallpaperId, show: false, pending: [], pendingEngineOptions: [])
                 forgetPropertyEditsOnDesktop(wallpaperId)
             } catch {
                 desktopPropertyPreviewLog("properties: \(wallpaperId) could not put its saved look back on the desktop: \(error.localizedDescription)")
@@ -1056,6 +1135,18 @@ final class BridgeStore {
         }
     }
 
+    /// Asks the bridge to play every wallpaper at `gain` times its own saved volume, from 0 to 1;
+    /// 1 restores the saved volumes. The bridge keeps it for this run only and never rewrites a
+    /// saved volume. Open scenes change live, and the snapshot this applies carries the reduced
+    /// volume to the web pages and native video. Like the mute it is an automatic change of the
+    /// environment, so it waits for an in-flight Apply instead of invalidating it.
+    func setAudioGainAsync(_ gain: Float) async throws {
+        try await updatePlaybackEnvironment {
+            let bundle = try await bridge.setAudioGain(gain: gain)
+            apply(bundle)
+        }
+    }
+
     /// Asks the bridge to run every wallpaper at the reduced-quality profile for as long as
     /// `reductions` is not empty, on top of the battery mode the user saved. The bridge keeps
     /// it for this run only and lowers frame rate and render scale live, without pausing or
@@ -1091,6 +1182,13 @@ final class BridgeStore {
         apply(bundle)
     }
 
+    /// MetalFX upscaling of a scene drawn below full resolution. Off by default. A preference:
+    /// a scene at 100% render scale, or one MetalFX cannot take, is stretched as before.
+    func setMetalFXUpscalingEnabledAsync(_ enabled: Bool) async throws {
+        let bundle = try await bridge.setMetalfxUpscalingEnabled(enabled: enabled)
+        apply(bundle)
+    }
+
     /// Whole-scene on-demand updating. Off by default. The bundle carries back the saved
     /// preference plus `sceneUpdateModes`, which is the live per-scene read-back: the
     /// preference being on does not mean any scene actually stopped ticking.
@@ -1107,9 +1205,23 @@ final class BridgeStore {
         apply(bundle)
     }
 
+    /// SDR display framing: a 2D scene at Display resolution whose canvas overhangs the display
+    /// draws only the part the display shows. Off by default and experimental. A preference:
+    /// running scenes take it at their next frame, and one it cannot frame draws as before.
+    func setSceneDisplayFramingEnabledAsync(_ enabled: Bool) async throws {
+        let bundle = try await bridge.setSceneDisplayFramingEnabled(enabled: enabled)
+        apply(bundle)
+    }
+
     /// How many pixels a 2D scene is rasterized with, `"display"` or `"canvas"`. A preference every
     /// running 2D scene follows live, by resizing its render targets in place: nothing is reparsed (on
     /// Native Metal the scene's own video layers are reopened, as for any render-scale change).
+    /// Saves the scene quality; each running scene wallpaper loads once more with it.
+    func setSceneQualityAsync(_ quality: BridgeSceneQuality) async throws {
+        let bundle = try await bridge.setSceneQuality(quality: quality)
+        apply(bundle)
+    }
+
     func setSceneResolutionAsync(_ mode: String) async throws {
         let bundle = try await bridge.setSceneResolution(mode: mode)
         apply(bundle)
@@ -1130,7 +1242,7 @@ final class BridgeStore {
             $0.wallpaperId == wallpaperId && $0.mirrorTargetDisplayId == nil
         }.map(\.displayId))
         let previousAssignments = independentAssignments()
-        try await validateWallpaperForPlayback(id: wallpaperId)
+        try await WallpaperPlaybackPreflight.check(wallpaperID: wallpaperId, videoFormat: videoFormatCheck)
         try await commitPendingWallpaperEditsAsync(id: wallpaperId)
         do {
             try await applyValidatedWallpaperOptionsAsync(wallpaperId: wallpaperId, userInitiated: userInitiated)
@@ -1172,41 +1284,6 @@ final class BridgeStore {
     private func reportSuccessfulApply(wallpaperID: String) {
         for (display, wallpaper) in independentAssignments() where wallpaper == wallpaperID {
             onWallpaperApplied?(wallpaper, display)
-        }
-    }
-
-    private func validateWallpaperForPlayback(id wallpaperId: String) async throws {
-        let folder = ClientPaths.libraryURL.appendingPathComponent(wallpaperId, isDirectory: true)
-        let manifestData = try Data(contentsOf: folder.appendingPathComponent("project.json"))
-        let manifest = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any] ?? [:]
-        let entry = manifest["file"] as? String ?? ""
-        func failure(_ code: Int, _ message: String) -> NSError {
-            NSError(domain: "WallpaperMachine", code: code, userInfo: [NSLocalizedDescriptionKey: message])
-        }
-        switch (manifest["type"] as? String ?? "").lowercased() {
-        case "video":
-            let file = folder.appendingPathComponent(entry)
-            let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-            guard !entry.isEmpty, FileManager.default.isReadableFile(atPath: file.path),
-                  values?.isRegularFile == true, (values?.fileSize ?? 0) > 0 else {
-                throw failure(1, String(localized: "This video cannot be decoded. Import a complete, playable video file before applying it."))
-            }
-            // A format nothing can play is refused here, before any display changes.
-            if let message = VideoFormatSupport.message(for: await videoFormatCheck(file)) {
-                throw WallpaperActionError(message: message)
-            }
-        case "scene":
-            let assets = ClientPaths.assetsURL
-            guard ClientPaths.hasSceneAssets(at: assets) else {
-                throw failure(2, String(localized: "This wallpaper is downloaded, but Wallpaper Engine’s shared scene resources are not installed. Choose Get shared resources in the wallpaper’s details, or go to Settings → Library & Steam."))
-            }
-            setenv("WALLPAPER_MACHINE_ASSETS_ROOT", assets.path, 1)
-        case "web":
-            guard !entry.isEmpty, FileManager.default.fileExists(atPath: folder.appendingPathComponent(entry).path) else {
-                throw failure(3, String(localized: "This web wallpaper’s entry page is missing. Import the complete project folder, including its HTML file, before applying it."))
-            }
-        default:
-            break
         }
     }
 
@@ -1292,6 +1369,14 @@ final class BridgeStore {
         try await updatePlaybackEnvironment {
             try await bridge.setDisplayParkedWallpapers(displayId: String(displayID), wallpaperIds: wallpaperIDs)
         }
+    }
+
+    func preloadDesktopWallpaperAsync(displayID: UInt32, wallpaperID: String) async throws -> BridgeDesktopPreload {
+        var result = BridgeDesktopPreload(web: nil, video: nil)
+        try await updatePlaybackEnvironment {
+            result = try await bridge.preloadDesktopWallpaper(displayId: displayID, wallpaperId: wallpaperID)
+        }
+        return result
     }
 
     /// The window of every open scene wallpaper, live and kept paused, read without a round trip.
@@ -1424,10 +1509,13 @@ final class BridgeStore {
                 shaderCacheSizeBytes: 0,
                 logs: BridgeLogStatus(logsRoot: "", activeSession: "", activeFile: "", activeFileSizeBytes: 0)),
             videoBackends: [], sceneOptimizationEnabled: true, sceneOnDemandEnabled: false,
-            sceneVideoPlaneSamplingEnabled: false, sceneResolution: "display", sceneUpdateModes: [],
+            metalfxUpscalingEnabled: false, sceneVideoPlaneSamplingEnabled: false,
+            sceneDisplayFramingEnabled: false, sceneResolution: "display",
+            sceneQuality: .wallpaperEngineDefault, sceneUpdateModes: [],
             sceneRenderers: [], userAssetsPath: "", renderScale: 1, preferredRenderScale: 1,
             frameRateCap: nil, batteryRenderScale: 0.75, batteryTargetFps: 30, onBatteryPower: false,
-            qualityThrottle: [], effectiveFrameRateCap: nil, renderScaleSupported: false)
+            qualityThrottle: [], effectiveFrameRateCap: nil, renderScaleSupported: false,
+            mutedWallpaperCount: 0)
         return Snapshots(app: app, library: library, wallpaperOptions: nil, monitorInformation: monitor, settings: settings)
     }
 
@@ -1440,10 +1528,16 @@ final class BridgeStore {
         finishSnapshotApply()
     }
 
-    private func apply(_ bundle: BridgeWallpaperMutationBundle) {
+    /// A wallpaper edit's bundle carries the edited wallpaper's options, which take the place of the
+    /// open ones. With `keepingOpenOptions` they do only when the open ones are that wallpaper's, or
+    /// none are open: the inspector keeps showing its own wallpaper, and a drag on it goes on.
+    private func apply(_ bundle: BridgeWallpaperMutationBundle, keepingOpenOptions: Bool = false) {
         self.appSnapshot = bundle.app
         self.librarySnapshot = bundle.library
-        self.wallpaperOptionsSnapshot = bundle.wallpaperOptions
+        let open = wallpaperOptionsSnapshot?.wallpaperId
+        if !keepingOpenOptions || open == nil || open == bundle.wallpaperOptions.wallpaperId {
+            self.wallpaperOptionsSnapshot = bundle.wallpaperOptions
+        }
         self.monitorInformationSnapshot = bundle.monitorInformation
         self.settingsSnapshot = bundle.settings
         finishSnapshotApply()

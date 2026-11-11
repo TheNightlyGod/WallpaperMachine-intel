@@ -8,6 +8,7 @@ extension SettingsSection {
     case .general: "General"
     case .appearance: "Appearance"
     case .desktop: "Desktop & Lock Screen"
+    case .widgets: "Desktop Widgets"
     case .playback: "Playback & Power"
     case .performance: "Performance"
     case .displays: "Displays"
@@ -32,6 +33,7 @@ extension SettingsSection {
     case .general: "Language, startup and the welcome guide."
     case .appearance: "How this window looks. Your wallpapers are not affected."
     case .desktop: "How wallpapers meet the macOS desktop, lock screen and screen saver."
+    case .widgets: "Clocks, dates, notes and more on the desktop, over any wallpaper."
     case .playback: "When wallpapers pause, mute or stop on their own."
     case .performance: "Energy use, picture quality and the renderers behind them."
     case .displays: "Each display’s wallpaper, playlist and automatic changes."
@@ -49,6 +51,7 @@ extension SettingsSection {
     case .general: "gearshape"
     case .appearance: "circle.lefthalf.filled"
     case .desktop: "photo.on.rectangle"
+    case .widgets: "clock"
     case .playback: "play"
     case .performance: "gauge.with.dots.needle.67percent"
     case .displays: "display"
@@ -67,6 +70,7 @@ extension SettingsSection {
     case .desktop: .teal
     case .playback: .green
     case .performance: .orange
+    case .widgets: .purple
     case .library: .indigo
     }
   }

@@ -50,7 +50,13 @@ final class SettingsModel {
   private(set) var drafts: [String: Draft] = [:]
   @ObservationIgnored private var nextDraftToken: UInt64 = 0
 
-  init(controller: PanelController) { self.controller = controller }
+  /// The icons of the apps the App rules name.
+  let appIcons: AppIconCache
+
+  init(controller: PanelController) {
+    self.controller = controller
+    appIcons = AppIconCache()
+  }
 
   /// What the query keeps. Cached for the query, the language, the rows this Mac draws now and
   /// the live rows, because every row of the page asks.

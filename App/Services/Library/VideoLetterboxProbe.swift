@@ -101,8 +101,17 @@ actor VideoLetterboxProbe {
   static let maximumFrameDimension = 640
 
   /// Decodes the frames with `AVAssetImageGenerator`: upright, bounded in size, at exact times.
-  /// A frame that fails to decode is skipped; only when none decode is the file unreadable.
+  /// A frame that fails to decode is skipped; only when none decode is the file unreadable. An
+  /// HEVC clip tagged `hev1` is read from its corrected copy, as it plays (`DerivedVideoCache`).
   static let generatedFrames: FrameSource = { url in
+    try await decodedFrames(of: url, derived: .shared)
+  }
+
+  static func decodedFrames(of video: URL, derived: DerivedVideoCache) async throws -> Frames {
+    try await derived.reading(video) { try await sampledFrames(of: $0) }
+  }
+
+  private static func sampledFrames(of url: URL) async throws -> Frames {
     let asset = AVURLAsset(url: url)
     do {
       guard try await asset.load(.isPlayable) else { throw Failure.unreadable("not playable") }

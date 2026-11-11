@@ -6,6 +6,9 @@ struct AppearanceChoiceCard: View {
   let title: String
   let miniature: SurfacePalette.Miniature
   var split: SurfacePalette.Miniature?
+  /// The accents of the two looks, for a card of looks with their own; else the window's.
+  var accent: Color?
+  var splitAccent: Color?
   let isSelected: Bool
   let action: () -> Void
 
@@ -16,7 +19,9 @@ struct AppearanceChoiceCard: View {
   var body: some View {
     Button(action: action) {
       VStack(spacing: 6) {
-        SettingsMiniWindow(miniature: miniature, split: split, accent: theme.accent.accent.color)
+        SettingsMiniWindow(
+          miniature: miniature, split: split, accent: accent ?? theme.accent.accent.color,
+          splitAccent: splitAccent)
           // Room for the ring and the gap inside it, always, so choosing a card moves nothing.
           .padding(4.5)
           .overlay {
@@ -87,27 +92,41 @@ struct AppearanceIconOption: View {
   }
 }
 
-/// A row of picture cards with its name: beside the name while there is room, under it when the
-/// window is narrow. The cards keep their size either way, so a label is never cut short.
+/// A row of picture cards with its name, and a note under the name when it has one: beside the
+/// name while there is room, under it when the window is narrow. The cards keep their size either
+/// way, so a label is never cut short.
 ///
 /// The cards never shrink, because a card that did would cut its label first ("System…"). Their
 /// width cannot widen the window either: the stacked layout takes over before the row runs out of
 /// room, and the Settings column asks the split view for no width (`SettingsDetail`).
 struct AppearanceChoiceRow<Cards: View>: View {
   let item: SettingsItem
+  let note: String?
   let cards: Cards
 
   @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
 
-  init(_ item: SettingsItem, @ViewBuilder cards: () -> Cards) {
+  /// - Parameter note: Replaces the item's note, for one built from live values.
+  init(_ item: SettingsItem, note: String? = nil, @ViewBuilder cards: () -> Cards) {
     self.item = item
+    self.note = note
     self.cards = cards()
   }
 
   var body: some View {
     let settings = controller.settings
     if settings.search.shows(item) {
-      let title = Text(verbatim: settings.text(item.title)).font(.system(size: 13))
+      let lead = note ?? item.note.map(settings.text)
+      let title = VStack(alignment: .leading, spacing: 2) {
+        Text(verbatim: settings.text(item.title)).font(.system(size: 13))
+        if let lead {
+          Text(verbatim: lead)
+            .font(.system(size: 11.5))
+            .foregroundStyle(theme.surface.muted.color)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+      }
       ViewThatFits(in: .horizontal) {
         HStack(spacing: 12) {
           title.frame(maxWidth: .infinity, alignment: .leading)
@@ -117,6 +136,8 @@ struct AppearanceChoiceRow<Cards: View>: View {
           title
           cards.fixedSize()
         }
+        // As wide as the card, as the side-by-side layout is.
+        .frame(maxWidth: .infinity, alignment: .leading)
       }
       .padding(.horizontal, 12)
       .padding(.vertical, 8)

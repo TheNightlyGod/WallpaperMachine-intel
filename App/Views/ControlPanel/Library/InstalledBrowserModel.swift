@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// The model reads and acts through `controller`, which owns every store. It is the state the page
 /// keeps for itself: the search text, the tag filters and the sort, the multi-selection with its
-/// press-and-sweep gesture, the one animated tile, the Import popover, and the import pill.
+/// press-and-sweep gesture, the animated previews, the Import popover, and the import pill.
 /// Filters and sort are reported to `controller.storeViewState(_:)` as they change
 /// so a reopened window comes back to them, and restored once when the model is made.
 ///
@@ -23,6 +23,12 @@ final class InstalledBrowserModel {
 
   /// The search text, tag filters and collection on show.
   private(set) var filter = LibraryFilter()
+  /// Whether the search text arrived whole: pasted or dropped in one edit
+  /// (`WorkshopSearchTrigger.isPasteOrDrop(from:to:)`), confirmed with Return, or restored from
+  /// the last window. Only then may a bare number be the Workshop item that is not installed
+  /// (`LibraryEmptyState`); typed, it is a prefix of one until its last digit. Not part of
+  /// `filter`, since it changes nothing the grid shows.
+  private(set) var isTextWhole = false
   private(set) var sort = LibrarySort.title
   /// Whether the sort runs against its natural direction.
   private(set) var descending = false
@@ -51,22 +57,42 @@ final class InstalledBrowserModel {
   var armingID: String?
   /// The name being typed for a new collection made from the selection; nil when not asked for.
   var newCollectionName: String?
-  /// The last batch result, shown beside the selection's tools for five seconds.
+  /// The last result worth saying (a batch, a refresh), shown in the bar under the grid for five
+  /// seconds.
   var notice: String?
+  /// Where a notice can take the user, when what it says is something to act on.
+  enum NoticeLink: Equatable {
+    /// Settings › Displays, where the target display's playlist is turned on and told what to play.
+    case playlistSettings
+  }
+  /// The link offered beside `notice`; it goes when the notice does.
+  var noticeLink: NoticeLink?
   /// How a sentence reaches VoiceOver. A seam: tests record it.
   @ObservationIgnored var announce: @MainActor (String) -> Void = {
     AccessibilityNotification.Announcement($0).post()
   }
   @ObservationIgnored private var summaryTask: Task<Void, Never>?
 
-  // MARK: Animated preview
+  // MARK: Animated previews
+  //
+  // Every tile on screen plays its animation, unless Settings › General › Play Library previews
+  // only on hover is on; then only the tile under the pointer or keyboard focus does
+  // (`InstalledBrowserModel+LivePreview.swift`).
 
-  /// The one tile that is playing its animation, with the animation.
+  /// Whether only the hovered or focused tile plays, read from the setting when the model is made
+  /// and when the setting changes (`previewModeChanged()`).
+  var playsPreviewsOnHover: Bool
+
+  /// The one tile that is playing its animation on hover, with the animation.
   struct LivePreview: Equatable {
     let id: String
     let data: Data
   }
   var livePreview: LivePreview?
+
+  /// Each tile observes only its own animation; a load or release during scrolling must not
+  /// invalidate every other tile that is already on screen.
+  let gridAnimations = LibraryPreviewAnimations()
 
   // MARK: Import
 
@@ -106,6 +132,15 @@ final class InstalledBrowserModel {
 
   @ObservationIgnored fileprivate var sortedCache: (key: SortedKey, rows: [LibraryRow])?
   @ObservationIgnored fileprivate var visibleCache: (key: VisibleKey, result: Visible)?
+  /// Which tiles load their animation while every tile on screen plays, and when.
+  @ObservationIgnored var gridPreviews = LivePreviewScheduler()
+  @ObservationIgnored var gridPreviewTasks: [String: Task<Void, Never>] = [:]
+  /// The tiles inside the grid's visible part, as they report themselves.
+  @ObservationIgnored var tilesOnScreen = Set<String>()
+  @ObservationIgnored var isGridHidden = false
+  /// Each visible id's place in the grid, kept with the ids it was made from, so the previews load
+  /// in grid order without walking a large library at every scroll.
+  @ObservationIgnored var gridOrder: (ids: [String], index: [String: Int])?
   @ObservationIgnored var liveTarget = LivePreviewTarget()
   @ObservationIgnored var liveCandidate: String?
   @ObservationIgnored var liveTask: Task<Void, Never>?
@@ -126,6 +161,7 @@ final class InstalledBrowserModel {
 
   init(controller: PanelController) {
     self.controller = controller
+    playsPreviewsOnHover = PanelPreferences.playsLibraryPreviewsOnHover(in: controller.defaults)
     restore(controller.restoredViewState)
     importPill.observe(controller.importState, popoverOpen: false)
     importLoop = ObservationLoop(
@@ -217,8 +253,16 @@ final class InstalledBrowserModel {
 
   func setText(_ text: String) {
     guard text != filter.text else { return }
+    isTextWhole = WorkshopSearchTrigger.isPasteOrDrop(from: filter.text, to: text)
     filter.text = text
     filtersChanged(immediately: false)
+  }
+
+  /// Return in the search field: the text is complete, as a bare id typed into Discover's field
+  /// is looked up on Return. The grid already shows what it finds.
+  func submitSearch() {
+    guard !filter.text.isEmpty else { return }
+    isTextWhole = true
   }
 
   /// Chooses a sort key, which also puts the list in that key's natural direction.
@@ -316,12 +360,14 @@ final class InstalledBrowserModel {
   func clearSearch() {
     guard !filter.text.isEmpty else { return }
     filter.text = ""
+    isTextWhole = false
     filtersChanged(immediately: true)
   }
 
   /// Clear search and filters: the text goes first, then everything Clear takes away.
   func clearSearchAndFilters() {
     filter = LibraryFilter()
+    isTextWhole = false
     filtersChanged(immediately: true)
   }
 
@@ -348,6 +394,8 @@ final class InstalledBrowserModel {
     var sort: LibrarySort
     var descending: Bool
     var favorites: Set<String>?
+    /// The history's revision, while the list is sorted by last use.
+    var history: UInt64?
     var language: String
   }
 
@@ -356,6 +404,8 @@ final class InstalledBrowserModel {
     var filter: LibraryFilter
     var favorites: Set<String>?
     var members: [String]?
+    /// The wallpapers of the collections the search text names.
+    var named: Set<String>
   }
 
   fileprivate struct Visible {
@@ -364,8 +414,9 @@ final class InstalledBrowserModel {
   }
 
   /// Every installed wallpaper the filters let through, in the chosen order. Kept until an input
-  /// moves: a typed letter filters the sorted library again, and only a new library or sort
-  /// sorts it, so a 10,000-wallpaper library is sorted once however long the user types.
+  /// moves: a typed letter filters the sorted library again, and only a new library or sort (or,
+  /// under Last used, a wallpaper put on a display) sorts it, so a 10,000-wallpaper library is
+  /// sorted once however long the user types.
   var visibleRows: [LibraryRow] { visible.rows }
 
   /// The ids of `visibleRows`, in order.
@@ -380,11 +431,14 @@ final class InstalledBrowserModel {
       || filter.excludedTags.contains { $0.lowercased() == "favorite" }
     let sortedKey = SortedKey(
       rows: controller.libraryRowsCache.rebuilds, sort: sort, descending: descending,
-      favorites: sort == .favorites ? favorites : nil, language: PanelLocale.shared.tag)
+      favorites: sort == .favorites ? favorites : nil,
+      history: sort == .lastUsed ? controller.historyRevision : nil,
+      language: PanelLocale.shared.tag)
     let members = shownCollection?.wallpaperIDs
+    let named = filter.text.isEmpty ? [] : filter.membersOfCollectionsNamed(in: controller.collectionRows)
     let key = VisibleKey(
       sorted: sortedKey, filter: filter, favorites: usesFavorites ? favorites : nil,
-      members: members)
+      members: members, named: named)
     if let visibleCache, visibleCache.key == key { return visibleCache.result }
 
     let sorted: [LibraryRow]
@@ -392,11 +446,13 @@ final class InstalledBrowserModel {
       sorted = sortedCache.rows
     } else {
       sorted = sort.sorted(
-        rows, descending: descending, favorites: favorites, locale: PanelLocale.shared.locale)
+        rows, descending: descending, favorites: favorites,
+        lastUsed: sort == .lastUsed ? controller.lastUsedDates : [:],
+        locale: PanelLocale.shared.locale)
       sortedCache = (sortedKey, sorted)
     }
     let narrowed = filter.apply(
-      to: sorted, favorites: favorites, members: members.map(Set.init))
+      to: sorted, favorites: favorites, members: members.map(Set.init), named: named)
     let result = Visible(rows: narrowed, ids: narrowed.map(\.id))
     visibleCache = (key, result)
     return result
@@ -409,8 +465,9 @@ final class InstalledBrowserModel {
     let collection = shownCollection
     return LibraryEmptyState.make(
       rowCount: rowCount, isLoading: controller.isLibraryLoading,
-      libraryIsEmpty: controller.libraryRows.isEmpty,
-      collection: collection.map { ($0.name, $0.count) }, filter: effectiveFilter)
+      loadFailure: controller.libraryLoadFailure, libraryIsEmpty: controller.libraryRows.isEmpty,
+      collection: collection.map { ($0.name, $0.count) }, filter: effectiveFilter,
+      isInstalled: { controller.libraryRow(id: $0) != nil }, textIsWhole: isTextWhole)
   }
 
   /// The wallpapers that enabled displays other than the target show, for the Other display pill.
@@ -477,6 +534,7 @@ final class InstalledBrowserModel {
   private func restore(_ saved: PanelViewState?) {
     guard let saved else { return }
     filter.text = saved.installed.text
+    isTextWhole = !filter.text.isEmpty
     if let sort = LibrarySort(rawValue: saved.installed.sort) { self.sort = sort }
     descending = saved.installed.descending
     filter.requiredTags = Self.unique(saved.installed.tags)
@@ -556,6 +614,7 @@ final class InstalledBrowserModel {
   func leavePage() {
     closeImport()
     windowWentAway()
+    releaseGridPreviews()
   }
 
   /// The window was hidden or lost focus, or the page went: a hold or a sweep ends, the animation
@@ -604,6 +663,17 @@ final class InstalledBrowserModel {
     let duplicates = importDuplicates
     return controller.launch(PanelActionCoordinator.key("import")) { [controller] in
       try await controller.beginImport(duplicates: duplicates)
+    }
+  }
+
+  /// Files and folders dropped on the page: the import the picker would start with them, with the
+  /// popover's choice for duplicates. Nil when the drop holds no file, so it is not taken.
+  @discardableResult
+  func importDropped(_ urls: [URL]) -> Task<Void, Never>? {
+    guard urls.contains(where: \.isFileURL) else { return nil }
+    let duplicates = importDuplicates
+    return controller.launch(PanelActionCoordinator.key("import")) { [controller] in
+      try await controller.importDropped(urls, duplicates: duplicates)
     }
   }
 }

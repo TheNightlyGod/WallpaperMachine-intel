@@ -12,6 +12,9 @@
 #include "SceneSourceResolver.hpp"
 #include "WPPkgFs.hpp"
 #include "tex_fixtures.hpp"
+#include "Scene/Parse/WPTextureFormats.hpp"
+#include <cstdlib>
+#include <fstream>
 
 using namespace wallpaper;
 using namespace textest;
@@ -74,7 +77,6 @@ TEST(TexContainer, HeaderLayoutForEveryContainerVersion) {
         EXPECT_EQ(h.width, 8);
         EXPECT_EQ(h.height, 8);
         EXPECT_EQ(h.type, texb >= 3 ? ImageType::PNG : ImageType::UNKNOWN);
-        EXPECT_EQ(h.extraHeader.count("texb_reserved"), texb == 4 ? 1u : 0u);
         EXPECT_FALSE(h.mipmap_pow2);
 
         const auto image = rig->Parse("sample");
@@ -91,26 +93,240 @@ TEST(TexContainer, HeaderLayoutForEveryContainerVersion) {
     }
 }
 
-TEST(TexContainer, ReservedWordIsNeitherAFlagNorABodyOffset) {
-    for (int word : { 12345, 0, 32, -1, 1 }) {
-        SCOPED_TRACE("reserved " + std::to_string(word));
-        Container c(4, { levelOf(1, 1, redPng(77)) });
-        c.type     = 13;
-        c.reserved = word;
-        auto rig   = texRig(c);
-        const auto h = headerOf(rig);
-        EXPECT_FALSE(h.isVideo);
-        EXPECT_EQ(h.type, ImageType::PNG);
-        EXPECT_EQ(h.extraHeader.at("texb_reserved").val, word);
-        EXPECT_FALSE(h.mipmap_pow2);
+// ---- volumes (`.tex` flag 0x40, `sub_14015C760` / `sub_14015C8D0`) ----------------------------
+
+TEST(TexContainer, AVolumeHeaderReadsItsDepthBeforeTheColour) {
+    Container c;
+    c.texb  = 3;
+    c.flags = kClamp | kVolume;
+    c.width = c.height = c.mapWidth = c.mapHeight = 2;
+    c.depth = 4;
+    LevelSpec level = rawLevel(2, 2, 0);
+    level.depth     = 4;
+    level.bytes.resize(2 * 2 * 4 * 4);
+    for (size_t i = 0; i < level.bytes.size(); ++i) level.bytes[i] = static_cast<uint8_t>(i);
+    c.pictures.push_back({ { level }, std::nullopt });
+    auto rig = texRig(c);
+    EXPECT_EQ(headerOf(rig).depth, 4);
+    const auto image = rig->Parse("sample");
+    ASSERT_NE(image, nullptr);
+    EXPECT_EQ(image->header.depth, 4);
+    EXPECT_EQ(image->slots[0].depth, 4);
+    ASSERT_EQ(image->slots[0].mipmaps.size(), 1u);
+    EXPECT_EQ(image->slots[0].mipmaps[0].depth, 4);
+    EXPECT_EQ(image->slots[0].mipmaps[0].size, 64);
+    EXPECT_EQ(image->slots[0].mipmaps[0].data.get()[63], 63);
+}
+
+TEST(TexContainer, AVolumePictureIsItsSlicesStackedTopToBottom) {
+    // The reference decodes a volume's picture as width x (height x depth).
+    Blob rgba(2 * 8 * 4);
+    for (size_t i = 0; i < rgba.size(); ++i) rgba[i] = static_cast<uint8_t>(i);
+    const auto make = [](Blob png, int w, int h) {
+        Container c;
+        c.flags = kVolume;
+        c.type  = 13;
+        c.depth = 4;
+        LevelSpec level = levelOf(w, h, std::move(png));
+        level.depth     = 4;
+        c.pictures.push_back({ { level }, std::nullopt });
+        return c;
+    };
+    {
+        auto rig         = texRig(make(pngRgba(2, 8, rgba), 2, 2));
         const auto image = rig->Parse("sample");
         ASSERT_NE(image, nullptr);
-        ASSERT_EQ(image->slots.size(), 1u);
-        ASSERT_EQ(image->slots[0].mipmaps.size(), 1u);
-        EXPECT_EQ(image->slots[0].width, 1);
-        EXPECT_EQ(image->slots[0].height, 1);
-        EXPECT_EQ(image->slots[0].mipmaps[0].data.get()[0], 77);
+        EXPECT_EQ(image->slots[0].width, 2);
+        EXPECT_EQ(image->slots[0].height, 2);
+        EXPECT_EQ(image->slots[0].depth, 4);
+        // Slice 1, row 0, pixel 0 is picture row 2.
+        EXPECT_EQ(image->slots[0].mipmaps[0].data.get()[2 * 2 * 4 * 1], rgba[2 * 2 * 4]);
     }
+    {
+        // Slices side by side are not what the reference asks the decoder for.
+        auto rig = texRig(make(pngRgba(8, 2, rgba), 2, 2));
+        EXPECT_EQ(rig->Parse("sample"), nullptr);
+    }
+}
+
+TEST(TexContainer, ShippedLutsLoadAsVolumes) {
+    const char* home = std::getenv("HOME");
+    const std::filesystem::path root =
+        std::filesystem::path(home != nullptr ? home : "") /
+        "Library/Application Support/WallpaperMachine/SceneAssets/materials/lut";
+    std::error_code ec;
+    if (! std::filesystem::is_directory(root, ec)) GTEST_SKIP() << "no SceneAssets LUTs at " << root;
+    int seen = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (entry.path().extension() != ".tex") continue;
+        SCOPED_TRACE(entry.path().filename().string());
+        std::ifstream in(entry.path(), std::ios::binary);
+        const Blob bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        auto rig         = rigForTex(bytes);
+        const auto image = rig->Parse("sample");
+        ASSERT_NE(image, nullptr);
+        EXPECT_GT(image->slots[0].depth, 1);
+        EXPECT_EQ(image->slots[0].width * image->slots[0].height * image->slots[0].depth * 4,
+                  image->slots[0].mipmaps[0].size);
+        ++seen;
+    }
+    EXPECT_GT(seen, 0);
+}
+
+// ---- the format table (`sub_1401E53A0`) ------------------------------------------------------
+
+TEST(TexContainer, EveryFormatOfTheReferenceTableIsRead) {
+    struct Case {
+        int           code;
+        Blob          stored; // one pixel as the file holds it
+        TextureFormat upload;
+        Blob          uploaded;
+    };
+    const std::vector<Case> cases {
+        // The three-channel and packed names are stored with their four-channel twin's stride
+        // (read off Wallpaper Engine, texshader probe T3); `rgba8888s` reads as unsigned.
+        { 1, { 1, 2, 3, 4 }, TextureFormat::RGBA8, { 1, 2, 3, 4 } },
+        { 2, { 1, 2, 3, 4 }, TextureFormat::RGBA8, { 1, 2, 3, 4 } },
+        { 10, { 1, 2, 3, 4 }, TextureFormat::RG16F, { 1, 2, 3, 4 } },
+        { 11, { 1, 2 }, TextureFormat::R16F, { 1, 2 } },
+        { 13, { 1, 2, 3, 4 }, TextureFormat::RGB10A2, { 1, 2, 3, 4 } },
+        { 14, { 1, 2, 3, 4, 5, 6, 7, 8 }, TextureFormat::RGBA16F, { 1, 2, 3, 4, 5, 6, 7, 8 } },
+        { 15, { 1, 2, 3, 4, 5, 6, 7, 8 }, TextureFormat::RGBA16F, { 1, 2, 3, 4, 5, 6, 7, 8 } },
+        { 17, { 1, 2, 3, 4, 5, 6, 7, 8 }, TextureFormat::RGBA16, { 1, 2, 3, 4, 5, 6, 7, 8 } },
+        { 18, { 1, 2, 3, 4, 5, 6, 7, 8 }, TextureFormat::RGBA16, { 1, 2, 3, 4, 5, 6, 7, 8 } },
+        { 19, { 1, 2, 3, 4, 5, 6, 7, 8 }, TextureFormat::RGBA16S, { 1, 2, 3, 4, 5, 6, 7, 8 } },
+        { 20, { 1, 2, 3, 4, 5, 6, 7, 8 }, TextureFormat::RGBA16S, { 1, 2, 3, 4, 5, 6, 7, 8 } },
+        { 21, { 1, 2, 3, 4 }, TextureFormat::RGBA8, { 1, 2, 3, 4 } },
+    };
+    for (const auto& k : cases) {
+        SCOPED_TRACE("code " + std::to_string(k.code));
+        Container c(2, { levelOf(1, 1, k.stored) });
+        c.format = k.code;
+        auto rig = texRig(c);
+        EXPECT_EQ(headerOf(rig).formatCode, k.code);
+        const auto image = rig->Parse("sample");
+        ASSERT_NE(image, nullptr);
+        EXPECT_EQ(image->header.format, k.upload);
+        EXPECT_EQ(image->header.formatCode, k.code);
+        const auto& level = image->slots[0].mipmaps[0];
+        ASSERT_EQ(level.size, static_cast<isize>(k.uploaded.size()));
+        EXPECT_EQ(Blob(level.data.get(), level.data.get() + level.size), k.uploaded);
+    }
+}
+
+TEST(TexContainer, CodesOutsideTheReferenceTableAreRefused) {
+    for (int code : { 3, 5, 16, 22 }) {
+        SCOPED_TRACE("code " + std::to_string(code));
+        Container c(2, { rawLevel(1, 1, 1) });
+        c.format = code;
+        auto rig = texRig(c);
+        EXPECT_EQ(rig->Parse("sample"), nullptr);
+    }
+}
+
+TEST(TextureFormatTable, NamesAndCodesMatchTheReference) {
+    const std::vector<std::pair<std::string, int>> names {
+        { "rgba8888", 0 },       { "rgb888", 1 },         { "rgb565", 2 },         { "dxt5", 4 },
+        { "dxt3", 6 },           { "dxt1", 7 },           { "rg88", 8 },           { "r8", 9 },
+        { "rg1616f", 10 },       { "r16f", 11 },          { "bc7", 12 },           { "rgba1010102", 13 },
+        { "rgba16161616f", 14 }, { "rgb161616f", 15 },    { "rgba16161616", 17 },  { "rgb161616", 18 },
+        { "rgba16161616S", 19 }, { "rgb161616S", 20 },    { "rgba8888s", 21 },
+    };
+    for (const auto& [name, code] : names) {
+        const auto* row = WeFormatOfName(name);
+        ASSERT_NE(row, nullptr) << name;
+        EXPECT_EQ(row->code, code);
+        EXPECT_EQ(WeFormatOfCode(code), row);
+    }
+    EXPECT_EQ(WeFormatOfName("RGBA8888"), nullptr);
+    EXPECT_EQ(WeFormatOfName("rgba_backbuffer"), nullptr);
+}
+
+// ---- variants (TEXB0004, `sub_14015C8D0`, `sub_14015C480`) ------------------------------------
+
+namespace
+{
+// A 2x1 RGBA8 texture whose second pixel a variant patch may overwrite.
+Container variantContainer(uint32_t flags, Blob patch, const char* json) {
+    LevelSpec level = levelOf(2, 1, { 10, 10, 10, 255, 10, 10, 10, 255 });
+    PatchSpec p;
+    p.id     = 7;
+    p.x      = 1;
+    p.bytes  = std::move(patch);
+    level.patches.push_back(p);
+    Container c(4, { level });
+    c.variants.push_back({ 1, 7, flags, json });
+    return c;
+}
+constexpr const char* kModeTwo = R"({"condition":{"name":"mode","condition":"2"}})";
+} // namespace
+
+TEST(TexContainer, AVariantPatchIsLaidOverItsLevelWhileItsConditionHolds) {
+    for (bool holds : { true, false }) {
+        SCOPED_TRACE(holds ? "holds" : "does not hold");
+        auto rig = texRig(variantContainer(0, { 200, 100, 50, 255 }, kModeTwo));
+        std::vector<std::string> asked;
+        rig->SetVariantCondition([&](std::string_view name, std::string_view condition) {
+            asked.push_back(std::string(name) + "=" + std::string(condition));
+            return holds;
+        });
+        const auto image = rig->Parse("sample");
+        ASSERT_NE(image, nullptr);
+        EXPECT_EQ(asked, std::vector<std::string> { "mode=2" });
+        const uint8_t* px = image->slots[0].mipmaps[0].data.get();
+        EXPECT_EQ(px[0], 10);
+        EXPECT_EQ(px[4], holds ? 200 : 10);
+        EXPECT_EQ(image->header.variantChoices.at("mode"), holds ? "2" : "$__default");
+    }
+}
+
+TEST(TexContainer, AVariantPatchCanBlendOrReplaceTheWholeLevel) {
+    {
+        // Flag 1: colour moves toward the patch by its alpha (>> 8), alpha takes the larger.
+        auto rig = texRig(variantContainer(1, { 210, 10, 10, 128 }, kModeTwo));
+        rig->SetVariantCondition([](std::string_view, std::string_view) { return true; });
+        const auto image = rig->Parse("sample");
+        ASSERT_NE(image, nullptr);
+        const uint8_t* px = image->slots[0].mipmaps[0].data.get();
+        EXPECT_EQ(px[4], 10 + (128 * 200 >> 8));
+        EXPECT_EQ(px[7], 255);
+    }
+    {
+        // Flag 2: the patch's bytes are the level.
+        auto rig = texRig(variantContainer(2, { 1, 2, 3, 4, 5, 6, 7, 8 }, kModeTwo));
+        rig->SetVariantCondition([](std::string_view, std::string_view) { return true; });
+        const auto image = rig->Parse("sample");
+        ASSERT_NE(image, nullptr);
+        const auto& level = image->slots[0].mipmaps[0];
+        EXPECT_EQ(Blob(level.data.get(), level.data.get() + level.size), (Blob { 1, 2, 3, 4, 5, 6, 7, 8 }));
+    }
+}
+
+TEST(TexContainer, ABareNameConditionAsksWhetherThePropertyIsSet) {
+    auto rig = texRig(variantContainer(0, { 99, 99, 99, 255 }, R"({"condition":"showbadge"})"));
+    rig->SetVariantCondition([](std::string_view name, std::string_view condition) {
+        return name == "showbadge" && condition.empty();
+    });
+    const auto image = rig->Parse("sample");
+    ASSERT_NE(image, nullptr);
+    EXPECT_EQ(image->slots[0].mipmaps[0].data.get()[4], 99);
+    EXPECT_EQ(image->header.variantChoices.at("showbadge"), "1");
+}
+
+TEST(TexContainer, AVariantCountTheFileCannotHoldIsRefused) {
+    for (uint32_t count : { 0xFFFFFFFFu, 1000u }) {
+        Container c(4, { rawLevel(1, 1, 1) });
+        c.variantCount = count;
+        auto rig       = texRig(c);
+        EXPECT_EQ(rig->Parse("sample"), nullptr);
+    }
+}
+
+TEST(TexContainer, AVariantStringWithoutItsEndIsRefused) {
+    Container c(4, { rawLevel(1, 1, 1) });
+    c.variants.push_back({ 1, 7, 0, kModeTwo, false });
+    auto rig = texRig(c);
+    EXPECT_EQ(rig->Parse("sample"), nullptr);
 }
 
 TEST(TexContainer, EmptyLevelTablesGiveAHeaderButNoImage) {
@@ -334,6 +550,59 @@ TEST(TexContainer, VideoFlagWithCompressedPayloadTakesTheMetadataPath) {
     plain.flags = kVideo;
     auto plainRig = texRig(plain);
     EXPECT_TRUE(headerOf(plainRig).isVideo);
+}
+
+// Every level of a texture is uploaded as its first one is: a decoded picture as RGBA, raw
+// pixels in the container's format. A level of another kind would be read as the first one's
+// pixels, past the end of its own bytes, so it ends the chain, and the levels behind it go too.
+TEST(TexContainer, ALevelOfAnotherKindEndsTheChain) {
+    struct Case {
+        const char*            what;
+        int                    format;
+        std::vector<LevelSpec> levels;
+        uint8_t                first; // the first byte of the one level kept
+    };
+    const std::vector<Case> cases {
+        { "a picture, then raw one-byte pixels", 9,
+          { levelOf(2, 2, redPng(40)), levelOf(1, 1, Blob(1, 9)), levelOf(1, 1, Blob(1, 9)) }, 40 },
+        { "raw pixels, then a picture", 0, { rawLevel(2, 2, 3), levelOf(1, 1, redPng(41)) }, 3 },
+        { "raw pixels, then a clip", 0, { rawLevel(2, 2, 4), levelOf(1, 1, mp4Marker()), rawLevel(1, 1, 5) }, 4 },
+    };
+    for (const auto& k : cases) {
+        SCOPED_TRACE(k.what);
+        Container c(3, k.levels);
+        c.format = k.format;
+        auto rig = texRig(c);
+        const auto image = rig->Parse("sample");
+        ASSERT_NE(image, nullptr);
+        ASSERT_EQ(image->slots.size(), 1u);
+        ASSERT_EQ(image->slots[0].mipmaps.size(), 1u);
+        EXPECT_EQ(image->slots[0].mipmaps[0].data.get()[0], k.first);
+        EXPECT_FALSE(image->header.isVideo);
+    }
+}
+
+// A sprite sheet's pictures share one format too: a frame that holds another kind of level
+// than the first frame cannot be shown, and neither can the sheet.
+TEST(TexContainer, ASpriteFrameOfAnotherKindRefusesTheSheet) {
+    Container c;
+    c.texb  = 3;
+    c.flags = kSprite;
+    c.pictures.push_back({ { levelOf(1, 1, redPng(50)) }, std::nullopt });
+    c.pictures.push_back({ { rawLevel(1, 1, 51) }, std::nullopt });
+    auto rig = texRig(c);
+    EXPECT_EQ(rig->Parse("sample"), nullptr);
+
+    // Two frames of one kind are a sheet as before.
+    Container same;
+    same.texb  = 3;
+    same.flags = kSprite;
+    same.pictures.push_back({ { levelOf(1, 1, redPng(52)) }, std::nullopt });
+    same.pictures.push_back({ { levelOf(1, 1, redPng(53)) }, std::nullopt });
+    auto sameRig = texRig(same);
+    const auto image = sameRig->Parse("sample");
+    ASSERT_NE(image, nullptr);
+    EXPECT_EQ(image->slots.size(), 2u);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -812,6 +1081,51 @@ TEST(TexLoose, PackagedBmpDecodesToItsPixels) {
     EXPECT_EQ(rig->ParseHeader("backdrop.bmp").type, ImageType::BMP);
 }
 
+// Pictures are decoded only in the formats a wallpaper's textures come in.
+TEST(TexLoose, APictureInAFormatNoTextureUsesIsNotDecoded) {
+    auto rig = rigFor({ { "/materials/backdrop.png", pnm1x1(1, 2, 3) } });
+    EXPECT_EQ(rig->Parse("backdrop.png"), nullptr);
+
+    // The same bytes as a container's declared picture are refused too.
+    Container c(3, { levelOf(1, 1, pnm1x1(1, 2, 3)) });
+    c.type = 13;
+    auto container = texRig(c);
+    EXPECT_EQ(container->Parse("sample"), nullptr);
+}
+
+TEST(TexLoose, APictureWiderThanAnyTextureIsNotDecoded) {
+    auto widest = rigFor({ { "/materials/wide.bmp", bmpRow(16384, 9, 8, 7) } });
+    const auto image = widest->Parse("wide.bmp");
+    ASSERT_NE(image, nullptr);
+    EXPECT_EQ(image->slots[0].width, 16384);
+
+    auto wider = rigFor({ { "/materials/wide.bmp", bmpRow(16385, 9, 8, 7) } });
+    EXPECT_EQ(wider->Parse("wide.bmp"), nullptr);
+}
+
+TEST(TexLoose, ATgaShorterThanItsPixelsIsNotDecoded) {
+    auto whole = rigFor({ { "/materials/mark.tga", tga(1, 1, { 30, 60, 90 }) } });
+    const auto image = whole->Parse("mark.tga");
+    ASSERT_NE(image, nullptr);
+    const uint8_t want[4] = { 90, 60, 30, 255 };
+    for (int i = 0; i < 4; ++i) EXPECT_EQ(image->slots[0].mipmaps[0].data.get()[i], want[i]) << i;
+
+    // Four by four pixels promised, one given: the rest would be whatever the heap held.
+    auto cut = rigFor({ { "/materials/mark.tga", tga(4, 4, { 30, 60, 90 }) } });
+    EXPECT_EQ(cut->Parse("mark.tga"), nullptr);
+}
+
+TEST(TexLoose, AJpegWhoseMarkersFailBeforeAnyScanIsNotDecoded) {
+    // A frame header, then a marker no JPEG has, and no scan: there are no pixels to show, so
+    // the picture is refused rather than handed back as whatever its buffer held.
+    const Blob broken { 0xFF, 0xD8,                                  // start of image
+                        0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+                        0xFF, 0xC8, 0x00, 0x02,                      // a marker no JPEG uses
+                        0xFF, 0xD9 };                                // end of image
+    auto rig = rigFor({ { "/materials/broken.jpg", broken } });
+    EXPECT_EQ(rig->Parse("broken.jpg"), nullptr);
+}
+
 TEST(TexLoose, HostLooseAssetReadability) {
     ScratchDir dir("tex-readable");
     const std::string chosen = dir.write("chosen.png", png1x1(1, 2, 3, 4));
@@ -958,5 +1272,18 @@ TEST(TexPackage, PresetFilesMountBesideThePackageAndThePackageWins) {
         std::string failure;
         EXPECT_FALSE(MountSceneSource(vfs, missing, &failure));
         EXPECT_EQ(failure, "can't load pkg directory: " + missing.pkg_dir);
+    }
+}
+
+// Wallpaper Engine binds a texture it loaded from a file with its anisotropic sampler, 8x, unless
+// the file asks for point sampling (`sub_140099980`, linear argument from `sub_1400EC220`).
+TEST(TexContainer, FileTexturesAskForEightfoldAnisotropyUnlessPointSampled) {
+    {
+        auto rig = texRig(rawChain({ 4, 2, 1 }));
+        EXPECT_EQ(headerOf(rig).sample.maxAnisotropy, 8);
+    }
+    {
+        auto rig = texRig(rawChain({ 4, 2, 1 }, kPointSampling));
+        EXPECT_EQ(headerOf(rig).sample.maxAnisotropy, 1);
     }
 }

@@ -191,10 +191,12 @@ struct WPTextObject : WPMiscObjectBase {
     bool                 ledsource { false };
     std::array<float, 3> backgroundcolor { 0.0f, 0.0f, 0.0f };
     float                backgroundbrightness { 1.0f };
-    // The signed-distance font shader's looks, with Wallpaper Engine's defaults
-    // for the keys being absent. `msdf` only picks how the glyph edges are
-    // rebuilt, so it is read and nothing more.
+    // The font shader's looks, with Wallpaper Engine's defaults for the keys being absent.
+    // `msdf` draws the glyphs from the distance-field atlas even without a style.
     bool                 msdf { false };
+    // `depthtest`: a word, `disabled` or (the default) `enabled` (member table 0x140258CA0,
+    // decompiles/G-F10.md); anything else reads as enabled.
+    std::string          depthtest { "enabled" };
     bool                 outline { false };
     float                outlinethickness { 4.0f };
     std::array<float, 3> outlinecolor { 0.0f, 0.0f, 0.0f };
@@ -244,6 +246,7 @@ struct WPTextObject : WPMiscObjectBase {
         if (json.contains("backgroundcolor")) ReadStrictVec(json.at("backgroundcolor"), backgroundcolor);
         ReadMiscNumber(json, "backgroundbrightness", backgroundbrightness);
         ReadMiscFlag(json, "msdf", msdf);
+        ReadMiscEnumWord(json, "depthtest", "enabled", depthtest);
         ReadMiscFlag(json, "outline", outline);
         ReadMiscNumber(json, "outlinethickness", outlinethickness);
         if (json.contains("outlinecolor")) ReadStrictVec(json.at("outlinecolor"), outlinecolor);
@@ -265,6 +268,12 @@ struct WPModelObject : WPMiscObjectBase {
     bool        perspective { false };
     bool        solid { true };
     bool        disablepropagation { false };
+    // Script-visible model flags (we_ss_reg_ModelLayer 0x140227470): `rootmotion` (+784,
+    // default off, B-D9) and `castshadow` (+288 bit 0x800). A model casts when the key is
+    // absent: Wallpaper Engine's probe frame shows it (C-6.md, probe P-S ps1 vs ps2), which
+    // overturns B-D9's static "default off".
+    bool        rootmotion { false };
+    bool        castshadow { true };
     std::vector<WPPuppetLayer::AnimationLayer> puppet_layers;
     std::vector<nlohmann::json> puppet_layer_settings;
 
@@ -276,6 +285,8 @@ struct WPModelObject : WPMiscObjectBase {
         ReadMiscFlag(json, "perspective", perspective);
         ReadMiscFlag(json, "solid", solid);
         ReadMiscFlag(json, "disablepropagation", disablepropagation);
+        ReadMiscFlag(json, "rootmotion", rootmotion);
+        ReadMiscFlag(json, "castshadow", castshadow);
         if (json.contains("animationlayers")) {
             ParsePuppetAnimationLayers(json.at("animationlayers"), puppet_layers,
                                        puppet_layer_settings);

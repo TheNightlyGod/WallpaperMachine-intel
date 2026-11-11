@@ -40,7 +40,7 @@ final class WallpaperMachineUITests: XCTestCase {
     let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
     defaults.setPersistentDomain([
       "WallpaperMachine.appLanguage": "en", "AppleLanguages": ["en"],
-      "WallpaperMachine.welcomeSeen": true, "WallpaperMachine.whatsNew.suppressed": true,
+      "WallpaperMachine.welcomeSeen": true,
     ], forName: suite)
     defaults.synchronize()
     app.launchEnvironment["WALLPAPER_MACHINE_HOME"] = root.path

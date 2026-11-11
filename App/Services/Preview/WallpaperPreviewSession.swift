@@ -11,6 +11,9 @@ protocol WallpaperPreviewSurface: AnyObject {
     /// Shows newer property values on the running preview without starting it again. `json`
     /// has the same shape as the request's `propertiesJSON`.
     func applyProperties(_ json: String) throws
+    /// Shows newer Wallpaper Engine options on the running preview. A surface whose wallpaper has
+    /// none, or that cannot show them in place, leaves itself as it is.
+    func applyEngineOptions(_ options: WallpaperEngineOptions) throws
     func stop()
 }
 
@@ -50,6 +53,8 @@ final class WallpaperPreviewSession {
     private var propertiesStale = false
     /// What the surface shows, in the form `LivePropertyPayload` writes; nil until it is changed.
     private var shownProperties: String?
+    /// The Wallpaper Engine options the surface shows; nil until they are changed.
+    private var shownEngineOptions: WallpaperEngineOptions?
     /// The last problem logged for a refresh, so one that keeps recurring is logged once.
     private var lastRefreshProblem: String?
     var onChange: (() -> Void)?
@@ -225,6 +230,10 @@ final class WallpaperPreviewSession {
                 try surface.applyProperties(merged.json)
                 shownProperties = merged.json
             }
+            if let options = latest.engineOptions, options != (shownEngineOptions ?? started.engineOptions) {
+                try surface.applyEngineOptions(options)
+                shownEngineOptions = options
+            }
             lastRefreshProblem = nil
         } catch is CancellationError {
             return
@@ -273,6 +282,7 @@ final class WallpaperPreviewSession {
         refreshes.cancel(Self.refreshKey)
         propertiesStale = false
         shownProperties = nil
+        shownEngineOptions = nil
         lastRefreshProblem = nil
         needsReload = false
         surface?.onReady = nil

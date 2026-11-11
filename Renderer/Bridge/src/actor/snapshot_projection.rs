@@ -118,6 +118,9 @@ pub(super) fn project_options(
         media_integration_enabled: current.media_integration_enabled,
         muted: current.audio.muted,
         volume: current.audio.volume,
+        // Filled by the caller, which holds the scene traits and the image
+        // filters this projection does not read.
+        engine_options: None,
     }
 }
 

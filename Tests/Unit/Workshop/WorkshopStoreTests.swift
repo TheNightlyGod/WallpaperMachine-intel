@@ -125,6 +125,44 @@ final class WorkshopStoreTests: XCTestCase {
       WorkshopDownloadManager.concurrentDownloadRange.upperBound)
   }
 
+  /// The sort and filters searched with outlive a relaunch, as after an update; a draft that was
+  /// never searched does not, and a stored list larger than a search accepts leaves the defaults.
+  func testSearchedSortAndFiltersSurviveRelaunch() throws {
+    let fixture = try Fixture()
+    defer { fixture.remove() }
+    let relaunch = {
+      WorkshopStore(
+        downloader: WorkshopDownloadManager(
+          sessionDirectory: fixture.root.appendingPathComponent("SteamSession")),
+        supportDirectory: fixture.root, defaults: fixture.defaults)
+    }
+    let fresh = relaunch()
+    XCTAssertEqual(fresh.sort, .trendingYear)
+    XCTAssertEqual(fresh.tags, [])
+    XCTAssertEqual(fresh.excludedTags, WorkshopStore.defaultExcludedTags)
+
+    let store = fixture.store
+    store.sort = .topRated
+    store.tags = ["Approved", "Anime"]
+    store.excludedTags = ["Application", "Asset", "Web"]
+    store.search()
+    store.sort = .newest
+    store.tags = []
+
+    let restored = relaunch()
+    XCTAssertEqual(restored.sort, .topRated)
+    XCTAssertEqual(restored.tags, ["Approved", "Anime"])
+    XCTAssertEqual(restored.excludedTags, ["Application", "Asset", "Web"])
+
+    fixture.defaults.set(
+      ["sort": "unknown", "tags": Array(repeating: "Anime", count: 40), "excludedTags": []],
+      forKey: WorkshopStore.browseFiltersKey)
+    let rejected = relaunch()
+    XCTAssertEqual(rejected.sort, .trendingYear)
+    XCTAssertEqual(rejected.tags, [])
+    XCTAssertEqual(rejected.excludedTags, WorkshopStore.defaultExcludedTags)
+  }
+
   func testFailedPageAndFailedSubmissionRetryTheirOwnQueryWithoutChangingDraft() async throws {
     let fixture = try Fixture()
     defer { fixture.remove() }
@@ -969,8 +1007,8 @@ final class WorkshopDownloadIntentTests: XCTestCase {
     XCTAssertTrue(job.isSignIn)
     XCTAssertNil(job.item)
     try await waitUntil { !job.isQueued }
-    XCTAssertTrue(job.worker.isSigningInOnly)
-    XCTAssertFalse(job.worker.isInstallingAssets)
+    XCTAssertTrue(job.steamCMD?.isSigningInOnly == true)
+    XCTAssertFalse(job.steamCMD?.isInstallingAssets ?? true)
 
     // A second request while one runs shows the running job instead of starting another.
     fixture.store.requestSignIn(account: "localtest", rememberSession: true, bridge: fixture.bridge)
@@ -983,6 +1021,39 @@ final class WorkshopDownloadIntentTests: XCTestCase {
     fixture.store.requestSignIn(account: "", rememberSession: true, bridge: fixture.bridge)
     XCTAssertEqual(try stage(fixture.store), .account)
     XCTAssertEqual(fixture.store.downloader.downloads.count, 1, "No job starts without an account")
+  }
+
+  func testSignInThatEndsForNoReasonIsTriedAgainOnceAfterSteamCMDChanged() async throws {
+    let fixture = try makeFixture()
+    let launches = home.appendingPathComponent("launches")
+    try Data("#!/bin/sh\nprintf x >> '\(launches.path)'\nprintf 'Logging in user to Steam Public...\\n'\nexit 8\n".utf8)
+      .write(to: fixture.executable)
+    var checks: [TimeInterval] = []
+    var updated = true
+    fixture.store.updateSteamCMD = { interval in
+      checks.append(interval)
+      return updated
+    }
+    try await makeSetupReady(fixture)
+    func launched() -> Int { (try? Data(contentsOf: launches).count) ?? 0 }
+
+    fixture.store.requestSignIn(account: "localtest", rememberSession: true, bridge: fixture.bridge)
+    try await waitUntil { launched() == 2 && fixture.store.downloader.signIn?.isPending == false }
+    XCTAssertEqual(checks, [SteamCMDSetupStore.failureUpdateCheckInterval])
+    XCTAssertNotNil(fixture.store.downloader.signIn?.errorMessage)
+    // The retry failed too: what an update could fix, it did not, so the failure is the user's.
+    try await Task.sleep(for: .milliseconds(200))
+    XCTAssertEqual(launched(), 2)
+    XCTAssertEqual(checks.count, 1)
+
+    // When SteamCMD did not change, nothing is tried again.
+    updated = false
+    try FileManager.default.removeItem(at: launches)
+    fixture.store.requestDownload(item: video, rememberSession: true, bridge: fixture.bridge)
+    try await waitUntil { checks.count == 2 }
+    try await Task.sleep(for: .milliseconds(200))
+    XCTAssertEqual(launched(), 1)
+    XCTAssertEqual(fixture.store.downloader.download(for: video.id)?.isPending, false)
   }
 
   func testSceneSkipsResourceConsentWhenAssetsAreReady() async throws {

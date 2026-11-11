@@ -196,17 +196,19 @@ TEST(ParticleControlPoints, MouseLinkedPointFollowsThePointerInCanvasUnits) {
     points[1].offset      = { 7.0, 8.0, 9.0 };
 
     rig.subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(points[0].offset.x(), 151.0);
-    EXPECT_EQ(points[0].offset.y(), 77.0) << "the pointer's y runs upward";
-    EXPECT_EQ(points[0].offset.z(), 3.0);
+    // The cursor replaces the point's whole translation; the authored offset
+    // (1, 2, 3) is not added (WE 2.8.0.42 `0x14022E3E0`, probe G).
+    EXPECT_EQ(points[0].offset.x(), 150.0);
+    EXPECT_EQ(points[0].offset.y(), 75.0) << "the pointer's y runs upward";
+    EXPECT_EQ(points[0].offset.z(), 0.0);
     EXPECT_EQ(points[1].offset, linalg::Vector3d(7.0, 8.0, 9.0)) << "an unlinked point is left alone";
 
     // When the presentation reports where the pointer is in the scene, that answer wins.
     rig.scene.pointerScenePosition = std::array<float, 2> { 20.0f, 30.0f };
     rig.subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(points[0].offset.x(), 21.0);
-    EXPECT_EQ(points[0].offset.y(), 32.0);
-    EXPECT_EQ(points[0].offset.z(), 3.0);
+    EXPECT_EQ(points[0].offset.x(), 20.0);
+    EXPECT_EQ(points[0].offset.y(), 30.0);
+    EXPECT_EQ(points[0].offset.z(), 0.0);
     EXPECT_EQ(points[1].offset, linalg::Vector3d(7.0, 8.0, 9.0));
 }
 
@@ -228,16 +230,16 @@ TEST(ParticleControlPoints, MouseLinkedPointIsTakenIntoTheOwnersLocalSpace) {
     points[0].offset      = points[0].base_offset;
 
     rig.subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(points[0].offset.x(), 26.0) << "(150 - 100) / 2 + 1";
-    EXPECT_EQ(points[0].offset.y(), 27.0) << "75 - 50 + 2";
-    EXPECT_EQ(points[0].offset.z(), 3.0);
+    EXPECT_EQ(points[0].offset.x(), 25.0) << "(150 - 100) / 2";
+    EXPECT_EQ(points[0].offset.y(), 25.0) << "75 - 50";
+    EXPECT_EQ(points[0].offset.z(), 0.0);
 
     // A world-space system only measures from the layer's origin.
     rig.subsystem->SetWorldSpace(true);
     rig.subsystem->UpdateMouseControlpoints();
-    EXPECT_EQ(points[0].offset.x(), 51.0) << "150 - 100 + 1";
-    EXPECT_EQ(points[0].offset.y(), 27.0);
-    EXPECT_EQ(points[0].offset.z(), 3.0);
+    EXPECT_EQ(points[0].offset.x(), 50.0) << "150 - 100";
+    EXPECT_EQ(points[0].offset.y(), 25.0);
+    EXPECT_EQ(points[0].offset.z(), 0.0);
 }
 
 // PX-01

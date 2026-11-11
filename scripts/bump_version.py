@@ -11,6 +11,14 @@ Commit subject or a line in the message:
 
 `project.yml` is the source of truth. The generated Xcode project is updated
 to match so a committed pbxproj stays in sync without running xcodegen.
+
+On a `hotfix/` branch (`--branch`, or `GITHUB_REF_NAME` with `--ci`) only a patch
+release is allowed, and it must be newer than every `vx.y.z` tag: a hotfix is cut
+from the newest release and becomes the newest release (docs/release.md#hotfix-releases).
+Any other branch releases only once it contains the newest tag, so `main` never ships
+without a hotfix whose merge back failed.
+With `--ci`, a pushed commit that a version tag already contains is not scanned, so
+merging a released hotfix branch into `main` does not release its `release:` line again.
 """
 from __future__ import annotations
 
@@ -18,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +44,7 @@ YML_BUILD = re.compile(r'(CURRENT_PROJECT_VERSION:\s*")([^"]+)(")')
 PBX_MARKETING = re.compile(r"(MARKETING_VERSION = )([^;]+)(;)")
 PBX_BUILD = re.compile(r"(CURRENT_PROJECT_VERSION = )([^;]+)(;)")
 BUMP_RANK = {"patch": 1, "minor": 2, "major": 3}
+HOTFIX_PREFIX = "hotfix/"
 
 
 class VersionError(Exception):
@@ -119,16 +129,63 @@ def next_build(current: str) -> str:
     return str(number + 1)
 
 
-def collect_event_messages(event: dict) -> list[str]:
+def collect_event_messages(event: dict, released=lambda commit_id: False) -> list[str]:
+    """The messages of a push, leaving out commits `released` says a version tag already contains."""
     messages: list[str] = []
-    head = (event.get("head_commit") or {}).get("message") or ""
-    if head:
-        messages.append(head)
-    for commit in event.get("commits") or []:
+    head = event.get("head_commit") or {}
+    for commit in [head, *(event.get("commits") or [])]:
         message = commit.get("message") or ""
-        if message and message not in messages:
-            messages.append(message)
+        if not message or message in messages:
+            continue
+        if commit.get("id") and released(commit["id"]):
+            continue
+        messages.append(message)
     return messages
+
+
+def version_tags(root: Path) -> list[str]:
+    listed = subprocess.run(["git", "tag", "--list", "v*"], cwd=root, capture_output=True, text=True, check=False)
+    return [tag for tag in listed.stdout.split() if SEMVER.fullmatch(tag[1:])]
+
+
+def tagged_commit(root: Path, commit_id: str) -> bool:
+    """Whether a `vx.y.z` tag contains the commit, which then was released already."""
+    listed = subprocess.run(["git", "tag", "--list", "v*", "--contains", commit_id],
+                            cwd=root, capture_output=True, text=True, check=False)
+    return listed.returncode == 0 and any(SEMVER.fullmatch(tag[1:]) for tag in listed.stdout.split())
+
+
+def newest_tag(tags: list[str]) -> str | None:
+    return max(tags, key=lambda tag: parse_semver(tag[1:]), default=None)
+
+
+def check_contains_newest_release(root: Path, tags: list[str]) -> None:
+    """A release outside a hotfix branch must carry the newest released version."""
+    newest = newest_tag(tags)
+    if newest is None:
+        return
+    contained = subprocess.run(["git", "merge-base", "--is-ancestor", newest, "HEAD"],
+                               cwd=root, capture_output=True, check=False)
+    if contained.returncode != 0:
+        raise VersionError(
+            f"{newest} is not merged into this branch; merge that hotfix (`git merge --no-ff {newest}`) "
+            "before releasing from here")
+
+
+def check_hotfix(current: str, new: str, tags: list[str]) -> None:
+    """A hotfix release is the next patch of the release it was cut from, and the newest version."""
+    old, target = parse_semver(current), parse_semver(new)
+    if target[:2] != old[:2] or target[2] <= old[2]:
+        raise VersionError(f"a hotfix branch releases a patch of {current}, not {new}; use `release: patch`")
+    newest = max((parse_semver(tag[1:]) for tag in tags), default=(0, 0, 0))
+    if tags and old != newest:
+        raise VersionError(
+            f"this branch carries {current}, not the newest released {format_semver(newest)}; cut hotfix "
+            "branches from the newest release tag")
+    if target <= newest:
+        raise VersionError(
+            f"hotfix {new} is not newer than the released {format_semver(newest)}; cut hotfix branches "
+            "from the newest release tag")
 
 
 def spec_from_messages(messages: list[str]) -> str | None:
@@ -184,7 +241,7 @@ def resolve_cli_spec(args: argparse.Namespace) -> str | None:
         event_path = os.environ.get("GITHUB_EVENT_PATH")
         if event_path:
             event = json.loads(Path(event_path).read_text())
-            messages.extend(collect_event_messages(event))
+            messages.extend(collect_event_messages(event, lambda commit_id: tagged_commit(args.root, commit_id)))
     return spec_from_messages(messages)
 
 
@@ -196,6 +253,7 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true", help="write project.yml and the Xcode project")
     parser.add_argument("--ci", action="store_true", help="read RELEASE_SPEC or GITHUB_EVENT_PATH")
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--branch", help="branch being released (defaults to GITHUB_REF_NAME with --ci)")
     parser.add_argument("--output", help="GitHub Actions output file (defaults to GITHUB_OUTPUT)")
     args = parser.parse_args()
     try:
@@ -205,6 +263,11 @@ def main() -> int:
             print("No release: spec in commit message; skipping.")
         else:
             result = plan_bump(args.root, spec)
+            branch = args.branch or (os.environ.get("GITHUB_REF_NAME", "") if args.ci else "")
+            if result["changed"] and branch.startswith(HOTFIX_PREFIX):
+                check_hotfix(str(result["old_marketing"]), str(result["new_marketing"]), version_tags(args.root))
+            elif result["changed"] and branch:
+                check_contains_newest_release(args.root, version_tags(args.root))
             if result["changed"] and args.apply:
                 apply_bump(args.root, str(result["new_marketing"]), str(result["new_build"]))
             if result["changed"]:

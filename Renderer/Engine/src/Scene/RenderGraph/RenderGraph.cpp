@@ -227,6 +227,11 @@ std::vector<NodeID> RenderGraph::topologicalOrder() const {
     return order;
 }
 
+void RenderGraph::orderBefore(NodeID before, NodeID after) {
+    if (before != after && getPassNode(before) != nullptr && getPassNode(after) != nullptr)
+        connect(before, after);
+}
+
 bool RenderGraph::mustPrecede(NodeID from, NodeID to) const {
     if (getPassNode(from) == nullptr || getPassNode(to) == nullptr || from == to) return false;
     std::vector<char>   seen(m_dg.NodeNum(), 0);

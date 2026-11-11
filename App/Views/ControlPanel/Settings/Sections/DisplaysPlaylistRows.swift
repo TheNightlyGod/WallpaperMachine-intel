@@ -123,7 +123,7 @@ private struct DisplaysRotateRows: View {
           guard let edit = choice.edit else { return }
           try await controller.editPlaylist(edit, display: display.id)
         },
-        title: sourceTitle(state.source, collections: collections)
+        title: state.sourceTitle(collections: collections)
       ) {
         Text("All wallpapers").tag(PlaylistSourceChoice.all)
         Text("Favorites").tag(PlaylistSourceChoice.favorites)
@@ -201,6 +201,25 @@ private struct DisplaysRotateRows: View {
       .announcesChanges(of: refused ? accepted : nil)
     }
 
+    // Only a timed change can wait: the unlock's change comes as you sit down to the Mac.
+    if playlist.trigger == .interval {
+      DisplaysRow(
+        item: DisplaysSettingsSection.playlistClipEnd, forced: forced, identity: display.id,
+        controlLabel: name(DisplaysSettingsSection.playlistClipEnd.title)
+      ) {
+        Toggle(
+          noLabel,
+          isOn: model.binding(
+            PanelActionCoordinator.key("playlistSetting", id: display.id, detail: "waitsForClipEnd"),
+            current: playlist.waitsForClipEnd
+          ) { waits in try await controller.editPlaylist(.waitsForClipEnd(waits), display: display.id) }
+        )
+        .toggleStyle(.switch)
+        .labelsHidden()
+        .disabled(off)
+      }
+    }
+
     if playlist.source == .list {
       DisplaysOrderEditor(display: display, state: state, off: off, card: card)
     }
@@ -210,7 +229,7 @@ private struct DisplaysRotateRows: View {
     }
 
     DisplaysRow(
-      item: DisplaysSettingsSection.playlistNext, note: nextNote(state), forced: forced,
+      item: DisplaysSettingsSection.playlistNext, note: state.nextNote, forced: forced,
       identity: display.id, labelsControl: false
     ) {
       Button("Change now") {
@@ -222,17 +241,6 @@ private struct DisplaysRotateRows: View {
     }
   }
 
-  /// What the Wallpapers menu says for the source in use.
-  private func sourceTitle(_ source: PlaylistSourceChoice, collections: [CollectionRow]) -> String {
-    switch source {
-    case .all: L("All wallpapers")
-    case .favorites: L("Favorites")
-    case .list: L("This display’s list (\(state.listedCount))")
-    case .collection(let id): collections.first { $0.id == id }?.name ?? L("A collection that no longer exists")
-    case .missingCollection: L("A collection that no longer exists")
-    }
-  }
-
   /// Why a source may read as it does: its collection is gone, or there are none to choose from.
   private func sourceNote(_ collections: [CollectionRow]) -> String {
     if state.source == .missingCollection {
@@ -241,16 +249,6 @@ private struct DisplaysRotateRows: View {
       )
     }
     return collections.isEmpty ? L("Collections you make in Installed appear here too.") : ""
-  }
-
-  private func nextNote(_ state: PlaylistState) -> String {
-    if state.playlist.trigger == .unlock {
-      return L("Changes when you unlock the Mac, while wallpapers are playing.")
-    }
-    if let time = state.nextChangeText(locale: PanelLocale.shared.locale) {
-      return L("Around \(time), if wallpapers are playing then.")
-    }
-    return L("Starts counting once wallpapers play.")
   }
 }
 

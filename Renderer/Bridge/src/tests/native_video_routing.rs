@@ -235,6 +235,23 @@ async fn the_native_descriptor_carries_the_users_own_settings() {
 }
 
 #[tokio::test]
+async fn the_native_descriptor_is_turned_down_by_the_audio_gain_and_restored() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    let bridge = video_bridge(&engine, &temp).await;
+    commit(&bridge, "300", "7").await;
+    bridge.set_volume("300".into(), 0.8).await.unwrap();
+
+    bridge.set_audio_gain(0.25).await.unwrap();
+    let native = bridge.native_video_wallpapers().await.unwrap();
+    assert_eq!(native[0].volume, 0.8 * 0.25);
+    assert!(!native[0].muted, "turning down is not muting");
+
+    bridge.set_audio_gain(1.0).await.unwrap();
+    assert_eq!(bridge.native_video_wallpapers().await.unwrap()[0].volume, 0.8);
+}
+
+#[tokio::test]
 async fn hiding_a_display_pauses_only_its_native_wallpaper() {
     let temp = tempfile::tempdir().unwrap();
     let engine = FakeEngineFacade::default();
@@ -370,6 +387,11 @@ async fn a_mirror_shares_its_sources_key_and_carries_no_rate() {
         source.admission_key, mirror.admission_key,
         "one verdict has to cover the group, so the group needs one key"
     );
+    assert_eq!(source.audio_source_display_id, 7, "a source is its own audio source");
+    assert_eq!(
+        mirror.audio_source_display_id, 7,
+        "a mirror names its source, so the host can let one member of the group be heard"
+    );
     // No member's target rate takes part in the key.
     bridge.set_mirror_target_fps("9".into(), 24).await.unwrap();
     retarget_fps(&bridge, "300", "7", 30).await;
@@ -441,4 +463,48 @@ async fn the_lock_screen_export_still_carries_a_plain_video_as_a_scene() {
     assert_eq!(scenes.len(), 1);
     assert!(scenes[0].project_path.contains("300"));
     assert_eq!(scenes_for(&engine, "300"), 0, "the desktop's engine still gets none");
+}
+
+#[tokio::test]
+async fn a_video_and_its_lock_screen_export_carry_the_options_filter_and_scheme_border() {
+    use crate::{BridgeEngineOptionId as Id, BridgePropertyValue as Value, BridgeRgb};
+    let temp = tempfile::tempdir().unwrap();
+    let engine = FakeEngineFacade::default();
+    let bridge = video_bridge(&engine, &temp).await;
+    let paths = BridgePaths::for_home(temp.path().to_path_buf());
+    let lut = crate::engine::lut_catalog::lut_directory(&paths.assets_root());
+    fs::create_dir_all(&lut).unwrap();
+    fs::write(lut.join("amber.tex"), b"TEXV0005").unwrap();
+    commit(&bridge, "300", "7").await;
+    bridge
+        .inject_scene_project_for_test(
+            "300",
+            "Clip",
+            r#"{"type":"video","title":"Clip","file":"clip.mp4","general":{"properties":{
+                "schemecolor":{"type":"color","text":"Scheme","value":"1 0 0.5","order":1}}}}"#,
+        )
+        .await;
+    for (option, value) in [
+        (Id::ImageFilter, Value::String { value: "amber".into() }),
+        (Id::PlaybackRate, Value::Number { value: 150.0 }),
+        (Id::FlipHorizontal, Value::Bool { value: true }),
+    ] {
+        bridge.edit_engine_option("300".into(), option, value).await.unwrap();
+    }
+    bridge.apply_wallpaper_options("300".into(), true).await.unwrap();
+
+    let rows = bridge.native_video_wallpapers().await.unwrap();
+    let row = native_row(&rows, 7);
+    assert_eq!(
+        (row.engine_options.image_filter.as_str(), row.engine_options.playback_rate, row.engine_options.flip_horizontal),
+        ("amber", 150.0, true)
+    );
+    assert!(row.lut_path.as_deref().is_some_and(|lut| lut.ends_with("materials/lut/amber.tex")));
+    assert_eq!(row.border_color, Some(BridgeRgb { red: 1.0, green: 0.0, blue: 0.5 }));
+
+    let lock = bridge.lock_screen_scenes().await.unwrap();
+    let lock = lock.iter().find(|row| row.wallpaper_id == "300").expect("the clip is exported");
+    assert_eq!(lock.engine_options.as_ref().map(|options| options.playback_rate), Some(150.0));
+    assert_eq!(lock.border_color, Some(BridgeRgb { red: 1.0, green: 0.0, blue: 0.5 }));
+    assert!(lock.scene_quality.is_none(), "a video has no scene quality");
 }

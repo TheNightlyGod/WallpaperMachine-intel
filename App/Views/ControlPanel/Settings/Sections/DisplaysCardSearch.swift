@@ -19,6 +19,8 @@ struct DisplaysCardSearch {
     var showsResume = false
     /// How often reads Custom, so the minutes field shows.
     var showsCustomInterval = false
+    /// A rotation changes on a timer, so Wait for the video to finish shows.
+    var rotatesOnTimer = false
     /// A rotation draws from the display's own list, so the list shows.
     var listsOwnWallpapers = false
     var hasSkipped = false
@@ -100,6 +102,7 @@ struct DisplaysCardSearch {
       case .rotate:
         items += [S.playlistSource, S.playlistOrder, S.playlistInterval]
         if rows.showsCustomInterval { items.append(S.playlistCustom) }
+        if rows.rotatesOnTimer { items.append(S.playlistClipEnd) }
         if rows.listsOwnWallpapers { items.append(S.playlistList) }
         if rows.hasSkipped { items.append(S.playlistSkipped) }
         items.append(S.playlistNext)
@@ -158,6 +161,7 @@ extension DisplaysCardSearch {
       isMirror: display.isMirror, playlistMode: playlist.playlist.mode, showsResume: playlist.showsResume,
       showsCustomInterval:
         controller.displaysSettings.intervalDraft(of: display.id).selection(for: playlist.playlist) == .custom,
+      rotatesOnTimer: playlist.playlist.trigger == .interval,
       listsOwnWallpapers: playlist.playlist.source == .list, hasSkipped: !playlist.skipped.isEmpty,
       showsNextSwitch: playlist.nextChangeText(locale: PanelLocale.shared.locale) != nil,
       hasPeers: !controller.transferPeers(of: display.id).isEmpty,

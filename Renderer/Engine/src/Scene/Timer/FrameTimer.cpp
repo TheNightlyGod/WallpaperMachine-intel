@@ -19,6 +19,14 @@ constexpr auto MAX_FRAME_DURATION = seconds(5);
 /// suspension feed hours into scene simulation.
 constexpr i32  SUSPENSION_INTERVAL_SLACK { 3 };
 constexpr u16  DEFAULT_REQUIRED_FPS { 30 };
+/// The period of `fps` frames a second, rounded up to the nanosecond so the cadence never runs
+/// faster than asked: 60 is 16 666 667 ns. Whole microseconds (16 666 us) ran 60.0024 a second,
+/// one frame more than a 60 Hz display shows every seven minutes, and the drawable queue ahead
+/// of the display filled up to stay full.
+nanoseconds PeriodOf(u16 fps) {
+    constexpr nanoseconds::rep second = 1'000'000'000;
+    return nanoseconds((second + fps - 1) / fps);
+}
 /// How many draws the render-cost statistic averages.
 constexpr std::size_t COST_WINDOW { 5 };
 }
@@ -26,11 +34,11 @@ constexpr std::size_t COST_WINDOW { 5 };
 FrameTimer::FrameTimer(std::function<void()> cb)
     : m_draw(std::move(cb)), m_timer([this] { OnTick(); }) {
     m_req_fps  = DEFAULT_REQUIRED_FPS;
-    m_ideatime = microseconds(1'000'000 / DEFAULT_REQUIRED_FPS);
-    m_elapsed_frametime = m_ideatime.load();
+    m_ideatime = PeriodOf(DEFAULT_REQUIRED_FPS);
+    m_elapsed_frametime = IdealStep();
     m_frame_busy_count  = 0;
-    m_frame_cost        = m_ideatime.load();
-    m_costs.assign(COST_WINDOW, m_ideatime.load());
+    m_frame_cost        = IdealStep();
+    m_costs.assign(COST_WINDOW, IdealStep());
     m_timer.SetMinInterval(m_ideatime.load());
     m_timer.SetInterval(ResolveInterval());
 }
@@ -60,9 +68,27 @@ void FrameTimer::AddFrametime(micros t) {
     while (m_costs.size() > COST_WINDOW) m_costs.pop_front();
 }
 
+microseconds FrameTimer::IdealStep() const { return duration_cast<microseconds>(m_ideatime.load()); }
+
 void FrameTimer::SetRequiredFps(u16 value) {
-    m_req_fps  = value > 0 ? value : DEFAULT_REQUIRED_FPS;
-    m_ideatime = microseconds(1'000'000 / m_req_fps.load());
+    m_req_fps = value > 0 ? value : DEFAULT_REQUIRED_FPS;
+    ApplyIdealPeriod();
+}
+
+void FrameTimer::SetDisplayRefreshPeriod(nanoseconds period) {
+    m_refresh_period = std::max(period, nanoseconds::zero());
+    ApplyIdealPeriod();
+}
+
+nanoseconds FrameTimer::PresentHold() const { return m_present_hold.load(); }
+
+void FrameTimer::ApplyIdealPeriod() {
+    // The rate and the display arrive on different threads; the period follows the later of both.
+    std::lock_guard lock(m_period_mutex);
+    // Never shorter than the display's own period: a ceiling of 60 on a 59.94 Hz display (whose
+    // rate is rounded to 60 everywhere a whole number is wanted) would otherwise outrun it.
+    m_ideatime = std::max(PeriodOf(m_req_fps.load()), m_refresh_period.load());
+    m_present_hold = PresentHoldFor(m_ideatime.load(), m_refresh_period.load());
     // The ceiling is a hard floor on the gap between frames, separate from the
     // cadence: content pacing lengthens the cadence past the ceiling, and a
     // one-shot request has no cadence at all, so both would otherwise be
@@ -129,7 +155,7 @@ void FrameTimer::RequestFrame() {
 
 bool FrameTimer::Idle() const { return m_timer.Idle(); }
 
-std::chrono::microseconds FrameTimer::TickInterval() const { return m_tick_interval.load(); }
+std::chrono::nanoseconds FrameTimer::TickInterval() const { return m_tick_interval.load(); }
 
 void FrameTimer::SetCounters(RendererCounters* counters) {
     m_counters.store(counters, std::memory_order_relaxed);
@@ -137,24 +163,25 @@ void FrameTimer::SetCounters(RendererCounters* counters) {
 
 std::chrono::microseconds FrameTimer::SuspensionThreshold() const {
     const auto floor    = duration_cast<microseconds>(MAX_FRAME_DURATION);
-    const auto relative = m_tick_interval.load() * SUSPENSION_INTERVAL_SLACK;
+    const auto relative = duration_cast<microseconds>(m_tick_interval.load() * SUSPENSION_INTERVAL_SLACK);
     return std::max(floor, relative);
 }
 
-std::chrono::microseconds FrameTimer::ResolveInterval() {
-    const auto ideal  = m_ideatime.load();
-    const auto period = m_content_period.load();
-    auto       interval = ideal;
+std::chrono::nanoseconds FrameTimer::ResolveInterval() {
+    const nanoseconds ideal  = m_ideatime.load();
+    const auto        period = m_content_period.load();
+    nanoseconds       interval = ideal;
     if (period > ideal) {
         // Bounded on both sides: never faster than the ceiling the user and the
         // display set, and never slower than the longest gap the frame clock
         // treats as continuous playback, so a bad period cannot stall the scene.
-        interval = std::min(period, duration_cast<microseconds>(MAX_FRAME_DURATION));
+        interval = std::min<nanoseconds>(period, MAX_FRAME_DURATION);
     }
     m_tick_interval.store(interval);
     auto* counters = m_counters.load(std::memory_order_relaxed);
     if (counters != nullptr) {
-        counters->Set(OWE_RC_TICK_INTERVAL_MICROS, static_cast<u64>(interval.count()));
+        counters->Set(OWE_RC_TICK_INTERVAL_MICROS,
+                      static_cast<u64>(duration_cast<microseconds>(interval).count()));
         counters->Set(OWE_RC_CONTENT_PERIOD_MICROS, static_cast<u64>(period.count()));
     }
     return interval;
@@ -170,7 +197,7 @@ void FrameTimer::FrameBegin(steady_clock::time_point now) {
     // paced to its content is not mistaken for a resume on every frame.
     const bool reset = m_reset_frame_clock.exchange(false);
     m_elapsed_frametime.store(reset || elapsed > SuspensionThreshold()
-                                 ? m_ideatime.load()
+                                 ? IdealStep()
                                  : elapsed);
     m_clock = now;
 }
@@ -182,10 +209,10 @@ void FrameTimer::FrameEnd(steady_clock::time_point now) {
         // of drawing, and the next frame starts afresh.
         {
             std::lock_guard lock(m_costs_mutex);
-            m_costs.assign(COST_WINDOW, m_ideatime.load());
+            m_costs.assign(COST_WINDOW, IdealStep());
         }
         UpdateFrametime();
-        m_elapsed_frametime.store(m_ideatime.load());
+        m_elapsed_frametime.store(IdealStep());
         m_reset_frame_clock.store(true);
     } else {
         AddFrametime(cost);
@@ -219,7 +246,7 @@ void FrameTimer::Run() {
     if (m_timer.Running()) return;
     // A start is a fresh clock: the first frame counts one ideal interval, nothing inherits a
     // draw that will never complete, and no tick is owed.
-    const auto ideal = m_ideatime.load();
+    const auto ideal = IdealStep();
     {
         std::lock_guard lock(m_costs_mutex);
         m_costs.assign(COST_WINDOW, ideal);

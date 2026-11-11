@@ -1,8 +1,11 @@
-use std::sync::mpsc;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
-use wallpaper_core::media::audio::{AudioCaptureBackend, AudioCaptureController};
+use wallpaper_core::media::audio::{
+    AudioCaptureBackend, AudioCaptureController, TAP_STALL_CHECK_INTERVAL,
+};
 use wallpaper_core::project::SceneHandle;
 
 use crate::engine::AudioCaptureDemand;
@@ -44,6 +47,12 @@ pub(super) trait CaptureAssembly: Send + 'static {
         attempt: usize,
         events: &CaptureEvents,
     );
+    /// The lane's stall check of a running tap came due.
+    fn check_tap_stall(
+        &mut self,
+        controller: &mut AudioCaptureController<Self::Backend>,
+        events: &CaptureEvents,
+    );
     fn sync_watch(&mut self, wanted: bool, events: &CaptureEvents);
     fn stop_watch(&mut self);
 }
@@ -68,13 +77,17 @@ enum Envelope {
 }
 
 pub(super) fn start_capture_lane<A: CaptureAssembly>(assembly: A) -> CaptureMailbox {
+    spawn_lane(assembly, TAP_STALL_CHECK_INTERVAL)
+}
+
+fn spawn_lane<A: CaptureAssembly>(assembly: A, stall_check_interval: Duration) -> CaptureMailbox {
     let (sender, receiver) = mpsc::channel();
     let events = CaptureEvents {
         sender: sender.clone(),
     };
     let _ = thread::Builder::new()
         .name("wallpaper-bridge-audio-capture".to_owned())
-        .spawn(move || run_lane(assembly, receiver, events))
+        .spawn(move || run_lane(assembly, receiver, events, stall_check_interval))
         .expect("audio capture worker thread should start");
     CaptureMailbox { sender }
 }
@@ -134,10 +147,29 @@ fn run_lane<A: CaptureAssembly>(
     mut assembly: A,
     receiver: mpsc::Receiver<Envelope>,
     events: CaptureEvents,
+    stall_check_interval: Duration,
 ) {
     // The backend is made here, not captured by the thread closure. It need not be Send.
     let mut initialized = assembly.make_controller();
-    while let Ok(envelope) = receiver.recv() {
+    // When the running tap is next checked for missing callbacks. `None` while
+    // the controller watches nothing: the worker then blocks without waking.
+    let mut stall_check: Option<Instant> = None;
+    loop {
+        let received = match stall_check {
+            None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(due) => receiver.recv_timeout(due.saturating_duration_since(Instant::now())),
+        };
+        let envelope = match received {
+            Ok(envelope) => envelope,
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if let Ok(controller) = initialized.as_mut() {
+                    assembly.check_tap_stall(controller, &events);
+                }
+                stall_check = next_stall_check(&initialized, None, stall_check_interval);
+                continue;
+            }
+        };
         match envelope {
             Envelope::Finish => break,
             Envelope::OutputChanged => {
@@ -177,12 +209,29 @@ fn run_lane<A: CaptureAssembly>(
                 let _ = reply.send(result);
             }
         }
+        stall_check = next_stall_check(&initialized, stall_check, stall_check_interval);
     }
     if initialized.is_ok() {
         assembly.stop_watch();
     }
     // Watcher disposal must precede the real controller's final cleanup attempt.
     drop(initialized);
+}
+
+/// When the lane next checks the tap for missing callbacks: only while the
+/// controller watches one. A check already due keeps its time across other
+/// work, so checks stay once per interval however busy the lane is.
+fn next_stall_check<B: AudioCaptureBackend>(
+    initialized: &Result<AudioCaptureController<B>, String>,
+    due: Option<Instant>,
+    interval: Duration,
+) -> Option<Instant> {
+    match initialized {
+        Ok(controller) if controller.watches_tap_stall() => {
+            Some(due.unwrap_or_else(|| Instant::now() + interval))
+        }
+        _ => None,
+    }
 }
 
 fn apply_scene<B: AudioCaptureBackend>(
@@ -380,6 +429,9 @@ mod tests {
         retained_session: Option<u64>,
         next_session: u64,
         largest_retained: usize,
+        /// What a running tap reports as its callback count; `None` is a
+        /// backend that cannot count, which is never checked for a stall.
+        callback_count: Option<u64>,
     }
 
     impl BackendState {
@@ -396,6 +448,7 @@ mod tests {
                 retained_session: None,
                 next_session: 1,
                 largest_retained: 0,
+                callback_count: None,
             }
         }
     }
@@ -695,6 +748,11 @@ mod tests {
             self.shared.record(Mark::CleanupQuery);
             self.shared.backend.lock().unwrap().cleanup
         }
+
+        fn io_callback_count(&self) -> Option<u64> {
+            let state = self.shared.backend.lock().unwrap();
+            state.callback_count.filter(|_| state.running && !state.cleanup)
+        }
     }
 
     impl Drop for TestBackend {
@@ -813,6 +871,15 @@ mod tests {
             self.shared.capture(controller);
         }
 
+        fn check_tap_stall(
+            &mut self,
+            controller: &mut AudioCaptureController<TestBackend>,
+            _: &CaptureEvents,
+        ) {
+            let _operation = self.shared.enter("stall");
+            self.shared.capture(controller);
+        }
+
         fn sync_watch(&mut self, wanted: bool, _: &CaptureEvents) {
             let _operation = self.shared.enter("watch");
             let (gate, unavailable) = {
@@ -917,11 +984,18 @@ mod tests {
 
     impl Lane {
         fn start(shared: Arc<Shared>) -> Self {
+            Self::checking_every(shared, TAP_STALL_CHECK_INTERVAL)
+        }
+
+        fn checking_every(shared: Arc<Shared>, stall_check_interval: Duration) -> Self {
             let (sender, terminated) = mpsc::channel();
-            let mailbox = start_capture_lane(TestAssembly {
-                shared: shared.clone(),
-                terminated: Some(sender),
-            });
+            let mailbox = spawn_lane(
+                TestAssembly {
+                    shared: shared.clone(),
+                    terminated: Some(sender),
+                },
+                stall_check_interval,
+            );
             Self {
                 mailbox,
                 shared,
@@ -1662,6 +1736,46 @@ mod tests {
             dropped.2.is_some(),
             "the lane must not manufacture complete native release"
         );
+    }
+
+    #[test]
+    fn aw25_stall_checks_tick_on_the_worker_only_while_a_counted_tap_is_wanted() {
+        const INTERVAL: Duration = Duration::from_millis(5);
+        const SEVERAL_INTERVALS: Duration = Duration::from_millis(60);
+        let checks = |shared: &Shared| shared.count(|mark| *mark == Mark::Begin("stall"));
+
+        // A backend that cannot count its callbacks is never checked.
+        let shared = Shared::new(&[FIRST]);
+        let lane = Lane::checking_every(shared.clone(), INTERVAL);
+        assert_eq!(lane.scene(FIRST, true).wait(), Ok(()));
+        thread::sleep(SEVERAL_INTERVALS);
+        assert_eq!(checks(&shared), 0);
+        lane.finish();
+
+        let shared = Shared::new(&[FIRST]);
+        shared.backend.lock().unwrap().callback_count = Some(0);
+        let lane = Lane::checking_every(shared.clone(), INTERVAL);
+        assert_eq!(lane.prune().wait(), Ok(()));
+        thread::sleep(SEVERAL_INTERVALS);
+        assert_eq!(checks(&shared), 0, "with no tap wanted the worker does not wake");
+
+        assert_eq!(lane.scene(FIRST, true).wait(), Ok(()));
+        shared.wait_count(|mark| *mark == Mark::Begin("stall"), 3);
+
+        // A paused display suspends capture, and the checks end with the tap.
+        assert_eq!(
+            lane.demand(AudioCaptureDemand {
+                suspended: true,
+                external_consumers: false,
+            })
+            .wait(),
+            Ok(())
+        );
+        let suspended = checks(&shared);
+        thread::sleep(SEVERAL_INTERVALS);
+        assert_eq!(checks(&shared), suspended);
+        // Every check ran on the worker, one at a time with the other work.
+        lane.finish();
     }
 
     mod policy_tests;

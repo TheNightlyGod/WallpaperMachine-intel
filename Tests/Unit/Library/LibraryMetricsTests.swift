@@ -116,6 +116,37 @@ final class LibraryMetricsTests: XCTestCase {
         XCTAssertEqual(metrics["none"]?.size, 1)
     }
 
+    /// Installed's search reads the manifest's author and description beside the title and tags,
+    /// folded once in the background so typing never folds a description.
+    func testReadsTheWordsTheSearchFindsFromTheManifest() async throws {
+        let saved = try wallpaper("saved", bytes: [1])
+        let workshop = try wallpaper("workshop", bytes: [1])
+        try wallpaper("none", bytes: [1])
+        let pixiv: [String: Any] = [
+            "title": "Dusk", "tags": ["Anime"], "description": "Dusk by Élodie on pixiv",
+            "pixiv": ["author": "Élodie", "id": "1"],
+        ]
+        try JSONSerialization.data(withJSONObject: pixiv).write(to: saved.appendingPathComponent("project.json"))
+        let long = String(repeating: "a", count: LibraryMetricsService.searchedDescriptionLength) + " hidden"
+        try JSONSerialization.data(withJSONObject: ["title": "Rain", "author": "ＫＹŌＫＯ", "description": long])
+            .write(to: workshop.appendingPathComponent("project.json"))
+        let service = makeService()
+        let ids = ["saved", "workshop", "none"]
+        _ = service.metrics(for: ids, revision: 0)
+        let metrics = try await reported(service, ids: ids, count: 1)
+        func finds(_ id: String, _ query: String) -> Bool {
+            LibrarySearchText.contains(metrics[id]?.searchText ?? "", LibrarySearchText.fold(query))
+        }
+        XCTAssertTrue(finds("saved", "anime"), "the tags come first")
+        XCTAssertTrue(finds("saved", "elodie on pixiv"), "the description, its accents folded")
+        XCTAssertTrue(finds("workshop", "kyoko"), "an author the manifest names, at any width")
+        XCTAssertTrue(finds("workshop", "aaaa"))
+        XCTAssertFalse(finds("workshop", "hidden"), "only the start of a very long description is read")
+        XCTAssertFalse(finds("workshop", "rain"), "the title is the renderer's, not the manifest's")
+        XCTAssertFalse(finds("none", "a"), "no manifest, no words")
+        XCTAssertEqual(metrics["none"]?.size, 1, "…and the folder still measures")
+    }
+
     func testReloadRemeasuresOnlyFoldersWhoseContentsMoved() async throws {
         let one = try wallpaper("one", bytes: [10])
         try wallpaper("two", bytes: [20])

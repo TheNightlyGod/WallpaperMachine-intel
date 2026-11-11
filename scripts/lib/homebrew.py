@@ -2,6 +2,10 @@
 from pathlib import Path
 import re
 
+# The formulae the renderer builds against: `scripts/build.py` points CMake and pkg-config
+# at their kegs, and `scripts/source_times.py` keys a reused renderer build on their versions.
+RENDERER_PACKAGES = ("quickjs-ng", "libpng", "brotli", "lz4", "nlohmann-json", "argparse")
+
 # Homebrew keeps the upstream tarball's license and notice files at the keg root.
 KEG_LICENSE_FILE = re.compile(r"^(LICENSE|LICENCE|COPYING|COPYRIGHT|NOTICE)", re.IGNORECASE)
 

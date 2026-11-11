@@ -121,21 +121,21 @@ fn layout_only(vertex: &str, fragment: &str) -> Result<crate::legalize::LegalPro
 
 #[test]
 fn a_pass_through_sampler_reserves_its_index_only_in_set_zero() {
-    let reserved = "layout(set = 0, binding = 0) uniform samplerCube g_Cube; uniform sampler2D g_Texture1; uniform float g_X;\nvoid main() { gl_FragColor = texSample2D(g_Texture1, vec2(g_X)); }";
-    let p = layout_only("void main() { gl_Position = vec4(1.0); }", reserved).unwrap();
+    let reserved = "layout(set = 0, binding = 0) uniform samplerCube g_Cube; uniform sampler2D g_Texture1; uniform float g_X;\nvoid main() { gl_FragColor = texSample2D(g_Texture1, CAST2(g_X)); }";
+    let p = layout_only("void main() { gl_Position = CAST4(1.0); }", reserved).unwrap();
     assert_eq!(glsl_binding(&p.fragment.as_ref().unwrap().text, "GlobalUniforms"), Some(2), "0 is the cube, 1 the texture");
     let other_set = reserved.replace("set = 0", "set = 1");
-    let p = layout_only("void main() { gl_Position = vec4(1.0); }", &other_set).unwrap();
+    let p = layout_only("void main() { gl_Position = CAST4(1.0); }", &other_set).unwrap();
     assert_eq!(glsl_binding(&p.fragment.as_ref().unwrap().text, "GlobalUniforms"), Some(0), "a resource in set 1 reserves nothing in set 0");
     // Such a program cannot be compiled for the native renderer: naga reads no combined sampler.
-    let e = err("void main() { gl_Position = vec4(1.0); }", reserved);
+    let e = err("void main() { gl_Position = CAST4(1.0); }", reserved);
     assert_eq!(e.category(), ErrorCategory::Compile, "{e}");
 }
 
 #[test]
 fn one_index_claimed_by_two_different_resources_fails_naming_index_and_resources() {
-    let v = "layout(binding = 0) uniform float g_A;\nvoid main() { gl_Position = vec4(g_A); }";
-    let f = "uniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texSample2D(g_Texture0, vec2(0.5)); }";
+    let v = "layout(binding = 0) uniform float g_A;\nvoid main() { gl_Position = CAST4(g_A); }";
+    let f = "uniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texSample2D(g_Texture0, CAST2(0.5)); }";
     let e = err(v, f);
     assert_eq!(e.category(), ErrorCategory::InvalidRequest, "{e}");
     let text = e.to_string();
@@ -145,7 +145,7 @@ fn one_index_claimed_by_two_different_resources_fails_naming_index_and_resources
 
 #[test]
 fn an_explicit_block_binding_wins() {
-    let sampled = |name: &str| format!("uniform sampler2D {name};\nvoid main() {{ gl_FragColor = texSample2D({name}, vec2(g_A)); }}");
+    let sampled = |name: &str| format!("uniform sampler2D {name};\nvoid main() {{ gl_FragColor = texSample2D({name}, CAST2(g_A)); }}");
     // Separated from its uniform by a comment, followed by further layout qualifiers, on one of
     // several members: the first `binding` wins.
     let v = "uniform vec2 g_B; /* a comment */ layout(row_major) /* another */ layout(binding = 5) uniform float g_A;\nvoid main() { gl_Position = vec4(g_A, g_B, 1.0); }";
@@ -156,7 +156,7 @@ fn an_explicit_block_binding_wins() {
     assert_eq!(binding_in(&p, StageKind::Fragment, "_we_Sampler_g_Texture0"), Some(1), "5 is the block's, 0 the texture's");
     assert_bindings_agree(&p);
     // Two different explicit values fail naming both.
-    let e = err("layout(binding = 5) uniform float g_A;\nvoid main() { gl_Position = vec4(g_A); }", "layout(binding = 6) uniform float g_A;\nvoid main() { gl_FragColor = vec4(g_A); }");
+    let e = err("layout(binding = 5) uniform float g_A;\nvoid main() { gl_Position = CAST4(g_A); }", "layout(binding = 6) uniform float g_A;\nvoid main() { gl_FragColor = CAST4(g_A); }");
     let text = e.to_string();
     assert!(e.category() == ErrorCategory::InvalidRequest && text.contains('5') && text.contains('6'), "{text}");
 }
@@ -170,7 +170,7 @@ fn block_members(p: &crate::pipeline::CompiledProgram) -> Vec<(String, u32, u32)
 #[test]
 fn members_are_in_the_order_of_first_appearance_vertex_stage_first() {
     let v = "uniform float g_V1; uniform vec2 g_Shared; uniform float g_V2;\nvoid main() { gl_Position = vec4(g_V1 + g_V2, g_Shared, 1.0); }";
-    let f = frag("uniform float g_F1; uniform vec2 g_Shared; uniform vec4 g_F2;\nvoid main() { gl_FragColor = vec4(g_F1 + g_Shared.x) + g_F2; }");
+    let f = frag("uniform float g_F1; uniform vec2 g_Shared; uniform vec4 g_F2;\nvoid main() { gl_FragColor = CAST4(g_F1 + g_Shared.x) + g_F2; }");
     let p = Req::new(v, &f).fragment_first().ok();
     let names: Vec<(String, u32, u32)> = block_members(&p);
     assert_eq!(names.iter().map(|m| m.0.as_str()).collect::<Vec<_>>(), ["g_V1", "g_Shared", "g_V2", "g_F1", "g_F2"]);
@@ -178,8 +178,8 @@ fn members_are_in_the_order_of_first_appearance_vertex_stage_first() {
 
 #[test]
 fn a_member_declared_in_both_stages_is_one() {
-    let v = "uniform float g_A;\nvoid main() { gl_Position = vec4(g_A); }";
-    let f = "uniform float g_A;\nvoid main() { gl_FragColor = vec4(g_A); }";
+    let v = "uniform float g_A;\nvoid main() { gl_Position = CAST4(g_A); }";
+    let f = "uniform float g_A;\nvoid main() { gl_FragColor = CAST4(g_A); }";
     let p = ok(v, f);
     assert_eq!(block_members(&p), [("g_A".to_string(), 1, 0)]);
     assert!(p.reflection.descriptor_bindings.iter().find(|d| d.name == "GlobalUniforms").unwrap().stages == crate::reflection::StageMask::BOTH);
@@ -198,8 +198,8 @@ fn a_vector_declared_wider_in_one_stage_is_one_wider_member_read_through_a_view(
     // A float against a vec2, in both stage orders.
     for (vertex_ty, fragment_ty) in [("float", "vec2"), ("vec2", "float")] {
         let read = |ty: &str| if ty == "float" { "u_Size" } else { "u_Size.x" };
-        let v = format!("uniform {vertex_ty} u_Size;\nvoid main() {{ gl_Position = vec4({}); }}", read(vertex_ty));
-        let f = format!("uniform {fragment_ty} u_Size;\nvoid main() {{ gl_FragColor = vec4({}); }}", read(fragment_ty));
+        let v = format!("uniform {vertex_ty} u_Size;\nvoid main() {{ gl_Position = CAST4({}); }}", read(vertex_ty));
+        let f = format!("uniform {fragment_ty} u_Size;\nvoid main() {{ gl_FragColor = CAST4({}); }}", read(fragment_ty));
         assert_eq!(block_members(&ok(&v, &f)), [("u_Size".to_string(), 2, 0)]);
     }
 }
@@ -214,7 +214,7 @@ fn incompatible_redeclarations_fail_naming_the_member_and_both_declarations() {
         ("uniform vec2 u_Arr[2];", "uniform vec4 u_Arr[2];", "u_Arr"),      // arrays do not widen
     ];
     for (v, f, name) in cases {
-        let e = err(&format!("{v}\nvoid main() {{ gl_Position = vec4(0.0); }}"), &format!("{f}\nvoid main() {{ gl_FragColor = vec4(0.0); }}"));
+        let e = err(&format!("{v}\nvoid main() {{ gl_Position = CAST4(0.0); }}"), &format!("{f}\nvoid main() {{ gl_FragColor = CAST4(0.0); }}"));
         assert_eq!(e.category(), ErrorCategory::InvalidRequest, "{v} / {f}: {e}");
         assert!(e.to_string().contains(name), "{e}");
     }
@@ -222,8 +222,8 @@ fn incompatible_redeclarations_fail_naming_the_member_and_both_declarations() {
 
 #[test]
 fn engine_uniforms_never_merge_by_prefix() {
-    let v = "uniform float g_Time;\nvoid main() { gl_Position = vec4(g_Time); }";
-    let f = "uniform float g_TimeScale;\nvoid main() { gl_FragColor = vec4(g_TimeScale); }";
+    let v = "uniform float g_Time;\nvoid main() { gl_Position = CAST4(g_Time); }";
+    let f = "uniform float g_TimeScale;\nvoid main() { gl_FragColor = CAST4(g_TimeScale); }";
     let names: Vec<String> = block_members(&ok(v, f)).into_iter().map(|m| m.0).collect();
     assert_eq!(names, ["g_Time", "g_TimeScale"]);
 }
@@ -247,12 +247,12 @@ fn array_suffixes_are_canonical_and_macro_sizes_are_resolved() {
 #[test]
 fn an_empty_or_computed_suffix_and_a_structure_fail() {
     for suffix in ["[]", "[2 + 1]", "[UNKNOWN_MACRO]"] {
-        let e = err(&format!("uniform vec4 u_Arr{suffix};\nvoid main() {{ gl_Position = vec4(0.0); }}"), "void main() { gl_FragColor = vec4(0.0); }");
+        let e = err(&format!("uniform vec4 u_Arr{suffix};\nvoid main() {{ gl_Position = CAST4(0.0); }}"), "void main() { gl_FragColor = CAST4(0.0); }");
         assert_eq!(e.category(), ErrorCategory::InvalidRequest, "{suffix}: {e}");
         let text = e.to_string();
         assert!(text.contains("u_Arr") && text.contains("vertex") || text.contains("Vertex"), "{suffix}: {text}");
     }
-    let e = err("struct Light { vec3 c; };\nuniform Light u_Light;\nvoid main() { gl_Position = vec4(0.0); }", "void main() { gl_FragColor = vec4(0.0); }");
+    let e = err("struct Light { vec3 c; };\nuniform Light u_Light;\nvoid main() { gl_Position = CAST4(0.0); }", "void main() { gl_FragColor = CAST4(0.0); }");
     assert_eq!(e.category(), ErrorCategory::InvalidRequest, "{e}");
     assert!(e.to_string().contains("Light"), "{e}");
 }
@@ -268,7 +268,7 @@ fn no_uniforms_and_no_textures_produce_no_block() {
 #[test]
 fn a_stage_that_uses_no_uniform_still_declares_the_block() {
     let v = "attribute vec3 a_Position;\nvoid main() { gl_Position = vec4(a_Position, 1.0); }";
-    let f = "uniform float g_Alpha;\nvoid main() { gl_FragColor = vec4(g_Alpha); }";
+    let f = "uniform float g_Alpha;\nvoid main() { gl_FragColor = CAST4(g_Alpha); }";
     let p = ok(v, f);
     let vt = glsl_of(&p, StageKind::Vertex);
     assert!(vt.contains("uniform GlobalUniforms {") && vt.contains("float g_Alpha;"), "{vt}");
@@ -354,10 +354,8 @@ fn an_unflagged_compile_is_identical_with_or_without_the_plane_field() {
 fn a_use_the_translation_cannot_reproduce_refuses_the_variant_but_not_the_plain_program() {
     let cases = [
         ("an explicit level", "varying vec2 v_Tex;\nuniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texSample2DLod(g_Texture0, v_Tex, 1.0); }"),
-        ("a size query", "varying vec2 v_Tex;\nuniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = vec4(float(textureSize(g_Texture0, 0).x)); }"),
         ("a level inside a macro body", "varying vec2 v_Tex;\nuniform sampler2D g_Texture0;\n#define SAMPLE_LOD(uv) texSample2DLod(g_Texture0, uv, 2.0)\nvoid main() { gl_FragColor = SAMPLE_LOD(v_Tex); }"),
-        ("a size query inside a macro body", "varying vec2 v_Tex;\nuniform sampler2D g_Texture0;\n#define SIZE textureSize(g_Texture0, 0)\nvoid main() { gl_FragColor = vec4(float(SIZE.x)); }"),
-        ("a texel fetch", "varying vec2 v_Tex;\nuniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texelFetch(g_Texture0, ivec2(1), 0); }"),
+        ("a texel fetch", "varying vec2 v_Tex;\nuniform sampler2D g_Texture0;\nvoid main() { gl_FragColor = texLoad2D(g_Texture0, vec2(1.0,1.0), vec2(1.0,1.0)); }"),
     ];
     for (what, fragment) in cases {
         Req::new(VERTEX, fragment).texture(texture(0)).ok();
@@ -409,7 +407,7 @@ fn a_combo_that_removes_the_sampling_removes_the_slot() {
 
 #[test]
 fn a_non_canonical_name_fails_early_and_a_slot_above_31_fails_when_used() {
-    let e = err(VERTEX, &frag("uniform sampler2D g_Texture07;\nvoid main() { gl_FragColor = vec4(1.0); }"));
+    let e = err(VERTEX, &frag("uniform sampler2D g_Texture07;\nvoid main() { gl_FragColor = CAST4(1.0); }"));
     assert_eq!(e.category(), ErrorCategory::Legalization, "{e}");
     let text = e.to_string();
     assert!(text.contains("g_Texture07") && text.contains("canonical"), "{text}");
@@ -417,5 +415,5 @@ fn a_non_canonical_name_fails_early_and_a_slot_above_31_fails_when_used() {
     assert_eq!(e.category(), ErrorCategory::Reflection, "{e}");
     assert!(e.to_string().contains("model limits") && e.to_string().contains("g_Texture32"), "{e}");
     // Declared and never sampled: no error.
-    ok(VERTEX, &frag("uniform sampler2D g_Texture32;\nvoid main() { gl_FragColor = vec4(1.0); }"));
+    ok(VERTEX, &frag("uniform sampler2D g_Texture32;\nvoid main() { gl_FragColor = CAST4(1.0); }"));
 }

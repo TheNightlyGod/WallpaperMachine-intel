@@ -96,10 +96,8 @@ struct StretchParams {
 // Cubic B-spline filtering in four bilinear fetches: the four weights of the spline along an
 // axis are merged in pairs, and each pair is read from the point between its two texels that
 // gives their weighted mean.
-fragment float4 backdrop_stretch(Varying in [[stage_in]],
-                                 texture2d<float> source [[texture(0)]],
-                                 sampler linear_clamp [[sampler(0)]],
-                                 constant StretchParams& p [[buffer(0)]]) {
+float3 backdrop_color(Varying in, texture2d<float> source,
+                      sampler linear_clamp, constant StretchParams& p) {
     float2 uv = in.texcoord;
     if (p.mirrored != 0) uv.x = 1.0 - uv.x;
     const float2 position = uv * p.image_size - 0.5;
@@ -122,11 +120,39 @@ fragment float4 backdrop_stretch(Varying in [[stage_in]],
                            g1.x * source.sample(linear_clamp, float2(h1.x, h1.y)).rgb);
     color *= p.brightness;
 
+    return color;
+}
+float backdrop_dither(Varying in) {
     // A 4x4 ordered (Bayer) pattern worth one 8-bit step, fixed by the pixel it lands on.
     const uint2 cell = uint2(in.position.xy) & 3u;
     const uint  bayer[16] = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
     const float dither = ((float(bayer[cell.y * 4u + cell.x]) + 0.5) / 16.0 - 0.5) / 255.0;
-    return float4(saturate(color + dither), 1.0);
+    return dither;
+}
+float3 backdrop_encode(float3 c) {
+    c = saturate(c);
+    return select(c * 12.92, 1.055 * pow(c, float3(1.0 / 2.4)) - 0.055,
+                  c > float3(0.0031308));
+}
+float3 backdrop_decode(float3 c) {
+    c = max(c, float3(0.0));
+    return select(c / 12.92, pow((c + 0.055) / 1.055, float3(2.4)), c > float3(0.04045));
+}
+fragment float4 backdrop_stretch(Varying in [[stage_in]], texture2d<float> source [[texture(0)]],
+    sampler s [[sampler(0)]], constant StretchParams& p [[buffer(0)]]) {
+    return float4(saturate(backdrop_color(in,source,s,p) + backdrop_dither(in)),1.0);
+}
+fragment float4 backdrop_stretch_encode(Varying in [[stage_in]], texture2d<float> source [[texture(0)]],
+    sampler s [[sampler(0)]], constant StretchParams& p [[buffer(0)]]) {
+    return float4(saturate(backdrop_encode(backdrop_color(in,source,s,p)) + backdrop_dither(in)),1.0);
+}
+fragment float4 backdrop_stretch_linear(Varying in [[stage_in]], texture2d<float> source [[texture(0)]],
+    sampler s [[sampler(0)]], constant StretchParams& p [[buffer(0)]]) {
+    return float4(max(backdrop_color(in,source,s,p),float3(0.0)),1.0);
+}
+fragment float4 backdrop_stretch_decode(Varying in [[stage_in]], texture2d<float> source [[texture(0)]],
+    sampler s [[sampler(0)]], constant StretchParams& p [[buffer(0)]]) {
+    return float4(backdrop_decode(backdrop_color(in,source,s,p)),1.0);
 }
 )";
 
@@ -187,57 +213,52 @@ id<MTLRenderCommandEncoder> BeginPass(id<MTLCommandBuffer> command, id<MTLTextur
 MetalBackdrop::MetalBackdrop()  = default;
 MetalBackdrop::~MetalBackdrop() = default;
 
-bool MetalBackdrop::buildPipelines(id<MTLDevice> device, MTLPixelFormat destination)
+bool MetalBackdrop::buildPipelines(id<MTLDevice> device, MTLPixelFormat destination, bool source_linear)
 {
-    if (built_ && device == device_ && destination == stretch_format_) return true;
-    release();
+    if (built_ && device == device_ && destination == stretch_format_ && source_linear == source_linear_)
+        return true;
     if (device == nil) return false;
-
-    NSString*   source = [[NSString alloc] initWithBytes:kSource.data()
-                                                 length:kSource.size()
-                                               encoding:NSUTF8StringEncoding];
-    NSError*    failure = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:source options:[MTLCompileOptions new] error:&failure];
-    if (library == nil) {
-        error_ = std::string("the backdrop shaders failed to compile: ") +
-                 (failure != nil ? failure.localizedDescription.UTF8String : "unknown error");
-        return false;
+    if (!built_ || device != device_) {
+        release();
+        NSString* source = [[NSString alloc] initWithBytes:kSource.data() length:kSource.size()
+                                                encoding:NSUTF8StringEncoding];
+        NSError* failure = nil;
+        library_ = [device newLibraryWithSource:source options:[MTLCompileOptions new] error:&failure];
+        if (library_ == nil) {
+            error_ = std::string("the backdrop shaders failed to compile: ") +
+                (failure != nil ? failure.localizedDescription.UTF8String : "unknown error");
+            return false;
+        }
+        MTLSamplerDescriptor* descriptor = [MTLSamplerDescriptor new];
+        descriptor.minFilter = descriptor.magFilter = MTLSamplerMinMagFilterLinear;
+        descriptor.sAddressMode = descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
+        sampler_ = [device newSamplerStateWithDescriptor:descriptor];
+        reduce_8bit_ = MakePipeline(device, library_, @"backdrop_reduce", MTLPixelFormatRGBA8Unorm,
+                                   @"Backdrop reduction (8-bit)", &error_);
+        reduce_half_ = MakePipeline(device, library_, @"backdrop_reduce", MTLPixelFormatRGBA16Float,
+                                   @"Backdrop reduction", &error_);
+        blur_ = MakePipeline(device, library_, @"backdrop_blur", MTLPixelFormatRGBA16Float,
+                             @"Backdrop blur", &error_);
+        if (sampler_ == nil || reduce_8bit_ == nil || reduce_half_ == nil || blur_ == nil) return false;
+        device_ = device;
+        built_ = true;
     }
-
-    MTLSamplerDescriptor* sampler_descriptor = [MTLSamplerDescriptor new];
-    sampler_descriptor.minFilter    = MTLSamplerMinMagFilterLinear;
-    sampler_descriptor.magFilter    = MTLSamplerMinMagFilterLinear;
-    sampler_descriptor.sAddressMode = MTLSamplerAddressModeClampToEdge;
-    sampler_descriptor.tAddressMode = MTLSamplerAddressModeClampToEdge;
-    id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:sampler_descriptor];
-
-    std::string error;
-    auto reduce_8bit = MakePipeline(device, library, @"backdrop_reduce", MTLPixelFormatRGBA8Unorm,
-                                    @"Backdrop reduction (8-bit)", &error);
-    auto reduce_half = reduce_8bit == nil ? nil
-                                          : MakePipeline(device, library, @"backdrop_reduce", MTLPixelFormatRGBA16Float,
-                                                         @"Backdrop reduction", &error);
-    auto blur        = reduce_half == nil ? nil
-                                          : MakePipeline(device, library, @"backdrop_blur", MTLPixelFormatRGBA16Float,
-                                                         @"Backdrop blur", &error);
-    auto stretch     = blur == nil ? nil
-                                   : MakePipeline(device, library, @"backdrop_stretch", destination,
-                                                  @"Backdrop stretch", &error);
-    if (sampler == nil && error.empty()) error = "the backdrop sampler could not be created";
-    if (stretch == nil || sampler == nil) {
-        error_ = error;
-        return false;
+    const bool destination_linear = destination == MTLPixelFormatRGBA16Float ||
+        destination == MTLPixelFormatBGRA8Unorm_sRGB || destination == MTLPixelFormatRGBA8Unorm_sRGB;
+    NSString* fragment = source_linear
+        ? (destination_linear ? @"backdrop_stretch_linear" : @"backdrop_stretch_encode")
+        : (destination_linear ? @"backdrop_stretch_decode" : @"backdrop_stretch");
+    const uint32_t key = static_cast<uint32_t>(destination) | (source_linear ? 0x10000u : 0u);
+    auto found = stretches_.find(key);
+    if (found == stretches_.end()) {
+        auto pipeline = MakePipeline(device, library_, fragment, destination, @"Backdrop stretch", &error_);
+        if (pipeline == nil) return false;
+        found = stretches_.emplace(key, pipeline).first;
     }
-
-    device_         = device;
-    library_        = library;
-    reduce_8bit_    = reduce_8bit;
-    reduce_half_    = reduce_half;
-    blur_           = blur;
-    stretch_        = stretch;
-    sampler_        = sampler;
+    if (source_linear_ != source_linear) releaseImages();
+    source_linear_ = source_linear;
+    stretch_ = found->second;
     stretch_format_ = destination;
-    built_          = true;
     error_.clear();
     return true;
 }
@@ -254,6 +275,8 @@ void MetalBackdrop::release()
     reduce_half_    = nil;
     blur_           = nil;
     stretch_        = nil;
+    stretches_.clear();
+    source_linear_ = false;
     sampler_        = nil;
     library_        = nil;
     device_         = nil;
@@ -277,7 +300,8 @@ bool MetalBackdrop::makeImages(uint32_t source_width, uint32_t source_height)
 
     auto plan = wallpaper::PlanBackdropReduction(source_width, source_height);
     std::vector<id<MTLTexture>> chain;
-    for (const auto& step : plan) {
+    for (auto& step : plan) {
+        if (source_linear_) step.eight_bit = false;
         id<MTLTexture> image = MakeImage(device_, step.width, step.height,
                                          step.eight_bit ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRGBA16Float,
                                          step.eight_bit ? @"Backdrop eighth" : @"Backdrop small image");

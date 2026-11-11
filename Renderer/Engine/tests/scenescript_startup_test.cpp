@@ -5,6 +5,7 @@
 // Headless: scenes are loaded for their runtime only (support/script_scene.hpp).
 
 #include "scenescript_scenes.hpp"
+#include "support/font_assets.hpp"
 
 #include "Runtime/SceneRuntimeContext.hpp"
 
@@ -92,6 +93,31 @@ TEST(ScriptStartUp, ScriptsStartOnTheFirstTickAndNotWhenTheSceneLoads)
     EXPECT_EQ(scene.Origin("probe")[0], 128.0f);
     scene.Tick(1);
     EXPECT_EQ(scene.Origin("probe")[0], 5.0f);
+}
+
+// A group's transform script is made after every layer exists (it may look other layers up),
+// so it is registered after a later layer's alpha script. Wallpaper Engine still updates the
+// two in the scene's order: the group's `update` publishes `shared.size` before the later
+// layer reads it on the very first tick.
+TEST(ScriptStartUp, ValueScriptsUpdateInSceneOrderWhateverSettingTheySitOn)
+{
+    ScenePackage package;
+    const auto   model = ModelOf(package);
+    const Json   group = { { "id", 1 },
+                           { "name", "g" },
+                           { "origin", "0 0 0" },
+                           { "angles", "0 0 0" },
+                           { "scale", ScriptedValue("export function update(v) { shared.size = 7; return v; }", "1 1 1") } };
+    const auto   reader = "export function update() { thisScene.getLayer('probe').origin = "
+                          "new Vec3(shared.size === 7 ? 1 : 0, 0, 0); }";
+    Publish(package, { group, PlainImage(model, 2, "probe"),
+                       PlainImage(model, 3, "reader", { { "alpha", ScriptedValue(reader, 1.0) } }) });
+
+    ScriptScene scene(package);
+    ASSERT_TRUE(scene.ok()) << scene.error();
+    scene.Tick(1);
+    EXPECT_EQ(scene.Origin("probe")[0], 1.0f) << "the group's script ran first";
+    EXPECT_TRUE(scene.ScriptErrors().empty()) << Describe(scene.ScriptErrors());
 }
 
 // ---- what init returns -------------------------------------------------------------------
@@ -220,6 +246,7 @@ TEST(ScriptLayerNames, TwinTextLayersEachWithAScriptKeepTheirNamesAndAreFoundByT
 {
     ScenePackage package;
     const auto   model = ModelOf(package);
+    wallpaper::test::WriteFontAssets(package.root());
     const auto   own   = "var mine = thisLayer.name;\nexport function update(value) { return mine === 'caption' ? value : 'wrong name: ' + mine; }";
     const auto   mover = Join({ "export function init() {",
                                 "  var layers = thisScene.enumerateLayers();",
@@ -234,6 +261,8 @@ TEST(ScriptLayerNames, TwinTextLayersEachWithAScriptKeepTheirNamesAndAreFoundByT
 
     ScriptScene scene(package);
     ASSERT_TRUE(scene.ok()) << scene.error();
+    ASSERT_TRUE(scene.runtime().NodeTextState("__we_text_5").has_value());
+    ASSERT_TRUE(scene.runtime().NodeTextState("__we_text_6").has_value());
     scene.Tick(2);
     EXPECT_EQ(scene.Origin("probe")[0], 2.0f) << "both captions were found by name";
     EXPECT_EQ(scene.Origin("__we_text_5")[0], 10.0f);
@@ -249,6 +278,7 @@ TEST(ScriptInitResult, ATypingTextStartsEmpty)
 {
     ScenePackage package;
     const auto   model = ModelOf(package);
+    wallpaper::test::WriteFontAssets(package.root());
     const auto   typing = Join({ "var full = 'Hello world';",
                                  "var typed = 0;",
                                  "export function init() { return ''; }",
@@ -257,6 +287,7 @@ TEST(ScriptInitResult, ATypingTextStartsEmpty)
 
     ScriptScene scene(package);
     ASSERT_TRUE(scene.ok()) << scene.error();
+    ASSERT_TRUE(scene.runtime().NodeTextState("typing").has_value());
     scene.Tick(3);
     EXPECT_EQ(scene.runtime().NodeText("typing"), "");
 }
@@ -265,11 +296,13 @@ TEST(ScriptInitResult, ATextThatInitLeavesAloneKeepsTheFilesText)
 {
     ScenePackage package;
     const auto   model = ModelOf(package);
+    wallpaper::test::WriteFontAssets(package.root());
     Publish(package, { PlainImage(model, 1, "probe"),
                        TextLayer(5, "caption", "Hello world", "export function init() { }\nexport function update(value) { return value; }") });
 
     ScriptScene scene(package);
     ASSERT_TRUE(scene.ok()) << scene.error();
+    ASSERT_TRUE(scene.runtime().NodeTextState("caption").has_value());
     scene.Tick(3);
     EXPECT_EQ(scene.runtime().NodeText("caption"), "Hello world");
 }

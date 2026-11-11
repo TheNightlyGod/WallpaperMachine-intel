@@ -121,10 +121,10 @@ fn hostile_shapes_are_handled_in_bounded_time_and_stack() {
 #[test]
 fn a_legitimately_deep_shader_still_converts() {
     // 64 nested parentheses and a long else-if chain are well inside the bounds (E16)
-    let parens = format!("float f(float x) {{ return {}x{}; }}\nvoid main() {{ gl_FragColor = vec4(f(1.0)); }}", "(".repeat(64), ")".repeat(64));
+    let parens = format!("float f(float x) {{ return {}x{}; }}\nvoid main() {{ gl_FragColor = CAST4(f(1.0)); }}", "(".repeat(64), ")".repeat(64));
     let chain: String = (0..60).map(|i| format!("if (x == {i}.0) {{ r = {i}.0; }} else ")).collect::<String>() + "{ r = 0.0; }";
-    let ladder = format!("varying float x;\nvoid main() {{ float r; {chain} gl_FragColor = vec4(r); }}");
-    let sum = format!("uniform float u;\nvoid main() {{ float a = {}; gl_FragColor = vec4(a); }}", (0..200).map(|_| "u").collect::<Vec<_>>().join(" + "));
+    let ladder = format!("varying float x;\nvoid main() {{ float r; {chain} gl_FragColor = CAST4(r); }}");
+    let sum = format!("uniform float u;\nvoid main() {{ float a = {}; gl_FragColor = CAST4(a); }}", (0..200).map(|_| "u").collect::<Vec<_>>().join(" + "));
     on_small_stack(move || {
         for (name, src) in [("parens", parens), ("ladder", ladder), ("sum", sum)] {
             convert_stage(StageKind::Fragment, &src).unwrap_or_else(|d| panic!("{name}: {d:?}"));

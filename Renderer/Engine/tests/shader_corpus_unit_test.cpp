@@ -99,17 +99,30 @@ TEST(ShaderCorpusJobs, JobIsBuiltFromTheMaterialDocumentAlone) {
     EXPECT_EQ(std::count(flags.begin(), flags.begin() + 3, true), 0);
 }
 
-TEST(ShaderCorpusJobs, OnlyAlphaToCoverageBlendingSetsItsCombo) {
-    for (const char* blending : { "additive", "translucent" }) {
-        auto material                        = CustomMaterial();
-        material["passes"][0]["blending"]    = blending;
-        const auto job                       = BuildJob(PlainExpectation(), material);
+TEST(ShaderCorpusJobs, BlendingSetsOnlyItsOwnCombo) {
+    // ALPHATOCOVERAGE and ADDITIVE come from the material's own `blending`
+    // (Wallpaper Engine sub_140154480).
+    {
+        auto material                     = CustomMaterial();
+        material["passes"][0]["blending"] = "additive";
+        const auto job                    = BuildJob(PlainExpectation(), material);
         ASSERT_TRUE(job.has_value());
-        EXPECT_EQ(job->combos.count("ALPHATOCOVERAGE"), 0u) << blending;
+        EXPECT_EQ(job->combos.count("ALPHATOCOVERAGE"), 0u);
+        ASSERT_EQ(job->combos.count("ADDITIVE"), 1u);
+        EXPECT_EQ(job->combos.at("ADDITIVE"), "1");
+    }
+    {
+        auto material                     = CustomMaterial();
+        material["passes"][0]["blending"] = "translucent";
+        const auto job                    = BuildJob(PlainExpectation(), material);
+        ASSERT_TRUE(job.has_value());
+        EXPECT_EQ(job->combos.count("ALPHATOCOVERAGE"), 0u);
+        EXPECT_EQ(job->combos.count("ADDITIVE"), 0u);
     }
     auto material = CustomMaterial();
     material["passes"][0].erase("blending");
     EXPECT_EQ(BuildJob(PlainExpectation(), material)->combos.count("ALPHATOCOVERAGE"), 0u);
+    EXPECT_EQ(BuildJob(PlainExpectation(), material)->combos.count("ADDITIVE"), 0u);
 }
 
 TEST(ShaderCorpusJobs, OnlyIntegerCombosAreTaken) {

@@ -171,11 +171,14 @@ pub struct TextureRecord {
     pub format: TextureFormat,
     pub components: TextureComponents,
     pub video_planes: VideoPlanes,
+    /// Physical samples of a bound image, when known. A resolved back buffer
+    /// has one sample even when its HLSL declaration is Texture2DMS.
+    pub sample_count: Option<u32>,
 }
 
 impl TextureRecord {
     /// A record with the documented defaults: present, not enabled, unknown
-    /// format, no components, no planes.
+    /// format, no components, no planes and no physical sample count.
     pub fn new(slot: u8) -> TextureRecord {
         TextureRecord {
             slot,
@@ -184,6 +187,7 @@ impl TextureRecord {
             format: TextureFormat::Unknown,
             components: TextureComponents::default(),
             video_planes: VideoPlanes::None,
+            sample_count: None,
         }
     }
 }
@@ -233,6 +237,15 @@ pub enum CachePolicy {
     Enabled { scene_id: String },
 }
 
+/// A point-input geometry entry whose emitted vertices are selected by a mesh attribute.
+/// The renderer supplies one invocation per requested output vertex.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PointGeometry {
+    pub source: String,
+    pub max_vertices: u32,
+    pub output_index_attribute: String,
+}
+
 /// An unchecked request. Build one in code or fill it from JSON, then call
 /// [`ShaderRequest::validate`].
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -244,6 +257,7 @@ pub struct ShaderRequest {
     pub combos: Vec<Combo>,
     pub textures: Vec<TextureRecord>,
     pub properties: Vec<Property>,
+    pub point_geometry: Option<PointGeometry>,
 }
 
 /// What is wrong with the `stages` array (R11).
@@ -281,6 +295,7 @@ pub enum RequestError {
     DuplicateCombo { folded: String, first: String, second: String },
     TextureSlotOutOfRange(u8),
     DuplicateTextureSlot(u8),
+    TextureSampleCount { slot: u8, count: u32 },
     EmptyPropertyName,
     PropertyHasNoValue(String),
     /// A shader annotation that cannot be used (R75): an unparsable default,
@@ -328,6 +343,9 @@ impl fmt::Display for RequestError {
             ),
             RequestError::DuplicateTextureSlot(slot) => {
                 format!("invalid shader request: duplicate texture slot {slot}")
+            }
+            RequestError::TextureSampleCount { slot, count } => {
+                format!("invalid shader request: texture slot {slot} has sample count {count}, expected 1, 2, 4 or 8")
             }
             RequestError::EmptyPropertyName => "invalid shader request: property name is empty".to_string(),
             RequestError::PropertyHasNoValue(name) => {
@@ -397,6 +415,10 @@ impl ShaderRequest {
             if std::mem::replace(seen, true) {
                 return Err(RequestError::DuplicateTextureSlot(record.slot));
             }
+            if let Some(count) = record.sample_count
+                && !matches!(count, 1 | 2 | 4 | 8) {
+                    return Err(RequestError::TextureSampleCount { slot: record.slot, count });
+                }
         }
 
         // R14: named, and carrying a value.
@@ -409,6 +431,15 @@ impl ShaderRequest {
             }
         }
 
+        if let Some(geometry) = &self.point_geometry {
+            if !(1..=1024).contains(&geometry.max_vertices) {
+                return Err(RequestError::Program("point geometry max_vertices must be in 1..=1024".into()));
+            }
+            if geometry.source.trim().is_empty() || !is_identifier(&geometry.output_index_attribute)
+                || geometry.output_index_attribute.starts_with("gl_") {
+                return Err(RequestError::Program("point geometry needs source and a non-reserved output-index attribute".into()));
+            }
+        }
         Ok(ValidRequest {
             shader_name,
             target: self.target,
@@ -417,6 +448,7 @@ impl ShaderRequest {
             combos: self.combos,
             textures: self.textures,
             properties: self.properties,
+            point_geometry: self.point_geometry,
         })
     }
 }
@@ -437,9 +469,12 @@ pub struct ValidRequest {
     combos: Vec<Combo>,
     textures: Vec<TextureRecord>,
     properties: Vec<Property>,
+    point_geometry: Option<PointGeometry>,
 }
 
 impl ValidRequest {
+    pub fn point_geometry(&self) -> Option<&PointGeometry> { self.point_geometry.as_ref() }
+
     /// The normalised shader name (what diagnostics and the cache key use).
     pub fn shader_name(&self) -> &str {
         &self.shader_name
@@ -492,6 +527,12 @@ impl ValidRequest {
             .filter(|t| t.video_planes == VideoPlanes::Nv12Biplanar)
             .map(|t| t.slot)
             .collect()
+    }
+
+    /// Known single-sample resources: MS declarations on these slots read the
+    /// resolved image at integer coordinates instead of requiring a Metal MS image.
+    pub fn single_sample_slots(&self) -> Vec<u8> {
+        self.textures.iter().filter(|t| t.sample_count == Some(1)).map(|t| t.slot).collect()
     }
 
     pub fn properties(&self) -> &[Property] {
@@ -695,6 +736,7 @@ mod tests {
             format: TextureFormat::Unknown,
             components: TextureComponents { compo1: false, compo2: false, compo3: false, compo4: false },
             video_planes: VideoPlanes::None,
+            sample_count: None,
         });
     }
 

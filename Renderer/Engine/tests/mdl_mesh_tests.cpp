@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include "mdl_fixtures.hpp"
+#include "wpscene/WPMaterial.h"
 
 using namespace wallpaper;
 using namespace mdltest;
@@ -14,7 +15,7 @@ constexpr int kVersions[] = { 13, 14, 16, 17, 20, 21, 23 };
 // Version 16 surface mesh used by the truncation rows.
 Bytes surfaceFile(int version) {
     MeshSpec m;
-    m.flag     = 0x1 | kNormal | kTangent | kUv;
+    m.flag     = kPosition | kNormal | kTangent | kUv;
     m.material = "models/surface.json";
     Bytes f    = mdlFile(version, { m });
     f.u8(0);
@@ -23,7 +24,7 @@ Bytes surfaceFile(int version) {
 
 MeshSpec maskedMesh(std::vector<PartSpec> parts, std::vector<MaskSpec> masks) {
     MeshSpec m;
-    m.flag  = kUv;
+    m.flag  = kPosition | kUv;
     m.parts = std::move(parts);
     m.masks = std::move(masks);
     return m;
@@ -67,7 +68,7 @@ TEST(MdlMesh, SurfaceAttributesSurviveEveryFileVersion) {
         ASSERT_EQ(m.positions.size(), 3u);
         ASSERT_EQ(m.normals.size(), 3u);
         ASSERT_EQ(m.tangents.size(), 3u);
-        ASSERT_EQ(m.texcoords.size(), 3u);
+        ASSERT_EQ(uvOf(m).size(), 3u);
         EXPECT_TRUE(m.blend_indices.empty());
         EXPECT_TRUE(m.blend_weights.empty());
         EXPECT_EQ(p.mdl.puppet, nullptr);
@@ -75,7 +76,7 @@ TEST(MdlMesh, SurfaceAttributesSurviveEveryFileVersion) {
             EXPECT_EQ(m.positions[i], stdPosition(i));
             EXPECT_EQ(m.normals[i], stdNormal(i));
             EXPECT_EQ(m.tangents[i], stdTangent(i));
-            EXPECT_EQ(m.texcoords[i], stdUv(i));
+            EXPECT_EQ(uvOf(m)[i], stdUv(i));
         }
         EXPECT_EQ(m.indices, (std::vector<std::array<uint32_t, 3>> { { 0, 2, 1 } }));
         EXPECT_EQ(m.has_aabb, version >= 17);
@@ -114,7 +115,7 @@ TEST(MdlMesh, SkinnedMeshesKeepBoneStreamsAndSkeletonForEveryVersion) {
         for (bool surface : { false, true }) {
             SCOPED_TRACE("version " + std::to_string(version) + (surface ? " surface" : " plain"));
             MeshSpec m;
-            m.flag = kSkinned | (surface ? (0x1 | kNormal | kTangent) : 0u);
+            m.flag = kSkinned | (surface ? (kNormal | kTangent) : 0u);
             Bytes f = mdlFile(version, { m });
             writeSkeleton(f, 1, { { "root", kNone }, { "child", 0 } });
             f.stamp("MDLA", 0).u8(0);
@@ -123,12 +124,12 @@ TEST(MdlMesh, SkinnedMeshesKeepBoneStreamsAndSkeletonForEveryVersion) {
             ASSERT_EQ(p.mdl.meshes.size(), 1u);
             const auto& mm = p.mesh();
             ASSERT_EQ(mm.positions.size(), 3u);
-            ASSERT_EQ(mm.texcoords.size(), 3u);
+            ASSERT_EQ(uvOf(mm).size(), 3u);
             ASSERT_EQ(mm.blend_indices.size(), 3u);
             ASSERT_EQ(mm.blend_weights.size(), 3u);
             for (int i = 0; i < 3; ++i) {
                 EXPECT_EQ(mm.positions[i], stdPosition(i));
-                EXPECT_EQ(mm.texcoords[i], stdUv(i));
+                EXPECT_EQ(uvOf(mm)[i], stdUv(i));
                 EXPECT_EQ(mm.blend_indices[i], stdBoneIdx(i));
                 EXPECT_EQ(mm.blend_weights[i], stdBoneWgt(i));
             }
@@ -145,25 +146,27 @@ TEST(MdlMesh, SkinnedMeshesKeepBoneStreamsAndSkeletonForEveryVersion) {
 
 TEST(MdlMesh, SecondTexcoordLayoutYieldsBothCoordinateStreams) {
     MeshSpec m;
-    m.flag = kSkinIdx | kSkinWgt | kUvPair;
+    m.flag = kPosition | kSkinIdx | kSkinWgt | kUvPair;
     ASSERT_EQ(strideOf(m.flag), 60u);
     const auto p = parse(mdlFile(21, { m }));
     ASSERT_TRUE(p.ok);
     ASSERT_EQ(p.mdl.meshes.size(), 1u);
     const auto& mm = p.mesh();
-    ASSERT_EQ(mm.texcoords.size(), 3u);
-    ASSERT_EQ(mm.texcoord2.size(), 3u);
-    EXPECT_EQ(mm.texcoords[1], (F2 { 0.2f, 0.7f }));
-    EXPECT_EQ(mm.texcoord2[1], (F2 { 0.6f, 0.6f }));
-    EXPECT_EQ(mm.texcoords[2], (F2 { 0.3f, 0.5f }));
-    EXPECT_EQ(mm.texcoord2[2], (F2 { 0.9f, 0.6f }));
+    const auto uv  = uvOf(mm);
+    const auto uv2 = uvOf(mm, 2);
+    ASSERT_EQ(uv.size(), 3u);
+    ASSERT_EQ(uv2.size(), 3u);
+    EXPECT_EQ(uv[1], (F2 { 0.2f, 0.7f }));
+    EXPECT_EQ(uv2[1], (F2 { 0.6f, 0.6f }));
+    EXPECT_EQ(uv[2], (F2 { 0.3f, 0.5f }));
+    EXPECT_EQ(uv2[2], (F2 { 0.9f, 0.6f }));
     EXPECT_EQ(mm.blend_indices.size(), 3u);
     EXPECT_EQ(mm.positions[2], stdPosition(2));
 }
 
 TEST(MdlMesh, MoreThanSixtyFiveThousandVerticesKeepWideIndices) {
     MeshSpec m;
-    m.flag          = 0;
+    m.flag          = kPosition;
     m.vertices      = 65537;
     m.linePositions = true;
     m.indices       = { 0, 1, 65536 };
@@ -454,7 +457,7 @@ namespace
 {
 std::vector<Range> rangesForPart(uint32_t start, uint32_t size) {
     MeshSpec m;
-    m.flag  = kUv;
+    m.flag  = kPosition | kUv;
     m.parts = { { 10, start, size } };
     const auto p = parse(mdlFile(21, { m }));
     EXPECT_TRUE(p.ok);
@@ -481,7 +484,7 @@ TEST(MdlGeometry, PartRangeBeyondTheEmittedIndicesDrawsNothing) {
 
     // Several parts: the invalid middle one is dropped, the rest keep their order.
     MeshSpec m;
-    m.flag    = kUv;
+    m.flag    = kPosition | kUv;
     m.vertices = 4;
     m.indices = { 0, 1, 2, 1, 2, 3 };
     m.parts   = { { 1, 0, 3 }, { 2, 5, 3 }, { 3, 3, 3 } };
@@ -543,6 +546,54 @@ TEST(MdlGeometry, MasksProduceClippedBaseMaskPassAndClippedDraw) {
     }
 }
 
+TEST(MdlGeometry, ANestedMaskIsMultipliedIntoTheMaskThatEnclosesIt) {
+    // Wallpaper Engine links a mask to the first other mask that clips every piece it
+    // is drawn from (sub_140261880 record +72), then draws the enclosing mask cleared
+    // into the mask target, the nested one cleared into an intermediate, and
+    // multiplies that in (sub_140208670, sub_14020D6A0).
+    MeshSpec m = maskedMesh({ { 1, 0, 3 }, { 2, 3, 3 }, { 3, 6, 3 } },
+                            { { 7, "masks/outer.json", { 1, 2 }, { 0 } },
+                              { 7, "masks/inner.json", { 2 }, { 1 } } });
+    m.vertices = 4;
+    m.indices  = { 0, 1, 2, 1, 2, 3, 0, 2, 3 };
+    const auto p = parse(mdlFile(23, { m }, 0));
+    ASSERT_TRUE(p.ok);
+    ASSERT_EQ(p.mesh().masks.size(), 2u);
+    EXPECT_EQ(p.mesh().masks[0].parent, -1);
+    EXPECT_EQ(p.mesh().masks[1].parent, 0);
+    EXPECT_EQ(wallpaper::WPMdlParser::MaskChain(p.mesh(), 1), (std::vector<uint32_t> { 0 }));
+
+    const auto mesh = generate(p.mdl);
+    const auto& s   = mesh->Submeshes();
+    // base, outer mask, outer clipped, then for inner: outer mask, inner mask, multiply, clipped
+    ASSERT_EQ(s.size(), 7u);
+    for (size_t i = 0; i < s.size(); ++i) EXPECT_EQ(s[i].material_slot, i);
+    EXPECT_EQ(s[1].output_override, "_rt_puppet_mask");
+    EXPECT_TRUE(s[1].clear_output);
+    EXPECT_EQ(s[3].output_override, "_rt_puppet_mask");
+    EXPECT_TRUE(s[3].clear_output);
+    EXPECT_EQ(rangesOf(s[3]), (std::vector<Range> { { 0, 3 } }));
+    EXPECT_EQ(s[4].output_override, "_rt_puppet_mask_intermediate");
+    EXPECT_TRUE(s[4].clear_output);
+    EXPECT_EQ(rangesOf(s[4]), (std::vector<Range> { { 3, 3 } }));
+    EXPECT_EQ(s[5].output_override, "_rt_puppet_mask");
+    EXPECT_FALSE(s[5].clear_output) << "the multiply keeps what the enclosing mask drew";
+    EXPECT_TRUE(s[6].output_override.empty());
+    EXPECT_EQ(rangesOf(s[6]), (std::vector<Range> { { 6, 3 } }));
+}
+
+TEST(MdlGeometry, MasksThatEncloseEachOtherAreNotLinkedInALoop) {
+    const auto p = parse(mdlFile(23, { maskedMesh({ { 1, 0, 3 }, { 2, 3, 3 } },
+                                                  { { 7, "masks/a.json", { 1 }, { 0 } },
+                                                    { 7, "masks/b.json", { 0 }, { 1 } } }) },
+                                 0));
+    ASSERT_TRUE(p.ok);
+    for (std::size_t m = 0; m < 2; ++m) {
+        const auto chain = wallpaper::WPMdlParser::MaskChain(p.mesh(), m);
+        EXPECT_LT(chain.size(), 2u) << "mask " << m;
+    }
+}
+
 TEST(MdlGeometry, MaskListsNamingMissingPartsStillProduceRenderableSubmeshes) {
     const auto p = parse(mdlFile(23, { maskedMesh({ { 4, 0, 3 } }, { { 7, "masks/m.json", { 99 }, { 100 } } }) }, 0));
     ASSERT_TRUE(p.ok);
@@ -596,4 +647,137 @@ TEST(MdlMesh, FailedParseLeavesTheModelDefaultAndMissingPathsDoNotThrow) {
     vfs.Mount("/assets", std::make_unique<wallpaper::test::MapFs>(wallpaper::test::MapFs::Files {}));
     WPMdl untouched;
     EXPECT_FALSE(WPMdlParser::Parse("missing.mdl", vfs, untouched));
+}
+
+// B-D7.1: every bit of Wallpaper Engine's 26-entry vertex table adds its own size to the
+// record, in the table's order (0x140484A20 / 0x1404849B0).
+TEST(MdlMesh, EveryWeVertexBitHasItsSize) {
+    const std::pair<uint32_t, uint32_t> sizes[] = {
+        { 0x10000, 16 }, { 0x2000000, 12 }, { 0x2, 12 }, { 0x4, 16 }, { 0x800000, 16 },
+        { 0x1000000, 16 }, { 0x8, 8 }, { 0x10, 12 }, { 0x20, 16 }, { 0x40, 8 }, { 0x80, 12 },
+        { 0x100, 16 }, { 0x200, 8 }, { 0x400, 12 }, { 0x800, 16 }, { 0x1000, 8 }, { 0x2000, 12 },
+        { 0x4000, 16 }, { 0x20000, 8 }, { 0x40000, 12 }, { 0x80000, 16 }, { 0x100000, 8 },
+        { 0x200000, 12 }, { 0x400000, 16 }, { 0x8000, 16 },
+    };
+    for (const auto& [bit, size] : sizes) {
+        SCOPED_TRACE("bit " + std::to_string(bit));
+        MeshSpec m;
+        m.flag        = kPosition | bit;
+        m.vertexBytes = 3 * (12 + size);
+        const auto p  = parse(mdlFile(21, { m }));
+        ASSERT_TRUE(p.ok);
+        ASSERT_EQ(p.mesh().positions.size(), 3u);
+        EXPECT_EQ(p.mesh().positions[2], stdPosition(2));
+    }
+}
+
+// A bit outside the table adds nothing to the record and keeps the mesh readable.
+TEST(MdlMesh, ABitOutsideTheTableAddsNothing) {
+    MeshSpec m;
+    m.flag        = kPosition | kUv | 0x4000000;
+    m.vertexBytes = 3 * 20;
+    const auto p  = parse(mdlFile(21, { m }));
+    ASSERT_TRUE(p.ok);
+    EXPECT_EQ(uvOf(p.mesh())[1], stdUv(1));
+}
+
+// A generic stream keeps its floats per vertex and reaches the shader under its attribute name.
+TEST(MdlGeometry, EveryStoredStreamIsUploadedUnderItsAttribute) {
+    MeshSpec m;
+    m.flag       = kPosition | 0x2000000 | 0x8000 | 0x400;
+    const auto p = parse(mdlFile(21, { m }));
+    ASSERT_TRUE(p.ok);
+    const auto* color = p.mesh().FindStream(0x8000);
+    ASSERT_NE(color, nullptr);
+    EXPECT_EQ(color->width, 4u);
+    EXPECT_FLOAT_EQ(color->values[4 + 2], streamValue(0x8000, 1, 2));
+    const auto mesh = generate(p.mdl, false);
+    const auto& va  = mesh->GetVertexArray(0);
+    EXPECT_EQ(firstVertexAttr(va, "a_PositionC1", 3),
+              (std::vector<float> { streamValue(0x2000000, 0, 0), streamValue(0x2000000, 0, 1),
+                                    streamValue(0x2000000, 0, 2) }));
+    EXPECT_EQ(firstVertexAttr(va, "a_Color", 1), (std::vector<float> { streamValue(0x8000, 0, 0) }));
+    EXPECT_EQ(firstVertexAttr(va, "a_TexCoordVec3C2", 1), (std::vector<float> { streamValue(0x400, 0, 0) }));
+    // The narrower name of that coordinate set reads the same bytes.
+    const auto map = va.GetAttrOffsetMap();
+    ASSERT_TRUE(map.count("a_TexCoordC2"));
+    EXPECT_EQ(map.at("a_TexCoordC2").offset, map.at("a_TexCoordVec3C2").offset);
+    EXPECT_FALSE(map.count("a_TexCoordVec4C2"));
+}
+
+// B-D7.2: a shader input binds by semantic, so `vec2 a_TexCoord` reads xy of a 0x20 stream.
+TEST(MdlGeometry, LightmapUvReachesTexCoordVec4AndTexCoordStillReadsUv) {
+    MeshSpec m;
+    m.flag       = kPosition | kUvPair;
+    const auto p = parse(mdlFile(21, { m }));
+    ASSERT_TRUE(p.ok);
+    const auto mesh = generate(p.mdl, false);
+    const auto& va  = mesh->GetVertexArray(0);
+    const auto uv = stdUv(0), uv2 = stdUv2(0);
+    EXPECT_EQ(firstVertexAttr(va, "a_TexCoordVec4", 4), (std::vector<float> { uv[0], uv[1], uv2[0], uv2[1] }));
+    const auto map = va.GetAttrOffsetMap();
+    ASSERT_TRUE(map.count("a_TexCoord"));
+    EXPECT_EQ(map.at("a_TexCoord").offset, map.at("a_TexCoordVec4").offset);
+    EXPECT_EQ(firstVertexAttr(va, "a_TexCoord", 2), (std::vector<float> { uv[0], uv[1] }));
+}
+
+// The morph layout stores only the four-wide position; a_Position reads its xyz.
+TEST(MdlGeometry, AFourWidePositionAloneIsAlsoThePosition) {
+    MeshSpec m;
+    m.flag       = 0x10000;
+    const auto p = parse(mdlFile(21, { m }));
+    ASSERT_TRUE(p.ok);
+    ASSERT_EQ(p.mesh().positions.size(), 3u);
+    EXPECT_FLOAT_EQ(p.mesh().positions[1][2], streamValue(0x10000, 1, 2));
+    const auto mesh = generate(p.mdl, false);
+    const auto map  = mesh->GetVertexArray(0).GetAttrOffsetMap();
+    ASSERT_TRUE(map.count("a_Position"));
+    EXPECT_EQ(map.at("a_Position").offset, map.at("a_PositionVec4").offset);
+}
+
+TEST(SceneVertexArrayAlias, AnAliasReadsItsTargetAndNeverHidesARealAttribute) {
+    SceneVertexArray va({ { "a_Position", VertexType::FLOAT3 }, { "a_TexCoordVec4", VertexType::FLOAT4 } }, 1);
+    va.AddAlias("a_TexCoord", "a_TexCoordVec4");
+    va.AddAlias("a_Position", "a_TexCoordVec4");
+    va.AddAlias("a_Normal", "a_Missing");
+    const auto map = va.GetAttrOffsetMap();
+    EXPECT_EQ(map.at("a_TexCoord").offset, 16u);
+    EXPECT_EQ(map.at("a_TexCoord").attr.name, "a_TexCoord");
+    EXPECT_EQ(map.at("a_Position").offset, 0u);
+    EXPECT_FALSE(map.count("a_Normal"));
+    SceneVertexArray moved(std::move(va));
+    EXPECT_TRUE(moved.GetAttrOffsetMap().count("a_TexCoord"));
+}
+
+// we_LoadMdlModel 0x140261880: bit 2 of the mesh flag word is followed by one more word,
+// whatever the other bits.
+TEST(MdlMesh, AMeshFlagWordWithBitTwoReadsOneMoreWord) {
+    MeshSpec m;
+    m.flag       = kSkinned;
+    m.flagA      = 6;
+    const auto p = parse(mdlFile(21, { m }));
+    ASSERT_TRUE(p.ok);
+    EXPECT_EQ(p.mesh().flag_a, 6u);
+    EXPECT_TRUE(p.mesh().has_flag_a2_one);
+    EXPECT_EQ(p.mesh().positions[1], stdPosition(1));
+}
+
+// D5.1 (0x140206AE0): the first mesh's flag word bit 4 makes a skinned model SKINNING_ALPHA.
+TEST(MdlGeometry, SkinningAlphaFlagAddsTheCombo) {
+    for (const uint32_t flagA : { 0u, 4u }) {
+        SCOPED_TRACE(flagA);
+        MeshSpec m;
+        m.flag  = kSkinned;
+        m.flagA = flagA;
+        Bytes f = mdlFile(21, { m });
+        writeSkeleton(f, 1, { { "root", kNone } });
+        f.stamp("MDLA", 0).u8(0);
+        const auto p = parse(f);
+        ASSERT_TRUE(p.ok);
+        ASSERT_NE(p.mdl.puppet, nullptr);
+        EXPECT_EQ(p.mdl.puppet->bone_alpha, flagA == 4);
+        wpscene::WPMaterial mat;
+        WPMdlParser::AddPuppetMatInfo(mat, p.mdl);
+        EXPECT_EQ(mat.combos.count("SKINNING_ALPHA"), flagA == 4 ? 1u : 0u);
+    }
 }

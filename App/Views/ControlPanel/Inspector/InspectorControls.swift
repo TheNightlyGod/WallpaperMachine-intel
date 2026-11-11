@@ -10,6 +10,21 @@ extension PanelController {
   func isInspectorControlDisabled(_ options: InspectorOptions, key: String) -> Bool {
     options.isLocked && !isBusy(key)
   }
+
+  /// The inspector's Mute this wallpaper switch. Mute All silences every wallpaper on top of the
+  /// wallpaper's own mute and is never written into it, so while Mute All is on (drafts included)
+  /// the switch shows the wallpaper muted and waits: only turning Mute All off brings sound back.
+  func inspectorMuteSwitch(_ options: InspectorOptions) -> InspectorMuteSwitch {
+    let mutesAll = settings.isOn(.wallpapersMuted)
+    return InspectorMuteSwitch(isOn: options.isMuted || mutesAll, isMutedByMuteAll: mutesAll)
+  }
+}
+
+/// What the inspector's Mute this wallpaper switch shows: `isOn` is what the wallpaper sounds like,
+/// and `isMutedByMuteAll` says Mute All holds it, which locks the switch and shows a note.
+struct InspectorMuteSwitch: Equatable {
+  let isOn: Bool
+  let isMutedByMuteAll: Bool
 }
 
 /// Holds an object a view creates on first use (a drag driver, which needs the controller from the

@@ -135,7 +135,10 @@ fn uniform_annotation(
         }
         // A NUL byte cannot be part of a reported name (R10); such an alias is dropped.
         if !material.contains('\0') {
-            out.aliases.push(AliasEntry { material: material.to_string(), uniform: name.to_string() });
+            out.aliases.push(AliasEntry {
+                material: material.to_string(), uniform: name.to_string(),
+                rad2deg: json.string("conversion") == Some("rad2deg"),
+            });
         }
     }
     match slot {

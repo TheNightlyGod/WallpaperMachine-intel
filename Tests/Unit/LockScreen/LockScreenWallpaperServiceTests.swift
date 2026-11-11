@@ -93,7 +93,8 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       displayId: CGMainDisplayID(), wallpaperId: "2001", title: "t",
       projectPath: project.appendingPathComponent("project.json").path,
       assetsPath: project.path, fps: 30, scalingMode: .fill, scalingFactor: 1,
-      framing: .centered, propertiesJson: propertiesJSON, paused: false)
+      framing: .centered, propertiesJson: propertiesJSON, paused: false,
+      engineOptions: nil, sceneQuality: nil, borderColor: nil)
   }
 
   /// The managed store as the app writes it, isolated per test through
@@ -133,14 +134,18 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
   }
 
   /// Answers the extension's readiness files like the real lock-screen renderer, as process
-  /// `processID` when given.
-  private func readinessResponder(held: String? = nil, processID: Int32? = nil) -> Task<Void, Never> {
+  /// `processID` when given. A replacement started by a reload cannot acknowledge the revision
+  /// from before that reload; `afterRevision` keeps the fake from doing so while the app stages.
+  private func readinessResponder(
+    held: String? = nil, processID: Int32? = nil, afterRevision: String? = nil
+  ) -> Task<Void, Never> {
     let exchange = self.exchange
     return Task.detached {
       while !Task.isCancelled {
         let file = exchange.appendingPathComponent(LockScreenConfiguration.fileName)
         if let data = try? Data(contentsOf: file),
-          let configuration = try? JSONDecoder().decode(LockScreenConfiguration.self, from: data)
+          let configuration = try? JSONDecoder().decode(LockScreenConfiguration.self, from: data),
+          configuration.revision != afterRevision
         {
           for scene in configuration.scenes {
             let readiness = LockScreenReadiness(
@@ -743,7 +748,7 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     let exited = try XCTUnwrap(watches[999_901], "The process that drew the frame is watched")
 
     responder.cancel()
-    responder = readinessResponder(processID: 999_902)
+    responder = readinessResponder(processID: 999_902, afterRevision: first)
     exited()
     await waitFor("a new publication") {
       !service.isBusy && (try? self.publishedRevision()) != first && watches[999_902] != nil
@@ -782,12 +787,193 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
       let exited = try XCTUnwrap(watches[pid])
       pid += 1
       responder.cancel()
-      responder = readinessResponder(processID: pid)
+      responder = readinessResponder(processID: pid, afterRevision: try publishedRevision())
       exited()
       await waitFor("recovery \(recovery)") { !service.isBusy && watches[pid] != nil }
       XCTAssertTrue(service.isEnabled)
       XCTAssertNil(service.errorMessage)
     }
+    try XCTUnwrap(watches[pid])()
+    await waitFor("the failure") { !service.isBusy && service.errorMessage != nil }
+    XCTAssertFalse(service.isEnabled)
+    XCTAssertFalse(try storeOwnsDisplayOne())
+  }
+
+  /// Applying another wallpaper selects a new revision, which reloads WallpaperAgent, and that ends
+  /// the renderer process that drew the previous one. However often the wallpaper changes, that is
+  /// not a renderer failing and does not hand the lock screen back to macOS.
+  @MainActor
+  func testSwitchingWallpapersIsNotCountedAsTheRendererFailing() async throws {
+    @MainActor final class Renderers {
+      var watches: [Int32: @MainActor () -> Void] = [:]
+      var serving: Int32 = 999_930
+      var ended: [Int32] = []
+    }
+    let renderers = Renderers()
+    var record = scene()
+    record.displayId = 1
+    var records = [record]
+    let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { records },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {
+        // The reload ends the process serving the old revision a moment later.
+        let ending = renderers.serving
+        Task { @MainActor in
+          renderers.ended.append(ending)
+          renderers.watches[ending]?()
+        }
+      }),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { [1: "one"][$0] },
+      watchProcessExit: { pid, exited in
+        renderers.watches[pid] = exited
+        return {}
+      })
+    var responder = readinessResponder(processID: renderers.serving)
+    defer { responder.cancel() }
+    try service.start()
+    service.setEnabled(true)
+    await waitFor("lock screen ready") { service.isEnabled && !service.isBusy }
+    for change in 1...(LockScreenWallpaperService.rendererRecoveryLimit + 2) {
+      let previous = renderers.serving
+      let first = try publishedRevision()
+      responder.cancel()
+      responder = readinessResponder(processID: previous + 1, afterRevision: first)
+      record.fps = 30 + UInt32(change)
+      records = [record]
+      service.refresh()
+      await waitFor("wallpaper change \(change)") {
+        !service.isBusy && (try? self.publishedRevision()) != first && renderers.ended.contains(previous)
+          && renderers.watches[previous + 1] != nil
+      }
+      renderers.serving = previous + 1
+      // Let a miscounted exit's republication run before checking.
+      try await Task.sleep(for: .milliseconds(200))
+      await waitFor("settled after change \(change)") { !service.isBusy }
+      XCTAssertTrue(service.isEnabled, "change \(change)")
+      XCTAssertNil(service.errorMessage, "change \(change)")
+    }
+    XCTAssertTrue(try storeOwnsDisplayOne())
+  }
+
+  /// The old process can draw the published revision before WallpaperAgent's asynchronous
+  /// reload ends it. Its acknowledgement must not re-arm the watch we just cancelled.
+  @MainActor
+  func testAcknowledgementFromRetiringRendererDoesNotCompleteWallpaperSwitch() async throws {
+    try await checkRetiringRendererAcknowledgement(interrupt: false)
+  }
+
+  @MainActor
+  func testRefreshDuringSwitchStillRejectsRetiringRendererAcknowledgement() async throws {
+    try await checkRetiringRendererAcknowledgement(interrupt: true)
+  }
+
+  @MainActor
+  private func checkRetiringRendererAcknowledgement(interrupt: Bool) async throws {
+    weak var updatingService: LockScreenWallpaperService?
+    var publications = 0
+    var record = scene()
+    record.displayId = 1
+    var pid: Int32 = 999_950
+    var watches: [Int32: @MainActor () -> Void] = [:]
+    var watched: [Int32] = []
+    var switching = false
+    var reloadFinished = false
+    func acknowledge() throws {
+      let data = try Data(contentsOf: exchange.appendingPathComponent(LockScreenConfiguration.fileName))
+      let configuration = try JSONDecoder().decode(LockScreenConfiguration.self, from: data)
+      let readiness = LockScreenReadiness(
+        revision: configuration.revision, displayID: 1, error: nil, processID: pid)
+      try JSONEncoder().encode(readiness).write(
+        to: exchange.appendingPathComponent("ready-1.json"), options: .atomic)
+    }
+    let service = LockScreenWallpaperService(
+      prepareExtension: {}, notifyConfigurationChanged: {
+        publications += 1
+        try! acknowledge()
+      }, scenes: { [record] },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {
+        guard switching else { return }
+        switching = false
+        Task { @MainActor in
+          let ending = pid
+          if interrupt { updatingService?.refresh() }
+          pid += 1
+          try acknowledge()
+          watches[ending]?()
+          reloadFinished = true
+        }
+      }),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { [1: "one"][$0] },
+      watchProcessExit: { process, exited in
+        watched.append(process)
+        watches[process] = exited
+        return { watches.removeValue(forKey: process) }
+      })
+    updatingService = service
+    try service.start()
+    service.setScreenSaverEnabled(true)
+    service.setEnabled(true)
+    await waitFor("initial frame") { !service.isBusy && service.isEnabled }
+    XCTAssertEqual(watched, [999_950])
+
+    switching = true
+    record.fps += 1
+    service.refresh()
+    await waitFor("replacement renderer") { reloadFinished && !service.isBusy && watches[pid] != nil }
+    XCTAssertEqual(watched, [999_950, 999_951], "A retiring process must never acknowledge the replacement")
+    XCTAssertEqual(publications, 2, "Our own reload must not trigger another recovery")
+    XCTAssertTrue(service.isEnabled)
+    XCTAssertTrue(service.screenSaverEnabled)
+    XCTAssertNil(service.errorMessage)
+    XCTAssertNil(service.screenSaverError)
+    try await service.shutdown()
+  }
+
+  /// While the Mac is unlocked macOS closes its connections to the renderer and then ends the
+  /// process, minutes apart and with nothing wrong. Each is published again, and more of them
+  /// than the limit for other exits do not restore the system wallpaper. A renderer that keeps
+  /// dying after its connections closed still reaches a limit of its own.
+  @MainActor
+  func testRendererThatMacOSEndsAfterClosingItsConnectionsKeepsTheLockScreen() async throws {
+    var record = scene()
+    record.displayId = 1
+    var watches: [Int32: @MainActor () -> Void] = [:]
+    let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { [record] },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {}),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { [1: "one"][$0] },
+      watchProcessExit: { pid, exited in
+        watches[pid] = exited
+        return {}
+      })
+    var pid: Int32 = 999_920
+    var responder = readinessResponder(processID: pid)
+    defer { responder.cancel() }
+    try service.start()
+    service.setEnabled(true)
+    await waitFor("lock screen ready") { service.isEnabled && !service.isBusy }
+    let endings =
+      LockScreenWallpaperService.rendererReleaseLimit + LockScreenWallpaperService.rendererRecoveryLimit
+    for ending in 1...endings {
+      let exited = try XCTUnwrap(watches[pid])
+      let marker = exchange.appendingPathComponent(LockScreenHostRelease.fileName(processID: pid))
+      XCTAssertTrue(FileManager.default.createFile(atPath: marker.path, contents: nil))
+      let first = try publishedRevision()
+      pid += 1
+      responder.cancel()
+      responder = readinessResponder(processID: pid, afterRevision: first)
+      exited()
+      await waitFor("ending \(ending)") {
+        !service.isBusy && watches[pid] != nil && (try? self.publishedRevision()) != first
+      }
+      XCTAssertTrue(service.isEnabled)
+      XCTAssertNil(service.errorMessage)
+      XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+    XCTAssertTrue(try storeOwnsDisplayOne())
+    let marker = exchange.appendingPathComponent(LockScreenHostRelease.fileName(processID: pid))
+    XCTAssertTrue(FileManager.default.createFile(atPath: marker.path, contents: nil))
     try XCTUnwrap(watches[pid])()
     await waitFor("the failure") { !service.isBusy && service.errorMessage != nil }
     XCTAssertFalse(service.isEnabled)
@@ -840,6 +1026,49 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     await waitFor("the departure to apply") { !service.isBusy && !service.isEnabled }
     XCTAssertFalse(try storeOwnsDisplayOne())
     XCTAssertNil(service.errorMessage)
+  }
+
+  /// Asking whether the Mac is locked or dark is a window-server round trip. The monitor's
+  /// ticks that find every committed display still named do not ask it; only a tick where a
+  /// display left does.
+  @MainActor
+  func testSteadyMonitorTicksDoNotAskWhetherTheDisplaysAreAway() async throws {
+    var record = scene()
+    record.displayId = 1
+    var records = [record]
+    var sceneReads = 0
+    var awayChecks = 0
+    let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: {
+      sceneReads += 1
+      return records
+    },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {}),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { [1: "one"][$0] },
+      displaysAreAway: {
+        awayChecks += 1
+        return true
+      })
+    let responder = readinessResponder()
+    defer { responder.cancel() }
+    try service.start()
+    service.setEnabled(true)
+    await waitFor("lock screen ready") { service.isEnabled && !service.isBusy }
+    let timer = try XCTUnwrap(timers.last)
+
+    for _ in 0..<5 {
+      let reads = sceneReads
+      timer.fire()
+      await waitFor("a steady tick") { sceneReads > reads && !service.isBusy }
+    }
+    XCTAssertEqual(awayChecks, 0, "every display is still named, so nothing is asked")
+
+    records = []
+    let reads = sceneReads
+    timer.fire()
+    await waitFor("a tick with no displays") { sceneReads > reads && !service.isBusy }
+    XCTAssertEqual(awayChecks, 1, "a display left: is the Mac locked or dark?")
+    XCTAssertTrue(service.isEnabled, "it is, so the committed lock screen stays")
   }
 
   /// WallpaperAgent between its restart and relaunch fails one attempt; the committed selection
@@ -1397,15 +1626,11 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
     displayUUID: { _ in "one" })
     try service.start()
-    service.setEnabled(true)
-    await waitFor("web excluded from lock screen") { !service.isBusy }
-    XCTAssertFalse(service.isEnabled)
-    XCTAssertFalse(service.ownsDesktopProvider)
-    XCTAssertEqual(try selectedProvider("Desktop"), "display-one-desktop")
     service.setScreenSaverEnabled(true)
     await waitFor("web saver selected") { !service.isBusy }
     XCTAssertTrue(service.screenSaverEnabled)
     XCTAssertFalse(service.isEnabled)
+    XCTAssertFalse(service.ownsDesktopProvider)
     let configuration = try publishedConfiguration()
     let published = try XCTUnwrap(configuration.scenes.first)
     XCTAssertEqual(published.webEntryFile, "pages/index.html")
@@ -1427,6 +1652,46 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: emptyURL.path), [])
     XCTAssertEqual(try selectedProvider("Desktop"), "display-one-desktop")
     try await service.shutdown()
+  }
+
+  /// A web wallpaper animates the lock screen like a scene or a video (issue 155): it takes the
+  /// Desktop selection, and turning the screen saver off leaves it there.
+  @MainActor
+  func testAWebWallpaperTakesTheLockScreenAndKeepsItWhenTheScreenSaverTurnsOff() async throws {
+    try Data(#"{"type":"web","title":"t","file":"index.html"}"#.utf8).write(
+      to: project.appendingPathComponent("project.json"))
+    try Data("<html></html>".utf8).write(to: project.appendingPathComponent("index.html"))
+    var record = scene()
+    record.displayId = 1
+    let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { [record] },
+      selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {}),
+      exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
+      displayUUID: { _ in "one" })
+    let responder = readinessResponder()
+    defer { responder.cancel() }
+    try service.start()
+    service.setEnabled(true)
+    service.setScreenSaverEnabled(true)
+    await waitFor("web lock screen and saver") {
+      service.isEnabled && service.screenSaverEnabled && !service.isBusy
+    }
+    XCTAssertNil(service.errorMessage)
+    XCTAssertTrue(service.ownsDesktopProvider)
+    XCTAssertEqual(try selectedProvider("Desktop"), LockScreenConfiguration.extensionIdentifier)
+    XCTAssertEqual(try selectedProvider("Idle"), LockScreenConfiguration.extensionIdentifier)
+    XCTAssertEqual(try publishedConfiguration().scenes.first?.webEntryFile, "index.html")
+
+    service.setScreenSaverEnabled(false)
+    await waitFor("saver off") { !service.screenSaverEnabled && !service.isBusy }
+    let published = try publishedConfiguration()
+    XCTAssertTrue(published.lockScreenEnabled)
+    XCTAssertFalse(published.screenSaverEnabled)
+    XCTAssertEqual(published.scenes.first?.webEntryFile, "index.html")
+    XCTAssertTrue(service.isEnabled)
+    XCTAssertEqual(try selectedProvider("Desktop"), LockScreenConfiguration.extensionIdentifier)
+    XCTAssertEqual(try selectedProvider("Idle"), "display-one-idle")
+    try await service.shutdown()
+    XCTAssertEqual(try selectedProvider("Desktop"), "display-one-desktop")
   }
 
   @MainActor
@@ -1750,13 +2015,16 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
 
   /// The scene the app publishes for one display showing a project of `type` at `framing`.
   @MainActor
-  private func publishedScene(type: String, framing: BridgeFraming) async throws -> LockScreenScene {
+  private func publishedScene(
+    type: String, framing: BridgeFraming, edit: (inout BridgeLockScreenScene) -> Void = { _ in }
+  ) async throws -> LockScreenScene {
     try Data(#"{"type":"\#(type)","title":"t","file":"index.html"}"#.utf8).write(
       to: project.appendingPathComponent("project.json"))
     try Data("<html></html>".utf8).write(to: project.appendingPathComponent("index.html"))
     var record = scene()
     record.displayId = 1
     record.framing = framing
+    edit(&record)
     let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { [record] },
       selection: LockScreenWallpaperSelection(storeURL: store, journalURL: journal, reload: {}),
       exchange: exchange, defaults: defaults, scheduleMonitor: scheduleMonitor,
@@ -1764,14 +2032,62 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     let responder = readinessResponder()
     defer { responder.cancel() }
     try service.start()
-    // A web page can only be a screen saver; the others take the lock screen.
-    if type == "web" { service.setScreenSaverEnabled(true) } else { service.setEnabled(true) }
-    await waitFor("\(type) published") {
-      (service.isEnabled || service.screenSaverEnabled) && !service.isBusy
-    }
+    service.setEnabled(true)
+    await waitFor("\(type) published") { service.isEnabled && !service.isBusy }
     let published = try XCTUnwrap(publishedConfiguration().scenes.first)
     try await service.shutdown()
     return published
+  }
+
+  @MainActor
+  func testPublishedVideoCarriesItsEngineOptionsFilterAndBorder() async throws {
+    let lut = project.appendingPathComponent("materials/lut", isDirectory: true)
+    try FileManager.default.createDirectory(at: lut, withIntermediateDirectories: true)
+    try Data("TEXV0005".utf8).write(to: lut.appendingPathComponent("amber.tex"))
+    let options = BridgeSnapshotFixtures.engineOptionValues(
+      imageFilter: "amber", flipHorizontal: true, playbackRate: 150)
+    let video = try await publishedScene(type: "video", framing: .centered) {
+      $0.engineOptions = options
+      $0.sceneQuality = BridgeSceneQuality(
+        msaa: .x4, shadows: .high, volumetrics: .low, reflections: false, postProcessing: .ultra)
+      $0.borderColor = BridgeRgb(red: 1, green: 0, blue: 0.5)
+    }
+    XCTAssertEqual(video.engineOptions, WallpaperEngineOptions(options))
+    XCTAssertNil(video.sceneQuality, "a video has no scene quality")
+    XCTAssertEqual(video.borderColor, [1, 0, 0.5])
+    let file = try XCTUnwrap(video.lutFile)
+    XCTAssertTrue(file.hasSuffix("/amber.tex"))
+    let copy = exchange.appendingPathComponent(file)
+    XCTAssertEqual(try Data(contentsOf: copy), Data("TEXV0005".utf8), "the filter is published into the exchange")
+
+    let scene = try await publishedScene(type: "scene", framing: .centered) {
+      $0.engineOptions = options
+      $0.sceneQuality = BridgeSceneQuality(
+        msaa: .x4, shadows: .high, volumetrics: .low, reflections: false, postProcessing: .ultra)
+    }
+    XCTAssertEqual(scene.sceneQuality, SceneQualitySettings(msaa: 4, shadows: 3, volumetrics: 1, reflection: false, postProcessing: 4))
+    XCTAssertEqual(scene.engineOptions?.imageFilter, "amber")
+    XCTAssertNil(scene.lutFile, "a scene reads its filter from the published shared assets")
+    XCTAssertNil(scene.borderColor)
+  }
+
+  func testEngineOptionsQualityFilterAndBorderEachReplaceTheRenderer() {
+    let base = LockScreenScene(
+      displayID: 1, title: "t", projectPath: "p/project.json", assetsPath: "a", previewPath: nil, fps: 30,
+      scalingMode: 2, scalingFactor: 1, propertiesJSON: nil, paused: false)
+    XCTAssertTrue(base.sharesRenderer(with: base))
+    var options = base
+    options.engineOptions = .identity
+    options.engineOptions?.playbackRate = 150
+    var quality = base
+    quality.sceneQuality = .wallpaperEngineDefault
+    var filter = base
+    filter.lutFile = "r/amber.tex"
+    var border = base
+    border.borderColor = [1, 0, 0]
+    for changed in [options, quality, filter, border] {
+      XCTAssertFalse(changed.sharesRenderer(with: base))
+    }
   }
 
   @MainActor
@@ -1786,6 +2102,31 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     let web = try await publishedScene(type: "web", framing: position)
     XCTAssertEqual(web.webEntryFile, "index.html")
     XCTAssertNil(web.framing, "a web page fills its window, so it carries no position")
+  }
+
+  /// A scene's saved script storage reaches the lock screen as a copy taken at publish time,
+  /// with the key of its display's screen file; a video carries none (plan decision I3).
+  @MainActor
+  func testPublishedSceneCarriesStorageSnapshot() async throws {
+    let folder = ClientPaths.sceneStorageURL.appendingPathComponent("2001", isDirectory: true)
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    try Data(#"{"version":1,"entries":{"k":"1"}}"#.utf8).write(to: folder.appendingPathComponent("global.json"))
+    try Data(#"{"version":1,"entries":{"pos":"2"}}"#.utf8)
+      .write(to: folder.appendingPathComponent("screen-uuid-one.json"))
+    defer { try? FileManager.default.removeItem(at: folder) }
+
+    let scene = try await publishedScene(type: "scene", framing: .centered)
+    let path = try XCTUnwrap(scene.sceneStoragePath)
+    XCTAssertEqual(scene.sceneStorageScreenKey, "uuid-one")
+    let copy = exchange.appendingPathComponent(path, isDirectory: true)
+    XCTAssertEqual(
+      try Data(contentsOf: copy.appendingPathComponent("screen-uuid-one.json")),
+      Data(#"{"version":1,"entries":{"pos":"2"}}"#.utf8))
+    XCTAssertTrue(FileManager.default.fileExists(atPath: copy.appendingPathComponent("global.json").path))
+    XCTAssertFalse(copy.path.hasPrefix(ClientPaths.sceneStorageURL.path), "the extension reads only the exchange")
+
+    let video = try await publishedScene(type: "video", framing: .centered)
+    XCTAssertNil(video.sceneStoragePath)
   }
 
   /// Moving a wallpaper on its display has to reach the extension. It publishes a new
@@ -2481,12 +2822,12 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
   /// The scene the app publishes for a project of `type` with the Video backend `backend`.
   @MainActor
   private func publishedVideoScene(
-    type: String, file: String = "clip.mp4", makeFile: Bool = true
+    type: String, file: String = "clip.mp4", makeFile: Bool = true, contents: Data = Data("bytes".utf8)
   ) async throws -> LockScreenScene {
     try Data(#"{"type":"\#(type)","title":"t","file":"\#(file)"}"#.utf8).write(
       to: project.appendingPathComponent("project.json"))
     let media = project.appendingPathComponent(file)
-    if makeFile { try Data("bytes".utf8).write(to: media) }
+    if makeFile { try contents.write(to: media) }
     var record = scene()
     record.displayId = 1
     let service = LockScreenWallpaperService(prepareExtension: {}, notifyConfigurationChanged: {}, scenes: { [record] },
@@ -2513,6 +2854,25 @@ final class LockScreenWallpaperServiceTests: XCTestCase {
     let scene = try await publishedVideoScene(type: "scene")
     XCTAssertNil(scene.plainVideo, "a scene is not a plain video")
     XCTAssertNil(scene.nativeVideoFile, "a scene is not a plain video")
+  }
+
+  /// An HEVC clip tagged `hev1` that a retag makes playable reaches the extension retagged `hvc1`, as
+  /// the desktop plays it, and the project's own file keeps its bytes.
+  @MainActor
+  func testAnHev1ClipIsStagedRetaggedAndTheProjectsFileIsUntouched() async throws {
+    let original = try Data(contentsOf: try Hev1Fixture.write(name: "fixture", into: root))
+    let video = try await publishedVideoScene(type: "video", contents: original)
+    let file = try XCTUnwrap(video.nativeVideoFile)
+    let staged = exchange.appendingPathComponent(video.projectPath).deletingLastPathComponent()
+      .appendingPathComponent(file)
+    XCTAssertEqual(try HevcSampleEntryRetag.inspect(url: staged), .none, "no hev1 entry is left")
+    let playable = try await DerivedVideoCache.playsInAVFoundation(staged)
+    XCTAssertTrue(playable, "the extension's player can take it")
+    XCTAssertEqual(try Data(contentsOf: project.appendingPathComponent(file)), original)
+    let other = try await publishedVideoScene(type: "video")
+    let plain = exchange.appendingPathComponent(other.projectPath).deletingLastPathComponent()
+      .appendingPathComponent(try XCTUnwrap(other.nativeVideoFile))
+    XCTAssertEqual(try Data(contentsOf: plain), Data("bytes".utf8), "anything else is staged as it is")
   }
 
   /// A video whose file is not a regular file inside its project is still published as a video, with

@@ -19,7 +19,8 @@ private final class RecordingSink: WebMSampleSink {
 }
 
 /// The WebM player's feeding, looping and placement, without a display; and the player itself on a layer
-/// that is not in a window (no desktop is touched, and no audio is played: players here have no audio).
+/// that is not in a window (no desktop is touched, and no audio is played: players here have no audio,
+/// or send it to an output device that does not exist and feed it only while the clock is held).
 @MainActor
 final class WebMPlayerTests: XCTestCase {
   private func file(_ data: Data) throws -> WebMFile {
@@ -145,6 +146,63 @@ final class WebMPlayerTests: XCTestCase {
     XCTAssertGreaterThan(player.videoSamplesFed, 30)
   }
 
+  func testAPassEndsWhereTheClipStartsOverOnTheClockThatRunsOn() throws {
+    let clip = try file(WebMFixture.vp9)
+    let first = clip.firstPresentationTime.seconds
+    let length = clip.duration.seconds
+    let end = { (seconds: Double) in
+      WebMFeeder.endOfPass(containing: CMTime(seconds: seconds, preferredTimescale: 90_000), in: clip)?.seconds
+    }
+    XCTAssertEqual(try XCTUnwrap(end(first)), first + length, accuracy: 1e-6)
+    XCTAssertEqual(try XCTUnwrap(end(first + length * 0.5)), first + length, accuracy: 1e-6)
+    XCTAssertEqual(try XCTUnwrap(end(first + length * 1.25)), first + 2 * length, accuracy: 1e-6, "the second pass ends a length later")
+  }
+
+  func testAWatchOnTheNextLoopIsToldOnceWhenTheClipStartsOver() async throws {
+    let clip = try file(WebMFixture.vp9)
+    let player = WebMPlayer(file: clip, withAudio: false, paused: false)
+    let root = CALayer()
+    root.frame = CGRect(x: 0, y: 0, width: 320, height: 200)
+    player.attach(to: root)
+    XCTAssertFalse(player.watchNextLoop {}, "a player that has not started has no pass to end")
+    player.start()
+    defer { player.stop() }
+    let running = await waitUntil { player.currentTime.seconds > 0.1 }
+    XCTAssertTrue(running, player.stateSummary)
+    let end = try XCTUnwrap(WebMFeeder.endOfPass(containing: player.currentTime, in: clip)).seconds
+    var told: [Double] = []
+    XCTAssertTrue(player.watchNextLoop { told.append(player.currentTime.seconds) })
+    let reached = await waitUntil(10) { !told.isEmpty }
+    XCTAssertTrue(reached, player.stateSummary)
+    XCTAssertGreaterThanOrEqual(told.first ?? 0, end - 0.05, "not before the clip starts over")
+    let nextPass = await waitUntil(5) { player.currentTime.seconds > end + clip.duration.seconds + 0.2 }
+    XCTAssertTrue(nextPass, player.stateSummary)
+    XCTAssertEqual(told.count, 1, "told once, not at every pass")
+  }
+
+  func testACancelledOrPausedWatchIsNotTold() async throws {
+    let clip = try file(WebMFixture.vp9)
+    let player = WebMPlayer(file: clip, withAudio: false, paused: false)
+    let root = CALayer()
+    root.frame = CGRect(x: 0, y: 0, width: 320, height: 200)
+    player.attach(to: root)
+    player.start()
+    defer { player.stop() }
+    let running = await waitUntil { player.currentTime.seconds > 0.1 }
+    XCTAssertTrue(running, player.stateSummary)
+    var told = 0
+    XCTAssertTrue(player.watchNextLoop { told += 1 })
+    player.cancelLoopWatch()
+    let passed = await waitUntil(5) { player.currentTime.seconds > clip.duration.seconds + 0.3 }
+    XCTAssertTrue(passed, player.stateSummary)
+    XCTAssertEqual(told, 0, "a cancelled watch is not told")
+
+    XCTAssertTrue(player.watchNextLoop { told += 1 })
+    player.setPaused(true)
+    try await Task.sleep(for: .seconds(1.5))
+    XCTAssertEqual(told, 0, "a held clock never reaches the end of its pass")
+  }
+
   func testPausingStopsTheClockAndResumingRunsItAgain() async throws {
     let player = WebMPlayer(file: try file(WebMFixture.vp9), withAudio: false, paused: false)
     let root = CALayer()
@@ -242,6 +300,90 @@ final class WebMPlayerTests: XCTestCase {
     gate.signal()
     let shown = await waitUntil { ready && player.videoSamplesFed > 0 }
     XCTAssertTrue(shown, player.stateSummary)
+  }
+
+  // MARK: Sound that cannot be heard
+
+  /// A player of the clip with sound, its audio sent to an output that does not exist. The tests
+  /// below put its renderer on a running clock only while it cannot be heard and is off the clock,
+  /// so no sound reaches a real output.
+  private func playerWithSound(paused: Bool, releasesSilentAudio: Bool = true) throws -> WebMPlayer {
+    let player = WebMPlayer(
+      file: try file(WebMFixture.vp9Opus), withAudio: true, paused: paused,
+      releasesSilentAudio: releasesSilentAudio)
+    XCTAssertNil(player.audioUnavailableReason)
+    player.setAudioOutputDeviceForTest("org.wallpapermachine.tests.missing-output")
+    let root = CALayer()
+    root.frame = CGRect(x: 0, y: 0, width: 320, height: 200)
+    player.attach(to: root)
+    return player
+  }
+
+  func testAClipThatCannotBeHeardDecodesNoSound() async throws {
+    // Muted, and at zero volume: the picture plays and loops, and not one audio buffer is decoded.
+    for (volume, muted) in [(Float(1), true), (Float(0), false)] {
+      let player = try playerWithSound(paused: false)
+      player.setVolume(volume, muted: muted)
+      var ready = false
+      player.onReadyForDisplay = { ready = true }
+      player.start()
+      defer { player.stop() }
+      let looped = await waitUntil { ready && player.currentTime.seconds > 0.7 }
+      XCTAssertTrue(looped, player.stateSummary)
+      XCTAssertGreaterThan(player.videoSamplesFed, 15, "the picture is fed past the clip's end")
+      XCTAssertEqual(player.audioBuffersFed, 0, "volume \(volume), muted \(muted): sound was decoded")
+      XCTAssertFalse(player.isAudioOnClockForTest)
+    }
+  }
+
+  func testWithTheSwitchOffAMutedClipStillDecodesItsSound() async throws {
+    // `WALLPAPER_MACHINE_MUTED_VIDEO_AUDIO=1`: the old path. Held paused, so its renderer fills and
+    // nothing plays.
+    let player = try playerWithSound(paused: true, releasesSilentAudio: false)
+    player.setVolume(1, muted: true)
+    player.start()
+    defer { player.stop() }
+    let fed = await waitUntil { player.audioBuffersFed > 0 }
+    XCTAssertTrue(fed, player.stateSummary)
+    XCTAssertTrue(player.isAudioOnClockForTest)
+  }
+
+  func testHearingAClipFeedsItsSoundFromTheClockAndSilencingItStopsAgain() async throws {
+    let player = try playerWithSound(paused: false)
+    player.setVolume(1, muted: true)
+    var ready = false
+    player.onReadyForDisplay = { ready = true }
+    player.start()
+    defer { player.stop() }
+    // Into the second pass of the half-second clip, then held, so the sound fed next plays nowhere.
+    let running = await waitUntil { ready && player.currentTime.seconds > 0.65 }
+    XCTAssertTrue(running, player.stateSummary)
+    player.setPaused(true)
+    let clock = player.currentTime
+    XCTAssertEqual(player.audioBuffersFed, 0)
+
+    player.setVolume(0.8, muted: false)
+    let fed = await waitUntil { player.audioBuffersFed > 0 && player.isAudioOnClockForTest }
+    XCTAssertTrue(fed, player.stateSummary)
+    // The sound starts with the buffer that covers the clock, in the clock's own pass.
+    let from = player.audioFedFromForTest
+    XCTAssertTrue(from.isNumeric)
+    XCTAssertLessThanOrEqual(from.seconds, clock.seconds + 0.001)
+    XCTAssertGreaterThan(from.seconds, clock.seconds - 0.15)
+    XCTAssertTrue(player.isReadyForDisplay, "the picture is kept")
+    XCTAssertEqual(player.currentTime.seconds, clock.seconds, accuracy: 0.001, "the clock is not moved")
+
+    player.setVolume(0.8, muted: true)
+    XCTAssertFalse(player.isAudioOnClockForTest)
+    try await Task.sleep(for: .milliseconds(150))
+    let silenced = player.audioBuffersFed
+    let videoBefore = player.videoSamplesFed
+    player.setPaused(false)
+    let resumed = await waitUntil { player.currentTime.seconds > clock.seconds + 0.6 }
+    XCTAssertTrue(resumed, player.stateSummary)
+    XCTAssertEqual(player.audioBuffersFed, silenced, "no sound is decoded once it cannot be heard again")
+    XCTAssertGreaterThan(player.videoSamplesFed, videoBefore)
+    XCTAssertTrue(player.isReadyForDisplay)
   }
 
   func testThePosterIsAnUprightPictureAtTheShownSize() async throws {

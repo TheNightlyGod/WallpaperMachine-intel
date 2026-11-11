@@ -9,6 +9,38 @@ struct WallpaperEnergyConditions: Codable, Equatable, Sendable {
   var frameRateCap: UInt32?
   /// Render scale in force, rounded to hundredths.
   var renderScale: Double
+  /// The scene settings in force for a scene wallpaper; nil for a video or web page, which
+  /// they do not change, and in ratings saved before version 3.
+  var scene: WallpaperEnergySceneSettings? = nil
+}
+
+/// The saved settings that change what drawing a scene costs, beyond the frame rate and
+/// render scale: how many pixels a 2D scene is rasterized with, the scene quality and
+/// MetalFX upscaling.
+struct WallpaperEnergySceneSettings: Codable, Equatable, Sendable {
+  /// `display` or `canvas`.
+  var resolution: String
+  /// `[quality.scene]` as one stable string: MSAA, shadows, volumetrics, reflections and
+  /// post-processing. Levels the renderer does not draw yet are included, so a rating
+  /// taken before it does is not compared with one taken after.
+  var quality: String
+  var metalFXUpscaling: Bool
+
+  init(resolution: String, quality: String, metalFXUpscaling: Bool) {
+    self.resolution = resolution
+    self.quality = quality
+    self.metalFXUpscaling = metalFXUpscaling
+  }
+
+  init(resolution: String, quality: BridgeSceneQuality, metalFXUpscaling: Bool) {
+    self.init(
+      resolution: resolution,
+      quality: [
+        "msaa=\(quality.msaa)", "shadows=\(quality.shadows)", "volumetrics=\(quality.volumetrics)",
+        "reflections=\(quality.reflections)", "post=\(quality.postProcessing)",
+      ].joined(separator: ","),
+      metalFXUpscaling: metalFXUpscaling)
+  }
 }
 
 /// One wallpaper, alone on every display that is presenting, under known conditions.
@@ -23,9 +55,12 @@ struct WallpaperEnergyContext: Equatable, Sendable {
   /// A display playing a video through macOS's native player rules the interval out:
   /// the media engine decodes it and WindowServer draws it, and macOS charges neither
   /// to this app, so it would be rated as almost free.
+  ///
+  /// `scene` is recorded only for a wallpaper `isScene` calls a scene.
   static func resolve(
     assignments: [(display: String, wallpaper: String)], suspendedDisplays: Set<UInt32>,
     nativeVideoDisplays: Set<UInt32> = [], frameRateCap: UInt32?, renderScale: Float,
+    scene: WallpaperEnergySceneSettings? = nil, isScene: (String) -> Bool = { _ in true },
     resolveDisplay: (String) -> UInt32? = { UInt32($0) }
   ) -> WallpaperEnergyContext? {
     var presenting: [(display: UInt32, wallpaper: String)] = []
@@ -44,7 +79,8 @@ struct WallpaperEnergyContext: Equatable, Sendable {
       wallpaperID: id,
       conditions: WallpaperEnergyConditions(
         displays: presenting.count, frameRateCap: frameRateCap,
-        renderScale: (Double(renderScale) * 100).rounded() / 100))
+        renderScale: (Double(renderScale) * 100).rounded() / 100,
+        scene: isScene(id) ? scene : nil))
   }
 }
 
@@ -52,8 +88,12 @@ struct WallpaperEnergyContext: Equatable, Sendable {
 struct WallpaperEnergyRating: Codable, Equatable, Sendable {
   /// Ratings from another version are replaced, not averaged into. Version 1 (saved
   /// without one) also credited video played by macOS's native player, which reads as
-  /// almost nothing, so a video wallpaper's version 1 rating is not shown.
-  static let currentVersion = 2
+  /// almost nothing, so a video wallpaper's version 1 rating is not shown. Versions 1
+  /// and 2 left the scene settings out of the conditions, so a scene's rating averaged
+  /// measurements taken at different scene resolutions, qualities and upscaling.
+  static let currentVersion = 3
+  /// The first version whose video ratings leave the native player out.
+  static let nativeVideoExcludedVersion = 2
 
   var milliwatts: Double
   /// Measured time behind the mean.
@@ -142,7 +182,7 @@ final class WallpaperEnergyRatings {
   /// with a battery it adds the share of a full charge the rated power uses per hour.
   func snapshot(for id: String, kind: BridgeWallpaperKind) -> [String: Any]? {
     guard let rating = rating(for: id),
-      kind != .video || rating.version == WallpaperEnergyRating.currentVersion
+      kind != .video || (rating.version ?? 1) >= WallpaperEnergyRating.nativeVideoExcludedVersion
     else { return nil }
     var result: [String: Any] = [
       "level": rating.level.rawValue,
@@ -178,10 +218,18 @@ final class WallpaperEnergyRatings {
 /// interval whose two ends saw the same context and whose GPU was not contended is
 /// recorded. Anything that changes presentation in between should call `invalidate()`,
 /// since a pause and resume inside one interval leaves both ends looking the same.
+///
+/// While presentation is suspended or unloaded (`setParked(true)`) every tick would find no
+/// context, so the loop is not run at all: an unattended Mac (locked, displays asleep) gets
+/// no wakeup from it. The ticks may also come up to `tolerance` late, so the system can share
+/// the wakeup; an interval is measured between its samples, not assumed.
 @MainActor
 final class WallpaperEnergyRecorder {
   /// One sample costs about 3 ms of kernel calls; every 30 s that is 0.01 % of a core.
   nonisolated static let defaultInterval: Duration = .seconds(30)
+  /// How late a tick may come. A sixth of the interval, so an interval stays within 25 to
+  /// 35 s and is never cut short.
+  nonisolated static let defaultTolerance: Duration = .seconds(5)
   /// How long after a presentation change no interval starts. On an M5 Pro a scene's
   /// first load drew 6–7 W for 2–4 s while its shaders compiled (10–22 J); a load with
   /// every cache warm cost about 1.5 J.
@@ -190,31 +238,56 @@ final class WallpaperEnergyRecorder {
   private let source: EnergyUsageSource?
   private let ratings: WallpaperEnergyRatings
   private let interval: Duration
+  private let tolerance: Duration
   private let context: @MainActor () -> WallpaperEnergyContext?
   private var previous: (sample: EnergyUsageSample, context: WallpaperEnergyContext)?
   /// Uptime of the last presentation change, on the samples' clock.
   private var changedAt: UInt64?
   private var task: Task<Void, Never>?
+  private var started = false
+  private var parked = false
 
   var isRunning: Bool { task != nil }
 
   init(
     source: EnergyUsageSource?, ratings: WallpaperEnergyRatings,
-    interval: Duration = defaultInterval,
+    interval: Duration = defaultInterval, tolerance: Duration = defaultTolerance,
     context: @escaping @MainActor () -> WallpaperEnergyContext?
   ) {
     self.source = source
     self.ratings = ratings
     self.interval = interval
+    self.tolerance = tolerance
     self.context = context
   }
 
   func start() {
-    guard task == nil, let source else { return }
+    started = true
+    runIfWanted()
+  }
+
+  /// Parked while presentation is not running, when `context` has nothing to credit. A
+  /// parked recorder keeps no interval open; leaving it starts a new one a full interval
+  /// later, as a resume's `invalidate()` already makes the first one wait.
+  func setParked(_ parked: Bool) {
+    guard parked != self.parked else { return }
+    self.parked = parked
+    if parked {
+      task?.cancel()
+      task = nil
+      previous = nil
+    } else {
+      runIfWanted()
+    }
+  }
+
+  private func runIfWanted() {
+    guard started, !parked, task == nil, let source else { return }
     let interval = interval
+    let tolerance = tolerance
     task = Task { @MainActor [weak self] in
       while !Task.isCancelled {
-        try? await Task.sleep(for: interval)
+        try? await Task.sleep(for: interval, tolerance: tolerance)
         guard !Task.isCancelled, let self else { return }
         guard let context = self.context() else {
           self.previous = nil
@@ -228,6 +301,7 @@ final class WallpaperEnergyRecorder {
   }
 
   func stop() {
+    started = false
     task?.cancel()
     task = nil
     previous = nil

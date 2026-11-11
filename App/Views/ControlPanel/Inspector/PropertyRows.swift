@@ -45,8 +45,17 @@ struct PropertiesCards: View {
 /// default and the control. A switch, a colour and a choice sit beside the label; a slider, text,
 /// picture, file and folder sit under it. Groups are headings and descriptions are text.
 struct PropertyRowView: View {
+  /// Whose value the row edits: an authored property, or one of Wallpaper Engine's per-wallpaper
+  /// options, which the same row draws with the same Modified mark and Restore default. The scope
+  /// only picks the actions and their key.
+  enum Scope: Equatable {
+    case authored
+    case engineOption(BridgeEngineOptionId)
+  }
+
   let options: InspectorOptions
   let row: InspectorOptions.PropertyRow
+  let scope: Scope
 
   @Environment(PanelController.self) private var controller
   @Environment(\.panelTheme) private var theme
@@ -57,8 +66,19 @@ struct PropertyRowView: View {
   @State private var liveColor: Color?
   @FocusState private var textFocused: Bool
 
+  init(options: InspectorOptions, row: InspectorOptions.PropertyRow, scope: Scope = .authored) {
+    self.options = options
+    self.row = row
+    self.scope = scope
+  }
+
   private var id: String { options.wallpaperID }
-  private var propertyKey: String { InspectorAction.property(id, row.id) }
+  private var propertyKey: String {
+    switch scope {
+    case .authored: InspectorAction.property(id, row.id)
+    case .engineOption(let option): InspectorAction.engineOption(id, option)
+    }
+  }
 
   var body: some View {
     switch row.control {
@@ -237,9 +257,7 @@ struct PropertyRowView: View {
       if row.isModified { ModifiedMark() }
       if row.canRestoreDefault {
         Button {
-          controller.launch(InspectorAction.restoreProperty(id, row.id)) {
-            try await controller.restoreProperty(id, property: row.id)
-          }
+          restoreDefault()
         } label: {
           Image(systemName: "arrow.counterclockwise")
         }
@@ -256,8 +274,28 @@ struct PropertyRowView: View {
   // MARK: Committing
 
   private func commit(_ value: BridgePropertyValue) {
-    controller.launch(propertyKey, policy: .latestWins) {
-      try await controller.commitProperty(id, property: row.id, value: value)
+    switch scope {
+    case .authored:
+      controller.launch(propertyKey, policy: .latestWins) {
+        try await controller.commitProperty(id, property: row.id, value: value)
+      }
+    case .engineOption(let option):
+      controller.launch(propertyKey, policy: .latestWins) {
+        try await controller.commitEngineOption(id, option: option, value: value)
+      }
+    }
+  }
+
+  private func restoreDefault() {
+    switch scope {
+    case .authored:
+      controller.launch(InspectorAction.restoreProperty(id, row.id)) {
+        try await controller.restoreProperty(id, property: row.id)
+      }
+    case .engineOption(let option):
+      controller.launch(InspectorAction.restoreEngineOption(id, option)) {
+        try await controller.restoreEngineOption(id, option: option)
+      }
     }
   }
 
@@ -294,8 +332,13 @@ struct PropertyRowView: View {
   /// The driver of this slider's drags: a pump of its own for each drag, the property's key.
   private func sliderDrag() -> PumpedDrag<PropertyDragValue> {
     if let driver = drag.driver { return driver }
-    let driver = PumpedDrag<PropertyDragValue>.property(
-      controller: controller, wallpaperID: id, property: row.id)
+    let driver: PumpedDrag<PropertyDragValue>
+    switch scope {
+    case .authored:
+      driver = .property(controller: controller, wallpaperID: id, property: row.id)
+    case .engineOption(let option):
+      driver = .engineOption(controller: controller, wallpaperID: id, option: option)
+    }
     drag.driver = driver
     return driver
   }

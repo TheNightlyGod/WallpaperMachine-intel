@@ -67,6 +67,10 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
   private var preparing: CheckedContinuation<Void, Error>?
   private var stallCheck: Task<Void, Never>?
   private var stopped = false
+  private let colorPipeline = VideoColorPipeline()
+  private let flipHorizontal: Bool
+  private let borderColor: CGColor?
+  private weak var root: CALayer?
   private(set) var isPaused = false
   /// Called once, with the reason, when a clip that was playing can no longer be: the item
   /// failed, or a resumed player never advanced. The surface then draws it with the scene
@@ -82,9 +86,14 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
 
   init(
     url: URL, mode: NativeVideoScalingMode, factor: Double,
-    pan: NativeVideoLayout.Pan = .centered, viewport: CGSize, backingScale: CGFloat
+    pan: NativeVideoLayout.Pan = .centered, viewport: CGSize, backingScale: CGFloat,
+    options: WallpaperEngineOptions = .identity, lut: VideoLut? = nil, borderColor: CGColor? = nil
   ) {
     self.url = url
+    // The saved Wallpaper Engine options: they never change on a running lock-screen player
+    // (a change replaces it, `LockScreenScene.sharesRenderer`).
+    flipHorizontal = options.flipHorizontal
+    self.borderColor = borderColor
     self.mode = mode
     self.factor = factor
     self.pan = pan
@@ -98,6 +107,8 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
     player.allowsExternalPlayback = false
     layer.player = player
     layer.videoGravity = .resizeAspectFill
+    colorPipeline.update(.init(options: options, lut: lut))
+    player.defaultRate = Float(max(10, min(options.playbackRate, 200)) / 100)
   }
 
   /// Puts the layer into `root`, whose bounds are the display. The overflow of Fill, Original
@@ -105,6 +116,7 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
   func attach(to root: CALayer) {
     root.masksToBounds = true
     root.addSublayer(layer)
+    self.root = root
     applyPlacement()
   }
 
@@ -112,6 +124,8 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
   /// display's size. Throws when AVFoundation cannot play the clip.
   func prepare() async throws -> CGImage? {
     let item = try await Self.videoOnlyItem(url: url)
+    guard !stopped else { throw Failure.stopped }
+    try await colorPipeline.configure(item)
     guard !stopped else { throw Failure.stopped }
     let looper = AVPlayerLooper(player: player, templateItem: item)
     self.looper = looper
@@ -203,15 +217,28 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
     switch placement {
     case .gravity(let gravity):
       layer.videoGravity = gravity
-      layer.frame = CGRect(origin: .zero, size: viewport)
+      place(CGRect(origin: .zero, size: viewport))
     case .frame(let rect):
       // The rectangle already has the picture's own aspect.
       layer.videoGravity = .resize
       // The layout measures from the top edge and the root layer grows upward.
-      layer.frame = NativeVideoLayout.layerFrame(rect, viewportHeight: viewport.height)
+      place(NativeVideoLayout.layerFrame(rect, viewportHeight: viewport.height))
     case .pending:
       break
     }
+    // A Fit-style clip sits on its project's scheme colour; Fill and Stretch stay black.
+    let fitStyle = mode != .fill && mode != .stretch
+    let background = (fitStyle ? borderColor : nil) ?? CGColor(gray: 0, alpha: 1)
+    layer.backgroundColor = background
+    root?.backgroundColor = background
+  }
+
+  /// Bounds and position, then the flip about the centre (`frame` is undefined under a transform).
+  private func place(_ rect: CGRect) {
+    layer.setAffineTransform(.identity)
+    layer.bounds = CGRect(origin: .zero, size: rect.size)
+    layer.position = CGPoint(x: rect.midX, y: rect.midY)
+    layer.setAffineTransform(flipHorizontal ? CGAffineTransform(scaleX: -1, y: 1) : .identity)
   }
 
   /// Plays or holds the clip. A held clip keeps its last frame on the layer and decodes nothing.
@@ -255,11 +282,18 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
     // reading an 8K clip at full size.
     generator.maximumSize = CGSize(
       width: min(pixels.width * 2, 16_384), height: min(pixels.height * 2, 16_384))
+    do { generator.videoComposition = try await colorPipeline.videoComposition(for: generator.asset) }
+    catch { return nil }
     let time = player.currentItem?.currentTime() ?? .zero
-    guard let image = try? await generator.image(at: time.isValid ? time : .zero).image
+    guard var image = try? await generator.image(at: time.isValid ? time : .zero).image
     else { return nil }
+    if flipHorizontal {
+      guard let mirrored = Self.mirrored(image) else { return nil }
+      image = mirrored
+    }
     return NativeVideoLayout.composeFrame(
-      image, pixelSize: pixels, backingScale: backingScale, mode: mode, factor: factor, pan: pan)
+      image, pixelSize: pixels, backingScale: backingScale, mode: mode, factor: factor, pan: pan,
+      borderColor: borderColor)
   }
 
   func stop() {
@@ -283,6 +317,22 @@ final class LockScreenVideoPlayer: LockScreenVideoPlaying {
 
   /// The clip's video track alone, with its display matrix: the same picture the file shows and
   /// nothing that makes sound. Throws for a file AVFoundation cannot play, or that has no video.
+  static func mirrored(_ image: CGImage) -> CGImage? {
+    guard
+      let context = CGContext(
+        data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return nil }
+    context.translateBy(x: CGFloat(image.width), y: 0)
+    context.scaleBy(x: -1, y: 1)
+    context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+    return context.makeImage()
+  }
+
+  var layerTransformForTest: CGAffineTransform { layer.affineTransform() }
+  var layerBackgroundForTest: CGColor? { layer.backgroundColor }
+  var defaultRateForTest: Float { player.defaultRate }
+
   static func videoOnlyItem(url: URL) async throws -> AVPlayerItem {
     let asset = AVURLAsset(url: url)
     do {

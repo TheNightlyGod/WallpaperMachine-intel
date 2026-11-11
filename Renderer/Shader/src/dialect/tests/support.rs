@@ -149,7 +149,7 @@ impl Compiled {
 /// Declarations most tests share, in GLSL 450 form so that a stage compiles as it is.
 pub const PRE: &str = "\
 layout(std140, set = 0, binding = 0) uniform U {
-  vec4 u4; vec3 u3; vec2 u2; float uf; int ui; uint uu; ivec3 uiv3; uvec4 uuv4; mat4 um4; mat3 um3;
+  vec4 u4; vec3 u3; vec2 u2; float uf; int ui; uint uu; int3 uiv3; uvec4 uuv4; mat4 um4; mat3 um3;
   mat4x3 ub[4]; vec4 ua[4]; float ug;
 };
 layout(location = 0) in vec4 i4;

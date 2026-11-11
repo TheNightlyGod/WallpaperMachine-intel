@@ -8,6 +8,8 @@ final class PlaylistSchedulerTests: XCTestCase {
     private var collections: WallpaperCollectionStore!
     private var shown: [String: String] = [:]
     private var running = true
+    /// Playing, but paused only because nobody can see the display (covered, full screen).
+    private var unseen = false
     private var displayIDs = ["primary"]
     private var clock = Date()
     private var applied: [String] = []
@@ -24,9 +26,11 @@ final class PlaylistSchedulerTests: XCTestCase {
         collections = WallpaperCollectionStore(defaults: defaults)
         shown = ["primary": "a"]
         running = true
+        unseen = false
         displayIDs = ["primary"]
         clock = calendar.date(from: DateComponents(year: 2027, month: 1, day: 15, hour: 12))!
         applied = []
+        watcher = ClipWatcher()
     }
 
     override func tearDown() {
@@ -39,11 +43,14 @@ final class PlaylistSchedulerTests: XCTestCase {
     private func makeScheduler(
         library: [String] = ["a", "b", "c"], favorites: Set<String> = [],
         commandRevision: @escaping @MainActor (String) -> UInt64 = { _ in 0 },
-        activate: PlaylistScheduler.Activate? = nil
+        watchClipEnd: @escaping PlaylistScheduler.WatchClipEnd = { _, _, _ in nil },
+        activate: PlaylistScheduler.Activate? = nil,
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { _ in try await Task.sleep(for: .seconds(3600)) }
     ) -> PlaylistScheduler {
         PlaylistScheduler(
             store: store, collections: collections, displays: { self.displayIDs }, library: { library }, favorites: { favorites },
-            current: { self.shown[$0] }, isRunning: { _ in self.running },
+            current: { self.shown[$0] }, isRunning: { _ in self.running }, isUnseen: { _ in self.unseen },
+            watchClipEnd: watchClipEnd,
             activate: activate ?? { display, choose in
                 guard let id = choose() else { return nil }
                 self.shown[display] = id
@@ -51,7 +58,7 @@ final class PlaylistSchedulerTests: XCTestCase {
                 return id
             },
             commandRevision: commandRevision, now: { self.clock }, calendar: calendar, center: .default,
-            sleep: { _ in try await Task.sleep(for: .seconds(3600)) })
+            sleep: sleep)
     }
 
     /// Lets the switch a scheduler started on the main actor run to its end.
@@ -300,6 +307,223 @@ final class PlaylistSchedulerTests: XCTestCase {
         XCTAssertEqual(applied, ["b"], "missed intervals are not caught up one by one")
     }
 
+    /// Issue #160: a rotation that falls due while windows or a full-screen app cover the desktop
+    /// changes behind them, so the desktop shows the new wallpaper instead of switching the moment
+    /// the user returns to it. It changes once while out of sight, and showing again starts a whole
+    /// interval.
+    func testARotationOutOfSightChangesBehindTheWindowsOnceAndShowingStartsAnInterval() async {
+        store.update("primary") {
+            $0.mode = .rotate
+            $0.interval = 5
+        }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "a covered display changes when its interval ends")
+
+        clock.addTimeInterval(3 * 60 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "one change while out of sight, not one per interval")
+
+        running = true
+        unseen = false
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the desktop does not switch the moment it shows")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
+    func testACoveredRotationInterruptedBeforeSelectionRetriesWhenPlaybackResumes() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        var interrupt = true
+        let scheduler = makeScheduler(activate: { display, choose in
+            if interrupt {
+                // Sleep or a global playback pause can arrive after the timer fired but
+                // before the command gets to choose a wallpaper.
+                interrupt = false
+                self.unseen = false
+            }
+            guard let id = choose() else { return nil }
+            self.shown[display] = id
+            self.applied.append(id)
+            return id
+        })
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty)
+
+        unseen = true
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "an unmade change must not count as the covered display's change")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+    }
+
+    func testACoveredRotationThatFinishesDuringAPauseStillCountsAsItsHiddenChange() async throws {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let activation = AsyncGate()
+        let scheduler = makeScheduler(activate: { display, choose in
+            guard let id = choose() else { return nil }
+            await activation.wait()
+            self.shown[display] = id
+            self.applied.append(id)
+            return id
+        })
+        scheduler.start()
+        defer { activation.open(); scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        try await waitUntil { activation.waitingCount == 1 }
+
+        // A global pause or lock makes both eligibility queries false without
+        // revealing the desktop. The already-selected switch still succeeds.
+        unseen = false
+        scheduler.evaluate()
+        activation.open()
+        try await waitUntil { applied == ["b"] }
+
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "resuming behind the same windows must not rotate again")
+        clock.addTimeInterval(3 * 60 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the successful hidden change lasts until the desktop shows")
+
+        running = true
+        unseen = false
+        scheduler.evaluate()
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
+    func testACoveredRotationWithoutAnotherCandidateRetriesAtTheNextInterval() async throws {
+        let collection = try collections.create(name: "Rotation", wallpaperIDs: ["a"])
+        store.update("primary") {
+            $0.mode = .rotate; $0.interval = 5
+            $0.source = .collection; $0.collectionID = collection.id
+        }
+        let timer = ManualSleeper()
+        let scheduler = makeScheduler(sleep: { try await timer.sleep(.seconds($0)) })
+        scheduler.start()
+        defer { scheduler.stop() }
+        try await waitUntil { timer.pendingCount == 1 }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { timer.pendingCount == 1 }
+        XCTAssertTrue(applied.isEmpty)
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+
+        try collections.add(["b"], to: collection.id)
+        clock.addTimeInterval(5 * 60)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { applied == ["b"] }
+        XCTAssertEqual(applied, ["b"], "new candidates can recover a rotation that has not changed yet")
+    }
+
+    func testShowingACoveredRotationBeforeItsDeadlineStartsAFullInterval() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+
+        clock.addTimeInterval(4 * 60)
+        running = true
+        unseen = false
+        scheduler.evaluate()
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(5 * 60))
+        clock.addTimeInterval(60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the old deadline must not shorten the visible interval")
+        clock.addTimeInterval(4 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
+    func testAPlanAppliedToADisplayOutOfSightAppliesAtOnce() async throws {
+        store.update("source") { $0.mode = .rotate; $0.interval = 5; $0.wallpaperIDs = ["c"]; $0.source = .list }
+        let plan = try store.savePlan(from: "source", name: "Only c")
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+
+        try store.applyPlan(plan.id, to: "primary")
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"], "a playlist chosen meanwhile is not held back")
+    }
+
+    func testDayAndNightSwitchesADisplayOutOfSight() async {
+        store.update("primary") {
+            $0.mode = .dayNight
+            $0.dayWallpaperID = "b"
+        }
+        running = false
+        unseen = true
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+    }
+
+    func testNothingChangesOutOfSightWhileTheUserPausedOrForAnUnlock() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 5 }
+        let scheduler = makeScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        clock.addTimeInterval(5 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "paused, not merely out of sight")
+
+        store.update("primary") { $0.trigger = .unlock }
+        unseen = true
+        scheduler.noteUnlock()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "an unlock change waits until the display shows")
+    }
+
     func testDayAndNightFollowTheClockButLeaveAManualChoiceAlone() async {
         store.update("primary") {
             $0.mode = .dayNight
@@ -323,6 +547,86 @@ final class PlaylistSchedulerTests: XCTestCase {
         await settle()
         XCTAssertEqual(applied, ["b", "c"])
         XCTAssertEqual(store.nextChange["primary"], calendar.date(from: DateComponents(year: 2027, month: 1, day: 16, hour: 7)))
+    }
+
+    /// A relaunch inside the same half of the day (an app update, the library's drive coming
+    /// back) is not a new period: the wallpaper applied by hand before it stays until the next.
+    func testAManualChoiceOnADayAndNightDisplaySurvivesARelaunchUntilTheNextPeriod() async {
+        store.update("primary") {
+            $0.mode = .dayNight
+            $0.dayWallpaperID = "b"
+            $0.nightWallpaperID = "c"
+        }
+        let first = makeScheduler()
+        first.start()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        shown["primary"] = "a"
+        first.stop()
+
+        store = PlaylistStore(defaults: defaults)
+        clock = calendar.date(from: DateComponents(year: 2027, month: 1, day: 15, hour: 13))!
+        let second = makeScheduler()
+        second.start()
+        defer { second.stop() }
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the day wallpaper is not put back over the manual choice")
+        XCTAssertEqual(shown["primary"], "a")
+
+        clock = calendar.date(from: DateComponents(year: 2027, month: 1, day: 15, hour: 20))!
+        second.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"], "the night still takes over at its time")
+    }
+
+    /// What a relaunch keeps is the period settled under the day and night settings as they
+    /// were: a day wallpaper chosen just before quitting is applied when the app starts again.
+    func testADayWallpaperChosenBeforeARelaunchIsAppliedAfterIt() async {
+        store.update("primary") {
+            $0.mode = .dayNight
+            $0.dayWallpaperID = "b"
+        }
+        let first = makeScheduler()
+        first.start()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        first.stop()
+        store.update("primary") { $0.dayWallpaperID = "c" }
+
+        store = PlaylistStore(defaults: defaults)
+        let second = makeScheduler()
+        second.start()
+        defer { second.stop() }
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"])
+    }
+
+    /// A wallpaper that keeps failing is left out of the shuffle while it cools down, and the
+    /// round is over once every wallpaper that can be shown has been: the next round shows each
+    /// of them again before any repeats.
+    func testAShuffleRoundEndsWithoutTheWallpaperThatKeepsFailing() async {
+        store.update("primary") { $0.mode = .rotate; $0.order = .shuffle; $0.interval = 60 }
+        let scheduler = makeScheduler(library: ["a", "b", "c", "x"])
+        scheduler.start()
+        defer { scheduler.stop() }
+        await settle()
+        store.recordFailure(
+            "x", on: "primary", message: "Fixture failed",
+            retryAfter: clock.addingTimeInterval(PlaylistScheduler.failureCooldown))
+
+        for _ in 0..<3 {
+            scheduler.skip("primary")
+            await settle()
+        }
+        XCTAssertEqual(Set(applied), ["a", "b", "c"], "the first round shows every wallpaper that works")
+        XCTAssertEqual(store.recent["primary"], [], "and is over without the one that does not")
+
+        applied = []
+        for _ in 0..<3 {
+            scheduler.skip("primary")
+            await settle()
+        }
+        XCTAssertEqual(Set(applied), ["a", "b", "c"], "so the next round shows each again before one repeats")
     }
 
     func testChoosingADifferentDayWallpaperAppliesAtOnce() async {
@@ -1193,5 +1497,242 @@ final class PlaylistSchedulerTests: XCTestCase {
         await settle()
         XCTAssertNil(store.nextChange["second"], "an unlock plan is not due the moment it is applied")
         XCTAssertTrue(applied.isEmpty)
+    }
+
+    // MARK: Waiting for the video to finish
+
+    /// Stands in for the video host: the wallpapers in `videos` are clips with an end, and each
+    /// watch stays until the test says its clip started over.
+    @MainActor
+    private final class ClipWatcher {
+        var videos: Set<String> = []
+        private(set) var watches: [String: (wallpaper: String, ended: @MainActor () -> Void)] = [:]
+        private(set) var started = 0
+        private(set) var cancelled = 0
+
+        func watch(
+            _ display: String, _ wallpaper: String, _ ended: @escaping @MainActor () -> Void
+        ) -> (@MainActor () -> Void)? {
+            guard videos.contains(wallpaper) else { return nil }
+            started += 1
+            watches[display] = (wallpaper, ended)
+            return { [weak self] in
+                self?.cancelled += 1
+                self?.watches[display] = nil
+            }
+        }
+
+        /// The clip on `display` starts over.
+        func finish(_ display: String) {
+            watches.removeValue(forKey: display)?.ended()
+        }
+    }
+
+    private var watcher: ClipWatcher!
+
+    /// A rotation every 30 minutes that waits for videos, on a display playing the video "a".
+    private func makeWaitingScheduler(
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { _ in try await Task.sleep(for: .seconds(3600)) }
+    ) -> PlaylistScheduler {
+        store.update("primary") {
+            $0.mode = .rotate
+            $0.interval = 30
+            $0.waitsForClipEnd = true
+        }
+        watcher.videos = ["a"]
+        return makeScheduler(watchClipEnd: watcher.watch, sleep: sleep)
+    }
+
+    /// Waits, five seconds at most, for `condition`: the scheduler's timer sleeps off the main
+    /// actor, so yielding alone does not let it run.
+    private func waitUntil(_ condition: () -> Bool, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() {
+            guard Date() < deadline else { return XCTFail("Timed out", file: file, line: line) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func testADueChangeWaitsForTheVideoToStartOverAndTheNextIntervalCountsFromThen() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "the clip playing is not cut")
+        XCTAssertEqual(watcher.watches["primary"]?.wallpaper, "a")
+        let limit = clock.addingTimeInterval(PlaylistScheduler.clipEndLimit(minutes: 30))
+        XCTAssertEqual(store.clipWaits["primary"], limit, "the panel is told the change waits, and until when")
+
+        clock.addTimeInterval(40)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty)
+        XCTAssertEqual(watcher.started, 1, "one watch for the wait, not one per evaluation")
+        XCTAssertEqual(store.clipWaits["primary"], limit)
+
+        watcher.finish("primary")
+        await settle()
+        XCTAssertEqual(applied, ["b"], "the change happens as the clip ends")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(30 * 60))
+        XCTAssertNil(store.clipWaits["primary"])
+
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b", "c"], "a wallpaper that is not a video changes on time")
+        XCTAssertEqual(watcher.started, 1)
+    }
+
+    func testWithoutTheOptionAVideoChangesOnTime() async {
+        store.update("primary") { $0.mode = .rotate; $0.interval = 30 }
+        watcher.videos = ["a"]
+        let scheduler = makeScheduler(watchClipEnd: watcher.watch)
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        XCTAssertEqual(watcher.started, 0, "nothing is watched while the option is off")
+    }
+
+    /// The deadline and the limit both arrive through the scheduler's own timer, which the test
+    /// fires by hand, so the change at the limit is one the scheduler woke itself for.
+    func testAClipThatDoesNotFinishIsChangedOnceTheWaitReachesItsLimit() async throws {
+        XCTAssertEqual(PlaylistScheduler.clipEndLimit(minutes: 5), 10 * 60, "a short interval still waits ten minutes")
+        XCTAssertEqual(PlaylistScheduler.clipEndLimit(minutes: 30), 30 * 60)
+        XCTAssertEqual(PlaylistScheduler.clipEndLimit(minutes: 1440), 60 * 60, "never longer than an hour")
+        let timer = ManualSleeper()
+        let scheduler = makeWaitingScheduler(sleep: { try await timer.sleep(.seconds($0)) })
+        store.update("primary") { $0.interval = 5 }
+        scheduler.start()
+        defer { scheduler.stop() }
+        try await waitUntil { timer.pendingCount == 1 }
+        clock.addTimeInterval(5 * 60)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { timer.pendingCount == 1 }
+        XCTAssertTrue(applied.isEmpty, "the clip playing is not cut")
+        XCTAssertEqual(timer.requested, [.seconds(5 * 60), .seconds(10 * 60)], "the timer is armed for the wait's limit")
+
+        clock.addTimeInterval(10 * 60 - 1)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "up to the limit the clip may still finish")
+        clock.addTimeInterval(1)
+        XCTAssertTrue(timer.fireNext())
+        try await waitUntil { applied == ["b"] }
+        XCTAssertEqual(applied, ["b"], "a long or stalled clip cannot hold the rotation")
+        XCTAssertEqual(watcher.cancelled, 1, "and is no longer watched")
+        XCTAssertNil(store.clipWaits["primary"])
+    }
+
+    func testAPauseEndsTheWaitAndPlayingAgainWaitsForTheClipOnceMore() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        running = false
+        clock.addTimeInterval(2 * 60 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "nothing changes while wallpapers are paused, as before")
+        XCTAssertNil(watcher.watches["primary"], "a paused clip is not watched")
+        XCTAssertNil(store.clipWaits["primary"], "nor said to be waited for")
+
+        running = true
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "playing again does not cut the clip either")
+        XCTAssertEqual(watcher.started, 2)
+        watcher.finish("primary")
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+    }
+
+    func testAVideoOutOfSightChangesBehindTheWindowsWithoutWaiting() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        running = false
+        unseen = true
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "nobody sees the clip cut")
+        XCTAssertEqual(watcher.started, 0)
+    }
+
+    func testAWallpaperChosenByHandEndsTheWait() async throws {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        let ended = try XCTUnwrap(watcher.watches["primary"]?.ended)
+        shown["primary"] = "c"
+        scheduler.noteManualChoice("primary")
+        await settle()
+        XCTAssertEqual(watcher.cancelled, 1)
+        ended()
+        await settle()
+        XCTAssertTrue(applied.isEmpty, "the end of a clip that is gone changes nothing")
+        XCTAssertEqual(store.nextChange["primary"], clock.addingTimeInterval(PlaylistScheduler.manualGrace))
+    }
+
+    func testChangeNowWhileTheChangeWaitsChangesAtOnce() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        XCTAssertTrue(scheduler.skip("primary"))
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        XCTAssertEqual(watcher.cancelled, 1)
+    }
+
+    func testTurningTheOptionOffWhileTheChangeWaitsChangesAtOnce() async {
+        let scheduler = makeWaitingScheduler()
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        store.update("primary") { $0.waitsForClipEnd = false }
+        scheduler.evaluate()
+        await settle()
+        XCTAssertEqual(applied, ["b"])
+        XCTAssertNil(watcher.watches["primary"])
+    }
+
+    /// The video host reports the end of one display's own clip; a second report of it, or the end
+    /// of another display's clip, changes nothing more.
+    func testEachDisplayChangesOnceForTheEndOfItsOwnClip() async throws {
+        displayIDs = ["primary", "second"]
+        shown["second"] = "a"
+        let scheduler = makeWaitingScheduler()
+        store.update("second") {
+            $0.mode = .rotate
+            $0.interval = 30
+            $0.waitsForClipEnd = true
+        }
+        scheduler.start()
+        defer { scheduler.stop() }
+        clock.addTimeInterval(30 * 60)
+        scheduler.evaluate()
+        await settle()
+        let ended = try XCTUnwrap(watcher.watches["primary"]?.ended)
+        ended()
+        ended()
+        await settle()
+        XCTAssertEqual(applied, ["b"], "one change for one end")
+        XCTAssertEqual(shown["second"], "a", "the other display still waits for its clip")
+        XCTAssertNotNil(watcher.watches["second"])
     }
 }

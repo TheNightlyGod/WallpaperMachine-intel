@@ -31,7 +31,8 @@ pub use engine::{
     WallpaperEngine, WallpaperEngineConfig,
 };
 pub use error::EngineError;
-pub use owe::backend::AudioSpectrum128;
+pub use owe::backend::{AudioSpectrum128, SceneTraits, read_scene_traits};
+pub use owe::capability::{SceneCapabilityProbe, SceneMissingFile, probe_scene_capability};
 pub use owe::scene_demand::{
     SceneBackend, SceneDemandReasons, SceneFailure, SceneFailureStage,
     SceneResolution, SceneRuntimeReport, SceneUpdateMode, SceneVideoPath, SurfaceHealth,

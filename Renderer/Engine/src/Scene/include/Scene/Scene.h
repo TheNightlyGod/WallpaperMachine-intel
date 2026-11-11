@@ -1,4 +1,5 @@
 #pragma once
+#include "SceneReflection.hpp"
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -13,7 +14,10 @@
 #include "SceneRenderTarget.h"
 #include "SceneNode.h"
 #include "SceneLight.hpp"
+#include "SceneShadows.hpp"
 #include "SceneResolution.hpp"
+#include "SceneQuality.hpp"
+#include "WeUserOptions.hpp"
 
 #include "Core/NoCopyMove.hpp"
 
@@ -27,12 +31,37 @@ class SceneRuntimeContext;
 /// renderer, and a shared pointer to an incomplete type is all this needs.
 struct SceneMetalProgram;
 
+/// A file the scene names that none of its file systems holds, found while it was parsed: the path
+/// below the scene's own space (`materials/rain.json`), and the layer being built when it was asked
+/// for (an empty name and id -1 when none was).
+struct SceneMissingFile {
+    std::string layer;
+    int32_t     object_id { -1 };
+    std::string path;
+};
+
 struct ScenePostProcessPass {
     std::shared_ptr<SceneNode> node;
     std::string                output;
     /// When positive, the pass's `g_RenderVar0` is kept at this many texels of
-    /// its first texture, (+x, +y, -x, -y), whatever size that texture has.
+    /// its first texture, (+x, +y, -x, -y). A screen-bound source uses its
+    /// fractional raster extent before allocation rounding/minimum-size clamps.
     float                      source_texel_radius { 0.0f };
+};
+
+struct SceneVolumetricLight {
+    const SceneLight* light {nullptr};
+    std::shared_ptr<SceneNode> back, front, fullscreen;
+    bool shadow {false};
+    // Cached once per active light, shared by its back/front variants.
+    linalg::Matrix4d volume {linalg::Matrix4d::Identity()};
+    linalg::Matrix4d projection {linalg::Matrix4d::Identity()};
+    linalg::Matrix4d camera_inverse {linalg::Matrix4d::Identity()};
+    std::array<std::array<float,4>,5> parameters {};
+    linalg::Matrix4d previous_world {linalg::Matrix4d::Zero()};
+    linalg::Matrix4d previous_camera {linalg::Matrix4d::Zero()};
+    std::array<float,3> previous_shape {};
+    uint64_t generation {1};
 };
 
 struct ScenePostProcessCopy {
@@ -51,6 +80,9 @@ namespace fs
 {
 class VFS;
 }
+class Scene;
+void UpdateSceneVolumetrics(Scene& scene);
+
 class Scene : NoCopy, NoMove {
 public:
     Scene();
@@ -64,8 +96,15 @@ public:
     std::unordered_map<std::string, std::vector<std::string>>     linkedCameras;
 
     std::vector<std::unique_ptr<SceneLight>> lights;
+    std::vector<SceneVolumetricLight> volumetric_lights;
+    std::shared_ptr<ScenePostProcess> volumetric_combine;
+    bool volumetric_dirty {false};
+    std::size_t volumetric_cast_count {0};
+    std::function<bool()> prepare_volumetrics;
     /// The light counts lit shaders are compiled for (`general.lightconfig`).
     SceneLightConfig                         light_config;
+    /// The shadow views and atlas layout (Appendix C item 6); empty when no shadow is drawn.
+    SceneShadowState                         shadows;
     /// Distance and height fog (`general.fogdistance`, `general.fogheight`):
     /// a pass whose `FOG` combo is on is compiled with `FOG_DIST`/`FOG_HEIGHT`.
     bool                                     fog_distance { false };
@@ -96,11 +135,14 @@ public:
     /// here leaves the scene undrawn.
     std::unordered_set<int32_t> layer_texture_sources;
     std::string                 layer_texture_error;
-    /// Set when a shader of the scene could not be compiled for Metal: the
-    /// effect, layer or text that wanted it did not load, so the scene is not the
-    /// one the author made. It names the shader and the compiler's reason, and
-    /// leaves the scene undrawn (held), never drawn without the missing part.
-    std::string                 shader_compile_error;
+    /// One sentence per shader of the scene that could not be compiled for Metal, naming the
+    /// shader and the compiler's reason. Diagnostic only: the pass that wanted it is drawn with
+    /// Wallpaper Engine's fallback shader in place of the stage that failed, as there.
+    std::vector<std::string>    shader_fallbacks;
+    /// Files the scene names and does not have, at most 64, each once, in the order the parse
+    /// asked for them. A layer that names one draws without it or not at all; the scene is still
+    /// drawn, as Wallpaper Engine draws what it can.
+    std::vector<SceneMissingFile> missing_files;
     /// Layers the current render graph leaves out, each the top of a subtree:
     /// hidden by a settled visibility (`SceneNode::VisibilitySettled`) of their
     /// own or an ancestor's, and sampled by no other layer. Written by
@@ -147,8 +189,47 @@ public:
     /// Perspective scenes have no authored pixel canvas. Their raster and
     /// presentation follow the output surface instead of the 2D fallback size.
     bool                 display_sized { false };
-    bool                 opaque_first { false };
+    bool                 transparent_sorting { false };
+    // Stable ties retain the preceding sorted list, not a fresh file-order list.
+    // Weak handles do not prolong removed layers. No allocation while sorting is off.
+    std::vector<std::weak_ptr<SceneNode>> transparent_order;
+    // A runtime exposes the raw authored origin. A parse without one records that
+    // origin before image alignment changes the node's geometry-centre transform.
+    std::unordered_map<const SceneNode*, linalg::Vector3f> sorting_origins;
     bool                 hdr { false };
+    /// HDR output for a display that can show it (post-processing "displayhdr").
+    bool                 display_hdr { false };
+    /// The completed global post-process output is linear light. Ordinary scene
+    /// materials and their intermediate targets keep their authored encoding.
+    bool                 output_linear { false };
+    float                display_hdr_headroom { 1.0f };
+    std::weak_ptr<SceneMaterial> display_hdr_combine_material;
+    /// The quality the scene was parsed with (`SceneParseRequest::quality`).
+    SceneQuality         quality {};
+    /// Samples actually negotiated by the renderer; zero means single-sample rendering.
+    uint32_t             effective_msaa { 0 };
+    /// Whether `_rt_MipMappedFrameBuffer` is refreshed (the `reflection`
+    /// quality setting; WE flag 0x80, cleared and not updated when off).
+    bool                 reflection_enabled { true };
+    SceneReflection      reflection;
+    /// The user's colour / LUT pass (`ccsimple`, Wallpaper Engine's per-wallpaper
+    /// colour options and image filter), drawn after bloom; null when the options
+    /// leave the picture unchanged. Its `g_Params` / `g_LutParams` are written in
+    /// place when only a value changes (`ccsimple_shape` stays).
+    std::shared_ptr<SceneMaterial> color_correction_material;
+    CcsimpleShape                  ccsimple_shape {};
+    /// The colour of the bars a fitted picture leaves on the display: the
+    /// project's `schemecolor` property (WE sub_140181F30 / sub_14017FA70), black
+    /// when the project has none. Never shown under the blurred backdrop.
+    std::array<float, 3> border_color { 0.0f, 0.0f, 0.0f };
+    /// Render targets a script's `executeMaterialFunction` asked to clear since the last frame
+    /// (`SceneRuntimeContext::RunEffectFunction`); the renderer clears them at the start of its
+    /// next frame, before any pass, and takes them off the list.
+    struct EffectClear {
+        std::string          target;
+        std::array<float, 4> color { 0.0f, 0.0f, 0.0f, 0.0f };
+    };
+    std::vector<EffectClear> pending_effect_clears;
     /// Internal rasterization scale in (0, 1]. Multiplies the size of the
     /// render targets the scene draws into; it never touches the swapchain,
     /// the camera frustum or the presentation viewport, so output size and
@@ -160,6 +241,11 @@ public:
     /// source extent of layout, cursor mapping and every coordinate a script
     /// sees. A scene built without a host keeps the canvas.
     SceneResolution      resolution { SceneResolution::Canvas };
+    /// HDR Display output is framed before global postprocessing. Authored
+    /// cameras and local layer buffers keep their own coordinate systems.
+    bool                 display_framed {false};
+    std::array<double, 4> display_clip {1.0, 1.0, 0.0, 0.0};
+    uint64_t             display_clip_generation {0};
     std::array<float, 3> clearColor { 1.0f, 1.0f, 1.0f };
     bool                 clearEnabled { true };
 
@@ -168,6 +254,11 @@ public:
         frameTime = t;
         elapsingTime += t;
     }
+    /// The frame rate the host paces this scene at (its FPS cap), refreshed
+    /// every frame before the particles step. 0 = unknown: particles then take
+    /// full-length force steps and no half steps (Wallpaper Engine's
+    /// engine+0x148, artifacts/we-parity/decompiles/F-D5.md).
+    uint32_t targetFps { 0 };
 
     void UpdateLinkedCamera(const std::string& name) {
         const auto list = linkedCameras.find(name);

@@ -36,7 +36,7 @@ void main() {}
     let Item::Var(c) = &it[11] else { panic!() };
     assert!(c.has_word("const"));
     // The converted stage keeps `const`, precision and layout qualifiers and a `precision` statement.
-    let out = frag("precision mediump float;\nconst float K = 1.0;\nlayout(location = 0) out lowp vec4 o;\nvoid main() { o = vec4(K); }");
+    let out = frag("precision mediump float;\nconst float K = 1.0;\nlayout(location = 0) out lowp vec4 o;\nvoid main() { o = CAST4(K); }");
     assert!(out.contains("const float K = 1.0;"), "{out}");
     assert!(out.contains("precision mediump float;"), "{out}");
     assert!(out.contains("layout(location = 0) out lowp vec4 o;"), "{out}");
@@ -74,7 +74,7 @@ fn struct_declarations_with_and_without_the_final_semicolon() {
     let src = "struct A { vec2 v; float w; };\nstruct B { vec2 v; }\nvoid main() {}";
     let it = items(src);
     assert!(matches!(it[0], Item::Struct(_)) && matches!(it[1], Item::Struct(_)) && matches!(it[2], Item::Function(_)));
-    let out = frag("struct A { vec2 v; float w; };\nstruct B { vec2 v; }\nlayout(location = 0) out vec4 o;\nvoid main() { A a; a.v = vec2(1.0); B b; b.v = a.v; o = vec4(b.v, 0.0, 1.0); }");
+    let out = frag("struct A { vec2 v; float w; };\nstruct B { vec2 v; }\nlayout(location = 0) out vec4 o;\nvoid main() { A a; a.v = CAST2(1.0); B b; b.v = a.v; o = vec4(b.v, 0.0, 1.0); }");
     compile_glsl(StageKind::Fragment, &out).unwrap();
 }
 
@@ -116,7 +116,7 @@ void main() {
 
 #[test]
 fn a_continued_define_is_one_item_and_its_text_is_converted() {
-    let out = frag("#define TINT(c) \\\n  saturate(c) * \\\n  0.5\nvarying float v_A;\nvoid main() { gl_FragColor = vec4(TINT(v_A)); }");
+    let out = frag("#define TINT(c) \\\n  saturate(c) * \\\n  0.5\nvarying float v_A;\nvoid main() { gl_FragColor = CAST4(TINT(v_A)); }");
     assert!(out.contains("clamp(v_A, 0.0, 1.0) * 0.5"), "{out}");
 }
 
@@ -138,7 +138,7 @@ fn convert_stage_text(src: &str) -> String {
 
 #[test]
 fn number_lexing_survives_rewrites_digit_for_digit() {
-    let out = frag("void main() { float a = .5; float b = 5.; float c = 1e-3; uint d = 2u; float e = 0.5f; float f = 1.17549435e-38; vec3 g = vec3(a * 2.5); }");
+    let out = frag("void main() { float a = .5; float b = 5.; float c = 1e-3; uint d = 2u; float e = 0.5f; float f = 1.17549435e-38; vec3 g = CAST3(a * 2.5); }");
     for lit in [".5", "5.", "1e-3", "2u", "0.5f", "1.17549435e-38"] {
         assert!(out.contains(lit), "{lit}: {out}");
     }

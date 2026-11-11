@@ -37,6 +37,7 @@ extension PanelController {
     let pending =
       store.editorState.hasPendingEdits(wallpaperID: id)
       || !(pendingPropertyValues[id] ?? [:]).isEmpty
+      || !(pendingEngineOptionValues[id] ?? [:]).isEmpty
     let isDirty = options?.dirty == true || pending
     let clean =
       options?.supported == true && options?.dirty == false && !pending
@@ -154,17 +155,20 @@ extension PanelController {
       guard let url else { return }
       let scoped = url.startAccessingSecurityScopedResource()
       defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+      // What the user picked is theirs to get wrong: an alias or a file that is too large is
+      // refused with what a preset file has to be, not as a control sending nonsense.
+      let megabytes = WallpaperPresetStore.maximumDocumentBytes / (1024 * 1024)
+      let refusal = WallpaperActionError(
+        message: L("Choose a property preset file, not an alias of one, of at most \(megabytes) MB."))
       let data = try await Task.detached(priority: .utility) {
         let values = try url.resourceValues(forKeys: [
           .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
         ])
         guard values.isRegularFile == true, values.isSymbolicLink != true,
           let size = values.fileSize, size <= WallpaperPresetStore.maximumDocumentBytes
-        else { throw InvalidControlValue() }
+        else { throw refusal }
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        guard data.count <= WallpaperPresetStore.maximumDocumentBytes else {
-          throw InvalidControlValue()
-        }
+        guard data.count <= WallpaperPresetStore.maximumDocumentBytes else { throw refusal }
         return data
       }.value
       let options = try await store.wallpaperOptionsSnapshotAsync(wallpaperId: id)

@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// Settings › Playback & Power: when wallpapers pause, mute or stop on their own, and how they
-/// behave on battery, in Low Power Mode, when the Mac is hot, under a Focus and beside other apps.
+/// behave on battery, in Low Power Mode, when the Mac is hot or inactive, under a Focus and beside
+/// other apps.
 struct PlaybackSettingsSection: View {
   private static let playback = SettingsItem.Group("playback", title: "Playback")
   private static let context = SettingsItem.Group("context")
@@ -31,12 +32,33 @@ struct PlaybackSettingsSection: View {
     note:
       "Mute silences scene and video wallpapers, and Web wallpapers when page-output mute is available. Pause applies to every wallpaper."
   )
+  static let otherAudioVolume = SettingsItem(
+    id: "playback.other-audio-volume", section: .playback, group: playback,
+    title: "Reduce volume to",
+    note:
+      "Each wallpaper plays at this share of its own volume while the other sound lasts; its saved volume is not changed. In Web wallpapers it reaches only the audio and video played through media elements."
+  )
+  static let otherAppInFront = SettingsItem(
+    id: "playback.other-app-in-front", section: .playback, group: playback,
+    title: "When another app is in front",
+    note:
+      "Clicking the desktop brings Finder to the front, so Finder and this app count as the desktop. Mute and Pause work as they do when another app plays sound. Pause on battery applies only on battery: the wallpaper holds its last frame and plays again when you click the desktop or plug in your Mac."
+  )
   static let displaySleep = SettingsItem(
     id: "playback.display-sleep", section: .playback, group: playback,
     title: "When displays sleep",
     note:
       "Stop frees renderer memory and reloads the wallpaper when the display wakes. Pause keeps it loaded."
   )
+  static let inactivity = SettingsItem(
+    id: "playback.inactivity", section: .playback, group: playback,
+    title: "When the Mac is inactive",
+    note:
+      "Inactive means no keyboard, mouse or trackpad input for the time you choose. Wallpapers resume at your next input."
+  )
+  static let inactivityTime = SettingsItem(
+    id: "playback.inactivity-time", section: .playback, group: playback,
+    title: "Inactive after")
   static let batteryMode = SettingsItem(
     id: "playback.battery-mode", section: .playback, group: playback, title: "On battery",
     note:
@@ -96,19 +118,25 @@ struct PlaybackSettingsSection: View {
     title: "What these settings change")
 
   static let items = [
-    muteAll, desktopCovered, activeDisplayOnly, otherAudio, displaySleep, batteryMode, batteryScale,
+    muteAll, desktopCovered, activeDisplayOnly, otherAudio, otherAudioVolume, otherAppInFront, displaySleep,
+    inactivity,
+    inactivityTime, batteryMode, batteryScale,
     batteryFps, reducedQuality, lowBattery, lowBatteryLevel, lowPowerMode, thermal, focus, appRules,
     addAppRule, whatChanges,
   ]
 
   /// The rows this page leaves out now, by the rules its body draws them with: "Only play on the
-  /// display I'm using" needs two displays (or is on), the reduced profile needs a Reduced quality
-  /// choice, and the low-battery rows need a battery (the level also a rule that does something).
+  /// display I'm using" needs two displays (or is on), the reduced volume needs Reduce volume to
+  /// be the choice for other-app sound, the time without input needs an inactivity
+  /// rule that does something, the reduced profile needs a Reduced quality choice, and the
+  /// low-battery rows need a battery (the level also a rule that does something).
   @MainActor
   static func unofferedItems(_ controller: PanelController) -> Set<String> {
     let playback = controller.playbackSettings
     var hidden: [SettingsItem] = []
     if !playback.showsActiveDisplayOnly { hidden.append(activeDisplayOnly) }
+    if !playback.showsOtherAudioVolume { hidden.append(otherAudioVolume) }
+    if !playback.showsInactivityTime { hidden.append(inactivityTime) }
     if !controller.qualityReport.reducedQualityChosen {
       hidden += [batteryScale, batteryFps, reducedQuality]
     }
@@ -143,11 +171,42 @@ struct PlaybackSettingsSection: View {
             options: OtherAudioAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setOtherAudioAction($0) }
         }
+        if playback.showsOtherAudioVolume {
+          SettingsRow(Self.otherAudioVolume) {
+            // A percentage reads the same in every language.
+            SettingsSliderControl(
+              key: "otherAudioVolume", saved: playback.otherAudioVolume,
+              range: PlaybackPreferences.otherAudioVolumeRange, readout: { "\($0)%" }
+            ) { try await controller.setOtherAudioVolume($0) }
+          }
+        }
+        SettingsRow(Self.otherAppInFront, note: playback.otherAppInFrontNote) {
+          menu(
+            "otherAppInFrontAction", saved: playback.otherAppInFrontAction,
+            options: OtherAppInFrontAction.allCases.map { ($0, $0.title) }
+          ) { try await controller.setOtherAppInFrontAction($0) }
+        }
         SettingsRow(Self.displaySleep) {
           menu(
             "displaySleepAction", saved: playback.displaySleepAction,
             options: DisplaySleepAction.allCases.map { ($0, $0.title) }
           ) { try await controller.setDisplaySleepAction($0) }
+        }
+        SettingsRow(Self.inactivity, note: playback.inactivityNote) {
+          menu(
+            "inactivityAction", saved: playback.inactivityAction,
+            options: InactivityAction.allCases.map { ($0, $0.title) }
+          ) { try await controller.setInactivityAction($0) }
+        }
+        if playback.showsInactivityTime {
+          SettingsRow(Self.inactivityTime) {
+            menu(
+              "inactivityMinutes", saved: playback.inactivityMinutes,
+              options: PlaybackPreferences.inactivityMinuteChoices.map {
+                ($0, InactivityAction.timeTitle(minutes: $0))
+              }
+            ) { try await controller.setInactivityMinutes($0) }
+          }
         }
         SettingsRow(Self.batteryMode) {
           menu(
@@ -250,7 +309,7 @@ struct PlaybackSettingsSection: View {
     menu(key, saved: saved, options: SystemConditionAction.allCases.map { ($0, $0.title) }, perform: perform)
   }
 
-  /// What the settings above do, in thirteen short paragraphs.
+  /// What the settings above do, in fifteen short paragraphs.
   private var context: some View {
     SettingsProse {
       Text(
@@ -260,10 +319,16 @@ struct PlaybackSettingsSection: View {
         "With two or more displays, Only play on the display I’m using pauses the others a few seconds after your pointer leaves them."
       )
       Text(
-        "When another app plays sound, Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
+        "When another app plays sound, Reduce volume plays each wallpaper at the share of its own volume you chose, and Mute uses each wallpaper’s output mute channel. Web mute availability is shown in its details. Pause stops every wallpaper until that sound ends."
+      )
+      Text(
+        "When another app is in front, Mute or Pause lasts until you click the desktop or return to this app. Pause on battery does the same only while the Mac runs on battery, and plugging in ends it."
       )
       Text(
         "When displays sleep, Pause keeps wallpapers loaded. Stop frees renderer memory and reloads them when the display wakes."
+      )
+      Text(
+        "When the Mac is inactive, wallpapers pause or stop once there has been no keyboard, mouse or trackpad input for the time you chose, and resume at your next input. Your own Play and Pause are not changed."
       )
       Text(
         "On battery, Keep running leaves quality alone, Reduced quality uses the battery scale and frame rate, and Pause stops wallpapers until you plug in. None of these promises a measured power saving."
@@ -288,6 +353,9 @@ struct PlaybackSettingsSection: View {
       )
       Text(
         "Direct video plane sampling is experimental. It skips a color conversion when a layer’s shader can handle it; otherwise the picture is produced as before."
+      )
+      Text(
+        "Draw only the visible part of cropped scenes is experimental. It skips the part of a 2D scene your display crops off, so a few pixels can look very slightly different."
       )
     }
   }

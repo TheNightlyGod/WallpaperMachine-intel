@@ -20,7 +20,7 @@ struct DownloadDialogHost: View {
         isPresented: Binding(
           get: { model.isDialogOpen }, set: { if !$0 { model.closeDialog() } })
       ) {
-        DownloadDialogView()
+        DownloadDialogView().panelPresentationLocale()
       }
       .onAppear { model.start() }
       .onDisappear { model.stop() }

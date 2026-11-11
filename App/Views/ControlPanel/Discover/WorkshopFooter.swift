@@ -83,7 +83,7 @@ struct WorkshopSummaryLine: View {
     switch summary {
     case .searching:
       Text("Searching Steam Workshop…")
-    case .subscriptions:
+    case .subscriptions, .favorites:
       EmptyView()
     case .lookup:
       Text("Showing the item from your link. Filters don’t apply to it.")
@@ -103,74 +103,11 @@ struct WorkshopPager: View {
   var showsLabel = true
 
   @Environment(PanelController.self) private var controller
-  @Environment(\.panelTheme) private var theme
-  @FocusState private var fieldFocused: Bool
 
   var body: some View {
     @Bindable var model = controller.workshopBrowser
-    let canJump = pager.canJump
-    HStack(spacing: 6) {
-      Button {
-        model.showPage(pager.previousPage)
-      } label: {
-        Image(systemName: "chevron.left").frame(width: 16, height: 18)
-      }
-      .buttonStyle(.panelCapsule)
-      .disabled(!pager.canGoBack)
-      .help(L("Previous page"))
-      .accessibilityLabel(Text("Previous page"))
-      .accessibilityIdentifier("workshop-previous-page")
-
-      if showsLabel {
-        Text("Page")
-          .font(.system(size: 12))
-          .foregroundStyle(theme.surface.muted.color)
-      }
-      TextField(text: $model.pageText) { Text("Page number") }
-        .labelsHidden()
-        .textFieldStyle(.plain)
-        .multilineTextAlignment(.center)
-        .font(.system(size: 12).monospacedDigit())
-        .frame(width: 44, height: 22)
-        .background(theme.surface.hover.color, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-        .overlay {
-          if fieldFocused {
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-              .strokeBorder(theme.accent.focus.color, lineWidth: 2)
-          }
-        }
-        .focused($fieldFocused)
-        .disabled(!canJump)
-        .onSubmit { model.jump() }
-        .onChange(of: model.pageText) {
-          // Only digits make a page number, and no page has more than four.
-          let digits = String(model.pageText.filter { ("0"..."9").contains($0) }.prefix(5))
-          if digits != model.pageText { model.pageText = digits }
-        }
-        .help(L("Type a page number and press Return"))
-        .accessibilityLabel(Text("Page number"))
-        .accessibilityIdentifier("workshop-page-field")
-      Text("of \(pager.pages)")
-        .font(.system(size: 12).monospacedDigit())
-        .foregroundStyle(theme.surface.muted.color)
-      if canJump && model.pageText != String(pager.page) {
-        Button("Go") { model.jump() }
-          .buttonStyle(.panelLink)
-          .font(.system(size: 12))
-      }
-
-      Button {
-        model.showPage(pager.nextPage)
-      } label: {
-        Image(systemName: "chevron.right").frame(width: 16, height: 18)
-      }
-      .buttonStyle(.panelCapsule)
-      .disabled(!pager.canGoForward)
-      .help(L("Next page"))
-      .accessibilityLabel(Text("Next page"))
-      .accessibilityIdentifier("workshop-next-page")
-    }
-    .accessibilityElement(children: .contain)
-    .accessibilityLabel(Text("Go to page"))
+    PageJumpControls(
+      pager: pager, text: $model.pageText, style: .inline, showsLabel: showsLabel,
+      identifierPrefix: "workshop", showPage: { model.showPage($0) }, jump: { model.jump() })
   }
 }

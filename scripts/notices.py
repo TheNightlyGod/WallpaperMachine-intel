@@ -71,6 +71,10 @@ CRATE_LICENSE_FILE = re.compile(r"^(LICEN[CS]E|COPYING|UNLICENSE|COPYRIGHT)([-_.
 VENDORED_FILES = {
     "miniaudio": [THIRD_PARTY / "miniaudio/LICENSE"],
     "stb_vorbis": [THIRD_PARTY / "stb_vorbis/LICENSE"],
+    "harfbuzz": [THIRD_PARTY / "harfbuzz/LICENSE"],
+    "freetype": [THIRD_PARTY / "freetype/LICENSE.TXT", THIRD_PARTY / "freetype/docs/FTL.TXT",
+                 THIRD_PARTY / "freetype/docs/GPLv2.TXT"],
+    "msdfgen": [THIRD_PARTY / "msdfgen/LICENSE"],
     "mediaremote-adapter": [THIRD_PARTY / "mediaremote-adapter/LICENSE"],
     "phosphene abi reference": [ROOT / "Extension/Phosphene-LICENSE.txt"],
 }

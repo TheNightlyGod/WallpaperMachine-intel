@@ -63,7 +63,9 @@ impl Default for PlaceholderStyle {
 ///
 /// `object` is the new `CAMetalLayer`. `userInfo` holds `displayID`, an
 /// `NSNumber` with the `CoreGraphics` display id, and `reason`, an `NSString`
-/// with one of the [`LayerInstall`] strings. The host app matches the name and
+/// with one of the [`LayerInstall`] strings. A preload also carries `wallpaperID`,
+/// an `NSString` naming its wallpaper so pinning can place it before presentation.
+/// `WallpaperSwitchHold` ignores preloads. The host app matches the name and
 /// the strings literally, so they change only together with its observer.
 ///
 /// An observer runs inside the window operation that posts it, so it must be
@@ -75,6 +77,8 @@ pub(crate) const LAYER_INSTALLED_NOTIFICATION: &str = "WallpaperMachine.wallpape
 pub(crate) enum LayerInstall {
     /// The window was just opened and is about to be ordered front.
     Open,
+    /// A background desktop's window is about to be ordered front.
+    Preload,
     /// A scene replacement installed a fresh layer for the new renderer.
     Replace,
     /// A display reconfigure installed a fresh layer for the new geometry.
@@ -87,6 +91,7 @@ impl LayerInstall {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
+            Self::Preload => "preload",
             Self::Replace => "replace",
             Self::Reconfigure => "reconfigure",
         }
@@ -102,15 +107,19 @@ fn announce_layer_installed(
     layer: &AnyObject,
     display_id: u32,
     install: LayerInstall,
+    wallpaper_id: Option<&str>,
 ) {
     let name = NSString::from_str(LAYER_INSTALLED_NOTIFICATION);
     let display = NSNumber::new_u32(display_id);
     let reason = NSString::from_str(install.as_str());
-    let objects: [&AnyObject; 2] = [&display, &reason];
-    let user_info = NSDictionary::<NSString, AnyObject>::from_slices(
-        &[ns_string!("displayID"), ns_string!("reason")],
-        &objects,
-    );
+    let wallpaper = wallpaper_id.map(NSString::from_str);
+    let mut keys = vec![ns_string!("displayID"), ns_string!("reason")];
+    let mut objects: Vec<&AnyObject> = vec![&display, &reason];
+    if let Some(wallpaper) = &wallpaper {
+        keys.push(ns_string!("wallpaperID"));
+        objects.push(wallpaper);
+    }
+    let user_info = NSDictionary::<NSString, AnyObject>::from_slices(&keys, &objects);
     // SAFETY: The generic parameters of an Objective-C collection are not part
     // of its runtime type; an observer reads the keys as strings and the
     // values as the documented number and string.
@@ -280,12 +289,13 @@ unsafe fn install_fresh_layer(
         as_any_object(&layer),
         display.display_id,
         install,
+        None,
     );
     SendPtr::from_retained(layer)
 }
 
 /// Creates the native window for `display`. Main thread only.
-fn open_native(display: &DisplayDesc, style: PlaceholderStyle) -> Result<NativeWindow, EngineError> {
+fn open_native(display: &DisplayDesc, style: PlaceholderStyle, preloaded: Option<String>) -> Result<NativeWindow, EngineError> {
     let mtm = MainThreadMarker::new().ok_or_else(|| {
         EngineError::Platform("wallpaper windows can only be created on the main thread".to_string())
     })?;
@@ -307,7 +317,10 @@ fn open_native(display: &DisplayDesc, style: PlaceholderStyle) -> Result<NativeW
         );
         window.setCanHide(false);
     }
-    window.setOpaque(true);
+    // Keep the live window in Mission Control, but use translucent composition
+    // to avoid foreground trails during a fullscreen Space transition.
+    window.setOpaque(false);
+    window.setAlphaValue(0.995);
     window.setHasShadow(false);
     window.setMovable(false);
     window.setRestorable(false);
@@ -328,10 +341,9 @@ fn open_native(display: &DisplayDesc, style: PlaceholderStyle) -> Result<NativeW
     view.setWantsLayer(true);
 
     announce_layer_installed(
-        &NSNotificationCenter::defaultCenter(),
-        as_any_object(&layer),
-        display.display_id,
-        LayerInstall::Open,
+        &NSNotificationCenter::defaultCenter(), as_any_object(&layer), display.display_id,
+        if preloaded.is_some() { LayerInstall::Preload } else { LayerInstall::Open },
+        preloaded.as_deref(),
     );
     window.orderFrontRegardless();
     let number = window.windowNumber();
@@ -890,11 +902,18 @@ impl NormalizedMousePosition {
 }
 
 impl WallpaperWindow {
+    /// Stands in for a retained window without creating any AppKit objects.
+    #[cfg(test)]
+    pub(crate) fn windowless_for_test() -> Self {
+        Self { native: None }
+    }
+
     #[must_use]
     pub fn builder(display: DisplayDesc) -> WallpaperWindowBuilder {
         WallpaperWindowBuilder {
             display,
             style: PlaceholderStyle::default(),
+            preloaded: None,
         }
     }
 
@@ -1135,9 +1154,12 @@ impl Drop for WallpaperWindow {
 pub struct WallpaperWindowBuilder {
     display: DisplayDesc,
     style: PlaceholderStyle,
+    preloaded: Option<String>,
 }
 
 impl WallpaperWindowBuilder {
+    #[must_use]
+    pub fn preloaded_wallpaper(self, wallpaper: String) -> Self { Self { preloaded: Some(wallpaper), ..self } }
     #[must_use]
     pub fn placeholder_style(self, style: PlaceholderStyle) -> Self {
         Self { style, ..self }
@@ -1151,8 +1173,8 @@ impl WallpaperWindowBuilder {
     /// window cannot be created.
     pub fn open(self) -> Result<WallpaperWindow, EngineError> {
         validate_window_display(&self.display)?;
-        let Self { display, style } = self;
-        let native = MainThread::dispatch(move || open_native(&display, style))?;
+        let Self { display, style, preloaded } = self;
+        let native = MainThread::dispatch(move || open_native(&display, style, preloaded))?;
         Ok(WallpaperWindow {
             native: Some(native),
         })
@@ -1261,6 +1283,7 @@ mod tests {
         layer: usize,
         display_id: u32,
         reason: String,
+        wallpaper_id: Option<String>,
         thread: std::thread::ThreadId,
     }
 
@@ -1287,6 +1310,8 @@ mod tests {
                 layer: Retained::as_ptr(&layer) as usize,
                 display_id: display.as_u32(),
                 reason: reason.to_string(),
+                wallpaper_id: info.objectForKey(ns_string!("wallpaperID"))
+                    .map(|value| value.downcast::<NSString>().expect("wallpaperID is a string").to_string()),
                 thread: std::thread::current().id(),
             });
         });
@@ -1302,18 +1327,19 @@ mod tests {
     fn announcement_carries_display_and_reason() {
         let center = NSNotificationCenter::new();
         let (seen, token) = observe_announcements(&center, None);
-        let layers = [NSObject::new(), NSObject::new(), NSObject::new()];
+        let layers = [NSObject::new(), NSObject::new(), NSObject::new(), NSObject::new()];
         // An observer on the default center, aimed at one of these layers, must
         // not hear what is announced on the private center.
         let (default_center_seen, default_token) =
             observe_announcements(&NSNotificationCenter::defaultCenter(), Some(&layers[0]));
 
-        for (layer, (display_id, install)) in layers.iter().zip([
-            (1, LayerInstall::Open),
-            (69_733_254, LayerInstall::Replace),
-            (u32::MAX, LayerInstall::Reconfigure),
+        for (layer, (display_id, install, wallpaper)) in layers.iter().zip([
+            (1, LayerInstall::Open, None),
+            (69_733_254, LayerInstall::Replace, None),
+            (u32::MAX, LayerInstall::Reconfigure, None),
+            (7, LayerInstall::Preload, Some("200")),
         ]) {
-            announce_layer_installed(&center, layer, display_id, install);
+            announce_layer_installed(&center, layer, display_id, install, wallpaper);
         }
         // SAFETY: The tokens came from the matching `addObserver` calls above.
         unsafe {
@@ -1322,13 +1348,15 @@ mod tests {
         }
 
         let thread = std::thread::current().id();
-        let expected = [(1, "open"), (69_733_254, "replace"), (u32::MAX, "reconfigure")];
+        let expected = [(1, "open", None), (69_733_254, "replace", None),
+            (u32::MAX, "reconfigure", None), (7, "preload", Some("200"))];
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), expected.len(), "one announcement per install, in order");
-        for ((announcement, layer), (display_id, reason)) in seen.iter().zip(&layers).zip(expected) {
+        for ((announcement, layer), (display_id, reason, wallpaper)) in seen.iter().zip(&layers).zip(expected) {
             assert_eq!(announcement.layer, Retained::as_ptr(layer) as usize, "object is the layer");
             assert_eq!(announcement.display_id, display_id);
             assert_eq!(announcement.reason, reason);
+            assert_eq!(announcement.wallpaper_id.as_deref(), wallpaper);
             assert_eq!(announcement.thread, thread, "delivered synchronously on the posting thread");
         }
         assert!(default_center_seen.lock().unwrap().is_empty());
@@ -1339,6 +1367,7 @@ mod tests {
         // The Swift observer matches these literally.
         assert_eq!(LAYER_INSTALLED_NOTIFICATION, "WallpaperMachine.wallpaperLayerInstalled");
         assert_eq!(LayerInstall::Open.as_str(), "open");
+        assert_eq!(LayerInstall::Preload.as_str(), "preload");
         assert_eq!(LayerInstall::Replace.as_str(), "replace");
         assert_eq!(LayerInstall::Reconfigure.as_str(), "reconfigure");
     }

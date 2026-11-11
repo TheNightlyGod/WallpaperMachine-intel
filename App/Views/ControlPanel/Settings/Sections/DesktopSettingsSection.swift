@@ -32,11 +32,23 @@ struct DesktopSettingsSection: View {
     note:
       "Turns off macOS’s “Click wallpaper to reveal desktop” so clicks reach interactive wallpapers."
   )
+  static let hideDesktopIcons = SettingsItem(
+    id: "desktop.hide-desktop-icons", section: .desktop, group: desktop,
+    title: "Hide desktop icons",
+    note:
+      "Finder stops showing files, folders and disks on the desktop, so they no longer cover the wallpaper. They stay in your Desktop folder. Finder restarts to apply the change.",
+    keywords: ["Restart Finder"])
+  static let hideNotch = SettingsItem(
+    id: "desktop.hide-notch", section: .desktop, group: desktop,
+    title: "Hide the notch",
+    note:
+      "On displays with a camera notch, the menu bar turns black so the notch disappears into it. The rest of the screen still shows the wallpaper.",
+    keywords: ["Menu bar"])
   static let livePropertyEdits = SettingsItem(
     id: "desktop.live-property-edits", section: .desktop, group: desktop,
     title: "Show property edits on the desktop as I make them",
     note:
-      "While you edit a wallpaper’s properties, your displays follow each change before you press Apply changes, and Revert puts the saved look back. Pictures and options that switch an effect on or off still wait for Apply changes. The lock screen and the Mission Control picture keep the saved look until you apply."
+      "While you edit a wallpaper’s properties, your displays follow each change before you press Apply changes, and Revert puts the saved look back. Pictures, options that switch an effect on or off, and a video’s Wallpaper Engine options still wait for Apply changes. The lock screen and the Mission Control picture keep the saved look until you apply."
   )
 
   static let lockScreenSwitch = SettingsItem(
@@ -60,7 +72,8 @@ struct DesktopSettingsSection: View {
     title: "Compatibility & permissions")
 
   static let items = [
-    desktopWallpapers, writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, livePropertyEdits,
+    desktopWallpapers, writeDesktopPicture, refreshMissionControl, keepWindowsOnClick, hideDesktopIcons,
+    hideNotch, livePropertyEdits,
     lockScreenSwitch, lockScreenStatus, lockScreenContext, screenSaverSwitch, screenSaverStatus,
     screenSaverContext,
   ]
@@ -82,6 +95,8 @@ struct DesktopSettingsSection: View {
         SettingsRow(Self.keepWindowsOnClick) {
           SettingsSwitchControl(key: .keepWindowsOnWallpaperClick)
         }
+        SettingsRow(Self.hideDesktopIcons) { SettingsSwitchControl(key: .hideDesktopIcons) }
+        SettingsRow(Self.hideNotch) { SettingsSwitchControl(key: .hideNotch) }
         SettingsRow(Self.livePropertyEdits) { SettingsSwitchControl(key: .livePropertyEdits) }
       }
       SettingsGroup(Self.lockScreen, in: .desktop) {
@@ -93,7 +108,7 @@ struct DesktopSettingsSection: View {
         SettingsDisclosure(Self.lockScreenContext) {
           SettingsProse {
             Text(
-              "Lock screen animation uses private macOS APIs and may stop working after a macOS update. While it is on, the app takes over only the Desktop wallpaper selection on displays with an applied scene or video wallpaper, and reloads the macOS wallpaper service. The screen saver is a separate choice below. Turning this off restores the Desktop choices; quitting restores all choices the app changed and keeps other wallpaper changes."
+              "Lock screen animation uses private macOS APIs and may stop working after a macOS update. While it is on, the app takes over only the Desktop wallpaper selection on displays with an applied wallpaper, and reloads the macOS wallpaper service. The screen saver is a separate choice below. Turning this off restores the Desktop choices; quitting restores all choices the app changed and keeps other wallpaper changes."
             )
             Text(
               "It keeps separate copies of wallpaper files, which uses extra disk space, and may not render on every macOS version. Pause and battery settings still apply."

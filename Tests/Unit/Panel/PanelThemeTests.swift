@@ -68,16 +68,47 @@ final class PanelThemeTests: XCTestCase {
     XCTAssertNotEqual(light.accent.accent, PanelTheme(appearance: .dark).accent.accent)
   }
 
+  func testASeasonStandsInForThePersonsAccentAndToneWhileItIsOn() {
+    let own = preferences(accent: "#30d158", tone: .cool)
+    for appearance in [PanelAppearance.light, .dark] {
+      let halloween = PanelTheme(preferences: own, season: .halloween, appearance: appearance)
+      XCTAssertEqual(halloween.season, .halloween)
+      XCTAssertEqual(halloween.surface, SurfacePalette(season: .halloween, appearance: appearance))
+      XCTAssertEqual(halloween.accent, AccentPalette(accent: Season.halloween.accent, appearance: appearance))
+      XCTAssertEqual(halloween.tone, .cool, "The person's tone is still what they chose")
+      let everyday = PanelTheme(preferences: own, appearance: appearance)
+      XCTAssertEqual(everyday.surface, SurfacePalette(tone: .cool, appearance: appearance))
+      XCTAssertEqual(everyday.accent.base.hex, "#30d158")
+    }
+  }
+
+  func testRootModifierPutsTheSeasonOnAndTakesItOff() throws {
+    let store = AppThemeStore(
+      defaults: try TemporaryDefaults.make(for: self).defaults, now: { .noon(month: 10, day: 31) })
+    let seen = Seen()
+    let (view, window) = host(seen, theme: store, locale: PanelLocale(region: nil), dark: true)
+    defer { window.close() }
+    XCTAssertEqual(seen.theme?.season, .halloween, "Halloween week dresses the window by itself")
+    XCTAssertEqual(seen.theme?.surface, SurfacePalette(season: .halloween, appearance: .dark))
+
+    store.setHalloween(.off)
+    settle(view)
+    XCTAssertNil(seen.theme?.season)
+    XCTAssertEqual(seen.theme?.surface, SurfacePalette(tone: .neutral, appearance: .dark))
+    XCTAssertEqual(seen.theme?.accent.base.hex, AccentPalette.defaultAccent)
+  }
+
   func testRootModifierPublishesThePalettesAndFollowsPreferenceChanges() throws {
-    let store = AppThemeStore(defaults: try TemporaryDefaults.make(for: self).defaults)
+    let store = AppThemeStore(
+      defaults: try TemporaryDefaults.make(for: self).defaults, now: { .outsideAnySeason })
     let seen = Seen()
     let (view, window) = host(seen, theme: store, locale: PanelLocale(region: nil))
     defer { window.close() }
     XCTAssertEqual(seen.theme?.accent.base.hex, AccentPalette.defaultAccent)
     XCTAssertEqual(seen.theme?.surface, SurfacePalette(tone: .neutral, appearance: .light))
 
-    try store.set("accent", value: "#FFD60A")
-    try store.set("tone", value: "cool")
+    try store.setAccent("#FFD60A")
+    store.setTone(.cool)
     settle(view)
     XCTAssertEqual(seen.theme?.accent.base.hex, "#ffd60a")
     XCTAssertEqual(seen.theme?.surface, SurfacePalette(tone: .cool, appearance: .light))
@@ -89,7 +120,8 @@ final class PanelThemeTests: XCTestCase {
   }
 
   func testRootModifierReadsTheResolvedAppearanceFromTheEnvironment() throws {
-    let store = AppThemeStore(defaults: try TemporaryDefaults.make(for: self).defaults)
+    let store = AppThemeStore(
+      defaults: try TemporaryDefaults.make(for: self).defaults, now: { .outsideAnySeason })
     let seen = Seen()
     let (view, window) = host(seen, theme: store, locale: PanelLocale(region: nil), dark: true)
     defer { window.close() }
@@ -103,7 +135,8 @@ final class PanelThemeTests: XCTestCase {
   }
 
   func testRootModifierPublishesTheLanguageLocaleAndFollowsTheLanguage() throws {
-    let store = AppThemeStore(defaults: try TemporaryDefaults.make(for: self).defaults)
+    let store = AppThemeStore(
+      defaults: try TemporaryDefaults.make(for: self).defaults, now: { .outsideAnySeason })
     let language = AppLanguageStore(
       defaults: try TemporaryDefaults.make(for: self).defaults, systemLanguages: ["en"])
     let locale = PanelLocale(region: "US")

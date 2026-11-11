@@ -8,6 +8,9 @@
 #include "Type.hpp"
 #include "Core/SurfaceHealth.hpp"
 #include "Presentation/WallpaperFraming.hpp"
+#include "Scene/SceneQuality.hpp"
+#include "Scene/WeUserOptions.hpp"
+#include <optional>
 #include "Scene/include/Scene/SceneBackendSelection.hpp"
 #include "Scene/include/Scene/SceneResolution.hpp"
 #include "Scene/include/Scene/SceneVideoPath.hpp"
@@ -54,6 +57,19 @@ constexpr std::string_view PROPERTY_FRAMING                   = "framing";
 /// Internal rasterization scale in (0,1]. Distinct from PROPERTY_SCALINGFACTOR,
 /// which scales the presented image on the output.
 constexpr std::string_view PROPERTY_RENDER_SCALE              = "render_scale";
+/// Object property: a `SceneQuality`. A different value reloads a loaded scene,
+/// because shadows, volumetrics, reflection and post-processing change how the
+/// scene is parsed.
+constexpr std::string_view PROPERTY_SCENE_QUALITY             = "scene_quality";
+/// Object property (`SceneScriptStorageConfig`): where the scripts' `localStorage` is kept.
+/// Kept for the load that follows; a running scene keeps the storage it loaded with.
+constexpr std::string_view PROPERTY_SCENE_STORAGE             = "scene_storage";
+/// Object property: a `WeUserOptions` (Wallpaper Engine's per-wallpaper colour
+/// options, image filter, flip, mouse parallax and playback rate). Kept for the
+/// next load; on a loaded scene a value is applied live (flip and rate through
+/// the `horizontal_flip` / `speed` paths), and only a change of the `ccsimple`
+/// pass's shape (COL / LUT on or off, another LUT) loads the scene again.
+constexpr std::string_view PROPERTY_WE_USER_OPTIONS           = "we_user_options";
 /// Bool property: mirrors the presented wallpaper left to right, and the pointer with it.
 constexpr std::string_view PROPERTY_HORIZONTAL_FLIP =
     "horizontal_flip";
@@ -98,6 +114,14 @@ constexpr std::string_view PROPERTY_POINTER_INPUT_CALLBACK = "pointer_input_call
 constexpr std::string_view PROPERTY_USER_SHORTCUT_CALLBACK = "user_shortcut_callback";
 constexpr std::string_view PROPERTY_AUDIO_REQUIREMENT_CALLBACK = "audio_requirement_callback";
 constexpr std::string_view PROPERTY_RENDER_FAILURE_CALLBACK     = "render_failure_callback";
+
+/// Plan decision I3: `<directory>/global.json` and `<directory>/screen-<screen_key>.json`.
+/// An empty directory keeps `localStorage` in memory only.
+struct SceneScriptStorageConfig {
+    std::string directory;
+    std::string screen_key;
+    bool        read_only { false };
+};
 
 #include "Core/NoCopyMove.hpp"
 class MainHandler;
@@ -186,6 +210,17 @@ public:
     /// the next frame, which is what distinguishes a saved preference from one
     /// that is really in force.
     [[nodiscard]] bool sceneOptimizationApplied() const;
+    /// The scene quality the loaded scene actually renders with: features the
+    /// scene does not use (MSAA, shadows, volumetrics) read 0, and
+    /// reflection / post-processing read what the parse applied. Empty before
+    /// a scene has loaded.
+    [[nodiscard]] std::optional<SceneQuality> qualityInForce() const;
+    /// Kept for the next load; a loaded scene with another value is reloaded.
+    void setSceneQuality(const SceneQuality&);
+    void setSceneStorage(SceneScriptStorageConfig);
+    /// See `PROPERTY_WE_USER_OPTIONS`.
+    void setUserOptions(const WeUserOptions&);
+    void setDisplayId(uint32_t identity);
 
     void setPropertyBool(std::string_view, bool);
     void setPropertyInt32(std::string_view, int32_t);

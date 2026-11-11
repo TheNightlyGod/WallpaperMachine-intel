@@ -34,10 +34,11 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
     }
     private func settle() async { for _ in 0..<70 { await Task.yield() } }
     private func target(_ id: String, _ kind: WallpaperAutomationTarget.Kind = .wallpaper) -> WallpaperAutomationTarget { .init(kind: kind, id: id) }
-    private func scheduler() -> WallpaperAutomationScheduler {
+    private func scheduler(appearanceCenter: NotificationCenter = NotificationCenter(),
+                           spaceMonitor: WallpaperSpaceMonitor? = nil) -> WallpaperAutomationScheduler {
         WallpaperAutomationScheduler(store: rules, focus: focus, displays: { Array(self.states.keys) }, targetDisplay: { self.targetDisplay },
             canRun: { _ in self.running }, capture: { self.states[$0]! }, queue: { display, action in
-                try await self.queue.run(slot: BridgeStore.activationSlot(displayId: display), origin: .automation, action)
+                try await self.queue.runReporting(slot: BridgeStore.activationSlot(displayId: display), origin: .automation, action)
             }, apply: { target, display in
                 self.changes.append((display, target))
                 if self.failures.contains(target.id) { throw AutomationError(message: "Fixture unavailable") }
@@ -54,8 +55,26 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
                 self.states[display]?.playlist = original.playlist
                 if !preserve { self.states[display]?.wallpaperID = original.wallpaperID }
             }, dark: { self.dark }, now: { self.clock }, calendar: calendar,
-            appearanceCenter: NotificationCenter(), sleep: { _ in try await Task.sleep(for: .seconds(3600)) },
-            spaceVisit: { self.spaceVisits[$0] })
+            appearanceCenter: appearanceCenter, sleep: { _ in try await Task.sleep(for: .seconds(3600)) },
+            spaceMonitor: spaceMonitor, spaceVisit: { self.spaceVisits[$0] })
+    }
+
+    func testAppearanceAndSpaceInputsReportDistinctNotificationsWithoutChangingSelection() {
+        let appearanceCenter = NotificationCenter()
+        let spaceMonitor = WallpaperSpaceMonitor()
+        let scheduler = scheduler(appearanceCenter: appearanceCenter, spaceMonitor: spaceMonitor)
+        var received: [Notification.Name] = []
+        scheduler.onInputsChanged = { received.append($0) }
+        scheduler.start()
+        defer { scheduler.stop() }
+
+        let appearanceChanged = Notification.Name("AppleInterfaceThemeChangedNotification")
+        appearanceCenter.post(name: appearanceChanged, object: nil)
+        NotificationCenter.default.post(name: WallpaperSpaceMonitor.didChangeNotification, object: spaceMonitor)
+
+        XCTAssertEqual(received, [appearanceChanged, WallpaperSpaceMonitor.didChangeNotification])
+        XCTAssertEqual(states["primary"]?.wallpaperID, "original")
+        XCTAssertTrue(changes.isEmpty)
     }
 
     func testTimeRulesCatchUpOnceWaitWhenPausedAndRespectManualChoice() async throws {
@@ -312,6 +331,32 @@ final class WallpaperAutomationSchedulerTests: XCTestCase {
         await blocker.value; await manual.value; await settle()
         XCTAssertTrue(changes.isEmpty)
         XCTAssertEqual(states["primary"]?.wallpaperID, "manual")
+    }
+
+    /// An update reloading the display's files while a Focus wallpaper waits its turn takes the
+    /// Focus change's place in the line. Nothing the user chose replaced it, so it is applied
+    /// once the queue is free, and leaving Focus then restores what was there before.
+    func testAFocusChangeReplacedByAReloadWhileWaitingIsStillApplied() async throws {
+        let original = states["primary"]
+        var release: CheckedContinuation<Void, Never>?
+        let blocker = Task { await queue.run { await withCheckedContinuation { release = $0 } } }
+        await settle()
+        focus.set(nil, selection: .init(target: target("focus"), displayID: "primary"))
+        let scheduler = scheduler(); scheduler.start(); defer { scheduler.stop() }; await settle()
+        XCTAssertTrue(changes.isEmpty, "the Focus change waits behind the running command")
+
+        let reload = Task {
+            await queue.run(slot: BridgeStore.activationSlot(displayId: "primary"), origin: .updateReload) {}
+        }
+        await settle()
+        try XCTUnwrap(release).resume()
+        await blocker.value; _ = await reload.value; await settle()
+
+        XCTAssertEqual(states["primary"]?.wallpaperID, "focus")
+        XCTAssertNotNil(rules.focusRestore["primary"])
+        focus.set(nil); await settle()
+        XCTAssertEqual(states["primary"], original)
+        XCTAssertEqual(restores, 1)
     }
 
     func testARuleThatFindsAManualCommandWaitingGivesWayAndDoesNotRetry() async throws {

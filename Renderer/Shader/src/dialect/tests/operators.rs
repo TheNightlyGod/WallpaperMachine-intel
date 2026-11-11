@@ -16,7 +16,7 @@ int d = r % c;
 uint e = uint(r % c);
 float f = float(r % c);
 uint g = uuv4.x % uint(uf);
-o = vec4(float(a + b + e + g) + float(d) + f);",
+o = CAST4(float(a + b + e + g) + float(d) + f);",
     );
     for form in ["u % 24u", "(u + 3u) % 24u", "r % c", "uint(r % c)", "float(r % c)"] {
         assert!(t.contains(form), "{form}: {t}");
@@ -40,7 +40,7 @@ float r8 = p * q % r;
 float r9 = p % q - r;
 float r10 = w.x % s;
 float r11 = float(ui) % uf;
-o = vec4(r1 + r2 + r3 + r4.x + r5 + r6 + r7 + r8 + r9 + r10 + r11);",
+o = CAST4(r1 + r2 + r3 + r4.x + r5 + r6 + r7 + r8 + r9 + r10 + r11);",
     );
     for v in ["r1", "r2", "r3", "r5", "r6", "r7", "r8", "r9", "r10", "r11"] {
         assert_eq!(c.local_type(v), "f32", "{v}");
@@ -51,7 +51,7 @@ o = vec4(r1 + r2 + r3 + r4.x + r5 + r6 + r7 + r8 + r9 + r10 + r11);",
 
 #[test]
 fn remainder_precedence_associativity_and_signed_operands() {
-    let t = text("", "float p = uf, q = ug, r = i1; float a = p + q % r; float b = p * q % r; float c = p % q % r; float d = p % q - r; float e = p % -q; o = vec4(a + b + c + d + e);");
+    let t = text("", "float p = uf, q = ug, r = i1; float a = p + q % r; float b = p * q % r; float c = p % q % r; float d = p % q - r; float e = p % -q; o = CAST4(a + b + c + d + e);");
     assert!(t.contains("p + q % r"), "{t}");
     assert!(t.contains("p * q % r"), "{t}");
     assert!(t.contains("p % q % r"), "{t}");
@@ -61,7 +61,7 @@ fn remainder_precedence_associativity_and_signed_operands() {
 
 #[test]
 fn remainder_with_mixed_operands_converts_the_integer_side() {
-    let t = text("", "float a = uf; int i = ui; float b = a % 4; float c = i % a; vec2 d = u2 % 2.0; uint n = uint(a % 64); uint k = a % 48; o = vec4(b + c + d.x + float(n + k));");
+    let t = text("", "float a = uf; int i = ui; float b = a % 4; float c = i % a; vec2 d = u2 % 2.0; uint n = uint(a % 64); uint k = a % 48; o = CAST4(b + c + d.x + float(n + k));");
     assert!(t.contains("a % 4.0"), "{t}");
     assert!(t.contains("float(i) % a"), "{t}");
     assert!(t.contains("u2 % vec2(2.0)"), "{t}");
@@ -72,29 +72,29 @@ fn remainder_with_mixed_operands_converts_the_integer_side() {
 
 #[test]
 fn remainder_assignment_is_per_kind() {
-    let c = ok("", "float acc = uf; float n = i1; acc %= n; vec3 w = u3; w.y %= n; w %= 2.0; int k = ui; k %= 3; o = vec4(acc + w.x + float(k));");
+    let c = ok("", "float acc = uf; float n = i1; acc %= n; vec3 w = u3; w.y %= n; w %= 2.0; int k = ui; k %= 3; o = CAST4(acc + w.x + float(k));");
     assert_eq!(c.local_type("acc"), "f32");
-    let t = text("", "int k = ui; k %= 3; o = vec4(float(k));");
+    let t = text("", "int k = ui; k %= 3; o = CAST4(float(k));");
     assert!(t.contains("k %= 3;"), "{t}");
 }
 
 #[test]
 fn constant_integer_expressions_stay_constant_expressions() {
     // a `%` on integer literals feeds an array size, so it must not become a call
-    let t = text("const int N = 24 % 5;\nconst uint M = 8u >> 1u;\nfloat w[N];\nfloat v[M];", "w[0] = 1.0; v[0] = 2.0; o = vec4(w[0] + v[1]);");
+    let t = text("const int N = 24 % 5;\nconst uint M = 8u >> 1u;\nfloat w[N];\nfloat v[M];", "w[0] = 1.0; v[0] = 2.0; o = CAST4(w[0] + v[1]);");
     assert!(t.contains("const int N = 24 % 5;") && t.contains("float w[N];"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
 }
 
 #[test]
 fn a_remainder_of_unknown_types_is_left_alone() {
-    let t = text("", "float r = mystery % other; o = vec4(r);");
+    let t = text("", "float r = mystery % other; o = CAST4(r);");
     assert!(t.contains("mystery % other"), "{t}");
 }
 
 #[test]
 fn a_remainder_inside_a_texture_call_inside_fmod_inside_an_int_initializer_converts_at_every_level() {
-    let c = legacy_frag("uniform sampler2D g_T; varying vec2 v_T; uniform float g_F;\nvoid main() { int k = fmod(texSample2D(g_T, v_T + g_F % 2).r, 3.0); gl_FragColor = vec4(float(k)); }");
+    let c = legacy_frag("uniform sampler2D g_T; varying vec2 v_T; uniform float g_F;\nvoid main() { int k = fmod(texSample2D(g_T, v_T + g_F % 2).r, 3.0); gl_FragColor = CAST4(float(k)); }");
     assert_eq!(c.local_type("k"), "i32");
 }
 
@@ -104,20 +104,20 @@ fn a_remainder_inside_a_texture_call_inside_fmod_inside_an_int_initializer_conve
 fn a_number_condition_compares_with_a_zero_of_its_type() {
     let t = text(
         "",
-        "int n = ui; uint k = uu; float f = uf; vec3 m = u3; uvec2 cnt = uuv4.xy; float gate = 1.0;
-if (n - 4) { o = vec4(1.0); }
-if (m.z) { o = vec4(2.0); }
-if (gate) { o = vec4(3.0); }
-if (cnt.y) { o = vec4(4.0); }
-if (1) { o = vec4(5.0); }
-if (1.0) { o = vec4(5.5); }
+        "int n = ui; uint k = uu; float f = uf; vec3 m = u3; uint2 cnt = uuv4.xy; float gate = 1.0;
+if (n - 4) { o = CAST4(1.0); }
+if (m.z) { o = CAST4(2.0); }
+if (gate) { o = CAST4(3.0); }
+if (cnt.y) { o = CAST4(4.0); }
+if (1) { o = CAST4(5.0); }
+if (1.0) { o = CAST4(5.5); }
 float a = f ? 1.0 : 2.0;
 float b = (f + gate) ? 1.0 : 2.0;
 do { n--; } while (k - 2u);
 while (n + 2) { n = 0; }
-if (f > 1.0) { o = vec4(6.0); }
-if (a + b) { o = vec4(7.0); }
-o += vec4(a + b);",
+if (f > 1.0) { o = CAST4(6.0); }
+if (a + b) { o = CAST4(7.0); }
+o += CAST4(a + b);",
     );
     for form in ["n - 4 != 0", "m.z != 0.0", "gate != 0.0", "cnt.y != 0u", "1 != 0", "1.0 != 0.0", "f != 0.0 ? 1.0 : 2.0", "k - 2u != 0u", "n + 2 != 0", "a + b != 0.0"] {
         assert!(t.contains(form), "{form}: {t}");
@@ -128,30 +128,51 @@ o += vec4(a + b);",
 
 #[test]
 fn a_macro_constant_as_a_condition_takes_its_literals_type() {
-    let t = text("#define MODE 3\n#define LEVEL 0.5\n", "if (MODE) { o = vec4(1.0); }\nif (LEVEL) { o = vec4(2.0); }");
+    let t = text("#define MODE 3\n#define LEVEL 0.5\n", "if (MODE) { o = CAST4(1.0); }\nif (LEVEL) { o = CAST4(2.0); }");
     assert!(t.contains("3 != 0") && t.contains("0.5 != 0.0"), "{t}");
 }
 
 #[test]
 fn a_struct_member_condition_uses_the_zero_of_the_members_type() {
-    let t = text("struct Box { int tally; float w; };", "Box b; b.tally = 1; b.w = 2.0; if (b.tally) { o = vec4(1.0); } if (b.w) { o = vec4(2.0); }");
+    let t = text("struct Box { int tally; float w; };", "Box b; b.tally = 1; b.w = 2.0; if (b.tally) { o = CAST4(1.0); } if (b.w) { o = CAST4(2.0); }");
     assert!(t.contains("b.tally != 0") && t.contains("b.w != 0.0"), "{t}");
     compile_glsl(StageKind::Fragment, &t).unwrap();
 }
 
 #[test]
 fn mixed_signedness_arithmetic_conditions_take_the_unsigned_zero() {
-    let t = text("", "int i = ui; uint u = uu; while (i - u) { i = 0; } o = vec4(float(i));");
+    let t = text("", "int i = ui; uint u = uu; while (i - u) { i = 0; } o = CAST4(float(i));");
     assert!(t.contains("i - u != 0u"), "{t}");
 }
 
 #[test]
-fn an_unknown_condition_is_untouched() {
-    let t = text("", "if (mystery) { o = vec4(1.0); }");
-    assert!(t.contains("if (mystery)"), "{t}");
+fn an_unknown_condition_is_tested_as_hlsl_tests_a_number() {
+    // A condition whose type is not worked out is `bool(x)`: the identity on a bool and
+    // "not zero" on a number, which is HLSL's test either way.
+    let t = text("", "if (mystery) { o = CAST4(1.0); }");
+    assert!(t.contains("if (bool(mystery))"), "{t}");
 }
 
 // ----- `!`, `&&`, `||` on numbers (R54, R55) -----
+
+#[test]
+fn untyped_numeric_operands_of_logical_operators_are_tested_against_zero() {
+    // The converter leaves `ldexp`'s return type unknown. HLSL still tests its value
+    // as a number, and a store into a scalar converts it to that scalar type.
+    let c = ok(
+        "",
+        "float f = uf; bool b = uf > 0.5;
+bool z = !ldexp(f, 1);
+float r = 0.0;
+if (ldexp(f, 1) && b) { r += 1.0; }
+float k = ldexp(f, 1) || b;
+int n = ldexp(f, 1);
+o = CAST4(r + k + float(z) + float(n));",
+    );
+    assert_eq!(c.local_type("k"), "f32");
+    let t = text("", "bool b = uf > 0.5; bool z = !ldexp(uf, 1); if (ldexp(uf, 1) && b) { o = CAST4(1.0); } o += CAST4(float(z));");
+    assert!(t.contains("!bool(ldexp(uf, 1))") && t.contains("bool(ldexp(uf, 1)) && b"), "{t}");
+}
 
 #[test]
 fn logical_operators_accept_numbers() {
@@ -168,10 +189,10 @@ if (mask && inside) { r += 1.0; }
 if (!mask) { r += 1.0; }
 float on = f || g;
 bool z = !f;
-o = vec4(r + on + float(z));",
+o = CAST4(r + on + float(z));",
     );
     assert_eq!(c.local_type("on"), "f32");
-    let t = text("", "float f = uf, g = ug; int i = ui; bool a = !f; bool b = !i; bool c = f && i; bool d = !(f + g); o = vec4(float(a) + float(b) + float(c) + float(d));");
+    let t = text("", "float f = uf, g = ug; int i = ui; bool a = !f; bool b = !i; bool c = f && i; bool d = !(f + g); o = CAST4(float(a) + float(b) + float(c) + float(d));");
     assert!(t.contains("(f == 0.0)") && t.contains("(i == 0)"), "{t}");
     assert!(t.contains("f != 0.0") && t.contains("i != 0"), "{t}");
     assert!(t.contains("((f + g) == 0.0)"), "{t}");
@@ -179,13 +200,13 @@ o = vec4(r + on + float(z));",
 
 #[test]
 fn logical_operators_on_booleans_are_untouched() {
-    let t = text("", "bool a = uf > 1.0; bool b = ug < 2.0; if (!a && b || a) { o = vec4(1.0); }");
+    let t = text("", "bool a = uf > 1.0; bool b = ug < 2.0; if (!a && b || a) { o = CAST4(1.0); }");
     assert!(t.contains("!a && b || a"), "{t}");
 }
 
 #[test]
 fn short_circuit_evaluation_is_preserved() {
-    let t = text("float n = 0.0;\nbool probe() { n += 1.0; return true; }", "float f = uf; if (f && probe()) { o = vec4(1.0); }");
+    let t = text("float n = 0.0;\nbool probe() { n += 1.0; return true; }", "float f = uf; if (f && probe()) { o = CAST4(1.0); }");
     assert!(t.contains("f != 0.0) && probe()") || t.contains("(f != 0.0) && probe()"), "{t}");
 }
 

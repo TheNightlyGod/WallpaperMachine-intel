@@ -75,6 +75,6 @@ struct StorageUnavailableError: LocalizedError, Equatable {
         guard let location else {
             return String(localized: "WallpaperMachine could not read where your wallpaper library is kept.")
         }
-        return String(localized: "Your wallpaper library is in “\(location.path)”, which is not available. Connect the drive that holds it, then quit and reopen WallpaperMachine. If it is connected, allow WallpaperMachine to use removable volumes in System Settings › Privacy & Security › Files and Folders.")
+        return String(localized: "Your wallpaper library is in “\(location.path)”, which is not available. Connect the drive that holds it: WallpaperMachine opens the library once it is connected. If it does not, quit and reopen WallpaperMachine. If the drive is connected, allow WallpaperMachine to use removable volumes in System Settings › Privacy & Security › Files and Folders.")
     }
 }

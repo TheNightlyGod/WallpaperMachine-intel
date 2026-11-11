@@ -755,8 +755,8 @@ typedef struct
    uint16 coupling_steps;
    MappingChannel *chan;
    uint8  submaps;
-   uint8  submap_floor[15]; // varies
-   uint8  submap_residue[15]; // varies
+   uint8  submap_floor[16]; // varies
+   uint8  submap_residue[16]; // varies
 } Mapping;
 
 typedef struct
@@ -1241,11 +1241,12 @@ static int vorbis_validate(uint8 *data)
 static int lookup1_values(int entries, int dim)
 {
    int r = (int) floor(exp((float) log((float) entries) / dim));
-   if ((int) floor(pow((float) r+1, dim)) <= entries)   // (int) cast for MinGW warning;
-      ++r;                                              // floor() to avoid _ftol() when non-CRT
+   // compared as doubles: a damaged header's powers do not fit an int
+   if (floor(pow((float) r+1, dim)) <= entries)
+      ++r;
    if (pow((float) r+1, dim) <= entries)
       return -1;
-   if ((int) floor(pow((float) r, dim)) > entries)
+   if (floor(pow((float) r, dim)) > entries)
       return -1;
    return r;
 }
@@ -1753,7 +1754,7 @@ static int codebook_decode_scalar(vorb *f, Codebook *c)
 
 #define DECODE(var,f,c)                                       \
    DECODE_RAW(var,f,c)                                        \
-   if (c->sparse) var = c->sorted_values[var];
+   if (c->sparse && var >= 0) var = c->sorted_values[var];
 
 #ifndef STB_VORBIS_DIVIDES_IN_CODEBOOK
   #define DECODE_VQ(var,f,c)   DECODE_RAW(var,f,c)
@@ -3650,6 +3651,7 @@ static int start_decoder(vorb *f)
    if (!vorbis_validate(header))                    return error(f, VORBIS_invalid_setup);
    //file vendor
    len = get32_packet(f);
+   if (len < 0 || len > INT_MAX - 8)                return error(f, VORBIS_invalid_setup);
    f->vendor = (char*)setup_malloc(f, sizeof(char) * (len+1));
    if (f->vendor == NULL)                           return error(f, VORBIS_outofmem);
    for(i=0; i < len; ++i) {
@@ -3659,14 +3661,23 @@ static int start_decoder(vorb *f)
    //user comments
    f->comment_list_length = get32_packet(f);
    f->comment_list = NULL;
+   if (f->comment_list_length < 0 || (unsigned) f->comment_list_length > INT_MAX / sizeof(char*)) {
+      f->comment_list_length = 0;
+      return error(f, VORBIS_invalid_setup);
+   }
    if (f->comment_list_length > 0)
    {
       f->comment_list = (char**) setup_malloc(f, sizeof(char*) * (f->comment_list_length));
-      if (f->comment_list == NULL)                  return error(f, VORBIS_outofmem);
+      if (f->comment_list == NULL) {
+         f->comment_list_length = 0;
+         return error(f, VORBIS_outofmem);
+      }
+      memset(f->comment_list, 0, sizeof(char*) * f->comment_list_length);
    }
 
    for(i=0; i < f->comment_list_length; ++i) {
       len = get32_packet(f);
+      if (len < 0 || len > INT_MAX - 8)             return error(f, VORBIS_invalid_setup);
       f->comment_list[i] = (char*)setup_malloc(f, sizeof(char) * (len+1));
       if (f->comment_list[i] == NULL)               return error(f, VORBIS_outofmem);
 
@@ -4210,8 +4221,10 @@ static void vorbis_deinit(stb_vorbis *p)
    int i,j;
 
    setup_free(p, p->vendor);
-   for (i=0; i < p->comment_list_length; ++i) {
-      setup_free(p, p->comment_list[i]);
+   if (p->comment_list) {
+      for (i=0; i < p->comment_list_length; ++i) {
+         setup_free(p, p->comment_list[i]);
+      }
    }
    setup_free(p, p->comment_list);
 

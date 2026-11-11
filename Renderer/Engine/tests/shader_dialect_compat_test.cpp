@@ -90,7 +90,7 @@ TEST(ShaderDialectCompat, UserScalarModDoesNotCaptureTheBuiltinVectorFormWithLit
     REQUIRE_LINKED_COMPILER();
     const auto result = CompileFragment(WithMain(kUserMod,
         "    float scalar = mod(5.0, 2.0);\n"
-        "    vec3 vector = mod(vec3(5.0, 6.0, 7.0), vec3(2.0));\n"
+        "    vec3 vector = mod(vec3(5.0, 6.0, 7.0), vec3(2.0, 2.0, 2.0));\n"
         "    gl_FragColor = vec4(vector.x + scalar, vector.yz, 1.0);\n"));
     ASSERT_TRUE(result.ok) << result.error;
     EXPECT_TRUE(Has(result.fragment_msl, "float3(1.0, 0.0, 1.0)")) << result.fragment_msl;
@@ -103,7 +103,7 @@ TEST(ShaderDialectCompat, UserScalarModDoesNotCaptureTheBuiltinVectorFormWithVar
     REQUIRE_LINKED_COMPILER();
     const auto result = CompileFragment(WithMain(kUserMod,
         "    vec3 a = vec3(5.0, 6.0, 7.0);\n"
-        "    vec3 b = vec3(2.0);\n"
+        "    vec3 b = vec3(2.0, 2.0, 2.0);\n"
         "    float scalar = mod(5.0, 2.0);\n"
         "    vec3 vector = mod(a, b);\n"
         "    gl_FragColor = vec4(vector.x + scalar, vector.yz, 1.0);\n"));
@@ -139,8 +139,8 @@ TEST(ShaderDialectCompat, UserModNextToAContinuedFunctionLikeMacro) {
 TEST(ShaderDialectCompat, LightingHelperNeedsNoDeclaration) {
     REQUIRE_LINKED_COMPILER();
     const std::string call =
-        "    vec3 lit = PerformLighting_V1(vec3(0.0), vec3(0.8), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 1.0),\n"
-        "                                  vec3(1.0), vec3(0.04), 0.5, 0.0);\n"
+        "    vec3 lit = PerformLighting_V1(vec3(0.0, 0.0, 0.0), vec3(0.8, 0.8, 0.8), vec3(0.0, 0.0, 1.0), vec3(0.0, 0.0, 1.0),\n"
+        "                                  vec3(1.0, 1.0, 1.0), vec3(0.04, 0.04, 0.04), 0.5, 0.0);\n"
         "    gl_FragColor = vec4(lit, 1.0);\n";
 
     const auto undeclared = CompileFragment(WithMain("", call));
@@ -179,7 +179,7 @@ TEST(ShaderDialectCompat, ScalarFirstOperandIsBroadcastAgainstVectors) {
     const auto result = CompileFragment(WithMain("",
         "    vec3 exponent = vec3(1.0, 2.0, 3.0);\n"
         "    vec3 powered = pow(2.0, exponent);\n"
-        "    vec3 clamped = clamp(0.5, vec3(0.0), vec3(1.0));\n"
+        "    vec3 clamped = clamp(0.5, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0));\n"
         "    gl_FragColor = vec4((powered + clamped) / 9.0, 1.0);\n"));
     ASSERT_TRUE(result.ok) << result.error;
     EXPECT_TRUE(Has(result.fragment_msl, "metal::pow(metal::float3(2.0)")) << result.fragment_msl;

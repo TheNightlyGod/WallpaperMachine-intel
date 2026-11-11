@@ -18,17 +18,49 @@ struct DisabledAppUpdateClient: AppUpdateClient {
     }
 }
 
+/// The ways to GitHub's release files: directly (`nil`) or through one of the mirrors. The way
+/// that last worked goes first, so a Mac that can't reach GitHub doesn't wait out its timeout
+/// on every check.
+final class AppUpdateRoutes: @unchecked Sendable {
+    let mirrors: [URL]
+    private let lock = NSLock()
+    private var preferred: URL?
+
+    init(mirrors: [URL]) {
+        self.mirrors = mirrors
+    }
+
+    var ordered: [URL?] {
+        let routes: [URL?] = [nil] + mirrors
+        guard let preferred = lock.withLock({ preferred }) else { return routes }
+        return [preferred] + routes.filter { $0 != preferred }
+    }
+
+    func remember(_ mirror: URL?) {
+        lock.withLock { preferred = mirror }
+    }
+
+    /// `url` as `mirror` serves it: the whole GitHub URL appended to the mirror's.
+    static func url(_ url: URL, through mirror: URL?) -> URL {
+        guard let mirror else { return url }
+        return URL(string: mirror.absoluteString + url.absoluteString) ?? url
+    }
+}
+
 struct GitHubReleaseClient: AppUpdateClient {
     private let session: URLSession
     private let manifestURL: URL
     private let latestURL: URL
+    private let routes: AppUpdateRoutes
 
     init(session: URLSession = GitHubReleaseClient.makeSession(),
          manifestURL: URL = AppUpdateConfiguration.latestManifestURL,
-         latestURL: URL = AppUpdateConfiguration.latestReleaseURL) {
+         latestURL: URL = AppUpdateConfiguration.latestReleaseURL,
+         mirrors: [URL] = AppUpdateConfiguration.mirrors) {
         self.session = session
         self.manifestURL = manifestURL
         self.latestURL = latestURL
+        routes = AppUpdateRoutes(mirrors: mirrors)
     }
 
     private struct RepositoryIdentity: Decodable {
@@ -51,8 +83,36 @@ struct GitHubReleaseClient: AppUpdateClient {
     /// when that release has no usable one. The manifest arrives through github.com's release
     /// download redirect, which GitHub's anonymous API limit (60 requests an hour per public
     /// IP, shared with everything behind it) does not count.
+    /// When GitHub can't be reached, the mirrors are asked for the same manifest in turn. Only
+    /// an unreachable route moves on: GitHub's own answers (a rate limit, no repository) stand,
+    /// and when every route fails the error reported is GitHub's.
     func fetchLatestRelease() async throws -> GitHubRelease? {
+        var failure: AppUpdateIssue?
+        for mirror in routes.ordered {
+            try Task.checkCancellation()
+            do {
+                let release = try await fetchLatestRelease(through: mirror)
+                if mirror != nil { AppLog.info("update: checked through \(mirror?.host ?? "")") }
+                routes.remember(mirror)
+                return release
+            } catch let issue as AppUpdateIssue {
+                guard issue.code == .network else { throw issue }
+                if mirror == nil || failure == nil { failure = issue }
+            }
+        }
+        throw failure ?? AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+    }
+
+    private func fetchLatestRelease(through mirror: URL?) async throws -> GitHubRelease? {
         do {
+            if let mirror {
+                // A mirror only relays the manifest; anything else it answers is a dead route.
+                guard let data = try? await fetchManifestData(through: mirror),
+                      let release = try? GitHubReleaseParser.decode(data) else {
+                    throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+                }
+                return release
+            }
             if let data = try await fetchManifestData() {
                 if let release = try? GitHubReleaseParser.decode(data) { return release }
                 AppLog.warn("The latest release's update manifest is unreadable; asking the GitHub API instead")
@@ -66,11 +126,13 @@ struct GitHubReleaseClient: AppUpdateClient {
     }
 
     /// The manifest's bytes, or nil when the Latest release carries none: it predates the
-    /// manifest, or nothing is published yet. Redirects are followed only on GitHub's hosts.
-    func fetchManifestData() async throws -> Data? {
-        var request = URLRequest(url: manifestURL)
+    /// manifest, or nothing is published yet. Redirects are followed only on GitHub's hosts
+    /// and the mirror's.
+    func fetchManifestData(through mirror: URL? = nil) async throws -> Data? {
+        var request = URLRequest(url: AppUpdateRoutes.url(manifestURL, through: mirror))
         request.setValue("WallpaperMachine", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request, delegate: GitHubRedirectGuard())
+        let (data, response) = try await session.data(
+            for: request, delegate: GitHubRedirectGuard(mirrors: mirror.map { [$0] } ?? []))
         guard let http = response as? HTTPURLResponse else {
             throw AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
         }
@@ -146,35 +208,59 @@ struct GitHubReleaseClient: AppUpdateClient {
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
         }
-        let transfer = GitHubReleaseDownload(source: asset.downloadURL, destination: destination,
+        // The image itself must be GitHub's; a mirror is only another way to fetch that URL.
+        guard GitHubReleaseDownload.isAllowed(asset.downloadURL) else {
+            throw AppUpdateIssue(code: .network, detail: String(localized: "The update download redirected outside GitHub."))
+        }
+        let order = routes.ordered
+        let transfer = GitHubReleaseDownload(sources: order.map { AppUpdateRoutes.url(asset.downloadURL, through: $0) },
+                                             mirrors: routes.mirrors, destination: destination,
                                              expectedSize: asset.size > 0 ? asset.size : nil,
                                              digest: asset.digest, progress: progress)
-        try await transfer.start()
+        let finished = try await transfer.start()
+        if let index = transfer.sources.firstIndex(of: finished) { routes.remember(order[index]) }
     }
 }
 
-/// Follows a redirect only while it stays on the GitHub HTTPS hosts a download may use.
+/// Follows a redirect only while it stays on the GitHub HTTPS hosts a download may use, or on
+/// the mirror relaying the request.
 final class GitHubRedirectGuard: NSObject, URLSessionTaskDelegate, Sendable {
+    private let mirrors: [URL]
+
+    init(mirrors: [URL] = []) {
+        self.mirrors = mirrors
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest) async -> URLRequest? {
-        guard let url = request.url, GitHubReleaseDownload.isAllowed(url) else { return nil }
+        guard let url = request.url, GitHubReleaseDownload.isAllowed(url, mirrors: mirrors) else { return nil }
         return request
     }
 }
 
-/// Streams a GitHub Release asset to disk. Redirects stay on GitHub HTTPS hosts.
+/// Streams a GitHub Release asset to disk from the first of `sources` that delivers it: GitHub
+/// itself, then mirrors relaying the same URL. A source that fails, stalls or (while another is
+/// left to try) crawls hands over to the next, which resumes where it stopped with an HTTP
+/// Range request. Redirects stay on GitHub's HTTPS hosts and the mirrors'.
 final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     static let allowedHosts: Set<String> = [
         "github.com", "api.github.com", "objects.githubusercontent.com",
         "release-assets.githubusercontent.com", "github-releases.githubusercontent.com"
     ]
 
-    private let source: URL
+    /// Below this rate, measured once a source has had `slowSourceGrace`, a source gives way to
+    /// the next one, so a trickling connection to GitHub doesn't hold the image for half an hour.
+    static let slowSourceRate: Int64 = 32 * 1024
+
+    let sources: [URL]
+    private let mirrors: [URL]
     private let destination: URL
     private let expectedSize: Int64?
     private let digest: String?
     private let progress: @Sendable (Int64, Int64, Int64) -> Void
     private let configuration: URLSessionConfiguration
+    private let slowSourceGrace: Duration
+    private let slowSourceRate: Int64
     private let lock = NSLock()
     private var cancelled = false
     private var task: URLSessionDataTask?
@@ -187,64 +273,126 @@ final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked 
     private var hasher = SHA256()
     private var lastProgressAt = ContinuousClock.now
     private var lastProgressBytes: Int64 = 0
+    private var attemptStartedAt = ContinuousClock.now
+    private var attemptStartBytes: Int64 = 0
+    private var abandonsSlowSource = false
 
-    init(source: URL, destination: URL, expectedSize: Int64?, digest: String?,
-         configuration: URLSessionConfiguration = .ephemeral,
+    /// What ends one source's attempt; the download moves on to the next source.
+    private struct SourceFailure: Error {
+        let issue: AppUpdateIssue
+    }
+
+    init(sources: [URL], mirrors: [URL] = [], destination: URL, expectedSize: Int64?, digest: String?,
+         configuration: URLSessionConfiguration = .ephemeral, slowSourceGrace: Duration = .seconds(30),
+         slowSourceRate: Int64 = GitHubReleaseDownload.slowSourceRate,
          progress: @escaping @Sendable (Int64, Int64, Int64) -> Void) {
-        self.source = source
+        self.sources = sources
+        self.mirrors = mirrors
         self.destination = destination
         self.expectedSize = expectedSize
         self.digest = digest
-        self.configuration = configuration.copy() as! URLSessionConfiguration
+        self.slowSourceGrace = slowSourceGrace
+        self.slowSourceRate = slowSourceRate
         self.progress = progress
+        let configuration = configuration.copy() as! URLSessionConfiguration
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 1800
+        self.configuration = configuration
     }
 
-    func start() async throws {
+    /// Downloads and verifies the image, returning the source that finished it. Sources take
+    /// turns while they reach new offsets; once each in a row has failed without advancing,
+    /// the last failure ends the download.
+    @discardableResult
+    func start() async throws -> URL {
         try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            guard !sources.isEmpty, sources.allSatisfy({ Self.isAllowed($0, mirrors: mirrors) }) else {
+                throw AppUpdateIssue(code: .network, detail: String(localized: "The update download redirected outside GitHub."))
+            }
+            // An image nothing could verify is not worth downloading.
+            guard let expectedHash = digest.flatMap(Self.parseSHA256Hex) else {
+                throw AppUpdateIssue(code: .verification, detail: String(localized: "The update couldn't be verified, so it wasn't installed."))
+            }
+            let descriptor = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+            guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+            file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            defer { try? file?.close(); file = nil }
+            var attempt = 0
+            var fruitless = 0
+            var furthest = Int64(0)
+            while true {
+                try Task.checkCancellation()
+                let source = sources[attempt % sources.count]
                 do {
-                    guard Self.isAllowed(source) else {
-                        throw AppUpdateIssue(code: .network, detail: String(localized: "The update download redirected outside GitHub."))
+                    try await transfer(from: source, abandoningIfSlow: attempt < sources.count - 1)
+                    let complete = received > 0 && expected.map { $0 == received } != false
+                    let actual = hasher.finalize().map { String(format: "%02x", $0) }.joined()
+                    if complete, actual == expectedHash {
+                        try file?.close()
+                        file = nil
+                        return source
                     }
-                    // An image nothing could verify is not worth downloading.
-                    guard digest.flatMap(Self.parseSHA256Hex) != nil else {
-                        throw AppUpdateIssue(code: .verification, detail: String(localized: "The update couldn't be verified, so it wasn't installed."))
-                    }
-                    let descriptor = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
-                    guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-                    file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-                    self.continuation = continuation
-                    configuration.httpCookieStorage = nil
-                    configuration.httpShouldSetCookies = false
-                    configuration.urlCredentialStorage = nil
-                    configuration.urlCache = nil
-                    configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-                    configuration.timeoutIntervalForRequest = 300
-                    configuration.timeoutIntervalForResource = 1800
-                    let queue = OperationQueue()
-                    queue.maxConcurrentOperationCount = 1
-                    var request = URLRequest(url: source)
-                    request.setValue("WallpaperMachine", forHTTPHeaderField: "User-Agent")
-                    request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
-                    let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
-                    self.session = session
-                    let task = session.dataTask(with: request)
-                    lock.withLock {
-                        self.task = task
-                        task.resume()
-                        if cancelled { task.cancel() }
-                    }
-                } catch { continuation.resume(throwing: error) }
+                    // Bytes that don't add up to the release's image start over on the next source.
+                    try restart()
+                    throw SourceFailure(issue: complete
+                        ? AppUpdateIssue(code: .verification, detail: String(localized: "The update couldn't be verified, so it wasn't installed."))
+                        : AppUpdateIssue(code: .verification, detail: String(localized: "The update download is empty or truncated.")))
+                } catch let failure as SourceFailure {
+                    fruitless = received > furthest ? 0 : fruitless + 1
+                    furthest = max(furthest, received)
+                    guard fruitless < sources.count else { throw failure.issue }
+                    AppLog.info("update: download moves on from \(source.host ?? "") at \(received) bytes")
+                    attempt += 1
+                }
             }
         } onCancel: {
             self.lock.withLock { self.cancelled = true; self.task?.cancel() }
         }
     }
 
+    /// One request to `source`, asking for the bytes after those already written.
+    private func transfer(from source: URL, abandoningIfSlow: Bool) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            self.continuation = continuation
+            failure = nil
+            attemptStartedAt = .now
+            attemptStartBytes = received
+            abandonsSlowSource = abandoningIfSlow
+            var request = URLRequest(url: source)
+            request.setValue("WallpaperMachine", forHTTPHeaderField: "User-Agent")
+            request.setValue("application/octet-stream", forHTTPHeaderField: "Accept")
+            if received > 0 { request.setValue("bytes=\(received)-", forHTTPHeaderField: "Range") }
+            let queue = OperationQueue()
+            queue.maxConcurrentOperationCount = 1
+            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
+            self.session = session
+            let task = session.dataTask(with: request)
+            lock.withLock {
+                self.task = task
+                task.resume()
+                if cancelled { task.cancel() }
+            }
+        }
+    }
+
+    /// Throws away what was written, for a source that sends the whole image again.
+    private func restart() throws {
+        guard received > 0 else { return }
+        try file?.truncate(atOffset: 0)
+        received = 0
+        attemptStartBytes = 0
+        hasher = SHA256()
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        guard let url = request.url, Self.isAllowed(url) else {
-            failure = AppUpdateIssue(code: .network, detail: String(localized: "The update download redirected outside GitHub."))
+        guard let url = request.url, Self.isAllowed(url, mirrors: mirrors) else {
+            failure = SourceFailure(issue: AppUpdateIssue(code: .network, detail: String(localized: "The update download redirected outside GitHub.")))
             completionHandler(nil)
             task.cancel()
             return
@@ -254,22 +402,38 @@ final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked 
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let url = response.url, Self.isAllowed(url) else {
-            failure = AppUpdateIssue(code: .network, detail: String(localized: "GitHub did not return a successful update response."))
+        let unsuccessful = SourceFailure(issue: AppUpdateIssue(
+            code: .network, detail: String(localized: "GitHub did not return a successful update response.")))
+        guard let http = response as? HTTPURLResponse, let url = response.url, Self.isAllowed(url, mirrors: mirrors) else {
+            failure = unsuccessful
             completionHandler(.cancel)
             return
         }
-        let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init).flatMap { $0 >= 0 ? $0 : nil }
-        expected = expectedSize ?? length
+        let total: Int64?
+        if http.statusCode == 206, received > 0, let range = Self.contentRange(http), range.start == received {
+            total = range.total
+        } else if http.statusCode == 200 {
+            // The whole image: a first request, or a source that ignores Range.
+            do { try restart() } catch {
+                failure = error
+                completionHandler(.cancel)
+                return
+            }
+            total = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int64.init).flatMap { $0 >= 0 ? $0 : nil }
+        } else {
+            failure = unsuccessful
+            completionHandler(.cancel)
+            return
+        }
+        expected = expectedSize ?? total
         if let expected, expected > AppUpdateConfiguration.maximumDownloadBytes {
             failure = AppUpdateIssue(code: .verification, detail: String(localized: "The update archive exceeds the allowed size."))
             completionHandler(.cancel)
             return
         }
         lastProgressAt = .now
-        lastProgressBytes = 0
-        progress(0, expected ?? 0, 0)
+        lastProgressBytes = received
+        progress(received, expected ?? 0, 0)
         completionHandler(.allow)
     }
 
@@ -284,8 +448,7 @@ final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked 
             try file?.write(contentsOf: data)
             hasher.update(data: data)
             received += Int64(data.count)
-            let elapsed = lastProgressAt.duration(to: .now)
-            let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) / 1_000_000_000_000_000_000
+            let seconds = Self.seconds(lastProgressAt.duration(to: .now))
             let rate: Int64
             if seconds >= 0.25 {
                 rate = Int64(Double(received - lastProgressBytes) / max(seconds, 0.001))
@@ -295,6 +458,12 @@ final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked 
                 rate = 0
             }
             progress(received, expected ?? 0, max(0, rate))
+            let elapsed = attemptStartedAt.duration(to: .now)
+            if abandonsSlowSource, elapsed >= slowSourceGrace, expected.map({ received < $0 }) != false,
+               Double(received - attemptStartBytes) < Double(slowSourceRate) * Self.seconds(elapsed) {
+                failure = SourceFailure(issue: AppUpdateIssue(code: .network, detail: URLError(.timedOut).localizedDescription))
+                dataTask.cancel()
+            }
         } catch {
             failure = error
             dataTask.cancel()
@@ -302,8 +471,6 @@ final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked 
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        do { try file?.close() } catch { if failure == nil { failure = error } }
-        file = nil
         let wasCancelled = lock.withLock { self.task = nil; return cancelled }
         let completion = continuation
         continuation = nil
@@ -318,26 +485,30 @@ final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked 
             return
         }
         if let error {
-            let code: AppUpdateErrorCode = (error as? URLError)?.code == .timedOut ? .network : AppUpdateErrorClassifier.classify(error)
-            completion?.resume(throwing: AppUpdateIssue(code: code, detail: error.localizedDescription))
+            completion?.resume(throwing: SourceFailure(issue: AppUpdateIssue(
+                code: AppUpdateErrorClassifier.classify(error), detail: error.localizedDescription)))
             return
         }
-        if received == 0 || expected.map({ $0 != received }) == true {
-            completion?.resume(throwing: AppUpdateIssue(code: .verification, detail: String(localized: "The update download is empty or truncated.")))
-            return
-        }
-        // Without a SHA-256 digest to compare against, nothing vouches for the image.
-        let actual = hasher.finalize().map { String(format: "%02x", $0) }.joined()
-        guard let digest, let expectedHash = Self.parseSHA256Hex(digest), actual == expectedHash else {
-            completion?.resume(throwing: AppUpdateIssue(code: .verification, detail: String(localized: "The update couldn't be verified, so it wasn't installed.")))
+        // A source that closed early leaves the rest to the next one.
+        if let expected, received < expected {
+            completion?.resume(throwing: SourceFailure(issue: AppUpdateIssue(
+                code: .network, detail: String(localized: "The update download is empty or truncated."))))
             return
         }
         completion?.resume()
     }
 
-    static func isAllowed(_ url: URL) -> Bool {
-        guard url.scheme == "https", let host = url.host, allowedHosts.contains(host.lowercased()) else { return false }
-        return url.port == nil || url.port == 443
+    static func isAllowed(_ url: URL, mirrors: [URL] = []) -> Bool {
+        guard url.scheme == "https", let host = url.host?.lowercased(), url.port == nil || url.port == 443 else { return false }
+        return allowedHosts.contains(host) || mirrors.contains { $0.host?.lowercased() == host }
+    }
+
+    /// `Content-Range: bytes <start>-<end>/<total>`; `total` is nil when the source gives `*`.
+    static func contentRange(_ response: HTTPURLResponse) -> (start: Int64, total: Int64?)? {
+        guard let value = response.value(forHTTPHeaderField: "Content-Range"), value.hasPrefix("bytes "),
+              let dash = value.firstIndex(of: "-"), let slash = value.firstIndex(of: "/"),
+              let start = Int64(value[value.index(value.startIndex, offsetBy: 6)..<dash]) else { return nil }
+        return (start, Int64(value[value.index(after: slash)...]))
     }
 
     static func parseSHA256Hex(_ digest: String) -> String? {
@@ -346,5 +517,9 @@ final class GitHubReleaseDownload: NSObject, URLSessionDataDelegate, @unchecked 
         let normalized = hex.lowercased()
         guard normalized.count == 64, normalized.allSatisfy(\.isHexDigit) else { return nil }
         return normalized
+    }
+
+    private static func seconds(_ duration: Duration) -> Double {
+        Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1_000_000_000_000_000_000
     }
 }

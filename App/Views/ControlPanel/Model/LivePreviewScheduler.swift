@@ -1,6 +1,8 @@
 import Foundation
 
-/// Decides which Discover tiles load their animated preview, and when.
+/// Decides which tiles of a grid load their animated preview, and when: Discover's, and the
+/// Library's while every tile on screen plays (the Library's covers are local, so it reports its
+/// stills settled at once).
 ///
 /// Every tile shows its cached still at once; the animation follows only for a tile that is on
 /// screen and whose still has arrived, and only after every still of the page has settled (loaded

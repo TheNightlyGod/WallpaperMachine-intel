@@ -6,7 +6,7 @@ extension BridgeStore {
         .init(displays: settingsSnapshot.displays.map { display in
             let assignment = monitorInformationSnapshot.rows.first { $0.displayId == display.displayId && $0.mirrorTargetDisplayId == nil }
             return .init(id: display.displayId, title: display.title.isEmpty ? display.displayId : display.title,
-                         eligible: display.enabled && display.mode == .standalone,
+                         eligible: display.isIndependent,
                          wallpaperID: assignment.flatMap { $0.wallpaperId.isEmpty ? nil : $0.wallpaperId })
         }, wallpapers: Set(librarySnapshot.wallpapers.filter(\.supported).map(\.id)), reliable: !activationNeedsRefresh,
            held: Set(heldWallpaperIDs))

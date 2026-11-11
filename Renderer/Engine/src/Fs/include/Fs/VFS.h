@@ -1,5 +1,6 @@
 // Clean-room implementation from the WallpaperMachine spec e7-small-units.md; written without access to the original source.
 #pragma once
+#include <functional>
 #include <iterator>
 #include <string_view>
 #include <vector>
@@ -15,6 +16,18 @@ namespace wallpaper
 {
 namespace  fs
 {
+
+/// Told, on this thread, about each file a reader asked for that no mount holds, while one is
+/// installed. A parse installs one to learn which files a scene names and does not have; with
+/// none installed (the default) nothing is recorded and a miss costs nothing more.
+using MissingFileObserver = std::function<void(std::string_view path)>;
+inline thread_local const MissingFileObserver* t_missing_file_observer = nullptr;
+
+/// Tells this thread's observer, if any, that `path` was asked for and not found. For readers
+/// that look for a file without opening it, such as a texture searched under several names.
+inline void ReportMissingFile(std::string_view path) {
+	if (t_missing_file_observer != nullptr) (*t_missing_file_observer)(path);
+}
 
 class VFS : NoCopy,NoMove {
 public:
@@ -77,6 +90,7 @@ public:
 		std::string      inside;
 		if (! Locate(path, &owner, &inside)) {
 			LOG_ERROR("not found \"%.*s\" in any mounted file system", (int)path.size(), path.data());
+			ReportMissingFile(path);
 			return nullptr;
 		}
 		return owner->fs->Open(inside);

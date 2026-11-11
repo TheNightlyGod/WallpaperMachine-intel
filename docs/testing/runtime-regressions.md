@@ -14,6 +14,13 @@ Scene-content areas are in [scene-regressions.md](scene-regressions.md).
 All in `metal_scene_draw_smoke` unless noted; `metal_backend_test` needs no
 device.
 
+- **Surface release drains pending Metal work** —
+  `MetalSurfaceLifetime.ReleaseWaitsForPendingCommandsBeforeDroppingLayer` holds an
+  empty command buffer's scheduled callback, then releases an unhosted surface. The
+  release must return with the command completed, and the callback must still see its
+  layer. This covers the surface-reconfiguration path used before wallpaper replacement
+  and shutdown, including the lock-screen extension; stopping the render loop alone
+  does not finish queued presentation callbacks.
 - **Native backend admission** — `metal_backend_test`: every refused construct
   keeps its own distinct reason; a plain sheet, a sprite particle layer and a
   skinned mesh under a `g_Bones` shader are accepted; a skinning shader on a mesh
@@ -89,18 +96,21 @@ device.
   [scene regressions](scene-regressions.md)).
   Projection is the scene camera's own FOV/aspect/near/far, not an orthographic
   scale; a rotated card must foreshorten.
-- **Depth writes** — `MetalSceneDraw.ADepthWritingDrawHidesLaterDraws`:
-  a half-transparent card, then an opaque card behind it, authored with
-  translucent, additive and normal blending, with and without `depthtest` and
-  `depthwrite`, and with and without a depth attachment, each drawn through
-  `SceneRendererHandle` (`DrawWithRenderer`); the nearer card must hide the
-  overlap exactly when it depth-tests and writes into a depth-attached target.
-  The depth state comes from `ResolveSceneDepthState` (`SceneMaterial.h`). Native
-  Metal used to drop depth writes for translucent and additive materials, and
-  depth-tested into targets with no depth attachment, where Wallpaper Engine draws in
-  painter's order. A layer drawn through effects takes the same state from the layer, not
-  its effect pass, except that a layer Wallpaper Engine sorts (blending `translucent` or
-  `additive`) in a scene that sorts takes no write from it
+- **Depth writes** — `MetalSceneDraw.OnlyADrawThatDoesNotBlendWritesDepth`:
+  a half-transparent card, then an opaque card behind it that depth-tests, the
+  nearer one authored with translucent, additive, normal and alphatocoverage
+  blending, with and without `depthtest` and `depthwrite`, and with and without a
+  depth attachment, each drawn through `SceneRendererHandle` (`DrawWithRenderer`);
+  the nearer card must hide the overlap exactly when it depth-tests, writes and does
+  not blend, into a depth-attached target. The depth state comes from
+  `ResolveSceneDepthState` (`SceneMaterial.h`), which takes the draw's blend mode:
+  Wallpaper Engine's device drops the write for every translucent or additive draw
+  (`sub_140099F60`), confirmed by its frames of the depth probe
+  (`artifacts/we-parity/probes/depth-probe`; facts in
+  `artifacts/we-parity/decompiles/A-1-labels-cause-C.md`). The translucent and
+  additive cases fail when the write is kept as authored. A target with no depth
+  attachment draws in painter's order. A layer drawn through effects takes the same
+  state from the layer, not its effect pass
   (`MetalSceneDraw.ALayerDrawnThroughEffectsKeepsItsOwnDepthTestAndWrite`,
   [scene regressions](scene-regressions.md#layers-textures-and-compositing)).
 - **Render passes** — `MetalSceneDraw.LayersSharingATargetShareOneRenderPassAndHiddenLayersCostNone`:
@@ -113,6 +123,26 @@ device.
   included. On a real scene, `WE_TEST_METAL_PROJECTS` prints render passes and
   blits per frame and CPU per `drawFrame`, and its PPM must stay byte-identical to
   a build without the change.
+- **Draws kept apart only by their order or their depth attachment** —
+  `ScenePassMerge.*` (`rendergraph_smoke`): in a scene whose layers sample another
+  layer's picture, a layer's own effect buffers are drawn ahead of the draws into the
+  scene's image around it, which then follow one another; a sample still reads this
+  frame's picture of an earlier layer and the previous frame's of a later one, a layer
+  whose effect samples the scene's image still runs between the draws it reads, a
+  depth-sorted scene keeps each object's passes together, and
+  `SetScenePassMergeForTests(false)` restores the object order.
+  `MetalDepthSharing.*` (`metal_backend_test`): only a draw that does not depth-test
+  between two depth-tested draws into one single-sample target, and joined to one of them by
+  draws into that target alone, takes the attachment, and none does in a scene sorted by depth.
+  `MetalSceneDraw.AFlatLayerBetweenTwoDepthTestedLayersSharesTheirRenderPass`: a red
+  layer without depth testing between two depth-tested cards draws the scene in one
+  render pass instead of three, byte for byte the same picture.
+  `MetalSceneDraw.AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses`:
+  a layer chain between two cards no longer splits the scene's render pass, drawn or
+  reused, and with the merge off the old split and reuse behaviour is pinned; the joined
+  render pass may differ from the split one by at most one level in 0.01 % of channels. On real
+  scenes, `perf_bench.py identity` against a build without the change
+  ([scene rendering](../features/scene-rendering.md#draws-into-one-image-share-a-render-pass)).
 - **Shared target images** — `MetalSceneDraw.TargetsThatAreNeverAliveTogetherShareImagesAndDrawTheSamePicture`:
   traded copies of the scene (two lenses, scene optimisation on) and the effect
   buffers of two layers drawn one after the other (optimisation off, so nothing is
@@ -136,14 +166,114 @@ device.
   abandoned frame undoes its trades. On a real scene,
   `WALLPAPER_MACHINE_FEEDBACK_COPIES=1` makes the copies again, and the harness
   PPM must match either way.
+  `.AHistoryCopyIsTradedAndDrawsTheSamePicture`: a motion-blur-shaped effect
+  (accumulate into `_rt_FullCompoBuffer2`, copy it to the history, draw from the
+  accumulation) on one, two and three same-size cards sharing the accumulation, drawn
+  with `MetalRender::SetCopyTradesForTests` off and on: six byte-identical frames, no
+  blit and no copied byte when on, one trade per copy; a second accumulation that
+  discards texels opens with the copy. `.AHiddenOrAbandonedHistoryKeepsItsPictureAcrossCopyTrades`:
+  the first card hidden for three frames (its stale accumulation is restored from the
+  history, one blit instead of two) and two abandoned frames (refused compositions)
+  must match the copies frame for frame; dropping the restore or the abandoned frame's
+  undo changes every frame after it. `.AHistoryCopyWhoseImageIsReadBeforeItsSourceIsDoneStaysACopy`:
+  a draw reading the history before the trade keeps the blit.
+  `.APostProcessResultCopiedIntoTheSceneTradesTexturesAndDrawsTheSamePicture`: bloom,
+  bloom with `clearenabled: false`, bloom and colour options (two copies), colour
+  options alone, HDR bloom, bloom over lenses (the scene's image a pooled trade's
+  source, whose image set follows the trade) and 4x MSAA: same frames, no blits.
+  With scene clearing disabled, both the ordinary graph and reordered draws preserve
+  the output on its first partial or blended write; discarding that image reads undefined
+  pixels and makes even two runs of the same path disagree. Proven full overwrites still
+  elide their load. `TransparentSortingGpu.SortingAroundAnOmittedLayerPreservesTheUnclearedOutputWithoutRebuilding`
+  moves visible and omitted layers through the sorting order: the first draw keeps loading
+  the output, every pixel stays identical and the graph is never rebuilt.
+  The copy trade's source must be single-sampled, in no pooled trade and not a layer
+  composite, the copy's name at most a pooled source; nothing may touch the copy's
+  name between the copy and the trade, and the source's next writer is a draw or
+  clear of it alone that the reuse table never skips, rendering that frame when it
+  is later in the frame. On a real scene, `WALLPAPER_MACHINE_COPY_TRADES=0` makes the
+  copies again and `WE_TEST_METAL_PROJECTS` prints blits, MB copied and copies traded
+  per frame; the poster hashes must match either way.
   `.InterleavedFeedbackCopiesPreserveEachReadersImage`: `copy A→Ac`, unrelated B
   work, `copy B→Bc`, then B's reader before A's reader; both target images match
   the blit path over four frames with both blits removed. Opening copies are
   retained separately by destination texture, not in one overwritable pending
   slot, and graph release and abandoned frames clear that state.
+- **Overwriting render passes skip their load** — `MetalSceneDraw.AnEffectChainThatOverwritesItsBuffersOpensThemWithAClearAndDrawsTheSamePicture`:
+  a card through four effects (the position through the matrix, as given, and
+  through a copy of the input) is drawn with `MetalRender::SetOverwriteLoadElisionForTests`
+  off and on; every frame must be byte-identical and the second and third effects,
+  which write a buffer already drawn this frame, must stop loading it (two fewer
+  loading render passes, the same number of render passes).
+  `.AnEffectPassThatMayLeaveTexelsAloneKeepsLoadingItsBuffer` gives the second effect a
+  scaled or moved card, a `discard`, a `clip`, back-face culling or
+  `alphawriting: disabled`: it keeps its load and the frames match; clearing every
+  loading pass without the proof changes the frames of the first four.
+  `.ABlendedOverwriteOfAFloatBufferKeepsItsLoad`: `One`/`Zero` blending over a
+  half-float buffer keeps its load (zero times an infinity it may hold is not zero),
+  over an 8-bit one it clears. `.ATradedReaderThatOverwritesTheSceneNeedsNoOpeningCopy`:
+  a canvas-sized layer with `alphawriting: enabled` reading `_rt_FullFrameBuffer`
+  needs no opening copy. The shader compiler's facts are pinned in
+  `Renderer/Shader/src/reflect/coverage/tests.rs` (spin's copy, gaussian's `#if`
+  kernels, skew/transform/foliagesway `MODE` 1 moving the corners), the geometry in
+  `MetalOverwrite.*` (`metal_backend_test`). On a real scene, `WE_TEST_METAL_PROJECTS`
+  prints render passes loading their target per frame, and
+  `WALLPAPER_MACHINE_OVERWRITE_LOAD_ELISION=0` must give the same poster PPM.
+- **Depth and multisampled stores** — `MetalSceneDraw.AttachmentsNothingReadsAgainAreLeftUnstoredAndDrawTheSamePicture`:
+  two depth-tested models with a card between them (the render pass merge off, so the
+  card still splits them) store depth only from the first model's render pass, which
+  the second loads; with 4x MSAA, lenses that split the
+  scene's render passes keep their samples for the next one and only the last render
+  pass leaves them unstored. Frames match `MetalRender::SetAttachmentStoreElisionForTests(false)`.
+  A depth image something samples (the volumetrics depth) is always stored, a hidden
+  or reused later user counts as a user, and samples the next frame may load (its
+  first pass on them does not clear) are kept.
+- **Work nothing visible can see** — `MetalSceneDraw.ALayerFadedOutToNothingIsLeftOutAndEveryFrameStaysTheSame`:
+  a screen-filling `vec4(g_Color, g_Alpha)` layer (the solid layer's shape) over a
+  moving card fades 1, 0, 1 by script, source over and additive: the two frames at
+  alpha 0 leave the draw out, the others draw it, and six frames match
+  `MetalRender::SetSkipNoopDrawsForTests(false)`.
+  `.ADrawThatIsNotProvenToLeaveItsTargetAsItIsIsDrawn`: alpha 0.5, a `normal` or
+  `multiply` blend and a colour or alpha from a varying are all drawn, frames identical;
+  letting a replacing blend through changes the frames.
+  `.AnOverflowingColourAtZeroAlphaIsNotSkipped` multiplies finite uniform operands
+  (`1e30 * 1e30`) at runtime and verifies that the draw reaches the scene output with no
+  no-op skip. It makes no pixel-equivalence claim for non-finite results under Metal fast math;
+  dropping the CPU product bound leaves out that draw and fails the test.
+  `.AFiniteColourProductAtZeroAlphaIsSkippedAndKeepsEveryFrame`
+  uses the same product with finite results: only the two zero-alpha frames skip the draw,
+  and all six frames match the unoptimized path exactly.
+  `.AHiddenLayersClearsAreLeftOutAndItsPictureComesBackAsItWas`: a panel through two
+  effects hidden by script for four frames (one of them abandoned), targets shared and
+  apart: each left-out clear takes its render pass with it and every frame matches
+  `MetalRender::SetHiddenLayerWorkForTests(false)`, the panel's first frame back included.
+  `.AClearALayerShownAgainReadsRunsAndANewGraphGetsWhatTheClearsLeft`: a faded solid
+  layer another layer samples, with the sampler hidden: its composite's clear is left
+  out until the sampler is shown again, and a graph built again while both are hidden
+  takes the composite over cleared (`clearLastRenderGraphForRebuild`); dropping the
+  reader check or the settle changes the frames or the carried composite.
+  `.ACopyOfTheSceneForAHiddenLensIsLeftOutUntilTheLensIsShownAgain`: the copy a hidden
+  lens reads is not made, alone and pooled with a second, shown lens. The plans are
+  pinned in `MetalHiddenClears.*` (readers up to the next clear, the next frame's
+  readers ahead of it, copies, conditional and dropped clears) and the blends in
+  `MetalNoopDraw.*` (`metal_backend_test`); the shader's colour fact in
+  `Renderer/Shader/src/reflect/coverage/tests.rs`. On a real scene,
+  `WE_TEST_METAL_PROJECTS` prints both per frame and the switches must give the same
+  poster hashes.
 - **Per-frame geometry upload** — `MetalSceneDraw.GeometryRebuiltEveryFrameIsUploadedAndDrawnFromItsOwnSlot`,
   across more frames than there are in-flight slots. Zero live particles must
   draw nothing rather than fail.
+  `MetalSceneDraw.ParticleGeometryCopiesOnlyWhatTheFrameDrawsAndTheSlotLacks`: a burst
+  that thins out and dies copies only the vertices each frame wrote (the mesh's
+  `DrawnSizeOf`, not its high-water mark) and copies its index pattern into each frame
+  slot once, with every picture byte-identical to
+  `MetalRender::SetDynamicUploadDeltaForTests(false)`, which copies the high-water mark
+  and every drawn index each frame. `SceneIndexArray.AppendingKeepsTheContentRevisionAndRewritingRenewsIt`
+  and `SceneVertexArray.TheDrawnSizeHoldsUntilTheNextWrite` (`scene_mesh_tests`) hold the
+  two facts the skip relies on: an index write over earlier bytes (a text relayout, a
+  model's `applyData`) renews the revision, so the slot is copied whole, and any vertex
+  write forgets the drawn size, so a writer other than the particle generator copies
+  everything it filled.
 - **Skinning** — `MetalSceneDraw.APuppetIsSkinnedByItsOwnShaderFromThePoseTheRuntimeProduces`:
   a 64-byte reflected bone stride, the skinned quad translating by the distance
   its bone did with its width unchanged (what rules out a transposed matrix), the
@@ -201,6 +331,15 @@ device.
   collector when the older work runs, and an older scheduled write publishes nothing of it
   (`AnOldCompletionDoesNotFeedAStoreOpenedAgainUnderTheSamePath`,
   `AnOldScheduledWriteDoesNotPublishAStoreOpenedAgain`).
+- **A picture's texture holds only levels it can** — `MetalImageLevels.*` in `metal_memory_test`
+  (`MetalImageLevels.hpp`): a texture made for a parsed slot has no more levels than the
+  halvings of its size (a 2x2 slot claiming four levels gets two; before, creating it aborted
+  the process), each level is written inside its own extent whatever size the file gives it,
+  a level shorter than the rows it fills is refused (raw or block-compressed) before any level
+  is written, so a refused runtime picture leaves its texture as it was, and a
+  block-compressed level that stops inside a block short of its edge is skipped (its block
+  holds none of its bytes). A second display reads back only levels the upload wrote whole
+  (`SharedImageCache::levelsReadBack`). An honest chain fills every level.
 - **Displays share the pictures of one scene** — `SharedPictures.*` in `metal_memory_test`:
   two renderers loading one scene at the same moment bind one texture, the cache holds one
   display's bytes for both and the second display uploaded nothing, both draw the same
@@ -268,7 +407,7 @@ device.
   cannot drift apart.
 - **10-bit and HDR scene video** — `MetalVideoTexture.P010ConvertedMatchesCpuReference`
   in `metal_video_texture_test` imports synthetic `x420` frames through the real
-  Core Video cache and compares the GPU's BGRA with `Renderer/Testing/hdr_reference.hpp`,
+  IOSurface import and compares the GPU's BGRA with `Renderer/Testing/hdr_reference.hpp`,
   a double-precision reference written from BT.2100, ST 2084 and BT.2390 with
   its gamut rotation derived from chromaticities (PQ and HLG greys across the
   range, saturated BT.2020 colour, P3-D65, full range, display-referred 10-bit, and
@@ -330,12 +469,46 @@ device.
   refuses (a fragmented MP4, a container it does not read) fails with its reason, holds no decoder
   and stages no file; nothing else is tried (`AFragmentedMp4IsRefusedWithItsReason`,
   `AContainerTheReadersDoNotKnowIsRefusedByName`).
+- **A decoder slower than the clip keeps to the clock** — `VideoSourceInput.ALateDecoderLeavesOutOnlyThePicturesNothingRefersTo`
+  and `VideoSourceClockSlowDecoder.ASlowDecoderKeepsToTheClockByLeavingOutLatePicturesNothingRefersTo`
+  in `video_source_input_test`. The first tells the native backend that the whole first pass of the
+  B-frame clip is late and requires that pass to come out with exactly its reference pictures, in
+  display order, and the next pass whole. The second plays a fake decoder that takes 25 ms a picture
+  of a 60 fps clip (two in three pictures disposable) for three seconds against a wall clock and
+  requires the frame on offer within 0.15 s of the clock and no seek; decoding every picture, it
+  fell a third of a second behind each second until the source sought ahead, holding the picture
+  still while the seek decoded (issue #151: a 7232x3100 60 fps clip, a freeze every few seconds).
 - **Decoded frames carry real timestamps** — `video_source_input_test` against media the tests encode. A frame whose
   timestamp is always zero looks like playback for as long as frames keep
   arriving and then freezes, so a video regression here reads as "the picture
   stopped" rather than as a decode failure. `video_source_input_test` owns a private
   `TMPDIR` and asserts that nothing is written to it; never clear the app's decode cache to make
   a test pass.
+- **Imported video frames hold device memory only while they are in use** —
+  `MetalVideoTexture.ImportedFramesHoldDeviceMemoryOnlyWhileTheyAreInUse` in
+  `metal_video_texture_test` imports 48 frames of 1024x1024 NV12, `x420` and BGRA, each on a
+  surface of its own, and requires the device's allocations
+  (`MTLDevice.currentAllocatedSize`) to grow by no more than two frames' planes: the frame on
+  screen and one completing. `MetalVideoTextures` makes each plane a texture on the frame's
+  IOSurface (`newTextureWithDescriptor:iosurface:plane:`) and lets it go with the frame's
+  `FrameBundle` once the last command buffer that read it completes. The trap is
+  `CVMetalTextureCache`: each texture it vends maps the whole surface, one mapping per plane,
+  and it keeps every texture it vended for a second after release
+  (`kCVMetalTextureCacheMaximumTextureAgeKey`; a flush does not shorten that second and an age
+  of 0 disables aging, so nothing is ever freed). It reuses a texture only when the surface
+  and a 56-byte block of texture parameters both match, and on macOS 27 that block carries
+  five stack bytes Core Video never initializes (padding in
+  `CVMetalTextureCache::createTextureFromImageWithParams`). Reuse therefore depends on what
+  last ran at that depth of the importing thread, not on the buffer: imports after
+  `ClockedVideoSource`'s queue mostly found different bytes, frames decoded on the importing
+  thread happened to find the same ones, and a single-thread `CVPixelBufferPool` misses every
+  time once those bytes change per frame. A texture that missed is freed a second after its
+  frame, and with it every other texture the cache holds for that surface. Every import then made a new pair, and a 7232x3100 60 fps scene
+  video held 4.5 GB of device allocations at 60 draws a second and 8.2 GB drawn as fast as
+  possible, against 0.47 GB with the textures made on the surface (`phys_footprint` about 1 GB
+  either way, measured with `metal_scene_draw_smoke`'s local-project run). The old cache
+  grows by 48 imports' worth in this test. Do not keep these textures past their frame either,
+  for instance by IOSurface: a texture on a surface keeps the decoder's pool from reusing it.
 - **A decoder survives a rebuild of the graph** -
   `MetalVideoTexture.AVideoSetAsideByARebuildIsTakenBackAsItIsAndNotReadAgain`,
   `.AVideoTheNewGraphDoesNotUseIsClosedWithItsCompile`,
@@ -382,6 +555,12 @@ device.
   the one second of slack fixed, a seek on its way was asked for again each second, and the
   600 frame clip did not land at 5 s in six seconds (six requests) and took three requests and
   3.2 to 3.7 s from 9.9 s on.
+  `VideoSourceClockSlowSeek.AClockSentBackKeepsThePictureShownUntilTheSeekDelivers` sends a clock
+  at 3 s back to the start of a decoder that takes 600 ms to deliver after a seek, then draws
+  every few milliseconds: no draw may take 100 ms, the picture at 3 s stays on offer until the
+  seek delivers, the start replaces it then, with one request and no pass counted. Before the
+  fix the clock going back emptied the display and the next draw waited out the whole seek
+  (600 ms here, two seconds at most).
 - **Consumption decided before import** — `MetalVideoTexture.PlanesOnlyDemandEncodesNoConversion`,
   `.MixedDemandConvertsOnceAndStillPublishesThePlanes` and
   `.ADemandChangeReImportsTheSameGenerationInsteadOfWaiting`: a frame every
@@ -422,6 +601,18 @@ device.
   uniforms borrow an owning packing buffer synchronously and read a fresh spectrum
   on every call; particle mouse inverses are skipped only when all current
   controlpoint link flags are off.
+- **Script frames that would change nothing** — `ScriptIdleFrames.*` and
+  `ScriptHostLimits.AFrameBetweenInterruptedHandlersClearsTheirStrikesEvenWhenItIsLeftOut`
+  (`script_runtime_compat_test`, each case run with `ScriptEngine::SetIdleEvaluationSkipForTests`
+  on and off). A property script without `update` makes no call into the script runtime
+  on a tick where no timer is due and no audio buffer is registered (five such scripts
+  over ten ticks are fifty calls fewer and nothing else). A timer set in `init`, or set for
+  now by an earlier script's `update`, fires at the same point of the same tick; registered
+  audio buffers keep every call; the left-out frame still writes the script's parameters
+  over what `init` left and clears an interrupted handler's strikes, as the completed call
+  did. The library tells the host the earliest due time of its live timers
+  (`n.waiting`) whenever it may have moved earlier and after every pass that ran or
+  dropped one; the host checks it before each script, never once per tick.
 - **A destroyed layer's script state** — `ScriptLayerRelease.*` in `scenescript_behavior_test`
   (no device). A script makes a layer and one below it, registers an animation-ended callback
   on each and keeps a weak reference to each callback and each layer object; the test gives the
@@ -491,6 +682,17 @@ device.
     loop seam or a seek are discarded; and repeated, rewound or non-finite
     timestamps are not counted as evidence at all. Rational rates keep their
     exact period (`24000/1001`, not `1/24`).
+- **Presents held to an even number of refreshes** — `PresentPacingTest.*` in
+  `timer_tests` pins the hold a present asks for (whole refreshes of the ceiling's
+  period less a quarter refresh, never more refreshes than the period covers, zero
+  at or above the display's rate or with no known rate), that the frame clock
+  publishes it for its ceiling rather than its content-paced cadence, and, in a model
+  of fixed-rate and ProMotion panels, that held frames near a refresh boundary are
+  shown two refreshes apart where plain presents alternate one and three.
+  `MetalSceneDraw.APresentHoldsTheFrameOnlyWhilePacing` checks that the present asks
+  for the hold only while `WALLPAPER_MACHINE_VSYNC_PACING` is on and that held
+  presents neither stall the next drawable nor lose their reports. When the display
+  showed them is not observable headlessly.
 - **Pointer-driven clock wakes** — `FrameTimerTest.ABurstOfWakeOnceAtTheCeilingDoesNotAddCallbacks`
   and `.AnIdleBurstOfWakeOnceProducesOneCallback` in `timer_tests`. Two hundred
   `WakeOnce` calls in one second at 30 fps stay inside about one callback per
@@ -508,9 +710,12 @@ device.
   `video_frames_selected`, `video_frames_reused` and `video_frames_skipped`: a gap
   between two displayed generations is exactly the number of decoded frames that
   never reached the screen, which is how a pacing regression is falsified while
-  the picture still moves. `present_requests` counts requests; this backend has
-  no presentation-feedback source, so the frames a compositor actually displayed
-  are reported as unavailable and never approximated by the request count.
+  the picture still moves. `present_requests` counts requests; what the display
+  did with them comes from each drawable's own report (`presented_frames`,
+  `presents_dropped`, the present gaps), never from the request count:
+  `PresentFeedbackTest.*` in `timer_tests` pins the arithmetic and
+  `MetalSceneDraw.EveryPresentedDrawableReportsWhetherItWasShownOnlyWhileCounting`
+  that every present reports exactly once while counting and none does otherwise.
 - **A scene with nothing left to do** — `MetalSceneDraw.AStaticTextSceneRunsOutOfWorkToDo`,
   `.AStaticTextLayerUnderAnEffectChainAlsoRunsOutOfWork` and
   `.TextBoundToAUserPropertyIsEventDrivenRatherThanContinuous`: a static caption
@@ -576,9 +781,11 @@ device.
   that a rejected registration hands the callback back to be dropped exactly once and that
   a panicking callback does not unwind into C++. In the renderer,
   `UnchangedPresent.ADrawFailureAfterTheFirstFrameIsReportedOnceAndASurfaceRebuildHealsIt`
-  and `...BeforeTheFirstFrameIsCountedButNotReported`. The engine's reaction to a report
-  on a live scene needs a real window and is not covered by an automated test, and no
-  genuine presentation failure is produced anywhere.
+  and `...BeforeTheFirstFrameIsCountedButNotReported`; a frame whose composition
+  fails is such a failure, presenting nothing and leaving nothing recorded as shown
+  (`MetalSceneDraw.AFrameThatCannotBeComposedIsNeitherPresentedNorRememberedAsShown`).
+  The engine's reaction to a report on a live scene needs a real window and is not
+  covered by an automated test, and no genuine presentation failure is produced anywhere.
 
 ## Audio
 
@@ -651,6 +858,19 @@ device.
   stops being wanted, and that a failed start is not retried on every command. The
   CoreAudio listener registration is not
   covered; see [audio response](../features/audio-response.md#output-device-changes).
+- **Tap stall rebuild** — `wallpaper-core`
+  `media::audio::capture::lifecycle_tests::recovery_tests` (`a_tap_that_stops_calling_back_*`,
+  `silence_an_idle_output_or_suspension_never_rebuild_the_tap`, `stall_rebuilds_stop_*`,
+  `the_rebuild_limit_counts_only_the_last_minute`) calls the real I/O callback with zeros
+  and injects one `Instant` per check: a tap is rebuilt only after 3 s without calls while
+  the output device runs, once, without a permission request, at most 3 times a minute
+  until a demand change, and never for silence, an idle device or a suspended display.
+  The bridge's `web_audio_media::output_device_change::a_tap_that_stops_calling_back_is_rebuilt`
+  and `::a_newer_device_change_supersedes_a_failed_stall_rebuild` run the stall handler,
+  and `audio_requests::tests::aw25_*` pins that the worker checks only while a counted tap is
+  wanted. The trap: keying the check on sample levels instead of calls rebuilds a healthy
+  tap whenever nothing plays. A tap that really stops calling back is not covered; see
+  [audio response](../features/audio-response.md#output-device-changes).
 - **Audio capture follows what the scene reads** — `SceneAudioRequirement.OnlyContentThatReadsAudioRaisesIt`
   and `SceneAudioReport.TheHostHearsTheRequirementOncePerSceneAndTheReplacementResetsIt` in
   `scene_schema_part11_test`, `Decoders/VideoSourceInput.PlainVideoProjectNeverReportsAnAudioRequirement/*`
@@ -678,10 +898,29 @@ engine to redo, and when.
   `engine::actor::space_parking_tests` (parking a scene that has drawn instead of replacing it,
   running it again with its handle and no refresh job, replacing in place as before when nothing
   is kept, closing on a shorter list, a new size, an unplugged display and `close_all`, and a
-  global resume leaving it paused) and the bridge's `tests::space_parking` and
+  global resume leaving it paused, and video/web visits retaining all prepared scene windows
+  without loading them again) and the bridge's `tests::space_parking` and
   `engine::facade::first_frame_tests::a_wallpaper_the_display_keeps_parked_is_not_awaited`. A parked scene
   that came back is never waited on for a first frame it does not report again, which would end
-  in the 90-second rollback. Device-free; no window or desktop.
+  in the 90-second rollback. `WallpaperSpacePinningTests` also covers a loading hold not
+  following a Space change onto a prepared desktop, and preparation on a different desktop
+  remaining visible. Explicit display destruction and unload still release the retained windows;
+  `performance_settings::unload_reports_a_failure_to_release_prepared_desktops_and_can_retry`
+  covers release errors and retry. Device-free; no window or desktop.
+- **Preloaded scenes retain audio capability until activation** — core's
+  `engine::actor::space_preloading::tests::preloaded_audio_demand_is_retained_until_promotion_without_exposing_parked_commands`
+  delivers real actor notifications to a windowless runtime, checks that parked demand
+  neither enters the active observer nor enables ordinary commands, and promotes the same
+  handle without a load or another capability report. Stale renderer identities and unknown
+  handles are ignored; a current report can still withdraw demand after promotion. This
+  exercises capability retention and publication, not native capture or desktop behavior.
+- **Repeated desktop wallpapers have independent transition pictures** —
+  `WallpaperSpaceReplicasTests` covers A–B–A–B placement before presentation, A–B–C–D creating no
+  replicas, one shared image per wallpaper/display, event-only refresh, memory/choice cleanup,
+  bounded image memory, refused placement and stale/cancelled captures. Native video and web
+  lifecycle tests cover reading kept/preloaded instances without resuming or reopening them.
+  These inject the windows and Space mover: real WindowServer stacking, swipe smoothness and
+  compositor memory still require an explicitly authorized desktop check.
 - **Download-speed sampling** — `DownloadTelemetryTests` in `Tests/Unit/Workshop/`:
   real `nettop` streaming over a private PTY with local-socket traffic; CRLF and
   split line endings. LF-only fixtures do not verify live delivery.
@@ -709,6 +948,7 @@ engine to redo, and when.
   `::a_display_refresh_does_not_reload_a_scene_held_to_the_battery_frame_rate`,
   `::a_display_refresh_does_not_reload_a_scene_held_to_the_quality_throttle`,
   `::a_display_refresh_does_not_reload_a_scene_muted_for_other_audio`,
+  `::a_display_refresh_does_not_reload_a_scene_turned_down_for_other_audio`,
   `::a_display_refresh_does_not_reload_a_scene_paused_by_a_lock_or_a_covered_display`,
   and `DisplayRefreshCoalescerTests` in `Tests/Unit/Desktop/`. A value applied
   live on top of the saved configuration must never read as a different
@@ -757,15 +997,26 @@ engine to redo, and when.
 - **The lock state is not asked per evaluation** — `WallpaperPresentationPolicyTests.testTheLockStateIsAskedOnlyWhenItCanHaveChanged`,
   `.testASessionLockedBeforeStartIsSuspendedFromTheStart`,
   `.testWakingDisplaysAskForTheLockStateAgain`,
-  `.testSwitchingUsersAsksForTheLockStateAgain` and
-  `.testAMissedUnlockClearsAtTheNextEvaluation`, plus
+  `.testSwitchingUsersAsksForTheLockStateAgain`,
+  `.testAMissedUnlockClearsAtTheNextEvaluation` and
+  `.testAMissedReturnToTheConsoleClearsAtTheNextEvaluation`, plus
   `.testUnlockIsReportedOnceWhenTheLockClears` and
   `.testAMissedUnlockIsStillReportedAtTheNextEvaluation` for the edge the playlists
   answer. Every snapshot the engine applies
   runs the presentation policy, and `CGSessionCopyCurrentDictionary` is a
   synchronous window-server round trip. It is asked again only at start, on a lock
   or unlock, on display wake, on a user switch and while the session counts as
-  locked, so a missed unlock still clears at the next evaluation.
+  locked or switched away, so a missed unlock or return still clears at the next
+  evaluation.
+- **A switched-away session does not render for nobody** —
+  `WallpaperPresentationPolicyTests.testASessionSwitchedAwayWithoutALockSuspendsUntilItIsBack`,
+  `.testASessionOffTheConsoleAtStartIsSuspendedFromTheStart` and
+  `WallpaperPresentationAuthorityTests.testASessionSwitchedAwayHasNobodyWatchingItsLockScreenSurfaces`.
+  The renderer runs its own frame clock, so nothing else stops a wallpaper whose
+  session fast user switching moved off the screens without a lock: the policy
+  suspends presentation and the extension's lock-screen surfaces have no consumer
+  until the session is on the console again. Not exercised live: it needs a second
+  account.
 - **No folder probe per panel snapshot** — `WorkshopDownloadIntentTests.testSceneAssetsAreFoundAgainOnlyOnRefresh`.
   Resolving `ClientPaths.assetsURL` probes up to four folders, which is a large
   share of building the page snapshot while a property slider is dragged. The

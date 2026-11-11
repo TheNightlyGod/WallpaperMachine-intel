@@ -30,7 +30,25 @@ final class WallpaperPreviewRequestTests: XCTestCase {
     ) -> BridgeWallpaperPreview {
         .init(wallpaperId: "preview", title: "Preview", kind: kind, projectPath: project.path,
               entryFile: entry, assetsPath: root.appendingPathComponent("Assets").path,
-              propertiesJson: "{}", fps: 30, scalingMode: scalingMode, scalingFactor: 1, volume: 0.5)
+              propertiesJson: "{}", fps: 30, scalingMode: scalingMode, scalingFactor: 1, volume: 0.5,
+              engineOptions: kind == .webpage ? nil : BridgeSnapshotFixtures.engineOptionValues(),
+              lutPath: nil, sceneQuality: .wallpaperEngineDefault)
+    }
+
+    /// A scene preview starts with the draft's Wallpaper Engine options and the saved quality.
+    func testASceneRequestCarriesTheEngineOptionsAndTheSceneQuality() throws {
+        var input = descriptor(kind: .projectScene, entry: "scene.json")
+        input.engineOptions = BridgeSnapshotFixtures.engineOptionValues(
+            colorEnabled: true, brightness: 60, imageFilter: "lutx32_amber", playbackRate: 150)
+        input.sceneQuality = BridgeSceneQuality(
+            msaa: .x4, shadows: .high, volumetrics: .off, reflections: false, postProcessing: .ultra)
+        let request = try WallpaperPreviewRequest(input)
+        XCTAssertEqual(request.engineOptions?.brightness, 60)
+        XCTAssertEqual(request.engineOptions?.imageFilter, "lutx32_amber")
+        XCTAssertEqual(request.engineOptions?.playbackRate, 150)
+        XCTAssertEqual(request.sceneQuality,
+                       SceneQualitySettings(msaa: 4, shadows: 3, volumetrics: 0, reflection: false, postProcessing: 4))
+        XCTAssertNil(try WallpaperPreviewRequest(descriptor()).engineOptions, "a web page has none")
     }
 
     /// The preview and the lock screen hand the renderer its own number for every mode, Fit with
@@ -140,6 +158,25 @@ final class WallpaperPreviewRequestTests: XCTestCase {
         XCTAssertEqual(store.editorState.propertyPreviews(wallpaperID: "other").count, 1, "another wallpaper's drag is its own")
     }
 
+    func testPreviewAsksForTheWallpaperEngineOptionValuesBeingDraggedUntilTheEditEndsThem() async throws {
+        let bridge = PreviewInputsBridge(noPointer: .init())
+        bridge.preview = descriptor(kind: .projectScene, entry: "scene.json")
+        bridge.options = BridgeSnapshotFixtures.options(wallpaperId: "preview", kind: .projectScene)
+        let store = BridgeStore(bridge: bridge)
+
+        await store.previewEngineOptionAsync(wallpaperId: "preview", option: .playbackRate, value: .number(value: 40))
+        await store.previewEngineOptionAsync(wallpaperId: "other", option: .brightness, value: .number(value: 9))
+        _ = try await store.wallpaperPreviewRequestAsync(id: "preview", displayID: "primary")
+        store.editorState.discard(wallpaperID: "preview")
+        _ = try await store.wallpaperPreviewRequestAsync(id: "preview", displayID: "primary")
+
+        XCTAssertEqual(
+            bridge.requestedEngineOptions,
+            [[.init(option: .playbackRate, value: .number(value: 40))], []],
+            "this wallpaper's step alone, and none once a revert or an apply ended it")
+        XCTAssertEqual(store.editorState.engineOptionPreviews(wallpaperID: "other").count, 1)
+    }
+
     func testPreviewNamesThePicturesAndFilesItCannotChangeInPlace() async throws {
         func property(_ id: String, _ kind: BridgePropertyKind) -> BridgePropertyDescriptor {
             BridgePropertyDescriptor(id: id, kind: kind, labelHtml: id, value: .string(value: ""), defaultValue: .string(value: ""),
@@ -164,8 +201,12 @@ private final class PreviewInputsBridge: WallpaperBridge {
     var options: BridgeWallpaperOptionsSnapshot!
     /// The values being dragged that each request asked the bridge to show on top of the draft.
     var requested: [[BridgePropertyEdit]] = []
-    override func wallpaperPreview(wallpaperId: String, displayId: String, pending: [BridgePropertyEdit]) async throws -> BridgeWallpaperPreview {
+    /// The option values being dragged that each request asked the bridge to show.
+    var requestedEngineOptions: [[BridgeEngineOptionEdit]] = []
+    override func wallpaperPreview(wallpaperId: String, displayId: String, pending: [BridgePropertyEdit],
+                                   pendingEngineOptions: [BridgeEngineOptionEdit]) async throws -> BridgeWallpaperPreview {
         requested.append(pending)
+        requestedEngineOptions.append(pendingEngineOptions)
         return preview
     }
     override func wallpaperOptionsSnapshot(wallpaperId: String) async throws -> BridgeWallpaperOptionsSnapshot { options }

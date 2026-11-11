@@ -15,8 +15,10 @@ struct PanelIdentity: View {
   var body: some View {
     let isCompact = controller.shell.isCompact
     HStack(spacing: 7) {
-      AppMark(size: 20)
+      AppMark(size: 20, season: theme.season)
         .foregroundStyle(theme.surface.text.color)
+        // A season's piece of the mark is a graphic, not text: the accent fitted for graphics.
+        .tint(theme.accent.focus.color)
       if !isCompact {
         // A proper noun: never translated.
         Text(verbatim: "WallpaperMachine")

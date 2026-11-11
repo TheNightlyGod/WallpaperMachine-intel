@@ -46,16 +46,19 @@ struct WelcomeOverlayHost: View {
         // for the guide, a popover or a sign-in is not, and never comes through here.
         set: { shown in if !shown && !presenter.isDismissed { presenter.dismiss() } })
     ) {
-      SupportPromptSheet(presenter: presenter)
+      SupportPromptSheet(presenter: presenter).panelPresentationLocale()
     }
   }
 }
 
 /// The one-time prompts, one at a time: after the first downloaded wallpaper, star the project or
 /// become a supporter; later, a GitHub star; for someone who finished the guide before it offered
-/// the switch, whether to send performance data; for someone signed in to Steam who never met the
-/// import, importing their subscriptions. Links open only when chosen; nothing is starred or paid
-/// by opening one. **Not now**, the close button and Escape all just leave.
+/// the switch, whether to send performance data; on a Mac playing a wallpaper on battery with
+/// nothing chosen to save it, how to save battery; for someone signed in to Steam who never met the
+/// import, importing their subscriptions; later still, MMFoundation's Discord. Links open only when
+/// chosen; nothing is starred, paid or joined by opening one, and no setting changes without a
+/// click on it. **Not now** (**Keep running** in the battery question), the close button and
+/// Escape all just leave.
 struct SupportPromptSheet: View {
   let presenter: SupportPromptPresenter
 
@@ -108,9 +111,13 @@ struct SupportPromptSheet: View {
           .disabled(presenter.isChoosing)
         }
         Spacer(minLength: 0)
-        Button("Not now") { presenter.dismiss() }
-          .buttonStyle(.welcomeCapsule)
-          .keyboardShortcut(.cancelAction)
+        // The battery question's way out is a choice too: keep things as they are. Like Not now,
+        // it changes nothing and spends the question.
+        Button(action: { presenter.dismiss() }) {
+          prompt == .battery ? Text("Keep running") : Text("Not now")
+        }
+        .buttonStyle(.welcomeCapsule)
+        .keyboardShortcut(.cancelAction)
       }
     }
     .padding(24)
@@ -125,7 +132,9 @@ struct SupportPromptSheet: View {
     case .support: Text("Feeling good?")
     case .star: Text("Like WallpaperMachine?")
     case .telemetry: Text("Send performance data?")
+    case .battery: Text("Save battery when your Mac is unplugged?")
     case .subscriptions: Text("Import your Steam subscriptions?")
+    case .discord: Text("Join us on Discord?")
     }
   }
 
@@ -140,9 +149,16 @@ struct SupportPromptSheet: View {
       Text(
         "It helps find what makes wallpapers slow: how long they take to apply, their frame rate and energy use, and your Mac’s model, sent once a day. No names, files or account details."
       )
+    case .battery:
+      // Already in the panel's language: the sentences, and the playing wallpaper's measured share.
+      Text(verbatim: presenter.controller.batteryQuestionFacts.lead)
     case .subscriptions:
       Text(
         "WallpaperMachine can download the Workshop wallpapers you already subscribe to on Steam. Sign in to Steam Community once, on Steam’s own page, and this Mac stays signed in until you sign out."
+      )
+    case .discord:
+      Text(
+        "MMFoundation, which makes WallpaperMachine, has a Discord server. Talk with the people who build it and with other users, ask questions and share ideas."
       )
     }
   }
@@ -160,10 +176,10 @@ struct SupportPromptSheet: View {
         note: Text("Help others discover WallpaperMachine."), trailingSymbol: "arrow.up.right"
       ) { choose(.star) }
       WelcomeActionRow(
-        symbol: "heart", color: theme.surface.heart.color, title: Text("Become a Supporter"),
-        note: Text("Support development with a one-time contribution."),
+        symbol: "heart", color: theme.surface.heart.color, title: Text("Sponsor on Open Collective"),
+        note: Text("Give to MMFoundation, which makes WallpaperMachine."),
         trailingSymbol: "arrow.up.right"
-      ) { choose(.supporter) }
+      ) { choose(.sponsor) }
     case .star:
       WelcomeActionRow(
         symbol: "star", color: .orange, title: Text("Star on GitHub"),
@@ -175,6 +191,22 @@ struct SupportPromptSheet: View {
         symbol: "waveform.path.ecg", color: .teal, title: Text("Send performance data"),
         note: Text("You can turn it off in Settings › Storage."), trailingSymbol: "checkmark"
       ) { choose(.enableTelemetry) }
+    case .battery:
+      // Each sets one choice of Settings › Playback & Power; nothing opens.
+      WelcomeActionRow(
+        symbol: "macwindow.on.rectangle", color: .blue, title: Text("Pause while I use other apps"),
+        note: Text("Animates only while you look at the desktop."),
+        trailingSymbol: "checkmark"
+      ) { choose(.pauseWhileUsingOtherApps) }
+      WelcomeActionRow(
+        symbol: "dial.low", color: .orange, title: Text("Lower quality on battery"),
+        note: Text(verbatim: presenter.controller.batteryQuestionFacts.reducedQualityNote),
+        trailingSymbol: "checkmark"
+      ) { choose(.reduceQualityOnBattery) }
+      WelcomeActionRow(
+        symbol: "pause.circle", color: .green, title: Text("Always pause on battery"),
+        note: Text("Wallpapers hold still until you plug in."), trailingSymbol: "checkmark"
+      ) { choose(.alwaysPauseOnBattery) }
     case .subscriptions:
       // Steam's sign-in window, then the downloads; the sheet closes at once.
       WelcomeActionRow(
@@ -182,6 +214,11 @@ struct SupportPromptSheet: View {
         title: Text("Import my subscriptions"),
         note: Text("Opens Steam’s sign-in, then adds them to Downloads."), trailingSymbol: "chevron.right"
       ) { choose(.importSubscriptions) }
+    case .discord:
+      WelcomeActionRow(
+        symbol: "bubble.left.and.bubble.right", color: .indigo, title: Text("Join Discord"),
+        note: Text("Opens the invite to MMFoundation’s server."), trailingSymbol: "arrow.up.right"
+      ) { choose(.joinDiscord) }
     }
   }
 

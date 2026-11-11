@@ -2,6 +2,7 @@
 // distributions, emitter schedules, initializer draws, operator maths, the
 // prewarm, event followers, and the renderer records of a particle file. Every
 // case builds its fixture from JSON in the test; none depends on a local scene.
+#include <bit>
 #include "Fs/Fs.h"
 #include "Fs/MemBinaryStream.h"
 #include "Fs/VFS.h"
@@ -10,16 +11,21 @@
 #include "Interface/IShaderValueUpdater.h"
 #include "Particle/ParticleEmitter.h"
 #include "Particle/ParticleModify.h"
+#include "Particle/ParticleNoise.h"
 #include "Particle/ParticleSystem.h"
 #include "Particle/WPParticleRawGener.h"
 #include "Project/ProjectProperties.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
+#include "Scripting/ScriptEngine.hpp"
 #include "Scene/Scene.h"
 #include "Scene/SceneNode.h"
 #include "SpecTexs.hpp"
 #include "WPParticleParser.hpp"
+#include "Scene/Parse/ParticleLayerImage.hpp"
 #include "WPSceneParser.hpp"
 #include "support/byte_fs.hpp"
+#include "support/font_assets.hpp"
+#include "tex_fixtures.hpp"
 #include "wpscene/WPParticleObject.h"
 #include "wpscene/WPScene.h"
 
@@ -140,15 +146,18 @@ ParticleParseContext IgnoringSpeedOverride(std::shared_ptr<const wpscene::Partic
     return ctx;
 }
 
-/// Runs an operator once over `particles`.
+/// Runs an operator once over `particles`. The forces act over `dt` unless a
+/// scaled step is given (Wallpaper Engine's second timestep).
 template<std::size_t N>
 void RunOperator(const ParticleOperatorOp& op, std::array<Particle, N>& particles, double dt,
-                 const std::array<ParticleControlpoint, 8>& controlpoints = {}, double time = 0.0) {
+                 const std::array<ParticleControlpoint, 8>& controlpoints = {}, double time = 0.0,
+                 double scaled_dt = -1.0) {
     ParticleInfo info {
-        .particles     = particles,
-        .controlpoints = controlpoints,
-        .time          = time,
-        .time_pass     = dt,
+        .particles        = particles,
+        .controlpoints    = controlpoints,
+        .time             = time,
+        .time_pass        = dt,
+        .time_pass_scaled = scaled_dt < 0.0 ? dt : scaled_dt,
     };
     op(info);
 }
@@ -331,6 +340,23 @@ TEST(ParticleSpawn, BoxWithoutAMinimumIsUnchanged) {
     }
 }
 
+// WE's box emitter (0x14023A2B0 onwards) divides the velocity by the length of the random
+// spread scaled by `directions`. With every direction zero that length is 0: the velocity is
+// 0 x infinity, not a number, and the particle is never drawn (probe bisect-clock-dir: a
+// `directions 0 0 0` sprite draws nothing; `1 1 1` draws).
+TEST(ParticleSpawn, ABoxWithNoDirectionGivesItsParticlesNoUsableVelocity) {
+    const auto none = SpawnBurst({ { "name", "boxrandom" }, { "directions", "0 0 0" },
+                                   { "speedmin", 10 }, { "speedmax", 10 } }, 8);
+    ASSERT_EQ(none.size(), 8u);
+    for (const auto& p : none) EXPECT_FALSE(p.velocity.allFinite());
+    const auto some = SpawnBurst({ { "name", "boxrandom" }, { "directions", "1 0 0" },
+                                   { "speedmin", 10 }, { "speedmax", 10 } }, 8);
+    for (const auto& p : some) {
+        EXPECT_TRUE(p.velocity.allFinite());
+        EXPECT_NEAR(p.velocity.norm(), 10.0f, 1e-3f);
+    }
+}
+
 TEST(ParticleSpawn, ControlpointOrientationTurnsTheSpawnOfAnEmitterThatNamesIt) {
     std::array<ParticleControlpoint, 8> controlpoints {};
     controlpoints[2].offset       = linalg::Vector3d(100.0, 0.0, 0.0);
@@ -366,7 +392,7 @@ TEST(ParticleSpawn, ControlpointOrientationTurnsTheSpawnOfAnEmitterThatNamesIt) 
 }
 
 TEST(ParticleSpawn, EveryParticleCarriesItsOwnSeed) {
-    const auto particles = SpawnBurst({ { "name", "boxrandom" }, { "directions", "0 0 0" } }, 256);
+    const auto particles = SpawnBurst({ { "name", "boxrandom" }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" } }, 256);
     std::set<float> seeds;
     for (const auto& p : particles) {
         EXPECT_GE(p.seed, 0.0f);
@@ -383,7 +409,7 @@ TEST(ParticleSpawn, EveryParticleCarriesItsOwnSeed) {
 TEST(EmitterSchedule, OnePerFrameFollowsTheRateInsteadOfFiringEveryFrame) {
     // Rate 1 at 60 fps: one particle a second, and none on the first frame.
     const auto added = EmissionPerStep(
-        { { "name", "boxrandom" }, { "rate", 1 }, { "flags", 2 }, { "directions", "0 0 0" } },
+        { { "name", "boxrandom" }, { "rate", 1 }, { "flags", 2 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" } },
         130,
         1.0 / 60.0);
     EXPECT_EQ(added.front(), 0u);
@@ -395,7 +421,7 @@ TEST(EmitterSchedule, OnePerFrameFollowsTheRateInsteadOfFiringEveryFrame) {
 
 TEST(EmitterSchedule, OnePerFrameNeverEmitsMoreThanOneAFrameWhateverTheRate) {
     const auto added = EmissionPerStep(
-        { { "name", "boxrandom" }, { "rate", 600 }, { "flags", 2 }, { "directions", "0 0 0" } },
+        { { "name", "boxrandom" }, { "rate", 600 }, { "flags", 2 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" } },
         30,
         1.0 / 60.0);
     for (const auto n : added) EXPECT_EQ(n, 1u);
@@ -403,7 +429,7 @@ TEST(EmitterSchedule, OnePerFrameNeverEmitsMoreThanOneAFrameWhateverTheRate) {
 
 TEST(EmitterSchedule, TheRateDoesNotChangeWithoutTheFlag) {
     const auto added = EmissionPerStep(
-        { { "name", "boxrandom" }, { "rate", 600 }, { "directions", "0 0 0" } }, 30, 1.0 / 60.0);
+        { { "name", "boxrandom" }, { "rate", 600 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" } }, 30, 1.0 / 60.0);
     for (const auto n : added) EXPECT_EQ(n, 10u);
 }
 
@@ -414,7 +440,7 @@ TEST(EmitterSchedule, ABurstRidesWithTheRateAndIsPaidForOutOfIt) {
     const auto added = EmissionPerStep({ { "name", "boxrandom" },
                                          { "rate", 10 },
                                          { "instantaneous", 5 },
-                                         { "directions", "0 0 0" } },
+                                         { "directions", "1 1 1" }, { "distancemax", "0 0 0" } },
                                        8,
                                        0.125 * 0.8);
     EXPECT_EQ(added[0], 6u);
@@ -428,7 +454,7 @@ TEST(EmitterSchedule, DelayHoldsBackTheFirstParticle) {
     const auto added = EmissionPerStep({ { "name", "boxrandom" },
                                          { "rate", 8 },
                                          { "delay", 0.5 },
-                                         { "directions", "0 0 0" } },
+                                         { "directions", "1 1 1" }, { "distancemax", "0 0 0" } },
                                        8,
                                        0.125);
     for (int i = 0; i < 4; ++i) EXPECT_EQ(added[i], 0u) << i;
@@ -439,7 +465,7 @@ TEST(EmitterSchedule, DurationStopsTheEmitterForGood) {
     const auto added = EmissionPerStep({ { "name", "boxrandom" },
                                          { "rate", 8 },
                                          { "duration", 1.0 },
-                                         { "directions", "0 0 0" } },
+                                         { "directions", "1 1 1" }, { "distancemax", "0 0 0" } },
                                        16,
                                        0.125);
     EXPECT_EQ(std::accumulate(added.begin(), added.begin() + 8, std::size_t { 0 }), 8u);
@@ -451,7 +477,7 @@ TEST(EmitterSchedule, DurationCountsOnlyAfterTheDelay) {
                                          { "rate", 8 },
                                          { "delay", 0.5 },
                                          { "duration", 0.5 },
-                                         { "directions", "0 0 0" } },
+                                         { "directions", "1 1 1" }, { "distancemax", "0 0 0" } },
                                        16,
                                        0.125);
     EXPECT_EQ(std::accumulate(added.begin(), added.begin() + 4, std::size_t { 0 }), 0u);
@@ -463,7 +489,7 @@ TEST(EmitterSchedule, PeriodicEmissionWorksInWindowsSeparatedByPauses) {
     // Windows of 0.6 s and pauses of 0.6 s at a step of 0.25: four steps emit
     // (the window opens, then runs down through zero), two are paused.
     const json fields {
-        { "name", "boxrandom" }, { "rate", 4 }, { "flags", 4 }, { "directions", "0 0 0" },
+        { "name", "boxrandom" }, { "rate", 4 }, { "flags", 4 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" },
         { "minperiodicduration", 0.6 }, { "maxperiodicduration", 0.6 },
         { "minperiodicdelay", 0.6 }, { "maxperiodicdelay", 0.6 },
     };
@@ -474,7 +500,7 @@ TEST(EmitterSchedule, PeriodicEmissionWorksInWindowsSeparatedByPauses) {
 
 TEST(EmitterSchedule, PeriodicWindowCapsTheRateEmissionsButNotTheBurst) {
     const json fields {
-        { "name", "boxrandom" }, { "rate", 40 }, { "flags", 4 }, { "directions", "0 0 0" },
+        { "name", "boxrandom" }, { "rate", 40 }, { "flags", 4 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" },
         { "minperiodicduration", 0.6 }, { "maxperiodicduration", 0.6 },
         { "minperiodicdelay", 0.6 }, { "maxperiodicdelay", 0.6 },
         { "maxtoemitperperiod", 3 },
@@ -487,7 +513,7 @@ TEST(EmitterSchedule, PeriodicWindowCapsTheRateEmissionsButNotTheBurst) {
 
 TEST(EmitterSchedule, PeriodicBurstIsRearmedAtTheStartOfEveryWindow) {
     const json fields {
-        { "name", "boxrandom" }, { "rate", 0 }, { "flags", 4 }, { "directions", "0 0 0" },
+        { "name", "boxrandom" }, { "rate", 0 }, { "flags", 4 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" },
         { "instantaneous", 5 },
         { "minperiodicduration", 0.6 }, { "maxperiodicduration", 0.6 },
         { "minperiodicdelay", 0.6 }, { "maxperiodicdelay", 0.6 },
@@ -503,7 +529,7 @@ TEST(EmitterSchedule, ABurstHeldBackByAZeroCountMultiplierIsStillOwedWhenItRises
     over->count   = 0.0f;
     auto op = WPParticleParser::genParticleEmittOp(
         ParseEmitter({ { "name", "boxrandom" }, { "rate", 0 }, { "instantaneous", 5 },
-                       { "directions", "0 0 0" } }),
+                       { "directions", "1 1 1" }, { "distancemax", "0 0 0" } }),
         false, over);
     std::vector<Particle>       particles;
     std::vector<ParticleInitOp> initializers { [](Particle& p, double) { PM::InitLifetime(p, 1000.0f); } };
@@ -520,7 +546,7 @@ TEST(EmitterSchedule, AnEmitterWithNoRateAndNoWindowFiresItsBurstOnce) {
     const auto added = EmissionPerStep({ { "name", "boxrandom" },
                                          { "rate", 0 },
                                          { "instantaneous", 7 },
-                                         { "directions", "0 0 0" } },
+                                         { "directions", "1 1 1" }, { "distancemax", "0 0 0" } },
                                        4,
                                        0.1);
     EXPECT_EQ(added[0], 7u);
@@ -539,7 +565,7 @@ TEST(EmitterSchedule, EachInstanceOfASubsystemRunsItsOwnSchedule) {
                                 ParticleSubSystem::SpawnType::EVENT_SPAWN,
                                 [](const Particle&, const ParticleRawGenSpec&) {});
     subsystem.AddEmitter(WPParticleParser::genParticleEmittOp(ParseEmitter(
-        { { "name", "boxrandom" }, { "rate", 0 }, { "instantaneous", 3 }, { "directions", "0 0 0" } })));
+        { { "name", "boxrandom" }, { "rate", 0 }, { "instantaneous", 3 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" } })));
     subsystem.AddInitializer([](Particle& p, double) { PM::InitLifetime(p, 100.0f); });
 
     auto* first = subsystem.QueryNewInstance();
@@ -1300,6 +1326,7 @@ TEST(Movement, FlagOneKeepsGravityAlignedToTheScreenOnATurnedLayer) {
         .controlpoints = controlpoints,
         .time          = 0.0,
         .time_pass     = 1.0,
+        .time_pass_scaled = 1.0,
     };
     // The layer is turned a quarter of a turn about z: world down is local +x.
     info.world_to_local = linalg::AngleAxisd(-M_PI / 2.0, linalg::Vector3d::UnitZ()).toRotationMatrix();
@@ -1876,6 +1903,22 @@ TEST(ControlpointOperators, MaintainDistanceToAControlpointPullsOntoTheShell) {
     EXPECT_NEAR(particles[0].position.x(), 15.0f, 1.0e-4f);
 }
 
+TEST(ControlpointOperators, MaintainDistanceIsMeasuredInTheControlpointsFrame) {
+    // A world-space system's control point carries its layer's matrix (here a
+    // scale of 0.5 and a quarter turn): Wallpaper Engine measures the distance
+    // through that matrix's inverse (kernel 0xB), so the shell is 0.5 · 10 away.
+    const auto op = MakeOperator({ { "name", "maintaindistancetocontrolpoint" }, { "distance", 10.0 } });
+    std::array<ParticleControlpoint, 8> controlpoints {};
+    controlpoints[0].has_world_linear = true;
+    controlpoints[0].world_linear << 0.0, -0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.5;
+    std::array<Particle, 2> particles { LivingParticle(), LivingParticle() };
+    particles[0].position = { 8.0f, 0.0f, 0.0f };
+    particles[1].position = { 0.0f, -2.0f, 0.0f };
+    RunOperator(op, particles, 0.1, controlpoints);
+    EXPECT_NEAR(particles[0].position.x(), 5.0f, 1.0e-4f);
+    EXPECT_NEAR(particles[1].position.y(), -5.0f, 1.0e-4f);
+}
+
 TEST(Collision, PlaneBouncesSlidesStopsAndDeletes) {
     struct Case { const char* behavior; float vx; float vy; bool alive; };
     const Case cases[] = {
@@ -2017,6 +2060,114 @@ TEST(Collision, FlagOneCentresASphereOnTheControlpointAndIgnoresItsOwnOrigin) {
     EXPECT_NEAR(particles[2].velocity.x(), 1.0f, 1.0e-6f);
 }
 
+namespace {
+/// One collision step with a scene canvas and scene-to-particle matrix.
+template<std::size_t N>
+void RunCollision(const ParticleOperatorOp& op, std::array<Particle, N>& particles,
+                  linalg::Vector2d canvas = { 0.0, 0.0 },
+                  const linalg::Matrix4d& scene_to_local = linalg::Matrix4d::Identity()) {
+    const std::array<ParticleControlpoint, 8> points {};
+    ParticleInfo info { .particles = particles, .controlpoints = points, .time = 0.0, .time_pass = 0.1,
+                        .time_pass_scaled = 0.1 };
+    info.canvas         = canvas;
+    info.scene_to_local = scene_to_local;
+    op(info);
+}
+} // namespace
+
+TEST(Collision, FlagTwoStopsTheRotationOfWhatEveryKindHits) {
+    // Every response thunk has a flags & 2 variant that zeroes the angular
+    // velocity of the particles it hits (sub_14024F5E0, F-D13.md).
+    const json kinds[] = {
+        { { "name", "collisionplane" }, { "plane", "0 1 0" }, { "distance", 0.0 } },
+        { { "name", "collisionsphere" }, { "radius", 10.0 }, { "origin", "0 0 0" } },
+    };
+    for (auto record : kinds) {
+        for (int flags : { 0, 2 }) {
+            record["flags"] = flags;
+            std::array<Particle, 1> particles { LivingParticle() };
+            particles[0].position        = { 1.0f, -1.0f, 0.0f };
+            particles[0].angularVelocity = { 0.0f, 0.0f, 3.0f };
+            RunCollision(MakeOperator(record), particles);
+            EXPECT_FLOAT_EQ(particles[0].angularVelocity.z(), flags == 2 ? 0.0f : 3.0f) << record.dump();
+        }
+    }
+}
+
+TEST(Collision, BoundsKeepParticlesOnTheCanvasAndTheLastPlaneBehindWins) {
+    const auto op = MakeOperator({ { "name", "collisionbounds" }, { "collisionbehavior", "slide" } });
+    std::array<Particle, 3> particles { LivingParticle(), LivingParticle(), LivingParticle() };
+    particles[0].position = { -5.0f, 20.0f, 0.0f };
+    particles[0].velocity = { -2.0f, 1.0f, 0.0f };
+    particles[1].position = { 120.0f, 60.0f, 0.0f }; // right of and above the canvas: the top plane wins
+    particles[2].position = { 50.0f, 25.0f, 0.0f };
+    RunCollision(op, particles, { 100.0, 50.0 });
+    EXPECT_NEAR(particles[0].position.x(), 0.0f, 1e-5f);
+    EXPECT_NEAR(particles[0].velocity.x(), 0.0f, 1e-5f);
+    EXPECT_NEAR(particles[0].velocity.y(), 1.0f, 1e-5f);
+    EXPECT_NEAR(particles[1].position.x(), 120.0f, 1e-5f);
+    EXPECT_NEAR(particles[1].position.y(), 50.0f, 1e-5f);
+    EXPECT_NEAR(particles[2].position.x(), 50.0f, 1e-6f);
+
+    // A layer at (10, 0): the canvas is measured in the particles' own frame.
+    linalg::Matrix4d to_local = linalg::Matrix4d::Identity();
+    to_local(0, 3)            = -10.0;
+    std::array<Particle, 1> shifted { LivingParticle() };
+    shifted[0].position = { -12.0f, 20.0f, 0.0f };
+    RunCollision(op, shifted, { 100.0, 50.0 }, to_local);
+    EXPECT_NEAR(shifted[0].position.x(), -10.0f, 1e-5f);
+}
+
+TEST(Collision, ACollisionBoxDoesNothingAsInWallpaperEngine) {
+    const auto op = MakeOperator({ { "name", "collisionbox" }, { "size", "10 10 10" } });
+    std::array<Particle, 1> particles { LivingParticle() };
+    particles[0].position = { 1.0f, 2.0f, 0.0f };
+    particles[0].velocity = { 1.0f, 0.0f, 0.0f };
+    RunCollision(op, particles);
+    EXPECT_FLOAT_EQ(particles[0].position.x(), 1.0f);
+    EXPECT_FLOAT_EQ(particles[0].velocity.x(), 1.0f);
+}
+
+TEST(Collision, AQuadStopsOnlyWhatCrossesItsFrontWithinItsSize) {
+    const auto op = MakeOperator({ { "name", "collisionquad" }, { "origin", "0 0 0" }, { "plane", "0 1 0" },
+                                   { "size", "20 20" }, { "collisionbehavior", "stop" } });
+    std::array<Particle, 3> particles { LivingParticle(), LivingParticle(), LivingParticle() };
+    for (auto& p : particles) p.velocity = { 0.0f, -5.0f, 0.0f };
+    particles[0].prev_position = { 0.0f, 1.0f, 0.0f };
+    particles[0].position      = { 0.0f, -1.0f, 0.0f };
+    particles[1].prev_position = { 30.0f, 1.0f, 0.0f }; // outside the quad's extent
+    particles[1].position      = { 30.0f, -1.0f, 0.0f };
+    particles[2].prev_position = { 0.0f, -2.0f, 0.0f }; // already behind it
+    particles[2].position      = { 0.0f, -1.0f, 0.0f };
+    RunCollision(op, particles);
+    EXPECT_NEAR(particles[0].position.y(), 0.05f, 1e-5f); // pushed out by 1.05 x depth
+    EXPECT_FLOAT_EQ(particles[0].velocity.y(), 0.0f);
+    EXPECT_FLOAT_EQ(particles[1].position.y(), -1.0f);
+    EXPECT_FLOAT_EQ(particles[2].velocity.y(), -5.0f);
+}
+
+TEST(Collision, AModelCapsulePushesAParticleOutToItsSurface) {
+    ParticleParseContext ctx;
+    ctx.over  = NoOverride();
+    ctx.links = std::make_shared<ParticleLayerLinks>();
+    const auto op = MakeOperatorIn({ { "name", "collisionmodel" }, { "collisionbehavior", "stop" } }, ctx);
+    ASSERT_EQ(ctx.links->slots.size(), 1u);
+    EXPECT_EQ(ctx.links->slots[0].kind, ParticleLayerLinks::Kind::CollisionModel);
+    std::array<Particle, 2> particles { LivingParticle(), LivingParticle() };
+    particles[0].position = { 5.0f, 2.0f, 0.0f };
+    particles[0].velocity = { 0.0f, -1.0f, 0.0f };
+    particles[1].position = { 5.0f, 20.0f, 0.0f };
+    RunCollision(op, particles); // no link resolved yet: nothing happens
+    EXPECT_FLOAT_EQ(particles[0].position.y(), 2.0f);
+    ctx.links->slots[0].model->fill = [](std::vector<ParticleCapsule>& out) {
+        out.push_back({ { 0.0, 0.0, 0.0 }, { 10.0, 0.0, 0.0 }, 4.0 });
+    };
+    RunCollision(op, particles);
+    EXPECT_NEAR(particles[0].position.y(), 4.0f, 1e-5f);
+    EXPECT_FLOAT_EQ(particles[0].velocity.y(), 0.0f);
+    EXPECT_FLOAT_EQ(particles[1].position.y(), 20.0f);
+}
+
 TEST(Defaults, ControlpointIndexAboveSixIsTheLastControlpoint) {
     wpscene::Emitter emitter = ParseEmitter({ { "name", "boxrandom" }, { "controlpoint", 12 } });
     EXPECT_EQ(emitter.controlpoint, 7);
@@ -2035,7 +2186,7 @@ TEST(AudioLevel, TheLoudestSelectedBandDecides) {
     audio::AudioSpectrumSnapshot spectrum;
     spectrum.average16[2] = 1.0f;
     auto op = WPParticleParser::genParticleEmittOp(
-        ParseEmitter({ { "name", "boxrandom" }, { "rate", 4 }, { "directions", "0 0 0" },
+        ParseEmitter({ { "name", "boxrandom" }, { "rate", 4 }, { "directions", "1 1 1" }, { "distancemax", "0 0 0" },
                        { "audioprocessingmode", 3 }, { "audioprocessingbounds", "0 1" },
                        { "audioprocessingexponent", 1 }, { "audioprocessingfrequencystart", 0 },
                        { "audioprocessingfrequencyend", 3 } }),
@@ -2065,7 +2216,7 @@ constexpr const char* kProbeFragment =
     "#if SPRITESHEETBLEND\nuniform float g_ProbeBlend; // {\"material\":\"probe blend\",\"default\":1}\n#endif\n"
     "#if THICKFORMAT\nuniform float g_ProbeThick; // {\"material\":\"probe thick\",\"default\":1}\n#endif\n"
     "varying vec2 v_TexCoord;\n"
-    "void main() {\n  gl_FragColor = texture(g_Texture0, v_TexCoord);\n"
+    "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
     "#if SPRITESHEETBLEND\n  gl_FragColor.r += g_ProbeBlend;\n#endif\n"
     "#if THICKFORMAT\n  gl_FragColor.g += g_ProbeThick;\n#endif\n}\n";
 
@@ -2087,7 +2238,7 @@ struct ParticleScene {
               "void main() { gl_Position = vec4(a_Position, 1.0); v_TexCoord = a_TexCoord; }\n" },
             { "/shaders/genericimage.frag",
               "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-              "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n" },
+              "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n" },
             { "/mat_probe.json",
               R"({"passes":[{"blending":"translucent","cullmode":"nocull","depthtest":"disabled","depthwrite":"disabled","shader":"comboprobe","textures":["a.tex"]}]})" },
             { "/shaders/comboprobe.vert", kProbeVertex },
@@ -2102,6 +2253,8 @@ struct ParticleScene {
         scene = WPSceneParser().Parse(SceneParseRequest {
                                           .scene_id           = "particle-parity",
                                           .project_properties = &properties,
+                                          // Ultra keeps the HDR pipeline the brightness override needs.
+                                          .quality            = SceneQuality { .post_processing = static_cast<int>(PostProcessing::Ultra) },
                                       },
                                       std::string(R"({
           "camera": {"center":[0,0,0], "eye":[0,0,1], "up":[0,1,0]},
@@ -2134,6 +2287,299 @@ std::string ParticleFile(const std::string& emitter, const std::string& extra = 
 std::string OneParticleObject(const std::string& extra = "") {
     return R"([{"id":1,"name":"layer","particle":"particle.json","visible":true,"origin":"320 180 0")" +
            (extra.empty() ? "" : "," + extra) + "}]";
+}
+
+TEST(LayerImage, ParticlesComeFromTheLinkedHiddenImageAndKeepItsColour) {
+    textest::Container texture(1, { textest::levelOf(4, 4, [&] {
+        textest::Blob pixels;
+        for (int i = 0; i < 16; ++i) pixels.insert(pixels.end(), { 64, 128, 192, 255 });
+        return pixels;
+    }()) });
+    texture.width = texture.mapWidth = texture.height = texture.mapHeight = 4;
+    texture.flags = textest::kClamp;
+    const auto bytes = textest::build(texture);
+    ParticleScene scene({ { "/particle.json", ParticleFile(R"({"name":"layerimage","instantaneous":4,"rate":0})", R"("maxcount":4)") },
+                          { "/image.json", R"({"material":"mat.json","width":4,"height":4})" },
+                          { "/materials/a.tex.tex", std::string(bytes.begin(), bytes.end()) } },
+                        R"([{"id":2,"name":"source","image":"image.json","origin":"200 120 0","visible":false},
+                             {"id":1,"name":"layer","particle":"particle.json","origin":"320 180 0", "dependencies":[{"id":2,"index":0,"type":"emitterimage"}]}])",
+                        R"("orthogonalprojection":{"width":640,"height":360},"bloom":false)");
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step();
+    ASSERT_EQ(scene.Sub().Instances().size(), 1u);
+    const auto particles = LiveParticles(*scene.Sub().Instances()[0]);
+    ASSERT_EQ(particles.size(), 4u);
+    for (const auto& p : particles) {
+        EXPECT_NEAR(p.position.x(), -120, 1e-4);
+        EXPECT_NEAR(p.position.y(), -60, 1e-4);
+        EXPECT_NEAR(p.color.x(), 64.0f / 255, 1e-5);
+        EXPECT_NEAR(p.color.y(), 128.0f / 255, 1e-5);
+        EXPECT_NEAR(p.color.z(), 192.0f / 255, 1e-5);
+        EXPECT_TRUE(p.velocity.isZero());
+    }
+}
+
+
+std::shared_ptr<Image> EmissionImage(int width, int height, std::array<uint8_t, 4> rgba) {
+    auto image = std::make_shared<Image>();
+    image->header.width = image->header.mapWidth = width;
+    image->header.height = image->header.mapHeight = height;
+    image->header.format = TextureFormat::RGBA8;
+    image->header.sample.wrapS = image->header.sample.wrapT = TextureWrap::CLAMP_TO_EDGE;
+    image->header.sample.minFilter = image->header.sample.magFilter = TextureFilter::LINEAR;
+    auto& slot = image->slots.emplace_back(); slot.width = width; slot.height = height;
+    auto& mip = slot.mipmaps.emplace_back(); mip.width = width; mip.height = height;
+    mip.size = width * height * 4;
+    mip.data = ImageDataPtr(new uint8_t[mip.size], [](uint8_t* p) { delete[] p; });
+    for (isize i = 0; i < mip.size; i += 4) std::copy(rgba.begin(), rgba.end(), mip.data.get() + i);
+    return image;
+}
+
+TEST(LayerImage, QuarterMapUsesTheShaderTapsAndAnInclusiveAlphaThreshold) {
+    ParticleLayerImageSource source;
+    source.available = true; source.extent = { 8, 8 };
+    auto image = EmissionImage(8, 8, { 0, 0, 0, 127 });
+    auto& pixels = image->slots[0].mipmaps[0].data;
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) {
+        pixels.get()[(y * 8 + x) * 4] = x * 16;
+        pixels.get()[(y * 8 + x) * 4 + 1] = y * 16;
+    }
+    source.surfaces.push_back({ .image = image });
+    source.Prepare(0, false);
+    ASSERT_EQ(source.samples.size(), 4u);
+    EXPECT_EQ(source.samples[0].colour, (std::array<uint8_t, 3> { 28, 28, 0 }));
+    EXPECT_EQ(source.samples[3].colour, (std::array<uint8_t, 3> { 84, 84, 0 }));
+    EXPECT_TRUE(source.LocalPosition(source.samples[0], linalg::Vector3d::Zero()).isApprox(linalg::Vector3d(-2, 2, 0)));
+    for (int i = 0; i < 64; ++i) pixels.get()[i * 4 + 3] = 126;
+    source.Prepare(1.01, true);
+    EXPECT_TRUE(source.samples.empty());
+}
+
+TEST(LayerImage, ContentRefreshIsOptInAndResizeAlwaysRebuildsTheMap) {
+    ParticleLayerImageSource source;
+    source.available = true;
+    auto current = EmissionImage(8, 8, { 255, 0, 0, 255 });
+    source.surfaces.resize(1);
+    source.refresh = [&current](ParticleLayerImageSource& s) { s.surfaces[0].image = current; };
+    source.Prepare(0, false);
+    ASSERT_EQ(source.samples.size(), 4u);
+    current = EmissionImage(8, 8, { 0, 0, 255, 255 });
+    source.Prepare(0.9, true);
+    EXPECT_EQ(source.samples[0].colour[0], 255);
+    source.Prepare(2, false);
+    EXPECT_EQ(source.samples[0].colour[0], 255) << "without the flag, a same-size image keeps its map";
+    source.Prepare(2.1, true);
+    EXPECT_EQ(source.samples[0].colour[2], 255);
+    current = EmissionImage(4, 4, { 0, 255, 0, 255 });
+    source.Prepare(2.2, false);
+    ASSERT_EQ(source.samples.size(), 1u);
+    EXPECT_EQ(source.samples[0].colour[1], 255);
+}
+
+TEST(LayerImage, DownsamplingUsesTheSourcePointFilterAndMipLevels) {
+    ParticleLayerImageSource point;
+    point.available = true;
+    auto image = EmissionImage(8, 8, { 0, 0, 0, 255 });
+    image->header.sample.minFilter = image->header.sample.magFilter = TextureFilter::NEAREST;
+    for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x)
+        image->slots[0].mipmaps[0].data.get()[(y * 8 + x) * 4] = x * 16;
+    point.surfaces.push_back({ .image = image });
+    point.Prepare(0, false);
+    ASSERT_EQ(point.samples.size(), 4u);
+    EXPECT_EQ(point.samples[0].colour[0], 32);
+
+    ParticleLayerImageSource mipmapped;
+    mipmapped.available = true;
+    image = EmissionImage(8, 8, { 255, 0, 0, 255 });
+    auto middle = EmissionImage(4, 4, { 0, 255, 0, 255 });
+    auto last = EmissionImage(2, 2, { 0, 0, 255, 255 });
+    image->slots[0].mipmaps.push_back(std::move(middle->slots[0].mipmaps[0]));
+    image->slots[0].mipmaps.push_back(std::move(last->slots[0].mipmaps[0]));
+    mipmapped.surfaces.push_back({ .image = image });
+    mipmapped.Prepare(0, false);
+    ASSERT_EQ(mipmapped.samples.size(), 4u);
+    EXPECT_EQ(mipmapped.samples[0].colour, (std::array<uint8_t, 3> { 0, 0, 255 }))
+        << "quarter-size sampling has a four-texel footprint, so reads mip 2";
+}
+
+TEST(LayerImage, EmissionPositionsUseThePackedPixelCoordinates) {
+    ParticleLayerImageSource source;
+    source.available = true;
+    source.extent = { 24, 20 };
+    source.surfaces.push_back({ .image = EmissionImage(12, 10, { 255, 255, 255, 255 }) });
+    source.Prepare(0, false);
+    ASSERT_EQ(source.samples.size(), 6u);
+    // sub_1401D3AE0 packs signed integer x/y, both stepped by source width / map width.
+    // The last two rows of a height not divisible by four therefore are not symmetric.
+    EXPECT_TRUE(source.LocalPosition(source.samples.front(), linalg::Vector3d::Zero()).isApprox(linalg::Vector3d(-8, 6, 0)));
+    EXPECT_TRUE(source.LocalPosition(source.samples.back(), linalg::Vector3d::Zero()).isApprox(linalg::Vector3d(8, -2, 0)));
+}
+
+TEST(LayerImage, AQuarterImageProducerRunsOnlyWhenTheMapNeedsNewPixels) {
+    ParticleLayerImageSource source;
+    source.available = true; source.extent = { 8, 8 };
+    source.surfaces.resize(1);
+    auto& surface = source.surfaces[0];
+    surface.downsampled = true;
+    surface.pixel_extent = { 8, 8 };
+    int builds = 0, releases = 0;
+    std::array<uint8_t, 4> colour { 255, 0, 0, 255 };
+    source.prepare_pixels = [&](ParticleLayerImageSource& s) {
+        ++builds;
+        s.surfaces[0].image = EmissionImage(s.surfaces[0].pixel_extent[0] / 4,
+                                           s.surfaces[0].pixel_extent[1] / 4, colour);
+    };
+    source.release_pixels = [&](ParticleLayerImageSource& s) { ++releases; s.surfaces[0].image.reset(); };
+    source.Prepare(0, false);
+    EXPECT_EQ(builds, 1); EXPECT_EQ(releases, 1);
+    ASSERT_EQ(source.samples.size(), 4u) << "a quarter image must not be downsampled again";
+    EXPECT_TRUE(source.LocalPosition(source.samples.front(), linalg::Vector3d::Zero()).isApprox(linalg::Vector3d(-2, 2, 0)));
+    EXPECT_EQ(surface.image, nullptr) << "the pixel buffer is temporary, the emission entries retain the result";
+    colour = { 0, 0, 255, 255 };
+    source.Prepare(0.5, true);
+    source.Prepare(2, false);
+    EXPECT_EQ(builds, 1);
+    EXPECT_EQ(source.samples[0].colour[0], 255);
+    source.Prepare(2.1, true);
+    EXPECT_EQ(builds, 2); EXPECT_EQ(releases, 2);
+    EXPECT_EQ(source.samples[0].colour[2], 255);
+    surface.pixel_extent = { 12, 4 };
+    source.Prepare(2.2, false);
+    EXPECT_EQ(builds, 3); EXPECT_EQ(releases, 3);
+    EXPECT_EQ(source.samples.size(), 3u);
+    colour[3] = 126;
+    source.Prepare(3.3, true);
+    EXPECT_TRUE(source.samples.empty());
+}
+
+TEST(LayerImage, EncodedVideoPayloadsAreNotSampledAsRgbaPixels) {
+    auto image = EmissionImage(4, 4, { 255, 255, 255, 255 });
+    image->header.isVideo = true;
+    ParticleLayerImageSource source;
+    source.available = true;
+    source.surfaces.push_back({ .image = image });
+    source.Prepare(0, false);
+    EXPECT_TRUE(source.samples.empty());
+}
+
+TEST(LayerImage, OpacityMaskAndPuppetPaletteAffectTheEmittedPoints) {
+    ParticleLayerImageSource source;
+    source.available = true;
+    ParticleImageSurface surface;
+    surface.image = EmissionImage(4, 4, { 255, 255, 255, 255 });
+    surface.opacity = EmissionImage(4, 4, { 126, 0, 0, 255 });
+    ParticleImageTriangle triangle;
+    triangle[0].uv = { 0, 0 }; triangle[0].position = { 0, 0, 0 };
+    triangle[1].uv = { 1, 0 }; triangle[1].position = { 4, 0, 0 };
+    triangle[2].uv = { 0, 1 }; triangle[2].position = { 0, 4, 0 };
+    triangle[0].bones[0] = 0; triangle[0].weights[0] = 1;
+    for (int v : { 1, 2 }) { triangle[v].bones[0] = 1; triangle[v].weights[0] = 1; }
+    surface.triangles.push_back(triangle);
+    source.surfaces.push_back(surface);
+    std::array<linalg::Affine3f, 2> bones { linalg::Affine3f::Identity(), linalg::Affine3f::Identity() };
+    bones[1].translate(linalg::Vector3f(10, 0, 0));
+    source.palette = [&bones]() { return std::span<const linalg::Affine3f>(bones); };
+    source.Prepare(0, false);
+    EXPECT_TRUE(source.samples.empty());
+    source.surfaces[0].opacity = EmissionImage(4, 4, { 255, 0, 0, 255 });
+    source.Prepare(1.1, true);
+    ASSERT_EQ(source.samples.size(), 1u);
+    EXPECT_TRUE(source.LocalPosition(source.samples[0], { 1, 0, 0 }).isApprox(linalg::Vector3d(13, 2, 0)));
+    bones[1].translate(linalg::Vector3f(10, 0, 0));
+    EXPECT_TRUE(source.LocalPosition(source.samples[0], { 1, 0, 0 }).isApprox(linalg::Vector3d(23, 2, 0)))
+        << "the current cached pose is read without rebuilding the emission map";
+}
+
+TEST(LayerImage, FlagsPlaceOffsetsBeforeInitializersAndInheritUnscaledFrameMotion) {
+    auto links = std::make_shared<ParticleLayerLinks>();
+    auto spawn = std::make_shared<ParticleSpawnContext>();
+    auto op = WPParticleParser::genParticleEmittOp(ParseEmitter({ { "name", "layerimage" }, { "rate", 10 },
+        { "flags", 0xD0002 }, { "offsetmin", "1 2 3" }, { "offsetmax", "1 2 3" },
+        { "speedmin", 0.5 }, { "speedmax", 0.5 } }), false, nullptr, {}, spawn, links);
+    ASSERT_EQ(links->slots.size(), 1u);
+    auto source = std::make_shared<ParticleLayerImageSource>();
+    source->available = true; source->extent = { 4, 4 };
+    source->surfaces.push_back({ .image = EmissionImage(4, 4, { 64, 128, 192, 255 }) });
+    double x = 20;
+    source->refresh = [&x](ParticleLayerImageSource& s) { s.world(0, 3) = x; };
+    links->slots[0].image->source = source;
+    spawn->scene_to_local(0, 3) = -10;
+    spawn->frame_time = 0.4; spawn->scene_frame_time = 0.1;
+    std::vector<Particle> particles;
+    std::vector<ParticleInitOp> initializers { [](Particle& p, double) {
+        EXPECT_NEAR(p.position.x(), p.velocity.x() == 0 ? 11 : 21, 1e-5);
+        PM::InitLifetime(p, 100);
+        PM::ChangeVelocity(p, linalg::Vector3d(3, 0, 0));
+        PM::MutiplyInitColor(p, 0.5, 1, 1);
+    } };
+    op(particles, initializers, 10, 0.4, {});
+    ASSERT_EQ(particles.size(), 1u);
+    EXPECT_NEAR(particles.back().position.y(), 2, 1e-5);
+    EXPECT_NEAR(particles.back().position.z(), 3, 1e-5);
+    EXPECT_NEAR(particles.back().color.x(), 32.0 / 255, 1e-5);
+    EXPECT_NEAR(particles.back().velocity.x(), 3, 1e-5);
+    x = 30; spawn->layer_time = 0.1;
+    op(particles, initializers, 10, 0.4, {});
+    ASSERT_EQ(particles.size(), 2u);
+    EXPECT_NEAR(particles.back().velocity.x(), 53, 1e-5) << "10 / scene dt 0.1 * speed 0.5, then initializer";
+    spawn->layer_time = 0.2;
+    initializers = { [](Particle& p, double) { PM::InitLifetime(p, 100); } };
+    op(particles, initializers, 10, 0.4, {});
+    EXPECT_NEAR(particles.back().velocity.x(), 0, 1e-5) << "a layer that stopped moving transfers no old motion";
+}
+
+TEST(LayerImage, ClearingTheColourFlagKeepsTheInitializersColour) {
+    auto links = std::make_shared<ParticleLayerLinks>();
+    auto op = WPParticleParser::genParticleEmittOp(ParseEmitter({ { "name", "layerimage" },
+        { "instantaneous", 1 }, { "rate", 0 }, { "flags", 0 } }), false, nullptr, {}, {}, links);
+    ASSERT_EQ(links->slots.size(), 1u);
+    auto source = std::make_shared<ParticleLayerImageSource>();
+    source->available = true; source->extent = { 4, 4 };
+    source->surfaces.push_back({ .image = EmissionImage(4, 4, { 255, 0, 0, 255 }) });
+    links->slots[0].image->source = source;
+    std::vector<Particle> particles;
+    std::vector<ParticleInitOp> initializers { [](Particle& p, double) {
+        PM::InitLifetime(p, 100);
+        PM::MutiplyInitColor(p, 0.25, 0.5, 0.75);
+    } };
+    op(particles, initializers, 10, 0, {});
+    ASSERT_EQ(particles.size(), 1u);
+    EXPECT_TRUE(particles[0].color.isApprox(linalg::Vector3f(0.25f, 0.5f, 0.75f)));
+}
+
+TEST(LayerImage, TwoChannelPicturesKeepGreenAndHaveOpaqueAlpha) {
+    auto image = EmissionImage(4, 4, { 0, 0, 0, 0 });
+    image->header.format = TextureFormat::RG8;
+    auto& mip = image->slots[0].mipmaps[0];
+    mip.size = 32;
+    for (int i = 0; i < 16; ++i) { mip.data.get()[i * 2] = 32; mip.data.get()[i * 2 + 1] = 96; }
+    ParticleLayerImageSource source;
+    source.available = true; source.extent = { 4, 4 };
+    source.surfaces.push_back({ .image = image });
+    source.Prepare(0, false);
+    ASSERT_EQ(source.samples.size(), 1u) << "green is not the alpha channel";
+    EXPECT_EQ(source.samples[0].colour, (std::array<uint8_t, 3> { 32, 96, 0 }));
+    EXPECT_EQ(TexelRgba(mip, TextureFormat::RG8, -1, 0), (std::array<uint8_t, 4> { 0, 0, 0, 0 }));
+    EXPECT_EQ(TexelRgba(mip, TextureFormat::RG8, 4, 0), (std::array<uint8_t, 4> { 0, 0, 0, 0 }));
+}
+
+TEST(LayerImage, ATextLayerSuppliesItsPublishedGlyphPixels) {
+    for (const auto text : { "M", " " }) {
+        SCOPED_TRACE(text);
+        json objects = json::array({
+            { { "id", 2 }, { "name", "caption" }, { "text", text }, { "font", "Arial" },
+              { "pointsize", 64 }, { "origin", "200 120 0" }, { "visible", false } },
+            { { "id", 1 }, { "name", "layer" }, { "particle", "particle.json" }, { "origin", "320 180 0" },
+              { "dependencies", json::array({ { { "id", 2 }, { "index", 0 }, { "type", "emitterimage" } } }) } } });
+        ParticleScene scene(test::WithFontAssets({ { "/particle.json", ParticleFile(R"({"name":"layerimage","instantaneous":8,"rate":0})", R"("maxcount":8)") } }),
+                            objects.dump(), R"("orthogonalprojection":{"width":640,"height":360},"bloom":false)");
+        ASSERT_NE(scene.scene, nullptr);
+        scene.Step();
+        ASSERT_EQ(scene.Sub().Instances().size(), 1u);
+        const auto particles = LiveParticles(*scene.Sub().Instances()[0]);
+        EXPECT_EQ(particles.size(), std::string_view(text) == "M" ? 8u : 0u);
+        for (const auto& particle : particles) EXPECT_TRUE(particle.position.allFinite());
+    }
 }
 
 TEST(Prewarm, TheFirstFrameAlreadyShowsASystemThatHasLivedForItsStartTime) {
@@ -2218,6 +2664,59 @@ TEST(Prewarm, AnEventChildStartsItsInstancesAlreadyAlong) {
     EXPECT_GE(child_age("1"), 19u);
 }
 
+// An `eventdeath` child: WE gives the system it makes for a dying particle running emitters
+// (0x140236CD0 clears their stop bit) and never stops them for the death it was born of.
+std::size_t LiveEventDeathChildren(ParticleScene& scene) {
+    std::size_t live = 0;
+    for (const auto& instance : scene.Sub().Children().at(0)->Instances()) live += LiveParticles(*instance).size();
+    return live;
+}
+
+std::map<std::string, std::string> EventDeathFiles(const std::string& child_emitter, const std::string& child_extra,
+                                                   const std::string& child_lifetime = "100") {
+    return { { "/particle.json",
+               ParticleFile(R"({"name":"sphererandom","id":1,"rate":0,"instantaneous":1,"distancemax":0})",
+                            R"("maxcount":1,"children":[{"name":"child.json","type":"eventdeath","maxcount":1}])",
+                            R"({"name":"lifetimerandom","min":0.1,"max":0.1})") },
+             { "/child.json",
+               ParticleFile(child_emitter, child_extra,
+                            R"({"name":"lifetimerandom","min":)" + child_lifetime + R"(,"max":)" + child_lifetime + "}") } };
+}
+
+TEST(EventDeath, AChildBornOfAParticlesDeathKeepsEmittingWhereTheParticleDied) {
+    ParticleScene scene(EventDeathFiles(R"({"name":"sphererandom","id":2,"rate":20,"distancemax":0})", R"("maxcount":100)"),
+                        OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step(60);
+    // The particle dies after 0.1 s; the child emits 20 a second for the remaining 0.9 s.
+    EXPECT_NEAR(static_cast<double>(LiveEventDeathChildren(scene)), 18.0, 2.0);
+}
+
+TEST(EventDeath, APrewarmedChildOfAnExpiredParticleStartsWithItsPrewarmedParticles) {
+    ParticleScene scene(EventDeathFiles(R"({"name":"sphererandom","id":2,"rate":20,"distancemax":0})",
+                                        R"("maxcount":100,"starttime":1)"),
+                        OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step(8);
+    EXPECT_GE(LiveEventDeathChildren(scene), 19u) << "one prewarmed second at 20 a second";
+}
+
+TEST(EventDeath, ABurstChildIsUsedAgainOnceItsBurstHasDied) {
+    auto files = EventDeathFiles(R"({"name":"sphererandom","id":2,"rate":0,"instantaneous":2,"distancemax":0})",
+                                 R"("maxcount":10)", "0.05");
+    // The parent particle is born again every 0.2 s and lives 0.1 s.
+    files["/particle.json"] =
+        ParticleFile(R"({"name":"sphererandom","id":1,"rate":5,"distancemax":0})",
+                     R"("maxcount":1,"children":[{"name":"child.json","type":"eventdeath","maxcount":1}])",
+                     R"({"name":"lifetimerandom","min":0.1,"max":0.1})");
+    ParticleScene scene(files, OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step(120);
+    const auto& instances = scene.Sub().Children().at(0)->Instances();
+    ASSERT_EQ(instances.size(), 1u);
+    EXPECT_GE(instances[0]->Generation(), 5u) << "each death takes the one instance again";
+}
+
 TEST(Prewarm, AStaticChildPrewarmsAtConstructionWithItsOwnStartTime) {
     ParticleScene scene(
         { { "/particle.json",
@@ -2270,7 +2769,7 @@ TEST(Prewarm, AStaticChildIsPrewarmedOnceItsLayerHasJoinedItsGroup) {
                          R"("maxcount":4,"starttime":0,"children":[{"name":"child.json","type":"static"}])") },
           { "/child.json",
             ParticleFile(R"({"name":"boxrandom","id":2,"rate":0,"instantaneous":1,"controlpoint":1,)"
-                         R"("directions":"0 0 0"})",
+                         R"("directions":"1 1 1","distancemax":"0 0 0"})",
                          R"("maxcount":4,"starttime":1,"controlpoint":[{"id":0},)"
                          R"({"id":1,"flags":2,"offset":"700 400 0"}])") } },
         R"([{"id":10,"name":"group","origin":"100 50 0","scale":"2 2 1","visible":true},)"
@@ -2506,12 +3005,11 @@ TEST(WorldSpace, AFollowerHangsWhereItsLayersMatrixPutsAWorldspaceParentsParticl
         for (int i = 0; i < 12; ++i) rig.parent->Emitt();
         ASSERT_EQ(rig.child->Instances().size(), 2u);
         const float anchored = rig.child->Instances()[1]->GetBoundedData().pos.x();
-        // The second parent particle is 100 out. In the layer's space that is
-        // already the follower's coordinate; in scene units it is 50 of them.
-        EXPECT_NEAR(anchored, world_space ? 50.0f : 100.0f, 1.0e-3f);
+        // A local child of a world parent inherits its simulation basis.
+        EXPECT_NEAR(anchored, 100.0f, 1.0e-3f);
         child_node->UpdateTrans();
         const linalg::Vector3d hung =
-            (child_node->ModelTrans() * linalg::Vector4d(anchored, 0.0, 0.0, 1.0)).head<3>();
+            (child_node->RenderTrans() * linalg::Vector4d(anchored, 0.0, 0.0, 1.0)).head<3>();
         EXPECT_NEAR(hung.x(), world_space ? 10.0 + 100.0 : 10.0 + 200.0, 1.0e-3);
     }
 }
@@ -2623,7 +3121,7 @@ TEST(ParseLevel, StartTimeIsAFractionOfASecond) {
 TEST(ParseLevel, TwoSizeInitializersOfOneFileScaleTheParticlesItSpawns) {
     // The falling-leaf preset: a size of 70 to 75, then 0.7 to 1 of it.
     ParticleScene scene({ { "/particle.json",
-                            ParticleFile(R"({"name":"boxrandom","id":1,"rate":0,"instantaneous":200,"directions":"0 0 0"})",
+                            ParticleFile(R"({"name":"boxrandom","id":1,"rate":0,"instantaneous":200,"directions":"1 1 1","distancemax":"0 0 0"})",
                                          R"("maxcount":256,"flags":0)",
                                          R"({"name":"lifetimerandom","min":100,"max":100},)"
                                          R"({"name":"sizerandom","min":70,"max":75},)"
@@ -2846,10 +3344,10 @@ std::map<std::string, std::string> HdrBloomStandIns() {
                              "varying vec2 v_TexCoord;\nvoid main() {\n"
                              "  gl_Position = vec4(a_Position, 1.0);\n  v_TexCoord = a_TexCoord;\n}\n";
     const std::string frag = "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                             "void main() {\n  gl_FragColor = texture(g_Texture0, v_TexCoord);\n}\n";
+                             "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n";
     std::map<std::string, std::string> files;
     for (const char* material : { "hdr_downsample_bloom", "hdr_downsample", "hdr_upsample",
-                                  "combine_hdr_upsample_linear" }) {
+                                  "combine_hdr_upsample" }) {
         files[std::string("/materials/util/") + material + ".json"] =
             R"({"passes":[{"shader":"bloom_stand_in","cullmode":"nocull","blending":"normal",)"
             R"("depthwrite":"disabled","depthtest":"disabled"}]})";
@@ -2913,6 +3411,32 @@ TEST(InstanceOverride, BoundControlpointAngleAndBrightnessFollowTheirPropertiesA
     float dimmest = 99.0f;
     for (const auto& p : LiveParticles(*scene.Sub().Instances()[0])) dimmest = std::min(dimmest, p.init.color.x());
     EXPECT_NEAR(dimmest, 1.0f, 1.0e-4f) << "and the ones born before it keep their colour";
+}
+
+TEST(InstanceOverride, AControlpointAngleKeyedWithATimelinePlaysIt) {
+    // The stock vortex orb preset turns its control point 1 by a looping timeline on
+    // `controlpointangle1` (no property, no script): the turn follows the scene clock.
+    auto files = HdrBloomStandIns();
+    files["/particle.json"] =
+        ParticleFile(R"({"name":"sphererandom","id":1,"rate":30,"distancemax":0})",
+                     R"("maxcount":64,"controlpoint":[{"id":0},{"id":1}])");
+    ParticleScene scene(
+        files,
+        OneParticleObject(R"("instanceoverride":{"id":1,"controlpointangle1":{"value":"0 0 0","animation":{)"
+                          R"("c0":[{"frame":0,"value":0},{"frame":10,"value":0}],)"
+                          R"("c1":[{"frame":0,"value":0},{"frame":10,"value":0}],)"
+                          R"("c2":[{"frame":0,"value":0},{"frame":10,"value":1.5707963}],)"
+                          R"("options":{"fps":10,"length":10,"mode":"loop"}}}})"));
+    ASSERT_NE(scene.scene, nullptr);
+    ASSERT_NE(scene.scene->runtime, nullptr);
+    // Half a second: frame 5 of the linear ramp, a turn of pi/4 about z.
+    for (int i = 0; i < 30; ++i) {
+        scene.scene->runtime->Tick(1.0 / 60.0);
+        scene.Step(1);
+    }
+    const auto points = scene.Sub().Controlpoints();
+    ASSERT_TRUE(points[1].has_rotation);
+    EXPECT_NEAR(points[1].rotation(1, 0), std::sin(0.785398), 0.05) << "the keyed angle turned the point";
 }
 
 TEST(InstanceOverride, TheSpeedOverrideScalesTheEmitterSpeedUnlessTheFileIgnoresIt) {
@@ -3141,7 +3665,7 @@ std::vector<double> AgesInSlotOrder(ParticleScene& scene) {
 bool StaysInBirthOrder(const std::string& renderers) {
     ParticleScene scene(
         { { "/particle.json",
-            ParticleFile(R"({"name":"boxrandom","id":1,"rate":60,"directions":"0 0 0"})",
+            ParticleFile(R"({"name":"boxrandom","id":1,"rate":60,"directions":"1 1 1","distancemax":"0 0 0"})",
                          R"("maxcount":8,"renderer":)" + renderers,
                          R"({"name":"lifetimerandom","min":0.06,"max":0.06})") } },
         OneParticleObject());
@@ -3326,10 +3850,200 @@ TEST(RopeGeometry, APlainRopeIsOneMorePiecePerPairThanItsSubdivisionAndThickInEv
     }
 }
 
+// A rope shader with a point geometry stage, the way WE's DX11 path draws ropes: the vertex
+// stage passes the piece record through and the geometry stage emits its strip.
+constexpr const char* kRopeGeometryVertex =
+    "attribute vec4 a_PositionVec4;\nattribute vec4 a_TexCoordVec4;\n"
+    "#if GS_ENABLED\nvarying vec3 v_EndPoint;\n"
+    "void main() { gl_Position = a_PositionVec4; v_EndPoint = a_TexCoordVec4.xyz; }\n"
+    "#else\nattribute vec4 a_TexCoordC4;\nvarying vec2 v_TexCoord;\n"
+    "void main() { gl_Position = vec4(mix(a_PositionVec4.xyz, a_TexCoordVec4.xyz, a_TexCoordC4.y), 1.0);\n"
+    "  v_TexCoord = a_TexCoordC4.xy; }\n#endif\n";
+// `declared` empty: WE's own bound, `4 + TRAILSUBDIVISION * 2`, with a pair of vertices for
+// each point the strip is subdivided at.
+std::string RopeGeometryStage(const std::string& declared = "") {
+    return "#ifndef TRAILSUBDIVISION\n#define TRAILSUBDIVISION 0\n#endif\n"
+           "in vec4 gl_Position;\nin vec3 v_EndPoint;\nout vec2 v_TexCoord;\nout vec4 gl_Position;\n"
+           "[maxvertexcount(" + (declared.empty() ? std::string("4 + TRAILSUBDIVISION * 2") : declared) +
+           ")]\nvoid main() {\n  PS_INPUT v;\n"
+           "  v.gl_Position = vec4(IN[0].gl_Position.xyz, 1.0); v.v_TexCoord = vec2(0.0, 0.0); OUT.Append(v);\n"
+           "  v.v_TexCoord = vec2(1.0, 0.0); OUT.Append(v);\n"
+           "#if TRAILSUBDIVISION != 0\n  for (int s = 0; s < TRAILSUBDIVISION; ++s) { OUT.Append(v); OUT.Append(v); }\n#endif\n"
+           "  v.gl_Position = vec4(IN[0].v_EndPoint, 1.0); v.v_TexCoord = vec2(0.0, 1.0); OUT.Append(v);\n"
+           "  v.v_TexCoord = vec2(1.0, 1.0); OUT.Append(v);\n}\n";
+}
+
+bool HasAttribute(SceneMesh& mesh, std::string_view name) {
+    const auto& attributes = mesh.GetVertexArray(0).Attributes();
+    return std::any_of(attributes.begin(), attributes.end(), [&](const auto& a) { return a.name == name; });
+}
+
+// The float `component` of attribute `name` on vertex `vertex`.
+float AttributeValue(SceneMesh& mesh, std::string_view name, std::size_t vertex, std::size_t component = 0) {
+    const auto& vertices = mesh.GetVertexArray(0);
+    const auto  offsets  = vertices.GetAttrOffsetMap();
+    const auto  found    = offsets.find(std::string(name));
+    if (found == offsets.end()) return std::nanf("");
+    return vertices.Data()[vertex * vertices.OneSize() + found->second.offset / sizeof(float) + component];
+}
+
+uint32_t IndexAt(const SceneIndexArray& array, std::size_t i) {
+    if (array.Width() == SceneIndexWidth::UInt32) return array.Data()[i];
+    return reinterpret_cast<const uint16_t*>(array.Data())[i];
+}
+
+// WE writes one record for each pair of particles and its geometry stage subdivides the
+// pair (0x1402308A0; `TRAILSUBDIVISION` from the renderer's `subdivision`, 0x1401D2340): the
+// record is drawn as `4 + 2 * subdivision` strip vertices, each naming the one it keeps, and
+// the strip's triangles as D3D draws them (every odd one with its first two swapped).
+TEST(RopeGeometry, ARopeShaderWithAGeometryStageDrawsEachPairAsTheStripItEmits) {
+    for (const int subdivision : { 0, 2 }) {
+        SCOPED_TRACE(subdivision);
+        ParticleScene scene(
+            { { "/particle.json",
+                ParticleFile(kThreeInABurst,
+                             R"("maxcount":8,"renderer":[{"name":"rope","subdivision":)" + std::to_string(subdivision) + "}]",
+                             R"({"name":"lifetimerandom","min":100,"max":100})", "mat_probe.json") },
+              { "/shaders/genericropeparticle.vert", kRopeGeometryVertex },
+              { "/shaders/genericropeparticle.geom", RopeGeometryStage() } },
+            OneParticleObject());
+        ASSERT_NE(scene.scene, nullptr);
+        scene.Step(2);
+        const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+        ASSERT_EQ(meshes.size(), 1u);
+        SceneMesh& mesh = *meshes[0];
+        EXPECT_TRUE(KindOf(mesh).rope);
+        EXPECT_TRUE(ActiveUniforms(mesh).count("g_ProbeThick")) << "the fragment stage is the author's";
+        ASSERT_TRUE(HasAttribute(mesh, WE_IN_GEOMETRYVERTEX)) << "each vertex names the stream vertex it keeps";
+        EXPECT_FALSE(HasAttribute(mesh, WE_IN_TEXCOORDC4)) << "the expanded quad corner is the geometry stage's job";
+        const std::size_t strip = 4 + 2 * static_cast<std::size_t>(subdivision);
+        const auto& indices = mesh.GetIndexArray(0);
+        ASSERT_EQ(indices.DrawIndexCount(), 2 * 3 * (strip - 2)) << "two pairs, one strip each";
+        for (std::size_t record = 0; record < 2; ++record) {
+            for (std::size_t k = 0; k < strip; ++k) {
+                EXPECT_EQ(AttributeValue(mesh, WE_IN_GEOMETRYVERTEX, record * strip + k), static_cast<float>(k))
+                    << "record " << record << " vertex " << k;
+            }
+            for (std::size_t t = 0; t + 2 < strip; ++t) {
+                const std::size_t at   = (record * (strip - 2) + t) * 3;
+                const uint32_t    base = static_cast<uint32_t>(record * strip + t);
+                const std::array<uint32_t, 3> want = t % 2 == 0 ? std::array<uint32_t, 3> { base, base + 1, base + 2 }
+                                                                : std::array<uint32_t, 3> { base + 1, base, base + 2 };
+                for (std::size_t c = 0; c < 3; ++c) EXPECT_EQ(IndexAt(indices, at + c), want[c]) << "triangle " << t;
+            }
+        }
+    }
+}
+
+// WE replaces only the stage that fails (dx11fallback.frag, sub_1400D5070): a rope whose
+// fragment stage does not compile keeps its geometry stage.
+TEST(RopeGeometry, AFragmentThatDoesNotCompileKeepsTheGeometryStage) {
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(kThreeInABurst, R"("maxcount":8,"renderer":[{"name":"rope","subdivision":0}])",
+                         R"({"name":"lifetimerandom","min":100,"max":100})", "mat_probe.json") },
+          { "/shaders/genericropeparticle.vert", kRopeGeometryVertex },
+          { "/shaders/genericropeparticle.geom", RopeGeometryStage() },
+          { "/shaders/genericropeparticle.frag",
+            "varying vec2 v_TexCoord;\nvoid main() { gl_FragColor = vec4(fract(v_TexCoord.y), 0.0, 0.0, 1.0); }\n" } },
+        OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step(2);
+    const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+    ASSERT_EQ(meshes.size(), 1u);
+    EXPECT_TRUE(HasAttribute(*meshes[0], WE_IN_GEOMETRYVERTEX)) << "the geometry stage stays";
+    EXPECT_FALSE(scene.scene->shader_fallbacks.empty()) << "the fragment was replaced";
+}
+
+// A scrolling rope's texture is measured against its file's first emitter rate times the
+// average of its lifetime bounds (probe rope-uv-v4: 8..16 counts as 12).
+TEST(RopeGeometry, AScrollingRopeIsMeasuredAgainstItsFilesRateAndAverageLifetime) {
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(R"({"name":"boxrandom","id":1,"rate":4,"distancemax":0})",
+                         R"("maxcount":64,"operator":[{"name":"movement"}],)"
+                         R"("renderer":[{"name":"rope","subdivision":0,"uvscrolling":true}])",
+                         R"({"name":"lifetimerandom","min":8,"max":16},)"
+                         R"({"name":"velocityrandom","min":"10 0 0","max":"10 0 0"})", "mat_probe.json") } },
+        OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step(60);
+    const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+    ASSERT_EQ(meshes.size(), 1u);
+    ASSERT_GT(meshes[0]->GetIndexArray(0).DrawIndexCount(), 0u);
+    EXPECT_FLOAT_EQ(AttributeValue(*meshes[0], WE_IN_TEXCOORDVEC4, 0, 3), 4.0f * 12.0f - 1.0f);
+}
+
+TEST(RopeGeometry, AGeometryStageThatCannotBeLoweredLeavesTheRopeOnItsVertexStage) {
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(kThreeInABurst, R"("maxcount":8,"renderer":[{"name":"rope","subdivision":0}])",
+                         R"({"name":"lifetimerandom","min":100,"max":100})", "mat_probe.json") },
+          { "/shaders/genericropeparticle.vert", kRopeGeometryVertex },
+          // A strip of five is not the four the generator supplies for each piece.
+          { "/shaders/genericropeparticle.geom", RopeGeometryStage("5") } },
+        OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step(2);
+    const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+    ASSERT_EQ(meshes.size(), 1u);
+    SceneMesh& mesh = *meshes[0];
+    EXPECT_FALSE(HasAttribute(mesh, WE_IN_GEOMETRYVERTEX));
+    ASSERT_TRUE(HasAttribute(mesh, WE_IN_TEXCOORDC4));
+    EXPECT_TRUE(scene.scene->shader_fallbacks.empty()) << "the author's own vertex path, not dx11fallback";
+    EXPECT_TRUE(ActiveUniforms(mesh).count("g_ProbeThick"));
+    EXPECT_EQ(AttributeValue(mesh, WE_IN_TEXCOORDC4, 0, 1), 1.0f) << "the quad corners are written as before";
+}
+
+// A rope trail's recording clock is WE's countdown (0x1402308A0): the first frame records,
+// and a recording resets it to the whole period, so points are a whole number of frames apart.
+std::string MovingTrailFile(const std::string& extra = "") {
+    return ParticleFile(R"({"name":"boxrandom","id":1,"rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                        R"("maxcount":1,"renderer":[{"name":"ropetrail","length":4,"segments":16,"subdivision":1}])" + extra,
+                        R"({"name":"lifetimerandom","min":100,"max":100},{"name":"velocityrandom","min":"20 0 0","max":"20 0 0"})",
+                        "mat_probe.json");
+}
+
+std::string WithMovement(std::string file) {
+    const auto at = file.rfind('}');
+    return file.insert(at, R"(,"operator":[{"name":"movement","drag":0}])");
+}
+
+TEST(RopeGeometry, ATrailRecordsOnItsFirstFrameAndThenAWholeNumberOfFramesApart) {
+    ParticleScene scene({ { "/particle.json", WithMovement(MovingTrailFile()) } }, OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    scene.Step(1, 1.0 / 15.0);
+    ASSERT_FALSE(scene.Sub().Instances().at(0)->Trails().empty());
+    EXPECT_EQ(scene.Sub().Instances().at(0)->Trails()[0].Count(), 2u)
+        << "the birth point and the first frame's recording";
+    scene.Step(40, 1.0 / 15.0);
+    const auto& trail = scene.Sub().Instances().at(0)->Trails()[0];
+    ASSERT_GE(trail.Count(), 8u);
+    // 0.25 s at 15 frames a second comes due on the fourth frame: 4/15 s at 20 units a second.
+    for (uint32_t age = 1; age < 6; ++age) {
+        const float gap = trail.At(age - 1).position.x() - trail.At(age).position.x();
+        EXPECT_NEAR(gap, 20.0f * 4.0f / 15.0f, 1e-3f) << "age " << age;
+    }
+}
+
+TEST(RopeGeometry, APrewarmedTrailStartsFromWhereItsParticleIs) {
+    ParticleScene scene({ { "/particle.json", WithMovement(MovingTrailFile(R"(,"starttime":2)")) } },
+                        OneParticleObject());
+    ASSERT_NE(scene.scene, nullptr);
+    ParticleInstance& instance = *scene.Sub().Instances().at(0);
+    const auto  particles = LiveParticles(instance);
+    ASSERT_EQ(particles.size(), 1u);
+    ASSERT_FALSE(instance.Trails().empty());
+    const auto& trail = instance.Trails()[0];
+    ASSERT_EQ(trail.Count(), 1u) << "the prewarm records no history";
+    const float anchor = instance.GetBoundedData().pos.x();
+    EXPECT_NEAR(trail.At(0).position.x(), particles[0].position.x() + anchor, 1e-3f);
+}
+
 TEST(RopeGeometry, ATrailRecordsItsSegmentsAndEncodesTheStripTheySubdivideInto) {
     ParticleScene scene(
         { { "/particle.json",
-            ParticleFile(R"({"name":"boxrandom","id":1,"rate":0,"instantaneous":1,"directions":"0 0 0"})",
+            ParticleFile(R"({"name":"boxrandom","id":1,"rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
                          R"("maxcount":4,"renderer":[{"name":"ropetrail","length":1,"segments":3,"subdivision":1}])",
                          R"({"name":"lifetimerandom","min":100,"max":100})", "mat_probe.json") } },
         OneParticleObject());
@@ -3342,11 +4056,13 @@ TEST(RopeGeometry, ATrailRecordsItsSegmentsAndEncodesTheStripTheySubdivideInto) 
     ASSERT_GE(var0->second.size(), 4u);
     EXPECT_FLOAT_EQ(var0->second[0], 3.0f) << "three recorded points";
     // Every recorded pair is drawn as subdivision + 1 = 2 pieces: a strip of 6.
-    EXPECT_FLOAT_EQ(var0->second[3], EncodeRopeTrailLength(6.0f, 1.0f));
-    EXPECT_NE(var0->second[3], EncodeRopeTrailLength(3.0f, 1.0f));
+    // WE's maximum count is the history less half a point (0x1402366F0).
+    EXPECT_FLOAT_EQ(var0->second[3], RopeTrailMaxCount(6.0f, 1.0f, false));
+    EXPECT_NE(var0->second[3], RopeTrailMaxCount(3.0f, 1.0f, false));
     const auto kind = KindOf(*meshes[0]);
     EXPECT_TRUE(kind.rope);
-    EXPECT_TRUE(kind.thick);
+    EXPECT_FALSE(kind.thick);
+    EXPECT_EQ(meshes[0]->GetVertexArray(0).OneSize(),24u);
     // Room for every particle's strip: 4 particles x 3 recorded points x 2 pieces.
     EXPECT_EQ(meshes[0]->GetIndexArray(0).QuadCapacity(), 4u * 3u * 2u);
 }
@@ -3569,5 +4285,1881 @@ TEST(ParticleCorpus, PrewarmCostOfTheLocalLibraryIsReported) {
     if (! costs.empty()) RecordProperty("prewarm_slowest_ms", std::to_string(costs.front().first));
 }
 
+
+// ---------------------------------------------------------------------------
+// Wallpaper Engine 2.8.0.42 parity, plan step 8.1 (P4, P6, P7, P8, P9, P13)
+// ---------------------------------------------------------------------------
+
+std::vector<Particle> LiveOfFirstInstance(ParticleSubSystem& sub) {
+    if (sub.Instances().empty()) return {};
+    return LiveParticles(*sub.Instances().front());
+}
+
+// P4: loader 0x1401C1430 `sub_1401D7BE0(a1,"maxcount",10)`; L1793 absent top maxcount reads 0.
+TEST(ParseLevel, AChildEntryWithoutMaxcountAllowsTenInstances) {
+    EXPECT_EQ(wpscene::ParticleChild {}.maxcount, 10);
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(R"({"name":"sphererandom","id":1,"rate":0,"distancemax":0})",
+                         R"("maxcount":4,"children":[{"name":"child.json","type":"eventspawn"}])") },
+          { "/child.json", ParticleFile(R"({"name":"sphererandom","id":2,"rate":1,"distancemax":0})",
+                                        R"("maxcount":4)") } },
+        OneParticleObject());
+    ASSERT_EQ(scene.Sub().Children().size(), 1u);
+    EXPECT_EQ(scene.Sub().Children()[0]->MaxInstanceCount(), 10u);
+}
+
+TEST(ParseLevel, AParticleFileWithoutMaxcountHoldsNoParticles) {
+    EXPECT_EQ(wpscene::Particle {}.maxcount, 0u);
+    ParticleScene scene({ { "/particle.json",
+                            ParticleFile(R"({"name":"sphererandom","id":1,"rate":10,"distancemax":0})") } },
+                        OneParticleObject());
+    EXPECT_TRUE(scene.scene->paritileSys->subsystems.empty());
+}
+
+// P6: file flags 8 / 32 / 64 (loader guards (v4+8)&8, &0x20, &0x40; sub_1401D15A0).
+TEST(ParseLevel, TheIgnoreColourCountAndLifetimeFlagsAreBitsEightThirtyTwoAndSixtyFour) {
+    wpscene::Particle plain;
+    EXPECT_TRUE(plain.AppliesColourOverride());
+    EXPECT_TRUE(plain.AppliesCountOverride());
+    EXPECT_TRUE(plain.AppliesLifetimeOverride());
+    plain.flags = wpscene::Particle::EFlags(8u | 32u | 64u);
+    EXPECT_FALSE(plain.AppliesColourOverride());
+    EXPECT_FALSE(plain.AppliesCountOverride());
+    EXPECT_FALSE(plain.AppliesLifetimeOverride());
+    EXPECT_TRUE(plain.AppliesSpeedOverride());
+}
+
+Particle FirstBorn(const std::string& flags, const std::string& initializers, const std::string& over) {
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(R"({"name":"sphererandom","id":1,"rate":0,"instantaneous":1,"distancemax":0})",
+                         R"("maxcount":4,"flags":)" + flags, initializers) } },
+        OneParticleObject(R"("instanceoverride":)" + over));
+    scene.Step();
+    const auto live = LiveOfFirstInstance(scene.Sub());
+    EXPECT_EQ(live.size(), 1u);
+    return live.empty() ? Particle {} : live.front();
+}
+
+TEST(InstanceOverride, AFileWithFlagEightKeepsItsColours) {
+    const std::string init =
+        R"({"name":"lifetimerandom","min":100,"max":100},{"name":"colorrandom","min":"255 0 0","max":"255 0 0"})";
+    const std::string teal = R"({"id":1,"color":"0 255 255"})";
+    const Particle kept = FirstBorn("8", init, teal);
+    EXPECT_NEAR(kept.init.color.x(), 1.0f, 1e-4f);
+    EXPECT_NEAR(kept.init.color.y(), 0.0f, 1e-4f);
+    EXPECT_NEAR(kept.init.color.z(), 0.0f, 1e-4f);
+    const Particle retinted = FirstBorn("0", init, teal);
+    EXPECT_LT(retinted.init.color.x(), 0.5f) << "without the flag the override retints the file";
+}
+
+TEST(InstanceOverride, AFileWithFlagThirtyTwoIgnoresTheCountOverride) {
+    const auto live_after_a_second = [](const char* flags) {
+        ParticleScene scene(
+            { { "/particle.json", ParticleFile(R"({"name":"sphererandom","id":1,"rate":1,"distancemax":0})",
+                                               std::string(R"("maxcount":20,"flags":)") + flags) } },
+            OneParticleObject(R"("instanceoverride":{"id":1,"count":3})"));
+        scene.Step(60);
+        return LiveOfFirstInstance(scene.Sub()).size();
+    };
+    EXPECT_EQ(live_after_a_second("32"), 1u);
+    EXPECT_EQ(live_after_a_second("0"), 3u);
+}
+
+TEST(InstanceOverride, AFileWithFlagSixtyFourIgnoresTheLifetimeOverride) {
+    const std::string init = R"({"name":"lifetimerandom","min":2,"max":2})";
+    const std::string over = R"({"id":1,"lifetime":3})";
+    EXPECT_NEAR(FirstBorn("64", init, over).init.lifetime, 2.0f, 1e-4f);
+    EXPECT_NEAR(FirstBorn("0", init, over).init.lifetime, 6.0f, 1e-4f);
+}
+
+// P9: the lifetime override binding (field 216) sits on lifetimerandom only.
+TEST(ParticleInstanceOverride, LifetimeReachesOnlyALifetimeRandomRecord) {
+    const std::string over = R"({"id":1,"lifetime":3})";
+    const float plain = FirstBorn("0", R"({"name":"alpharandom","min":1,"max":1})", R"({"id":1})").init.lifetime;
+    EXPECT_NEAR(FirstBorn("0", R"({"name":"alpharandom","min":1,"max":1})", over).init.lifetime, plain, 1e-5f);
+    EXPECT_NEAR(FirstBorn("0", R"({"name":"lifetimerandom","min":2,"max":2})", over).init.lifetime, 6.0f, 1e-4f);
+}
+
+// P9: the plan read binding{field=208} on the sequence `count`, but the Wallpaper Engine probe
+// (artifacts/we-parity/probes/particle-81, -81b) shows four spots under override counts 2 and 0.5.
+TEST(ParticleCountOverride, TheCountOverrideLeavesTheMapSequenceSpacingAlone) {
+    SpawnRig rig;
+    rig.Sync();
+    auto over     = std::make_shared<wpscene::ParticleInstanceoverride>();
+    over->enabled = true;
+    over->count   = 2.0f;
+    rig.ctx.over  = over;
+    const auto op = WPParticleParser::genParticleInitOp(
+        { { "name", "mapsequencearoundcontrolpoint" }, { "count", 4 }, { "axis", "0 0 1" } }, rig.ctx);
+    std::set<long> angles;
+    for (int i = 0; i < 16; ++i) {
+        Particle p;
+        p.position = { 5.0f, 0.0f, 0.0f };
+        op(p, 0.0);
+        angles.insert(std::lround(std::atan2(p.position.y(), p.position.x()) * 1000.0) % 6283);
+    }
+    EXPECT_EQ(angles.size(), 4u) << "count 4 whatever the override count";
+}
+
+// P7: blend windows on angularmovement, controlpointattract, maintain*, reducemovement; none on vortex.
+void AgeTo(Particle& p, double fraction) { PM::ChangeLifetime(p, -fraction * p.init.lifetime); }
+
+const json kLateWindow = { { "blendinstart", 0.4 }, { "blendinend", 0.5 } };
+
+json WithWindow(json op) {
+    for (auto& [k, v] : kLateWindow.items()) op[k] = v;
+    return op;
+}
+
+TEST(AngularMovement, BlendWindowKeepsTheForceOffBeforeItOpens) {
+    const auto op = MakeOperator(WithWindow({ { "name", "angularmovement" }, { "force", "0 0 10" } }));
+    std::array<Particle, 1> particles { LivingParticle() };
+    AgeTo(particles[0], 0.1);
+    RunOperator(op, particles, 0.1);
+    EXPECT_NEAR(particles[0].angularVelocity.z(), 0.0f, 1e-6f);
+    std::array<Particle, 1> open { LivingParticle() };
+    AgeTo(open[0], 0.7);
+    RunOperator(op, open, 0.1);
+    EXPECT_NEAR(open[0].angularVelocity.z(), 1.0f, 1e-5f);
+}
+
+// Blended opcode 28 (0x14023FBC0 case 0x1C, decompiled once the jump table holds all 40
+// opcodes): inside the window weight w the force, the turn by the angular velocity and the
+// clamped drag are each taken w times.
+TEST(AngularMovement, ABlendWindowWeighsTheForceTheTurnAndTheClampedDrag) {
+    const auto op = MakeOperator(WithWindow({ { "name", "angularmovement" }, { "force", "0 0 10" },
+                                              { "drag", 30.0 } }));
+    std::array<Particle, 1> p { LivingParticle() };
+    p[0].angularVelocity = { 0.0f, 0.0f, 4.0f };
+    AgeTo(p[0], 0.45);   // halfway up the 0.4..0.5 edge: w = 0.5
+    RunOperator(op, p, 0.1, {}, 0.0, 0.05);
+    const float spun = 4.0f + 0.5f * 0.1f * 10.0f;                       // 4.5
+    EXPECT_NEAR(p[0].rotation.z(), 0.5f * 0.1f * spun, 1e-4f) << "the turn is weighed too";
+    // drag x scaled step = 1.5 is clamped to just under 1 before w weighs it.
+    EXPECT_NEAR(p[0].angularVelocity.z(), spun * (1.0f - 0.5f * 0.9999999f), 1e-4f);
+}
+
+TEST(ControlpointAttract, BlendWindowScalesThePull) {
+    const auto op = MakeOperator(WithWindow(
+        { { "name", "controlpointattract" }, { "scale", 100.0 }, { "threshold", 100.0 } }));
+    std::array<Particle, 1> particles { LivingParticle() };
+    particles[0].position = { 50.0f, 0.0f, 0.0f };
+    AgeTo(particles[0], 0.45);   // halfway up the 0.4..0.5 edge
+    RunOperator(op, particles, 0.1);
+    EXPECT_NEAR(particles[0].velocity.x(), -0.5f * 0.5f * 100.0f * 0.1f, 1e-3f);
+}
+
+// Blended opcode 32 (0x14023FBC0 case 0x20): flag 2 caps the pull at the distance first,
+// and the window weight then takes the capped pull.
+TEST(ControlpointAttract, ABlendWindowWeighsThePullAfterFlagTwoCapsIt) {
+    const auto op = MakeOperator(WithWindow(
+        { { "name", "controlpointattract" }, { "scale", 4000.0 }, { "threshold", 100.0 }, { "flags", 2 } }));
+    std::array<Particle, 1> particles { LivingParticle() };
+    particles[0].position = { 50.0f, 0.0f, 0.0f };
+    AgeTo(particles[0], 0.45);   // w = 0.5
+    RunOperator(op, particles, 0.1);
+    // (1 - 50/100) * 4000 * 0.1 = 200, capped at the distance 50, then halved.
+    EXPECT_NEAR(particles[0].velocity.x(), -25.0f, 1e-3f);
+}
+
+TEST(ControlpointOperators, ReduceMovementAndMaintainDistanceTakeTheBlendWindow) {
+    const auto reduce = MakeOperator(WithWindow({ { "name", "reducemovementnearcontrolpoint" },
+                                                  { "distanceinner", 20.0 }, { "distanceouter", 50.0 },
+                                                  { "reductioninner", 1000.0 } }));
+    std::array<Particle, 1> slow { LivingParticle() };
+    slow[0].velocity = { 10.0f, 0.0f, 0.0f };
+    slow[0].position = { 5.0f, 0.0f, 0.0f };
+    AgeTo(slow[0], 0.1);
+    RunOperator(reduce, slow, 0.001);
+    EXPECT_NEAR(slow[0].velocity.x(), 10.0f, 1e-4f) << "the window is still closed";
+
+    const auto keep = MakeOperator(WithWindow({ { "name", "maintaindistancetocontrolpoint" }, { "distance", 10.0 } }));
+    std::array<ParticleControlpoint, 8> controlpoints {};
+    std::array<Particle, 1> far { LivingParticle() };
+    far[0].position = { 20.0f, 0.0f, 0.0f };
+    AgeTo(far[0], 0.1);
+    RunOperator(keep, far, 0.1, controlpoints);
+    EXPECT_NEAR(far[0].position.x(), 20.0f, 1e-4f) << "the window is still closed";
+}
+
+TEST(Vortex, IgnoresBlendKeys) {
+    const auto with = MakeOperator(WithWindow({ { "name", "vortex" }, { "distanceinner", 0.0 },
+                                                { "distanceouter", 100.0 }, { "speedinner", 100.0 },
+                                                { "speedouter", 100.0 } }));
+    std::array<Particle, 1> particles { LivingParticle() };
+    particles[0].position = { 10.0f, 0.0f, 0.0f };
+    AgeTo(particles[0], 0.1);
+    RunOperator(with, particles, 0.1);
+    EXPECT_NEAR(particles[0].velocity.norm(), 10.0f, 1e-3f);
+}
+
+// P13: case 3 of sub_14023FBC0 ORs the two masked factors bitwise.
+TEST(AlphaFade, WhenTheFadesOverlapTheFactorsAreBitwiseOred) {
+    const auto op = MakeOperator({ { "name", "alphafade" }, { "fadeintime", 0.8 }, { "fadeouttime", 0.4 } });
+    std::array<Particle, 1> particles { LivingParticle(1.0f) };
+    AgeTo(particles[0], 0.5);
+    RunOperator(op, particles, 0.0);
+    const float f_in  = 0.5f / 0.8f;
+    const float f_out = (1.0f - 0.5f) / (1.0f - 0.4f);
+    const uint32_t bits = std::bit_cast<uint32_t>(f_in) | std::bit_cast<uint32_t>(f_out);
+    EXPECT_NEAR(particles[0].alpha, std::bit_cast<float>(bits), 1e-6f);
+    EXPECT_NEAR(particles[0].alpha, 0.9583333f, 1e-6f);
+}
+
+// P8: loader 0x1401C5490: control point slot = array position; angles; parentcontrolpoint; flags 4/8.
+TEST(ParticleControlPoints, APointIsPlacedByItsPositionInTheListNotItsId) {
+    ParticleScene scene(
+        { { "/particle.json", ParticleFile(R"({"name":"sphererandom","id":1,"rate":0,"distancemax":0})",
+                                           R"("maxcount":4,"controlpoint":[{"id":3,"offset":"10 0 0"}])") } },
+        OneParticleObject());
+    scene.Step();
+    EXPECT_NEAR(scene.Sub().Controlpoints()[0].offset.x(), 10.0, 1e-6);
+    EXPECT_NEAR(scene.Sub().Controlpoints()[3].offset.x(), 0.0, 1e-6);
+}
+
+TEST(ParticleControlPoints, AnglesTurnTheControlPoint) {
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(R"({"name":"sphererandom","id":1,"rate":0,"distancemax":0})",
+                         R"("maxcount":4,"controlpoint":[{"offset":"0 0 0","angles":"0 0 1.5707963"}])") } },
+        OneParticleObject());
+    scene.Step();
+    const auto& point = scene.Sub().Controlpoints()[0];
+    EXPECT_TRUE(point.has_rotation);
+    EXPECT_NEAR(point.rotation(1, 0), 1.0, 1e-5);
+}
+
+double ChildPointX(const std::string& child_type, const std::string& child_flags, const std::string& parent_emitter,
+                   bool register_parent = false) {
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(parent_emitter,
+                         (register_parent ? R"("operator":[{"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":1,"output":"color"}],)" : "") +
+                         std::string(R"("maxcount":4,"controlpoint":[{"offset":"0 0 0"},{"offset":"150 0 0"}],)") +
+                         R"("children":[{"name":"child.json","type":")" + child_type +
+                             R"(","origin":"100 0 0","maxcount":1}])") },
+          { "/child.json",
+            ParticleFile(R"({"name":"sphererandom","id":2,"rate":0,"distancemax":0})",
+                         R"("maxcount":4,"controlpoint":[{"flags":)" + child_flags +
+                             R"(,"parentcontrolpoint":1,"offset":"7 0 0"}])") } },
+        OneParticleObject());
+    scene.Step(2);
+    EXPECT_EQ(scene.Sub().Children().size(), 1u);
+    if (scene.Sub().Children().empty()) return 0.0;
+    return scene.Sub().Children()[0]->Controlpoints()[0].offset.x();
+}
+
+// A point authored above the parent's highest referenced slot is not registered.
+// The old emitter-only probe exercised this fallback, not a valid parent copy.
+TEST(ParticleControlPoints, AnUnregisteredParentPointLeavesTheChildsAuthoredPoint) {
+    const std::string still = R"({"name":"sphererandom","id":1,"rate":0,"distancemax":0})";
+    const std::string burst =
+        R"({"name":"boxrandom","id":1,"rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0","origin":"30 0 0"})";
+    for (const char* flags : { "4", "12" }) {
+        EXPECT_NEAR(ChildPointX("static", flags, still), 7.0, 1e-4);
+        EXPECT_NEAR(ChildPointX("eventfollow", flags, burst), 7.0, 1e-4);
+    }
+}
+
+TEST(ParticleControlPoints, ARemapOwnedPointIsNotReplacedByAParentCopy) {
+    const std::string still = R"({"name":"sphererandom","rate":0,"distancemax":0})";
+    // Runtime bit 0x10000 owns the destination, ahead of the copy flag.
+    EXPECT_NEAR(ChildPointX("static", "65540", still, true), 7.0, 1e-4);
+}
+
+TEST(ParticleControlPoints, ARegisteredParentPointIsCopiedIntoTheStaticChildsSpace) {
+    const std::string still = R"({"name":"sphererandom","rate":0,"distancemax":0})";
+    EXPECT_NEAR(ChildPointX("static", "4", still, true), 50.0, 1e-4);
+    EXPECT_NEAR(ChildPointX("static", "12", still, true), 150.0, 1e-4);
+}
+
+TEST(ParticleControlPoints, ARegisteredParentPointIsRelativeToAnEventChildUnlessRaw) {
+    const std::string burst =
+        R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0","origin":"30 0 0"})";
+    EXPECT_NEAR(ChildPointX("eventfollow", "4", burst, true), 20.0, 1e-4);
+    EXPECT_NEAR(ChildPointX("eventfollow", "12", burst, true), 150.0, 1e-4);
+}
+
+TEST(ParticleChildren, AControlPointStartIndexDoesNotShiftTheChildEmitter) {
+    for (const int start : { 0, 1, 7, 8 }) {
+        SCOPED_TRACE(start);
+        ParticleScene scene(
+            { { "/particle.json", ParticleFile(R"({"name":"sphererandom","rate":0,"distancemax":0})",
+                R"("maxcount":4,"children":[{"name":"child.json","type":"static","controlpointstartindex":)" +
+                std::to_string(start) + "}]") },
+              { "/child.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"controlpoint":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":4,"controlpoint":[{}, {"offset":"30 20 0"}, {"offset":"90 40 0"}])") } },
+            OneParticleObject());
+        scene.Step();
+        const auto& child = *scene.Sub().Children()[0];
+        ASSERT_EQ(child.Instances().size(), 1u);
+        const auto live = LiveParticles(*child.Instances()[0]);
+        ASSERT_EQ(live.size(), 1u);
+        EXPECT_TRUE(live[0].position.isApprox(linalg::Vector3f(30, 20, 0)));
+    }
+}
+
+
+TEST(ParticleControlPoints, CopiedPointMotionKeepsASeparatePreviousPositionForEachEventInstance) {
+    ParticleScene scene(
+        { { "/particle.json", ParticleFile(
+                R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"30 0 0","directions":"1 1 1","distancemax":"0 0 0"},)"
+                R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"60 0 0","directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":2,"controlpoint":[{}, {"offset":"150 0 0"}],)"
+                R"("operator":[{"name":"movement","drag":0},{"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":1,"output":"color"}],)"
+                R"("children":[{"name":"child.json","type":"eventfollow","maxcount":2,"origin":"100 0 0"}])",
+                R"({"name":"lifetimerandom","min":100,"max":100},{"name":"velocityrandom","min":"10 0 0","max":"10 0 0"})") },
+          { "/child.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":1,"controlpoint":[{"flags":4,"parentcontrolpoint":1}])") } },
+        OneParticleObject());
+    auto& child = *scene.Sub().Children()[0];
+    std::vector<std::pair<double, double>> samples;
+    child.AddOperator([&](const ParticleInfo& info) {
+        samples.emplace_back(info.controlpoints[0].offset.x(), info.controlpoints[0].prev_offset.x());
+    });
+    scene.Step(1, 1.0);
+    ASSERT_EQ(samples.size(), 2u);
+    EXPECT_NEAR(samples[0].first, 10, 1e-4);
+    EXPECT_NEAR(samples[1].first, -20, 1e-4);
+    EXPECT_NEAR(samples[0].second, samples[0].first, 1e-4);
+    EXPECT_NEAR(samples[1].second, samples[1].first, 1e-4);
+    samples.clear();
+    scene.Step(1, 1.0);
+    ASSERT_EQ(samples.size(), 2u);
+    EXPECT_NEAR(samples[0].first, 0, 1e-4);
+    EXPECT_NEAR(samples[1].first, -30, 1e-4);
+    EXPECT_NEAR(samples[0].second, 10, 1e-4);
+    EXPECT_NEAR(samples[1].second, -20, 1e-4);
+
+    // Reusing a pool slot begins a new history even though its index is stable.
+    auto& reused = *child.Instances()[0];
+    const auto bound = reused.GetBoundedData();
+    reused.SetDeath(true);
+    reused.SetNoLiveParticle(true);
+    ASSERT_EQ(child.QueryNewInstance(), &reused);
+    reused.GetBoundedData() = bound;
+    samples.clear();
+    scene.Step(1, 1.0);
+    ASSERT_EQ(samples.size(), 2u);
+    EXPECT_NEAR(samples[0].second, samples[0].first, 1e-4);
+    EXPECT_NEAR(samples[1].second, -30, 1e-4);
+
+    scene.Sub().Stop();
+    scene.Sub().Play();
+    samples.clear();
+    scene.Step(1, 1.0);
+    ASSERT_EQ(samples.size(), 2u);
+    EXPECT_NEAR(samples[0].second, samples[0].first, 1e-4);
+    EXPECT_NEAR(samples[1].second, samples[1].first, 1e-4);
+}
+
+TEST(ParticleControlPoints, ANestedEventCopyReadsItsBoundParentInsteadOfTheLastSibling) {
+    ParticleScene scene(
+        { { "/particle.json", ParticleFile(
+                R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"30 0 0","directions":"1 1 1","distancemax":"0 0 0"},)"
+                R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"60 0 0","directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":2,"controlpoint":[{}, {"offset":"150 0 0"}],)"
+                R"("operator":[{"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":1,"output":"color"}],)"
+                R"("children":[{"name":"child.json","type":"eventfollow","maxcount":2}])") },
+          { "/child.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":1,"controlpoint":[{}, {"flags":4,"parentcontrolpoint":1}],)"
+                R"("operator":[{"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":1,"output":"color"}],)"
+                R"("children":[{"name":"grandchild.json","type":"eventfollow","maxcount":2}])") },
+          { "/grandchild.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":1,"controlpoint":[{"flags":12,"parentcontrolpoint":1}])") } },
+        OneParticleObject());
+    auto& grandchild = *scene.Sub().Children()[0]->Children()[0];
+    std::vector<double> copied;
+    grandchild.AddOperator([&](const ParticleInfo& info) { copied.push_back(info.controlpoints[0].offset.x()); });
+    scene.Step();
+    ASSERT_EQ(copied.size(), 2u);
+    EXPECT_NEAR(copied[0], 120, 1e-4);
+    EXPECT_NEAR(copied[1], 90, 1e-4);
+
+    // Particle following ends, but the native control-point parent link remains.
+    for (const auto& instance : scene.Sub().Children()[0]->Instances())
+        for (auto& particle : instance->ParticlesVec()) particle.lifetime = 0;
+    copied.clear();
+    scene.Step();
+    ASSERT_EQ(copied.size(), 2u);
+    EXPECT_NEAR(copied[0], 120, 1e-4);
+    EXPECT_NEAR(copied[1], 90, 1e-4);
+}
+
+TEST(ParticleControlPoints, AParentCopyCarriesTheFullControlPointOrientationIntoChildSpace) {
+    ParticleScene scene(
+        { { "/particle.json", ParticleFile(R"({"name":"boxrandom","rate":0,"controlpoint":1})",
+                R"("maxcount":1,"controlpoint":[{}, {"offset":"120 80 0","angles":"0 0 1.5707963"}],)"
+                R"("children":[{"name":"child.json","type":"static","angles":"0 0 1.5707963","scale":"2 1 1"}])") },
+          { "/child.json", ParticleFile(R"({"name":"boxrandom","rate":0,"controlpoint":1})",
+                R"("maxcount":1,"controlpoint":[{}, {"flags":4,"parentcontrolpoint":1}])") } },
+        OneParticleObject());
+    scene.Step();
+    const auto& point = scene.Sub().Children()[0]->Controlpoints()[1];
+    EXPECT_TRUE(point.offset.isApprox(linalg::Vector3d(40, -120, 0), 1e-5));
+    EXPECT_TRUE(point.rotation.isApprox(linalg::Vector3d(.5, 1, 1).asDiagonal(), 1e-5));
+}
+
+TEST(ParticleControlPoints, AWorldParentRemainsInItsAuthoredFrameDuringChildPrewarm) {
+    for (const int world : { 0, 1 }) for (const int flags : { 4, 12 }) {
+        SCOPED_TRACE(testing::Message() << "child world=" << world << " flags=" << flags);
+        ParticleScene scene(
+            { { "/particle.json", ParticleFile(R"({"name":"boxrandom","rate":0,"controlpoint":1})",
+                R"("maxcount":1,"flags":1,"controlpoint":[{}, {"offset":"150 0 0"}],)"
+                R"("children":[{"name":"child.json","type":"static","origin":"100 0 0"}])") },
+              { "/child.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"controlpoint":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":1,"starttime":1,"flags":)" + std::to_string(world) +
+                R"(,"controlpoint":[{}, {"flags":)" + std::to_string(flags) + R"(,"parentcontrolpoint":1}])") } },
+            OneParticleObject());
+        const auto& child = *scene.Sub().Children()[0];
+        ASSERT_EQ(child.Instances().size(), 1u);
+        const auto particles = LiveParticles(*child.Instances()[0]);
+        ASSERT_EQ(particles.size(), 1u);
+        const linalg::Vector3f expected = flags == 12 && !world
+            ? linalg::Vector3f(150, 0, 0) : linalg::Vector3f(-270, -180, 0);
+        EXPECT_TRUE(particles[0].position.isApprox(expected, 1e-5))
+            << particles[0].position.x() << ", " << particles[0].position.y();
+    }
+}
+
+TEST(ParticleControlPoints, EventCopiesUseEachFilesWorldspaceAndTheParentSimulationFrame) {
+    const std::array<linalg::Vector3d, 4> expected {
+        linalg::Vector3d(200, 540, 0), linalg::Vector3d(150, 40, 0),
+        linalg::Vector3d(590, 680, 0), linalg::Vector3d(240, 480, 0) };
+    for (int parent_world = 0; parent_world != 2; ++parent_world)
+        for (int child_world = 0; child_world != 2; ++child_world) {
+            SCOPED_TRACE(testing::Message() << parent_world << ":" << child_world);
+            ParticleScene scene(
+                { { "/particle.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"30 20 0","directions":"1 1 1","distancemax":"0 0 0"})",
+                    R"("maxcount":1,"flags":)" + std::to_string(parent_world) +
+                    R"(,"controlpoint":[{}, {"offset":"150 40 0"}],)"
+                    R"("operator":[{"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":1,"output":"color"}],)"
+                    R"("children":[{"name":"child.json","type":"eventfollow"}])") },
+                  { "/child.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"controlpoint":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                    R"("maxcount":1,"flags":)" + std::to_string(child_world) +
+                    R"(,"controlpoint":[{}, {"flags":12,"parentcontrolpoint":1}])") } },
+                OneParticleObject(R"("scale":"2 2 1","angles":"0 0 1.5707963")"));
+            scene.Step();
+            const auto& child = *scene.Sub().Children()[0];
+            ASSERT_EQ(child.Instances().size(), 1u);
+            const auto& instance = *child.Instances()[0];
+            const auto particles = LiveParticles(instance);
+            ASSERT_EQ(particles.size(), 1u);
+            SceneNode* drawn = nullptr;
+            const auto find = [&](auto&& self, SceneNode& node) -> void {
+                if (node.Mesh() == child.Mesh()) drawn = &node;
+                for (const auto& nested : node.GetChildren()) self(self, *nested);
+            };
+            find(find, *scene.scene->sceneGraph);
+            ASSERT_NE(drawn, nullptr);
+            const auto matrix = drawn->RenderTrans();
+            const auto& vertices = child.Mesh()->GetVertexArray(0);
+            const linalg::Vector3d local(vertices.Data()[0], vertices.Data()[1], vertices.Data()[2]);
+            const linalg::Vector3d actual = matrix.topLeftCorner<3, 3>() * local + matrix.topRightCorner<3, 1>();
+            EXPECT_TRUE(actual.isApprox(expected[parent_world * 2 + child_world], 1e-5))
+                << actual.x() << ", " << actual.y();
+        }
+}
+
+
+TEST(WorldSpace, BornEventParticlesKeepTheirWorldPositionWhenTheirParentMoves) {
+    for (const int parent_world : {0, 1}) for (const int child_world : {0, 1}) {
+        SCOPED_TRACE(testing::Message() << parent_world << ":" << child_world);
+        ParticleScene scene(
+            {{"/particle.json", ParticleFile(
+                R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"30 20 0","directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":1,"flags":)" + std::to_string(parent_world) +
+                R"(,"initializer":[{"name":"lifetimerandom","min":100,"max":100},{"name":"velocityrandom","min":"20 0 0","max":"20 0 0"}],)"
+                R"("operator":[{"name":"movement","drag":0,"gravity":"0 0 0"}],)"
+                R"("children":[{"name":"child.json","type":"eventfollow"}])")},
+             {"/child.json", ParticleFile(
+                R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                R"("maxcount":1,"flags":)" + std::to_string(child_world) +
+                R"(,"renderer":[{"name":"ropetrail","length":0.2,"segments":3,"subdivision":1},{"name":"sprite"}])")}},
+            OneParticleObject(R"("scale":"2 2 1","angles":"0 0 0.6")"));
+        scene.Step();
+        const auto& child = *scene.Sub().Children()[0];
+        const SceneMesh* sprite = nullptr;
+        const auto find_sprite = [&](auto&& self, SceneNode& node) -> void {
+            if (node.Mesh() == child.Mesh()) {
+                for (const auto& mirror : node.GetChildren())
+                    if (mirror->Mesh()) sprite = mirror->Mesh();
+            }
+            for (const auto& nested : node.GetChildren()) self(self, *nested);
+        };
+        find_sprite(find_sprite, *scene.scene->sceneGraph);
+        ASSERT_NE(sprite, nullptr);
+        const auto position = [&]() {
+            const auto& array = sprite->GetVertexArray(0);
+            return linalg::Vector3f(array.Data()[0],array.Data()[1],array.Data()[2]);
+        };
+        const auto before = position();
+        for (int i=0;i<20;++i) scene.Step();
+        const auto after = position();
+        if (child_world) {
+            EXPECT_TRUE(before.isApprox(after,1e-5)) << before.transpose() << " -> " << after.transpose();
+            const auto trails = child.Instances()[0]->Trails();
+            ASSERT_EQ(trails.size(), 1u);
+            EXPECT_GT(trails[0].Count(), 0u);
+            for (uint32_t i=0; i<trails[0].Count(); ++i)
+                EXPECT_TRUE(trails[0].At(i).position.isApprox(after, 1e-5)) << trails[0].At(i).position.transpose() << " mesh " << after.transpose() << " particle " << child.Instances()[0]->Particles()[0].position.transpose();
+        } else EXPECT_GT((after-before).norm(), 1.0f);
+    }
+}
+
+TEST(WorldSpace, SiblingControlpointVelocityKeepsEachInstancesPreviousBinding) {
+    for (const double prewarm : {0.0, 1.0}) {
+    SCOPED_TRACE(prewarm);
+    Scene scene;
+    scene.frameTime = 0.25;
+    ParticleSystem system(scene);
+    system.gener = std::make_unique<SilentGener>();
+    auto parent = std::make_unique<ParticleSubSystem>(system,
+        std::make_shared<SceneMesh>(MeshUpdate::PerFrame), 2, 1, 1, 1,
+        ParticleSubSystem::SpawnType::STATIC, [](const Particle&, const ParticleRawGenSpec&) {});
+    auto child = std::make_unique<ParticleSubSystem>(system,
+        std::make_shared<SceneMesh>(MeshUpdate::PerFrame), 1, 1, 2, 1,
+        ParticleSubSystem::SpawnType::EVENT_FOLLOW, [](const Particle&, const ParticleRawGenSpec&) {});
+    auto parent_node = std::make_shared<SceneNode>();
+    auto child_node = std::make_shared<SceneNode>();
+    parent_node->AppendChild(child_node);
+    parent->SetOwnerNode(parent_node);
+    child->SetOwnerNode(child_node);
+    child->SetWorldSpace(true);
+    child->SetStartTime(prewarm);
+    child->Controlpoints()[1].base_offset = {7, 0, 0};
+    parent->AddEmitter([](std::vector<Particle>& slots, std::vector<ParticleInitOp>&,
+                         uint32_t, double, std::span<const ParticleControlpoint>) {
+        if (!slots.empty()) return;
+        for (float x : {10.0f, 100.0f}) {
+            Particle p;
+            PM::InitLifetime(p, 100);
+            p.position = {x, 0, 0};
+            slots.push_back(p);
+        }
+    });
+    parent->AddOperator([](const ParticleInfo& info) {
+        for (std::size_t i=0;i<info.particles.size();++i) info.particles[i].position.x() += i==0 ? 1 : 3;
+    });
+    std::vector<double> velocities;
+    child->AddOperator([&](const ParticleInfo& info) {
+        velocities.push_back((info.controlpoints[1].offset-info.controlpoints[1].prev_offset).x());
+    });
+    parent->AddChild(std::move(child));
+    parent->Emitt();
+    ASSERT_GE(velocities.size(),2u);
+    for (double delta : velocities) EXPECT_LE(std::abs(delta), 3.0);
+    if (prewarm == 0) {
+        EXPECT_DOUBLE_EQ(velocities[0],0);
+        EXPECT_DOUBLE_EQ(velocities[1],0);
+    }
+    velocities.clear();
+    parent->Emitt();
+    ASSERT_EQ(velocities.size(),2u);
+    EXPECT_DOUBLE_EQ(velocities[0],1);
+    EXPECT_DOUBLE_EQ(velocities[1],3);
+    parent->Stop();
+    parent->Play();
+    velocities.clear();
+    parent->Emitt();
+    ASSERT_GE(velocities.size(),2u);
+    for (double delta : velocities) EXPECT_LE(std::abs(delta), 3.0);
+    if (prewarm == 0) {
+        EXPECT_DOUBLE_EQ(velocities[0],0);
+        EXPECT_DOUBLE_EQ(velocities[1],0);
+    }
+    }
+}
+
+
+TEST(ParticleControlpointWrites, BirthWritesSurviveLaterStepsAndKeepUntouchedComponents) {
+    for (const std::string component : {"all", "x", "y", "z"}) {
+        SCOPED_TRACE(component);
+        const auto writer = json{{"name","remapinitialvalue"},{"input","position"},
+            {"output","controlpoint"},{"outputcontrolpoint0",1},{"operation","remap"},
+            {"outputcomponent",component},{"flags",0}};
+        ParticleScene scene({{"/particle.json", ParticleFile(
+            R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"64 96 128","directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0})",
+            R"("maxcount":1,"controlpoint":[{}, {"offset":"16 32 48"}])",
+            R"({"name":"lifetimerandom","min":1000,"max":1000},)"+writer.dump())}}, OneParticleObject());
+        for (int step=0;step<3;++step) {
+            scene.Step();
+            linalg::Vector3d expected(16,32,48);
+            if(component=="all") expected={64,96,128};
+            if(component=="x") expected.x()=64;
+            if(component=="y") expected.y()=96;
+            if(component=="z") expected.z()=128;
+            EXPECT_TRUE(scene.Sub().Controlpoints()[1].offset.isApprox(expected,1e-5))
+                << scene.Sub().Controlpoints()[1].offset.transpose();
+        }
+    }
+}
+
+TEST(ParticleControlpointWrites, OperatorsWriteTheFirstLaneOfEachFourParticleGroup) {
+    for (const int count : {1,2,4,5,8,9}) {
+        SCOPED_TRACE(count);
+        std::string emitters;
+        for (int i=0;i<count;++i) {
+            if (i) emitters+=",";
+            emitters+=json{{"name","boxrandom"},{"rate",0},{"instantaneous",1},
+                {"origin",std::to_string(32+16*i)+" 0 0"},{"directions","1 1 1"},{"distancemin","0 0 0"},{"distancemax","0 0 0"},{"speedmin",0},{"speedmax",0}}.dump();
+        }
+        ParticleScene scene({{"/particle.json", ParticleFile(emitters,
+            R"("maxcount":)"+std::to_string(count)+
+            R"(,"operator":[{"name":"remapvalue","input":"position","output":"controlpoint","outputcontrolpoint0":1,"operation":"remap","flags":0}])")}}, OneParticleObject());
+        scene.Step();
+        EXPECT_NEAR(scene.Sub().Controlpoints()[1].offset.x(),32+16*((count-1)/4*4),1e-5);
+    }
+}
+
+TEST(ParticleControlpointWrites, ChildEntryFeedCopiesLiveParentPositionsWithoutShiftingEmitterIndices) {
+    for (const int start : {0,1,6,7}) {
+        SCOPED_TRACE(start);
+        ParticleScene scene({{"/particle.json", ParticleFile(
+            R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"32 64 96","directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0},)"
+            R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"48 72 100","directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0},)"
+            R"({"name":"boxrandom","rate":0,"instantaneous":1,"origin":"64 80 104","directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0})",
+            R"("maxcount":3,"children":[{"name":"child.json","type":"static","flags":1,"controlpointstartindex":)"+
+            std::to_string(start)+R"(}])")},
+            {"/child.json", ParticleFile(R"({"name":"boxrandom","rate":0,"instantaneous":1,"controlpoint":1,"directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0})",
+                R"("maxcount":1,"controlpoint":[{}, {"offset":"16 32 48"}])")}},OneParticleObject());
+        scene.Step(2);
+        const auto& child = *scene.Sub().Children()[0];
+        for(int i=0; i<3 && start+i<8; ++i) {
+            const linalg::Vector3d expected(32+16*i,64+8*i,96+4*i);
+            EXPECT_TRUE(child.Controlpoints()[start+i].offset.isApprox(expected,1e-5))
+                << child.Controlpoints()[start+i].offset.transpose();
+        }
+    }
+}
+
+
+TEST(ParticleControlpointWrites, OperatorAndBirthWritesPreserveTheNativeHomogeneousFrame) {
+    for (const std::string writer : {"remapvalue", "remapinitialvalue"})
+        for (const int z : {0,1,2}) for (const int flags : {4,12}) {
+            SCOPED_TRACE(testing::Message() << writer << " z=" << z << " copy=" << flags);
+            const auto op=json{{"name",writer},{"input","opacity"},{"output","controlpoint"},
+                {"outputcontrolpoint0",1},{"operation","remap"},{"inputrangemin",0},{"inputrangemax",1},
+                {"outputrangemin","64 32 "+std::to_string(z)},{"outputrangemax","64 32 "+std::to_string(z)}};
+            const std::string extras=R"("maxcount":1,"children":[{"name":"child.json","type":"static","origin":"40 20 0"}])"+
+                (writer=="remapvalue" ? ",\"operator\":["+op.dump()+"]" : "");
+            const std::string initializers=R"({"name":"lifetimerandom","min":1000,"max":1000})"+
+                (writer=="remapinitialvalue" ? ","+op.dump() : "");
+            ParticleScene scene({{"/particle.json", ParticleFile(
+                R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0})",
+                extras,initializers)},
+                {"/child.json", ParticleFile(
+                    R"({"name":"boxrandom","rate":0,"instantaneous":1,"controlpoint":1,"directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0})",
+                    R"("maxcount":1,"controlpoint":[{}, {"flags":)"+std::to_string(flags)+R"(,"parentcontrolpoint":1}])")}},OneParticleObject());
+            scene.Step(2);
+            const double w=writer=="remapvalue" ? z : 1;
+            const linalg::Vector3d expected(64-(flags==4 ? 40*w : 0),32-(flags==4 ? 20*w : 0),z);
+            const auto actual=scene.Sub().Children()[0]->Controlpoints()[1].offset;
+            EXPECT_TRUE(actual.isApprox(expected,1e-5)) << actual.transpose();
+        }
+}
+
+
+TEST(ParticleControlpointWrites, NestedReadersUseTheirOwnWrittenParentFrame) {
+    for (const std::string writer : {"remapvalue", "remapinitialvalue"}) for (const int flags : {4,12}) {
+        SCOPED_TRACE(testing::Message() << writer << " copy=" << flags);
+        const auto emit = [](const std::string& origin) { return json{{"name","boxrandom"},{"rate",0},{"instantaneous",1},
+            {"origin",origin},{"directions","1 1 1"},{"distancemin","0 0 0"},{"distancemax","0 0 0"},{"speedmin",0},{"speedmax",0}}.dump(); };
+        const auto remap = [](const std::string& name, const std::string& input, const std::string& output) {
+            return json{{"name",name},{"input",input},{"output",output},{"operation","remap"},
+                {"flags",0},{"inputrangemin",0},{"inputrangemax",1},{"outputrangemin",0},{"outputrangemax",1}};
+        };
+        auto write=remap(writer,"color","controlpoint");write["outputcontrolpoint0"]=1;
+        auto read=remap("remapvalue","controlpoint","color");read["inputcontrolpoint0"]=1;
+        ParticleScene scene({{"/particle.json",ParticleFile(emit("32 64 1")+","+emit("160 96 2"),
+            R"("maxcount":2,"children":[{"name":"child.json","type":"eventfollow","maxcount":2}])",
+            R"({"name":"lifetimerandom","min":1000,"max":1000},)"+remap("remapinitialvalue","position","color").dump())},
+            {"/child.json",ParticleFile(emit("0 0 0"),
+                R"("maxcount":1,"children":[{"name":"grand.json","type":"eventfollow","maxcount":2,"origin":"40 20 0"}])"+
+                (writer=="remapvalue" ? ",\"operator\":["+write.dump()+"]" : ""),
+                R"({"name":"lifetimerandom","min":1000,"max":1000},{"name":"inheritinitialvaluefromevent","input":"setcolor"})"+
+                (writer=="remapinitialvalue" ? ","+write.dump() : ""))},
+            {"/grand.json",ParticleFile(emit("0 0 0"),
+                R"("maxcount":1,"controlpoint":[{}, {"flags":)"+std::to_string(flags)+R"(,"parentcontrolpoint":1}],"operator":[)"+read.dump()+"]")}},OneParticleObject());
+        const auto check = [&]() {
+            const auto& grand=*scene.Sub().Children()[0]->Children()[0];
+            ASSERT_EQ(grand.Instances().size(),2u);
+            for (std::size_t i=0;i<2;++i) {
+                const auto particles=LiveParticles(*grand.Instances()[i]);ASSERT_EQ(particles.size(),1u);
+                const double homogeneous=writer=="remapvalue" ? i+1 : 1;
+                const double x=(i==0 ? 32 : 160)-(flags==4 ? 40*homogeneous : 0);
+                const double y=(i==0 ? 64 : 96)-(flags==4 ? 20*homogeneous : 0);
+                EXPECT_NEAR(particles[0].color.x(),x,1e-5);
+                EXPECT_NEAR(particles[0].color.y(),y,1e-5);
+            }
+        };
+        scene.Step(3);check();
+        for (auto& p : scene.Sub().Instances()[0]->ParticlesVec()) p.lifetime=0;
+        scene.Step(2);check();
+        scene.Sub().Stop();scene.Sub().Play();scene.Step(3);check();
+    }
+}
+
+TEST(Remap, MissingFlagsClampInputsButLeaveTheOutputRangeUnclamped) {
+    std::array<Particle,1> particles{LivingParticle()};particles[0].position={32,64,96};
+    RunOperator(MakeOperator({{"name","remapvalue"},{"input","position"},{"output","color"},
+        {"operation","remap"},{"inputrangemin",0},{"inputrangemax",64},{"outputrangemin",0},{"outputrangemax",4}}),particles,0.1);
+    EXPECT_FLOAT_EQ(particles[0].color.x(),2);
+    EXPECT_FLOAT_EQ(particles[0].color.y(),4);
+    EXPECT_FLOAT_EQ(particles[0].color.z(),4);
+}
+
+
+TEST(ParticleControlpointWrites, AWorldBirthWriteRemainsAtItsScenePositionWhenTheLayerMoves) {
+    const std::string emitter0=R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0,"controlpoint":0})";
+    const std::string emitter1=R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemin":"0 0 0","distancemax":"0 0 0","speedmin":0,"speedmax":0,"controlpoint":1})";
+    ParticleScene scene({{"/particle.json",ParticleFile(emitter0+","+emitter1,
+        R"("maxcount":2,"flags":1)",
+        R"({"name":"lifetimerandom","min":1000,"max":1000},{"name":"remapinitialvalue","input":"opacity","output":"controlpoint","outputcontrolpoint0":1,"operation":"remap","flags":0,"outputrangemin":"40 60 0","outputrangemax":"40 60 0"})")}},OneParticleObject());
+    SceneNode* layer=nullptr;
+    for(const auto& node:scene.scene->sceneGraph->GetChildren()) if(node->Name()=="layer") layer=node.get();
+    ASSERT_NE(layer,nullptr);
+    const auto drawn = [&]() {
+        const auto& array=scene.Sub().Mesh()->GetVertexArray(0);
+        const float* vertex=array.Data()+4*array.OneSize();
+        return linalg::Vector3d((layer->RenderTrans()*linalg::Vector4d(vertex[0],vertex[1],vertex[2],1)).head<3>());
+    };
+    scene.Step();
+    EXPECT_TRUE(drawn().isApprox(linalg::Vector3d(40,60,0),1e-5));
+    layer->SetTranslate({420,280,0});
+    scene.Step();
+    EXPECT_TRUE(drawn().isApprox(linalg::Vector3d(40,60,0),1e-5));
+    EXPECT_TRUE((scene.Sub().Controlpoints()[1].offset+linalg::Vector3d(420,280,0)).isApprox(linalg::Vector3d(40,60,0),1e-5));
+}
+
+// ---------------------------------------------------------------------------
+// Plan step 8.2 (P1, P3, P5): the engine's noise functions, rate on timescales, tvr
+// ---------------------------------------------------------------------------
+
+namespace PN = ParticleNoise;
+
+// D1: 0x1400FC220 is Gustavson's 3D simplex with Perlin's permutation, x 32; values computed
+// from a float32 port of the decompile (artifacts/we-parity/decompiles/F-D1.md).
+TEST(ParticleNoise, SimplexIsZeroAtTheOrigin) { EXPECT_EQ(PN::Simplex3(0.0f, 0.0f, 0.0f), 0.0f); }
+
+// Off the planes where two cell coordinates tie (there the engine's corner masks pick no
+// second corner, 0x1400FC220, and the sum can pass 1), the noise stays within -1..1.
+TEST(ParticleNoise, SimplexStaysWithinOne) {
+    float most = 0.0f;
+    for (int i = 0; i < 64; ++i)
+        for (int j = 0; j < 64; ++j)
+            for (int k = 0; k < 64; ++k)
+                most = std::max(most, std::abs(PN::Simplex3(i * 0.37f, j * 0.41f + 0.013f, k * 0.43f + 0.027f)));
+    EXPECT_LE(most, 1.0f);
+    EXPECT_GT(most, 0.5f);
+}
+
+TEST(ParticleNoise, SimplexMatchesTheEnginesFunction) {
+    EXPECT_NEAR(PN::Simplex3(0.3f, 0.7f, 0.1f), 0.009378886f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex3(1.25f, -2.5f, 3.75f), 0.41666058f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex3(10.1f, 20.2f, 30.3f), -0.0039777905f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex3(-0.6f, 0.2f, -0.9f), 0.38916525f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex2(0.3f, 0.7f), -0.66149795f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex2(1.25f, -2.5f), -0.55728513f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex2(10.1f, 20.2f), -0.025341531f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex1(0.3f), 0.63138485f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex1(1.75f), 0.16341758f, 1e-6f);
+    EXPECT_NEAR(PN::Simplex1(-2.4f), 0.15474615f, 1e-6f);
+}
+
+TEST(ParticleNoise, Simplex1IsZeroAtWholeNumbers) {
+    for (int k = -3; k <= 3; ++k) EXPECT_EQ(PN::Simplex1(static_cast<float>(k)), 0.0f) << k;
+}
+
+TEST(ParticleNoise, FbmOfOneOctaveIsTheNoise) {
+    EXPECT_EQ(PN::Fbm2(1.25f, -2.5f, 1), PN::Simplex2(1.25f, -2.5f));
+    const float two = (PN::Simplex2(1.25f, -2.5f) + 0.5f * PN::Simplex2(2.5f, -5.0f)) / 1.5f;
+    EXPECT_NEAR(PN::Fbm2(1.25f, -2.5f, 2), two, 1e-6f);
+}
+
+TEST(Turbulence, TheFieldIsTheEnginesSimplex) {
+    const json fields { { "name", "turbulence" }, { "speedmin", 100.0 }, { "speedmax", 100.0 },
+                        { "scale", 0.01 }, { "timescale", 0.0 }, { "mask", "1 1 1" } };
+    std::array<Particle, 1> particles { LivingParticle() };
+    particles[0].position = { 125.0f, -250.0f, 375.0f };
+    RunOperator(MakeOperator(fields), particles, 0.1);
+    const float x = 1.25f, y = -2.5f, z = 3.75f;
+    EXPECT_NEAR(particles[0].velocity.x(), PN::Simplex3(x, y, z) * 10.0f, 1e-4f);
+    EXPECT_NEAR(particles[0].velocity.y(), PN::Simplex3(z, x, y) * 10.0f, 1e-4f);
+    EXPECT_NEAR(particles[0].velocity.z(), PN::Simplex3(y, z, x) * 10.0f, 1e-4f);
+}
+
+TEST(SequenceInitializers, PositionOffsetRandomIsTheEnginesFbm) {
+    SpawnRig rig;
+    rig.spawn->system_time = 0.5;
+    rig.Sync();
+    const auto op = WPParticleParser::genParticleInitOp({ { "name", "positionoffsetrandom" },
+                                                          { "distance", 10.0 }, { "scale", 0.01 },
+                                                          { "timescale", 2.0 }, { "octaves", 3 },
+                                                          { "directions", "1 1 1" } },
+                                                        rig.ctx);
+    Particle p;
+    p.position = { 125.0f, -250.0f, 30.0f };
+    op(p, 0.0);
+    EXPECT_NEAR(p.position.x() - 125.0f, PN::Fbm2(1.25f, 1.0f, 3) * 10.0f, 1e-4f);
+    EXPECT_NEAR(p.position.y() + 250.0f, PN::Fbm2(1.0f, -2.5f, 3) * 10.0f, 1e-4f);
+    EXPECT_NEAR(p.position.z() - 30.0f, PN::Fbm2(0.3f, -1.0f, 3) * 10.0f, 1e-4f);
+}
+
+// P3: the override rate multiplies the turbulence and tvr timescales (binding field 220).
+TEST(Turbulence, TheRateOverrideScalesTheNoiseTime) {
+    auto over     = std::make_shared<wpscene::ParticleInstanceoverride>();
+    over->enabled = true;
+    over->rate    = 0.5f;
+    const json fields { { "name", "turbulence" }, { "speedmin", 100.0 }, { "speedmax", 100.0 },
+                        { "scale", 0.01 }, { "timescale", 7.0 }, { "mask", "1 1 1" } };
+    std::array<Particle, 1> slow { LivingParticle() }, plain { LivingParticle() };
+    slow[0].position = plain[0].position = { 13.0f, 29.0f, 7.0f };
+    RunOperator(MakeOperator(fields, over), slow, 0.1, {}, 2.0);
+    RunOperator(MakeOperator(fields), plain, 0.1, {}, 1.0);
+    EXPECT_NEAR((slow[0].velocity - plain[0].velocity).norm(), 0.0f, 1e-4f);
+}
+
+linalg::Vector3f TvrVelocity(double system_time, std::shared_ptr<wpscene::ParticleInstanceoverride> over = nullptr) {
+    SpawnRig rig;
+    rig.spawn->system_time = system_time;
+    rig.ctx.over           = over;
+    const auto op = WPParticleParser::genParticleInitOp(
+        { { "name", "turbulentvelocityrandom" }, { "speedmin", 100.0 }, { "speedmax", 100.0 },
+          { "forward", "0 1 0" }, { "right", "0 0 1" }, { "scale", 1.0 }, { "timescale", 1.0 } },
+        rig.ctx);
+    Particle p;
+    op(p, 0.0);
+    return p.velocity;
+}
+
+// P5: 0x14023B340 case 9.
+TEST(TurbulentVelocity, AtTimeZeroItLeavesAlongForward) {
+    for (int i = 0; i < 5; ++i) {
+        const auto v = TvrVelocity(0.0);
+        EXPECT_NEAR(v.x(), 0.0f, 1e-4f);
+        EXPECT_NEAR(v.y(), 100.0f, 1e-4f);
+        EXPECT_NEAR(v.z(), 0.0f, 1e-4f);
+    }
+}
+
+TEST(TurbulentVelocity, TheHeadingIsForwardTurnedAboutRightByTheNoise) {
+    const double a = PN::Simplex1(0.3f) * 3.14159265358979;
+    const auto   v = TvrVelocity(0.3);
+    EXPECT_NEAR(v.x(), -100.0 * std::sin(a), 1e-3);
+    EXPECT_NEAR(v.y(), 100.0 * std::cos(a), 1e-3);
+    EXPECT_NEAR(v.z(), 0.0f, 1e-4f);
+}
+
+TEST(TurbulentVelocity, ParticlesBornTogetherWithoutAPhaseRangeShareAHeading) {
+    const auto a = TvrVelocity(0.7), b = TvrVelocity(0.7);
+    EXPECT_NEAR((a - b).norm(), 0.0f, 1e-5f);
+}
+
+TEST(TurbulentVelocity, TheRateOverrideScalesItsTimescale) {
+    auto over     = std::make_shared<wpscene::ParticleInstanceoverride>();
+    over->enabled = true;
+    over->rate    = 0.5f;
+    EXPECT_NEAR((TvrVelocity(0.6, over) - TvrVelocity(0.3)).norm(), 0.0f, 1e-3f);
+}
+
+// P2: 0x140237724 (artifacts/we-parity/decompiles/F-D5.md). One particle,
+// started with a velocity, run through `operators` by whole subsystem steps at
+// a host frame-rate cap.
+struct ForceStepRig {
+    Scene                              scene;
+    std::unique_ptr<ParticleSystem>    system;
+    std::unique_ptr<ParticleSubSystem> subsystem;
+
+    ForceStepRig(const std::vector<json>& operators, linalg::Vector3f velocity) {
+        system         = std::make_unique<ParticleSystem>(scene);
+        system->gener  = std::make_unique<SilentGener>();
+        subsystem      = std::make_unique<ParticleSubSystem>(
+            *system, std::make_shared<SceneMesh>(MeshUpdate::PerFrame), 4, 1.0, 1, 1.0,
+            ParticleSubSystem::SpawnType::STATIC, [](const Particle&, const ParticleRawGenSpec&) {});
+        for (const auto& op : operators) subsystem->AddOperator(MakeOperator(op));
+        subsystem->AddEmitter([velocity](std::vector<Particle>& particles, std::vector<ParticleInitOp>&,
+                                         uint32_t, double, std::span<const ParticleControlpoint>) {
+            if (! particles.empty()) return;
+            Particle p;
+            PM::InitLifetime(p, 100.0f);
+            p.velocity = velocity;
+            particles.push_back(p);
+        });
+    }
+    const Particle& Step(uint32_t fps, double dt) {
+        scene.targetFps = fps;
+        scene.frameTime = dt;
+        subsystem->Emitt();
+        return subsystem->Instances()[0]->Particles()[0];
+    }
+};
+
+TEST(Movement, DragUsesTheScaledStepBelowFortyFramesASecond) {
+    ForceStepRig rig({ { { "name", "movement" }, { "drag", 1.0 } } }, { 10.0f, 0.0f, 0.0f });
+    const Particle& p = rig.Step(30, 1.0 / 30.0);
+    // k = (0.025 * 30)^0.7 = 0.75^0.7; the position moves by the whole step.
+    EXPECT_NEAR(p.velocity.x(), 10.0 * (1.0 - (1.0 / 30.0) * std::pow(0.75, 0.7)), 1e-4);
+    EXPECT_NEAR(p.position.x(), 10.0 / 30.0, 1e-5);
+}
+
+TEST(Movement, AtSixtyFramesASecondTheScaledStepIsTheStep) {
+    ForceStepRig rig({ { { "name", "movement" }, { "drag", 1.0 } } }, { 10.0f, 0.0f, 0.0f });
+    const Particle& p = rig.Step(60, 1.0 / 60.0);
+    EXPECT_NEAR(p.velocity.x(), 10.0 * (1.0 - 1.0 / 60.0), 1e-5);
+}
+
+TEST(ParticleStep, AFrameRateOfTwentyOrLessRunsTheOperatorsInTwoHalfSteps) {
+    ParticleScene scene(
+        { { "/particle.json",
+            ParticleFile(R"({"name":"sphererandom","id":1,"rate":0,"instantaneous":1,"distancemax":0,)"
+                         R"("directions":"1 1 1","speedmin":0,"speedmax":0})",
+                         R"("maxcount":4,"operator":[{"name":"movement","gravity":"0 -10 0"}])") } },
+        OneParticleObject());
+    scene.scene->targetFps = 15;
+    scene.Step(1, 1.0 / 15.0);
+    const auto live = LiveParticles(*scene.Sub().Instances()[0]);
+    ASSERT_EQ(live.size(), 1u);
+    // Two passes of 1/30 s: v -1/3 then -2/3, y -1/90 then -1/30 (one 1/15 s
+    // pass would give y = -2/45).
+    EXPECT_NEAR(live[0].velocity.y(), -2.0 / 3.0, 1e-5);
+    EXPECT_NEAR(live[0].position.y(), -1.0 / 30.0, 1e-6);
+}
+
+TEST(ParticleStep, AboveTwentyFramesASecondTheOperatorsRunOnce) {
+    int passes = 0;
+    ForceStepRig rig({}, { 0.0f, 0.0f, 0.0f });
+    rig.subsystem->AddOperator([&passes](const ParticleInfo&) { ++passes; });
+    rig.Step(21, 1.0 / 21.0);
+    EXPECT_EQ(passes, 1);
+    rig.Step(20, 1.0 / 20.0);
+    EXPECT_EQ(passes, 3);
+}
+
+TEST(ParticleStep, TheScaledStepIsDtTimesPowOfAFortiethOverTheFrameInterval) {
+    double seen = -1.0, plain = -1.0;
+    ForceStepRig rig({}, { 0.0f, 0.0f, 0.0f });
+    rig.subsystem->AddOperator([&](const ParticleInfo& info) {
+        seen  = info.time_pass_scaled;
+        plain = info.time_pass;
+    });
+    rig.Step(24, 0.05);
+    EXPECT_NEAR(seen, 0.05 * std::pow(0.6, 0.7), 1e-9);
+    EXPECT_NEAR(plain, 0.05, 1e-12);
+    rig.Step(0, 0.05);
+    EXPECT_NEAR(seen, 0.05, 1e-12) << "an unknown frame rate scales nothing";
+}
+
+TEST(ParticleStep, HalfStepsStartEachPassFromTheBirthValues) {
+    // The operator interpreter copies the birth colour, alpha and size in before
+    // it runs (0x14023FC34), so a ramp is not applied twice.
+    ForceStepRig rig({ { { "name", "alphachange" }, { "startvalue", 0.5 }, { "endvalue", 0.5 } } },
+                     { 0.0f, 0.0f, 0.0f });
+    const Particle& p = rig.Step(15, 1.0 / 15.0);
+    EXPECT_NEAR(p.alpha, 0.5f, 1e-6f);
+}
+
+TEST(ControlpointAttract, PullsByTheScaledStep) {
+    const json fields { { "name", "controlpointattract" }, { "scale", 100.0 }, { "threshold", 100.0 } };
+    std::array<Particle, 1> full { LivingParticle() }, half { LivingParticle() };
+    full[0].position = half[0].position = { 50.0f, 0.0f, 0.0f };
+    RunOperator(MakeOperator(fields), full, 0.1);
+    RunOperator(MakeOperator(fields), half, 0.1, {}, 0.0, 0.05);
+    ASSERT_LT(full[0].velocity.x(), -1.0f);
+    EXPECT_NEAR(half[0].velocity.x(), 0.5f * full[0].velocity.x(), 1e-4f);
+}
+
+TEST(Turbulence, SpeedIsTakenOverTheScaledStep) {
+    const json fields { { "name", "turbulence" }, { "speedmin", 100.0 }, { "speedmax", 100.0 },
+                        { "scale", 0.01 }, { "timescale", 0.0 }, { "mask", "1 1 1" } };
+    std::array<Particle, 1> full { LivingParticle() }, half { LivingParticle() };
+    full[0].position = half[0].position = { 13.0f, 29.0f, 7.0f };
+    RunOperator(MakeOperator(fields), full, 0.1);
+    RunOperator(MakeOperator(fields), half, 0.1, {}, 0.0, 0.05);
+    ASSERT_GT(full[0].velocity.norm(), 1e-3f);
+    EXPECT_NEAR((half[0].velocity - 0.5f * full[0].velocity).norm(), 0.0f, 1e-4f);
+}
+
+TEST(Vortex, SwirlsOverTheScaledStep) {
+    const json fields { { "name", "vortex" }, { "distanceinner", 0.0 }, { "distanceouter", 100.0 },
+                        { "speedinner", 100.0 }, { "speedouter", 100.0 } };
+    std::array<Particle, 1> full { LivingParticle() }, half { LivingParticle() };
+    full[0].position = half[0].position = { 50.0f, 0.0f, 0.0f };
+    RunOperator(MakeOperator(fields), full, 0.1);
+    RunOperator(MakeOperator(fields), half, 0.1, {}, 0.0, 0.05);
+    ASSERT_GT(full[0].velocity.norm(), 1.0f);
+    EXPECT_NEAR((half[0].velocity - 0.5f * full[0].velocity).norm(), 0.0f, 1e-4f);
+}
+
+TEST(AngularMovement, DragUsesTheScaledStep) {
+    const json fields { { "name", "angularmovement" }, { "drag", 1.0 } };
+    std::array<Particle, 1> p { LivingParticle() };
+    p[0].angularVelocity = { 0.0f, 0.0f, 10.0f };
+    RunOperator(MakeOperator(fields), p, 0.1, {}, 0.0, 0.05);
+    EXPECT_NEAR(p[0].angularVelocity.z(), 10.0f * 0.95f, 1e-4f);
+}
+
+// P10a: vortex_v2, 0x14023FBC0 case 0x10 (artifacts/we-parity/decompiles/F-D9.md).
+TEST(VortexV2, SwirlsAboutItsControlpointOverTheScaledStep) {
+    const auto op = MakeOperator({ { "name", "vortex_v2" }, { "distanceinner", 0.0 }, { "distanceouter", 200.0 },
+                                   { "speedinner", 100.0 }, { "speedouter", 100.0 } });
+    std::array<Particle, 1> p { LivingParticle() };
+    p[0].position = { 100.0f, 0.0f, 0.0f };
+    RunOperator(op, p, 0.1, {}, 0.0, 0.05);
+    // (1,0,0) x (0,0,1) = (0,-1,0), at 100 per second over the scaled step.
+    EXPECT_NEAR(p[0].velocity.x(), 0.0f, 1e-5f);
+    EXPECT_NEAR(p[0].velocity.y(), -5.0f, 1e-4f);
+}
+
+TEST(VortexV2, FlagOneMeasuresTheDistanceFromTheAxisLine) {
+    const json base { { "name", "vortex_v2" }, { "distanceinner", 0.0 }, { "distanceouter", 200.0 },
+                      { "speedinner", 100.0 }, { "speedouter", 0.0 } };
+    json line = base;
+    line["flags"] = 1;
+    std::array<Particle, 1> on_line { LivingParticle() }, from_point { LivingParticle() };
+    on_line[0].position = from_point[0].position = { 100.0f, 0.0f, 50.0f };
+    RunOperator(MakeOperator(line), on_line, 0.1);
+    RunOperator(MakeOperator(base), from_point, 0.1);
+    // From the line the particle is 100 away: half way, 50 per second.
+    EXPECT_NEAR(on_line[0].velocity.y(), -5.0f, 1e-4f);
+    const double r = std::sqrt(100.0 * 100.0 + 50.0 * 50.0);
+    EXPECT_NEAR(from_point[0].velocity.y(), -(100.0 / r) * 100.0 * (1.0 - r / 200.0) * 0.1, 1e-4);
+}
+
+TEST(VortexV2, FlagTwoKeepsTheParticleAtItsDistance) {
+    const auto op = MakeOperator({ { "name", "vortex_v2" }, { "flags", 2 }, { "centerforce", 1.0 },
+                                   { "speedinner", 0.0 }, { "speedouter", 0.0 } });
+    std::array<Particle, 1> p { LivingParticle() };
+    p[0].position = { 100.0f, 0.0f, 0.0f };
+    p[0].velocity = { 0.0f, 50.0f, 0.0f };
+    RunOperator(op, p, 0.1);
+    PM::MoveByTime(p[0], 0.1);
+    EXPECT_NEAR(p[0].position.norm(), 100.0f, 1e-3f);
+}
+
+TEST(VortexV2, TheRingPullsAParticleBetweenItsBandAndItsReach) {
+    const json ring { { "name", "vortex_v2" }, { "flags", 4 }, { "ringradius", 100.0 }, { "ringwidth", 10.0 },
+                      { "ringpulldistance", 50.0 }, { "ringpullforce", 10.0 }, { "speedinner", 0.0 },
+                      { "speedouter", 0.0 } };
+    std::array<Particle, 1> outside { LivingParticle() }, in_band { LivingParticle() };
+    outside[0].position = { 130.0f, 0.0f, 0.0f };
+    in_band[0].position = { 105.0f, 0.0f, 0.0f };
+    RunOperator(MakeOperator(ring), outside, 0.1);
+    RunOperator(MakeOperator(ring), in_band, 0.1);
+    // 30 off the ring: (30 - 10) / 50 = 0.4 of the reach, pull 0.6 * dt * force inward.
+    EXPECT_NEAR(outside[0].velocity.x(), -130.0f * 0.6f * 0.1f * 10.0f, 1e-3f);
+    EXPECT_NEAR(in_band[0].velocity.norm(), 0.0f, 1e-6f) << "no pull inside the band";
+}
+
+// P10b: boids, 0x14023FBC0 case 0x11 (artifacts/we-parity/decompiles/F-D10.md).
+template<std::size_t N>
+void RunBoids(const json& fields, std::array<Particle, N>& particles, double dt, uint32_t step = 0) {
+    const auto op = MakeOperator(fields);
+    const std::array<ParticleControlpoint, 8> points {};
+    ParticleInfo info { .particles = particles, .controlpoints = points, .time = 0.0, .time_pass = dt,
+                        .time_pass_scaled = dt };
+    info.step = step;
+    op(info);
+}
+
+TEST(Boids, TwoParticlesInsideTheNeighbourThresholdDrawTogether) {
+    std::array<Particle, 2> p { LivingParticle(), LivingParticle() };
+    p[1].position = { 30.0f, 0.0f, 0.0f };
+    RunBoids({ { "name", "boids" }, { "separationthreshold", 0.0 }, { "alignmentfactor", 0.0 },
+               { "cohesionfactor", 1.0 } },
+             p, 0.1);
+    // The centre of the neighbours, the particle itself included, is 15 away.
+    EXPECT_NEAR(p[0].velocity.x(), 1.5f, 1e-5f);
+    EXPECT_NEAR(p[1].velocity.x(), -1.5f, 1e-5f);
+}
+
+TEST(Boids, SeparationPushesCloseParticlesApart) {
+    std::array<Particle, 2> p { LivingParticle(), LivingParticle() };
+    p[1].position = { 10.0f, 0.0f, 0.0f };
+    RunBoids({ { "name", "boids" }, { "separationthreshold", 20.0 }, { "separationfactor", 1.0 },
+               { "alignmentfactor", 0.0 }, { "cohesionfactor", 0.0 } },
+             p, 0.1);
+    // d * (20 / 10 - 1) = -10, over one close neighbour, times the step.
+    EXPECT_NEAR(p[0].velocity.x(), -1.0f, 1e-5f);
+}
+
+TEST(Boids, FlagOneCapsTheSpeedItWouldGain) {
+    std::array<Particle, 2> p { LivingParticle(), LivingParticle() };
+    p[1].position = { 40.0f, 0.0f, 0.0f };
+    RunBoids({ { "name", "boids" }, { "flags", 1 }, { "maxspeed", 1.0 }, { "cohesionfactor", 100.0 },
+               { "separationthreshold", 0.0 }, { "alignmentfactor", 0.0 } },
+             p, 0.1);
+    EXPECT_NEAR(p[0].velocity.norm(), 1.0f, 1e-5f);
+}
+
+TEST(Boids, ParticlesBeyondTheThresholdIgnoreEachOther) {
+    std::array<Particle, 2> p { LivingParticle(), LivingParticle() };
+    p[1].position = { 100.0f, 0.0f, 0.0f };
+    p[1].velocity = { 0.0f, 9.0f, 0.0f };
+    RunBoids({ { "name", "boids" }, { "separationthreshold", 0.0 }, { "cohesionfactor", 1.0 } }, p, 0.1);
+    EXPECT_NEAR(p[0].velocity.norm(), 0.0f, 1e-6f);
+}
+
+TEST(Boids, AboveTwoHundredParticlesOnlyASliceIsSteeredEachStep) {
+    // 400 slots: three slices; step 0 steers blocks 0, 3, 6, ...
+    std::array<Particle, 400> p {};
+    for (std::size_t i = 0; i < p.size(); ++i) {
+        p[i] = LivingParticle();
+        p[i].position = { static_cast<float>(i % 2) * 10.0f, 0.0f, 0.0f };
+    }
+    const json fields { { "name", "boids" }, { "separationthreshold", 0.0 }, { "alignmentfactor", 0.0 },
+                        { "cohesionfactor", 1.0 } };
+    RunBoids(fields, p, 0.1, 0);
+    EXPECT_NE(p[0].velocity.x(), 0.0f) << "block 0 is steered";
+    EXPECT_EQ(p[4].velocity.x(), 0.0f) << "block 1 waits";
+    RunBoids(fields, p, 0.1, 1);
+    EXPECT_NE(p[4].velocity.x(), 0.0f);
+}
+
+// P10c: remapvalue / remapinitialvalue (artifacts/we-parity/decompiles/F-D11.md).
+TEST(ParticleNoise, OpenSimplex2IsZeroAtTheOriginAndStaysWithinOne) {
+    EXPECT_EQ(PN::OpenSimplex2(0, 0.0f, 0.0f), 0.0f);
+    float largest = 0.0f;
+    for (int i = 0; i < 64; ++i)
+        for (int j = 0; j < 64; ++j)
+            largest = std::max(largest, std::abs(PN::OpenSimplex2(1234, i * 0.37f - 7.0f, j * 0.29f - 9.0f)));
+    EXPECT_GT(largest, 0.2f);
+    EXPECT_LE(largest, 1.0f);
+    EXPECT_NE(PN::OpenSimplex2(1, 0.3f, 0.7f), PN::OpenSimplex2(2, 0.3f, 0.7f)) << "the seed picks the field";
+    EXPECT_FLOAT_EQ(PN::OpenSimplex2Fbm(5, 0.3f, 0.7f, 1), PN::OpenSimplex2(5, 0.3f, 0.7f));
+}
+
+json PreviewRemap() {
+    // The remapvalue preview scene's operator.
+    return { { "name", "remapvalue" }, { "input", "distancetocontrolpoint" }, { "inputcontrolpoint0", 1 },
+             { "inputrangemin", 150 }, { "inputrangemax", 200 }, { "operation", "remap" },
+             { "output", "color" }, { "outputrangemin", "1 0 0" }, { "outputrangemax", "0 0 1" } };
+}
+
+TEST(Remap, DistanceToAControlpointRemapsColour) {
+    std::array<Particle, 1> p { LivingParticle() };
+    p[0].position = { 175.0f, 0.0f, 0.0f };
+    RunOperator(MakeOperator(PreviewRemap()), p, 0.1);
+    EXPECT_NEAR(p[0].color.x(), 0.5f, 1e-5f);
+    EXPECT_NEAR(p[0].color.y(), 0.0f, 1e-5f);
+    EXPECT_NEAR(p[0].color.z(), 0.5f, 1e-5f);
+}
+
+TEST(Remap, FlagOneClampsTheInputAndFlagTwoTheOutput) {
+    json unclamped = PreviewRemap();
+    unclamped["flags"] = 0;
+    json clamped = PreviewRemap();
+    clamped["flags"] = 1;
+    std::array<Particle, 1> open { LivingParticle() }, held { LivingParticle() };
+    open[0].position = held[0].position = { 300.0f, 0.0f, 0.0f };
+    RunOperator(MakeOperator(unclamped), open, 0.1);
+    RunOperator(MakeOperator(clamped), held, 0.1);
+    EXPECT_NEAR(open[0].color.x(), -2.0f, 1e-5f) << "an unclamped input runs past the range";
+    EXPECT_NEAR(held[0].color.x(), 0.0f, 1e-5f);
+    EXPECT_NEAR(held[0].color.z(), 1.0f, 1e-5f);
+    clamped["flags"] = 2;
+    std::array<Particle, 1> out { LivingParticle() };
+    out[0].position = { 300.0f, 0.0f, 0.0f };
+    RunOperator(MakeOperator(clamped), out, 0.1);
+    EXPECT_NEAR(out[0].color.x(), 0.0f, 1e-5f);
+    EXPECT_NEAR(out[0].color.z(), 1.0f, 1e-5f);
+}
+
+TEST(Remap, TheDefaultMultipliesSizeByTheLifetimeFraction) {
+    std::array<Particle, 1> p { LivingParticle(10.0f) };
+    p[0].lifetime = 7.5f;   // a quarter of the way through
+    p[0].size     = 40.0f;
+    RunOperator(MakeOperator({ { "name", "remapvalue" } }), p, 0.1);
+    EXPECT_NEAR(p[0].size, 10.0f, 1e-4f);
+}
+
+double RemapTransformAt(const std::string& transform, double time) {
+    std::array<Particle, 1> p { LivingParticle() };
+    p[0].seed = 0.37f;
+    RunOperator(MakeOperator({ { "name", "remapvalue" }, { "input", "particlesystemtime" },
+                               { "operation", "remap" }, { "output", "opacity" },
+                               { "transformfunction", transform }, { "flags", 0 } }),
+                p, 0.1, {}, time);
+    return p[0].alpha;
+}
+
+TEST(Remap, TransformsFollowTheEngine) {
+    EXPECT_NEAR(RemapTransformAt("none", 0.3), 0.3, 1e-6);
+    EXPECT_NEAR(RemapTransformAt("sine", 0.5), 0.5, 1e-6);
+    EXPECT_NEAR(RemapTransformAt("sine", 1.0), 1.0, 1e-6);
+    EXPECT_NEAR(RemapTransformAt("square", 0.3), 0.0, 1e-6);
+    EXPECT_NEAR(RemapTransformAt("square", 0.7), 1.0, 1e-6);
+    EXPECT_NEAR(RemapTransformAt("saw", 1.3), 0.3, 1e-5);
+    EXPECT_NEAR(RemapTransformAt("triangle", 0.3), 0.6, 1e-5);
+    const auto seed = static_cast<int32_t>(std::bit_cast<uint32_t>(0.37f));
+    EXPECT_NEAR(RemapTransformAt("simplexnoise", 0.3), 0.5 + 0.5 * PN::OpenSimplex2(seed, 0.3f, 0.0f), 1e-6);
+    EXPECT_NEAR(RemapTransformAt("fbmnoise", 0.3), 0.5 + 0.5 * PN::OpenSimplex2Fbm(seed, 0.3f, 0.0f, 3), 1e-6);
+}
+
+TEST(Remap, TheBlendWindowLerpsTheOldAndTheNewValue) {
+    json fields = PreviewRemap();
+    fields["blendinstart"] = 0.0;
+    fields["blendinend"]   = 0.5;
+    std::array<Particle, 1> p { LivingParticle(10.0f) };
+    p[0].lifetime = 7.5f;   // life 0.25: half way into the window
+    p[0].position = { 175.0f, 0.0f, 0.0f };
+    RunOperator(MakeOperator(fields), p, 0.1);
+    EXPECT_NEAR(p[0].color.x(), 0.75f, 1e-5f);
+    EXPECT_NEAR(p[0].color.y(), 0.5f, 1e-5f);
+}
+
+TEST(Remap, WorldOriginsAffectAbsoluteCoordinatesButNotDifferencesAtBirthOrAtEachStep) {
+    for (const auto& [input, expected] : std::array<std::pair<const char*, float>,4>{
+            {{"position",105}, {"controlpoint",120}, {"deltatocontrolpoint",15}, {"distancetocontrolpoint",15}}}) {
+        SCOPED_TRACE(input);
+        SpawnRig rig;
+        rig.controlpoints[0].offset = {20, 0, 0};
+        rig.spawn->world_space = true;
+        rig.spawn->layer_origin = {100, 0, 0};
+        json fields{{"name","remapinitialvalue"},{"input",input},{"inputrangemax",1000},
+                    {"output","color"},{"operation","remap"}};
+        Particle born = LivingParticle();
+        born.position = {5, 0, 0};
+        WPParticleParser::genParticleInitOp(fields,rig.ctx)(born,0);
+        EXPECT_NEAR(born.color.x(),expected/1000,1e-6);
+        fields["name"] = "remapvalue";
+        std::array<Particle,1> running{LivingParticle()};
+        running[0].position = {5,0,0};
+        ParticleInfo info{.particles=running,.controlpoints=rig.controlpoints,.time=0,.time_pass=0.1,.time_pass_scaled=0.1};
+        info.world_space = true;
+        info.layer_origin = {100,0,0};
+        MakeOperator(fields)(info);
+        EXPECT_NEAR(running[0].color.x(),expected/1000,1e-6);
+    }
+}
+
+TEST(RemapInitial, AppliesOnceAtBirthToTheBirthValues) {
+    SpawnRig rig;
+    const auto op = WPParticleParser::genParticleInitOp(
+        { { "name", "remapinitialvalue" }, { "input", "maxlifetime" }, { "inputrangemax", 4.0 },
+          { "operation", "remap" }, { "output", "size" }, { "outputrangemax", 10.0 } },
+        rig.ctx);
+    Particle p;
+    PM::InitLifetime(p, 2.0f);
+    op(p, 0.0);
+    // Half of the input range: an engine size of 5, held here as 10.
+    EXPECT_NEAR(p.size, 10.0f, 1e-5f);
+    EXPECT_NEAR(p.init.size, 10.0f, 1e-5f);
+}
+
+// P10d: inheritvaluefromevent, 0x14023FBC0 case 0x14 (artifacts/we-parity/decompiles/F-D12.md).
+TEST(InheritValue, AnOperatorTakesTheParentsRunningValueEveryStep) {
+    Particle parent = LivingParticle();
+    parent.color    = { 1.0f, 0.0f, 0.0f };
+    parent.alpha    = 0.25f;
+    std::array<Particle, 1> child { LivingParticle() };
+    const auto op = MakeOperator({ { "name", "inheritvaluefromevent" } });   // setcoloropacity
+    const std::array<ParticleControlpoint, 8> points {};
+    ParticleInfo info { .particles = child, .controlpoints = points, .time = 0.0, .time_pass = 0.1,
+                        .time_pass_scaled = 0.1 };
+    op(info);
+    EXPECT_NEAR(child[0].color.y(), 1.0f, 1e-6f) << "no parent, nothing";
+    info.parent = &parent;
+    op(info);
+    EXPECT_NEAR(child[0].color.y(), 0.0f, 1e-6f);
+    EXPECT_NEAR(child[0].alpha, 0.25f, 1e-6f);
+}
+
+TEST(InheritValue, AnEventChildFollowsItsParentsColourEveryStep) {
+    FollowerRig rig;
+    rig.parent->AddOperator([](const ParticleInfo& info) {
+        for (auto& p : info.particles) p.color = { 1.0f, 0.0f, 0.0f };
+    });
+    rig.child->AddOperator(MakeOperator({ { "name", "inheritvaluefromevent" }, { "input", "setcolor" } }));
+    for (int i = 0; i < 2; ++i) rig.parent->Emitt();
+    ASSERT_EQ(rig.child->Instances().size(), 1u);
+    const auto live = LiveParticles(*rig.child->Instances()[0]);
+    ASSERT_FALSE(live.empty());
+    for (const auto& p : live) EXPECT_NEAR(p.color.y(), 0.0f, 1e-6f);
+}
+
+std::optional<float> ParticleScript(ParticleScene& fixture, const std::string& body) {
+    auto& runtime = *fixture.scene->runtime;
+    const auto errors = runtime.scriptErrorCount();
+    auto program = runtime.scriptEngine().CreatePropertyScriptProgram(
+        &runtime, "export function update(value) { " + body + " }", "layer", {},
+        DynamicValue(0.0f), runtime.hostContext());
+    EXPECT_NE(program, nullptr);
+    if (!program) return std::nullopt;
+    const auto value = program->Evaluate(runtime.hostContext(), DynamicValue(0.0f));
+    EXPECT_EQ(runtime.scriptErrorCount(), errors);
+    if (!value) return std::nullopt;
+    return value->getFloat();
+}
+
+TEST(ScriptParticles, IsPlayingObservesLiveSimulation) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":0,"instantaneous":1})", R"("maxcount":8)")}},
+        OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    fixture.Step();
+    ASSERT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 1u);
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying() ? 1 : 0;"), 1.0f);
+}
+
+TEST(ScriptParticles, StopClearsRootAndStaticChildren) {
+    const std::string emitter = R"({"name":"boxrandom","rate":0,"instantaneous":1})";
+    ParticleScene fixture({{"/particle.json", ParticleFile(emitter,
+        R"("maxcount":8,"children":[{"name":"child.json","type":"static","maxcount":1}])")},
+        {"/child.json", ParticleFile(emitter, R"("maxcount":8)")}}, OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    fixture.Step();
+    ASSERT_EQ(fixture.Sub().Children().size(), 1u);
+    ASSERT_FALSE(LiveParticles(*fixture.Sub().Instances().front()).empty());
+    ASSERT_FALSE(LiveParticles(*fixture.Sub().Children().front()->Instances().front()).empty());
+    ASSERT_TRUE(ParticleScript(fixture, "thisLayer.stop(); return 1;").has_value());
+    for (const auto* sub : {&fixture.Sub(), fixture.Sub().Children().front().get()})
+        for (const auto& instance : sub->Instances()) EXPECT_TRUE(LiveParticles(*instance).empty());
+    fixture.Step(2);
+    for (const auto& instance : fixture.Sub().Instances()) EXPECT_TRUE(LiveParticles(*instance).empty());
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying() ? 1 : 0;"), 0.0f);
+}
+
+TEST(ScriptParticles, EmitZeroAndNegativeUseTheNativeCountRules) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":0,"instantaneous":0})", R"("maxcount":16)")}},
+        OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    fixture.Step();
+    for (const auto& [argument, expected] : std::vector<std::pair<std::string,std::size_t>>{
+        {"-2",0}, {"0",1}, {"3",4}}) {
+        SCOPED_TRACE(argument);
+        ASSERT_TRUE(ParticleScript(fixture, "thisLayer.emitParticles("+argument+"); return 1;").has_value());
+        EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), expected);
+    }
+}
+
+TEST(ScriptParticles, InstanceExposesTheNativeOverrideRecord) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":0,"instantaneous":1})", R"("maxcount":8)")}},
+        OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.instance ? thisLayer.instance.rate : -1;"), 1.0f);
+}
+
+
+TEST(ScriptParticles, PauseStopsEmissionWhileRootAndStaticChildrenKeepMoving) {
+    const std::string emitter = R"({"name":"boxrandom","rate":10,"instantaneous":1,"distancemin":"1 0 0","distancemax":"1 0 0","speedmin":10,"speedmax":10})";
+    const std::string movement = R"("operator":[{"name":"movement","gravity":"0 0 0","drag":0}])";
+    ParticleScene fixture({{"/particle.json", ParticleFile(emitter,
+        R"("maxcount":32,"children":[{"name":"child.json","type":"static","maxcount":1}],)"+movement)},
+        {"/child.json", ParticleFile(emitter, R"("maxcount":32,)"+movement)}}, OneParticleObject(),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    fixture.Step(1, .1);
+    auto& child = *fixture.Sub().Children().front();
+    const auto root_before = LiveParticles(*fixture.Sub().Instances().front());
+    const auto child_before = LiveParticles(*child.Instances().front());
+    ASSERT_FALSE(root_before.empty());
+    ASSERT_FALSE(child_before.empty());
+    EXPECT_EQ(ParticleScript(fixture, "thisLayer.pause(); return thisLayer.isPlaying() ? 1 : 0;"), 0.0f);
+    fixture.Step(3, .1);
+    const auto root_after = LiveParticles(*fixture.Sub().Instances().front());
+    const auto child_after = LiveParticles(*child.Instances().front());
+    ASSERT_EQ(root_after.size(), root_before.size());
+    ASSERT_EQ(child_after.size(), child_before.size());
+    EXPECT_TRUE(root_after.front().position.isApprox(
+        root_before.front().position + root_before.front().velocity * .3f, 1e-5));
+    EXPECT_TRUE(child_after.front().position.isApprox(
+        child_before.front().position + child_before.front().velocity * .3f, 1e-5));
+    EXPECT_NEAR(root_before.front().lifetime-root_after.front().lifetime, .3, 2e-5);
+    EXPECT_TRUE(fixture.scene->paritileSys->HasTimeAdvancingWork());
+    EXPECT_EQ(ParticleScript(fixture, "thisLayer.play(); return thisLayer.isPlaying() ? 1 : 0;"), 1.0f);
+    fixture.Step(2, .1); // the initial burst also charged one particle to the stream
+    EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), root_before.size()+1);
+    EXPECT_EQ(LiveParticles(*child.Instances().front()).size(), child_before.size()+1);
+}
+
+TEST(ScriptParticles, StopRemovesEventInstancesAndPlayRestartsTheirSchedules) {
+    const std::string emitter = R"({"name":"boxrandom","rate":0,"instantaneous":1})";
+    ParticleScene fixture({{"/particle.json", ParticleFile(emitter,
+        R"("maxcount":8,"children":[{"name":"child.json","type":"eventspawn","maxcount":4}])")},
+        {"/child.json", ParticleFile(emitter, R"("maxcount":8)")}}, OneParticleObject(),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    fixture.Step(2);
+    auto& child = *fixture.Sub().Children().front();
+    ASSERT_FALSE(child.Instances().empty());
+    ASSERT_FALSE(LiveParticles(*child.Instances().front()).empty());
+    ASSERT_TRUE(ParticleScript(fixture, "thisLayer.pause(); thisLayer.stop(); return 1;").has_value());
+    EXPECT_TRUE(child.Instances().empty());
+    fixture.Step();
+    EXPECT_FALSE(fixture.scene->paritileSys->HasTimeAdvancingWork());
+    EXPECT_EQ(ParticleScript(fixture, "thisLayer.play(); return thisLayer.isPlaying() ? 1 : 0;"), 1.0f);
+    fixture.Step(2);
+    ASSERT_EQ(child.Instances().size(), 1u);
+    EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 1u);
+    EXPECT_EQ(LiveParticles(*child.Instances().front()).size(), 1u);
+}
+
+TEST(ScriptParticles, ManualEmissionBypassesPauseAndStopButDoesNotUnpause) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":10,"instantaneous":2,"delay":100})", R"("maxcount":8)",
+        R"({"name":"lifetimerandom","min":0.25,"max":0.25})")}}, OneParticleObject(),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture,
+        "thisLayer.pause(); thisLayer.stop(); thisLayer.emitParticles(0); return thisLayer.isPlaying()?1:0;"), 0.0f);
+    ASSERT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 1u);
+    fixture.Step(1, .1);
+    EXPECT_TRUE(fixture.scene->paritileSys->HasTimeAdvancingWork());
+    EXPECT_EQ(ParticleScript(fixture, "thisLayer.play(); return thisLayer.isPlaying()?1:0;"), 1.0f);
+    fixture.Step(3, .1);
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying()?1:0;"), 0.0f);
+    EXPECT_FALSE(fixture.scene->paritileSys->HasTimeAdvancingWork());
+}
+
+TEST(ScriptParticles, EachEmitterGetsTheExtraCountOutsideItsNormalQuota) {
+    const std::string emitter = R"({"name":"boxrandom","rate":1,"instantaneous":0,"flags":2})";
+    ParticleScene fixture({{"/particle.json", ParticleFile(emitter+","+emitter, R"("maxcount":32)")}},
+        OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    ASSERT_TRUE(ParticleScript(fixture, "thisLayer.emitParticles(3); return 1;").has_value());
+    EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 6u);
+    // The extra count is charged to each active emitter's balance. It does not
+    // gain another emission until the ordinary stream has repaid that advance.
+    fixture.Step(2, 1);
+    EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 6u);
+    fixture.Step(2, 1);
+    EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 8u);
+}
+
+TEST(ScriptParticles, PlayReopensFinishedFlagsAndStopResetsDurationAndBurst) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":20,"instantaneous":1,"duration":0.1})", R"("maxcount":32)",
+        R"({"name":"lifetimerandom","min":0.2,"max":0.2})")}}, OneParticleObject(),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    fixture.Step(20, .05);
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying()?1:0;"), 0.0f);
+    EXPECT_EQ(ParticleScript(fixture, "thisLayer.play(); return thisLayer.isPlaying()?1:0;"), 1.0f);
+    fixture.Step(2, .05);
+    EXPECT_TRUE(LiveParticles(*fixture.Sub().Instances().front()).empty());
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying()?1:0;"), 1.0f);
+    ASSERT_TRUE(ParticleScript(fixture, "thisLayer.stop(); thisLayer.play(); return 1;").has_value());
+    fixture.Step(1, .05);
+    EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 2u);
+}
+
+TEST(ScriptParticles, InstanceWritesReachNewParticlesAndControlPoints) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":0,"instantaneous":0,"distancemin":"0 0 0","distancemax":"0 0 0"})",
+        R"("maxcount":8)",
+        R"({"name":"lifetimerandom","min":10,"max":10},{"name":"sizerandom","min":2,"max":2},{"name":"alpharandom","min":0.8,"max":0.8},{"name":"colorrandom","min":"255 255 255","max":"255 255 255"})")}},
+        OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture, R"(
+        var i=thisLayer.instance;
+        i.size=3; i.alpha=.5; i.lifetime=2; i.colorn=new Vec3(1,0,0); i.count=9;
+        i.controlpoint0=new Vec3(11,22,33);
+        thisLayer.emitParticles(1);
+        return i===thisLayer.instance && engine.isObjectValid(i) ? 1 : 0;
+    )"), 1.0f);
+    const auto immediate = LiveParticles(*fixture.Sub().Instances().front());
+    ASSERT_EQ(immediate.size(), 1u);
+    EXPECT_FLOAT_EQ(immediate[0].size, 2) << "same-script emit still uses the previous binding";
+    EXPECT_FLOAT_EQ(immediate[0].alpha, .8f);
+    EXPECT_FLOAT_EQ(immediate[0].lifetime, 10);
+    EXPECT_TRUE(immediate[0].color.isApprox(linalg::Vector3f::Ones()));
+    EXPECT_TRUE(immediate[0].position.isZero());
+    fixture.Step();
+    ASSERT_TRUE(ParticleScript(fixture, "thisLayer.emitParticles(1); return 1;").has_value());
+    const auto live = LiveParticles(*fixture.Sub().Instances().front());
+    ASSERT_EQ(live.size(), 2u) << "manual count is not multiplied by instance.count";
+    EXPECT_FLOAT_EQ(live.back().size, 6);
+    EXPECT_FLOAT_EQ(live.back().alpha, .4f);
+    EXPECT_FLOAT_EQ(live.back().lifetime, 20);
+    EXPECT_TRUE(live.back().color.isApprox(linalg::Vector3f(1,0,0)));
+    EXPECT_TRUE(live.back().position.isApprox(linalg::Vector3f(11,22,33)));
+}
+
+TEST(ScriptParticles, RetainedInstanceExpiresWhenItsLayerIsRemoved) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":10})", R"("maxcount":8)")}},
+        OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture, "shared.particleInstance=thisLayer.instance; return engine.isObjectValid(shared.particleInstance)?1:0;"), 1.0f);
+    ASSERT_TRUE(ParticleScript(fixture, "shared.particleInstance.size=2; return 1;").has_value());
+    fixture.scene->runtime->UnregisterNode("layer");
+    EXPECT_TRUE(fixture.scene->paritileSys->subsystems.empty());
+    EXPECT_FALSE(fixture.scene->paritileSys->HasTimeAdvancingWork());
+    fixture.Step(); // removing the layer also cancels the queued instance write
+    EXPECT_EQ(ParticleScript(fixture, "return engine.isObjectValid(shared.particleInstance)?1:0;"), 0.0f);
+    EXPECT_EQ(ParticleScript(fixture, "thisLayer.play(); return thisLayer.isPlaying()?1:0;"), 0.0f);
+}
+
+
+TEST(ScriptParticles, InstanceDefaultsExposeNativeUnsetSentinels) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":1})", R"("maxcount":8)")}}, OneParticleObject(),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture, R"(
+        var i=thisLayer.instance;
+        if(i.colorn.x!==-1 || i.colorn.y!==-1 || i.colorn.z!==-1)return 0;
+        for(var p=0;p<8;p++) {
+          if(i['controlpoint'+p].x!==3.4028234663852886e38)return 0;
+          if(i['controlpointangle'+p].x!==3.4028234663852886e38)return 0;
+        }
+        return 1;
+    )"), 1.0f);
+}
+
+TEST(ScriptParticles, InstanceRateClampIsReadableAfterTheNextStep) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":1})", R"("maxcount":8)")}}, OneParticleObject(),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture, "thisLayer.instance.rate=-3; return thisLayer.instance.rate;"), -3.0f);
+    fixture.Step();
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.instance.rate;"), .01f);
+}
+
+TEST(ScriptParticles, WritingAnInstanceReopensAStoppedPositiveRateEmitter) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":10})", R"("maxcount":8)")}}, OneParticleObject(),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture,
+        "thisLayer.stop(); thisLayer.instance.alpha=1; return thisLayer.isPlaying()?1:0;"), 0.0f);
+    fixture.Step(1,.1);
+    EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying()?1:0;"), 1.0f);
+    ASSERT_FALSE(fixture.Sub().Instances().empty());
+    EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 1u);
+}
+
+
+TEST(ScriptParticles, InstanceVectorCopiesAndUnsetValuesKeepTheLastControlPoint) {
+    ParticleScene fixture({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":0,"distancemin":"0 0 0","distancemax":"0 0 0"})",
+        R"("maxcount":8)",
+        R"({"name":"lifetimerandom","min":100,"max":100},{"name":"colorrandom","min":"255 255 255","max":"255 255 255"})")}},
+        OneParticleObject(), R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene, nullptr);
+    EXPECT_EQ(ParticleScript(fixture, R"(
+        var i=thisLayer.instance;
+        i.colorn=new Vec3(0,0,1); i.controlpoint0=new Vec3(80,0,0);
+        var color=i.colorn; color.x=1;
+        var point=i.controlpoint0; point.x=123;
+        return i.colorn.x===0 && i.controlpoint0.x===80 ? 1 : 0;
+    )"), 1.0f);
+    fixture.Step();
+    ASSERT_TRUE(ParticleScript(fixture, "thisLayer.emitParticles(1); return 1;").has_value());
+    const auto blue = LiveParticles(*fixture.Sub().Instances().front());
+    ASSERT_EQ(blue.size(), 1u);
+    EXPECT_TRUE(blue[0].color.isApprox(linalg::Vector3f(0,0,1)));
+    EXPECT_TRUE(blue[0].position.isApprox(linalg::Vector3f(80,0,0)));
+    EXPECT_EQ(ParticleScript(fixture, R"(
+        var i=thisLayer.instance;
+        i.colorn=new Vec3(-1,-1,-1);
+        i.controlpoint0=new Vec3(3.4028234663852886e38,77,88);
+        return i.controlpoint0.y===77 ? 1 : 0;
+    )"), 1.0f);
+    fixture.Step();
+    ASSERT_TRUE(ParticleScript(fixture, "thisLayer.emitParticles(1); return 1;").has_value());
+    const auto live = LiveParticles(*fixture.Sub().Instances().front());
+    ASSERT_EQ(live.size(), 2u);
+    EXPECT_TRUE(live.back().color.isApprox(linalg::Vector3f::Ones()));
+    EXPECT_TRUE(live.back().position.isApprox(linalg::Vector3f(80,0,0)));
+}
+
+TEST(ScriptParticles, AnEmptyOrFinishedSystemDoesNotKeepTheFrameClockRunning) {
+    for (const auto* emitter : {"", R"({"name":"boxrandom","rate":0,"instantaneous":1})"}) {
+        SCOPED_TRACE(emitter);
+        ParticleScene fixture({{"/particle.json", ParticleFile(emitter, R"("maxcount":8)",
+            R"({"name":"lifetimerandom","min":0.1,"max":0.1})")}}, OneParticleObject(),
+            R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+        ASSERT_NE(fixture.scene, nullptr);
+        fixture.Step(20,.05);
+        EXPECT_FALSE(fixture.scene->paritileSys->HasTimeAdvancingWork());
+        EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying()?1:0;"), 0.0f);
+    }
+}
+
+
+TEST(ScriptParticles, ZeroCountStopsStreamsButPreservesPendingBursts) {
+    for (const int count : {0,-2}) {
+        SCOPED_TRACE(count);
+        ParticleScene fixture({{"/particle.json", ParticleFile(
+            R"({"name":"boxrandom","rate":20})", R"("maxcount":8)",
+            R"({"name":"lifetimerandom","min":0.1,"max":0.1})")}}, OneParticleObject(),
+            R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+        ASSERT_NE(fixture.scene, nullptr);
+        fixture.Step(1,.05);
+        ASSERT_TRUE(ParticleScript(fixture, "thisLayer.instance.count="+std::to_string(count)+"; return 1;").has_value());
+        fixture.Step(5,.05);
+        EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying()?1:0;"), 0.0f);
+        EXPECT_FALSE(fixture.scene->paritileSys->HasTimeAdvancingWork());
+        EXPECT_EQ(ParticleScript(fixture, "thisLayer.instance.count=1; return thisLayer.isPlaying()?1:0;"), 0.0f);
+        fixture.Step(1,.05);
+        EXPECT_EQ(ParticleScript(fixture, "return thisLayer.isPlaying()?1:0;"), 1.0f);
+        EXPECT_EQ(LiveParticles(*fixture.Sub().Instances().front()).size(), 1u);
+    }
+    ParticleScene burst({{"/particle.json", ParticleFile(
+        R"({"name":"boxrandom","rate":0,"instantaneous":1})", R"("maxcount":8)")}},
+        OneParticleObject(R"("instanceoverride":{"count":0})"),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(burst.scene, nullptr);
+    burst.Step(20,.05);
+    EXPECT_EQ(ParticleScript(burst, "return thisLayer.isPlaying()?1:0;"), 1.0f);
+    EXPECT_TRUE(burst.scene->paritileSys->HasTimeAdvancingWork());
+    EXPECT_TRUE(LiveParticles(*burst.Sub().Instances().front()).empty());
+    ASSERT_TRUE(ParticleScript(burst, "thisLayer.instance.count=1; return 1;").has_value());
+    burst.Step();
+    EXPECT_EQ(LiveParticles(*burst.Sub().Instances().front()).size(), 1u);
+}
+
+
+std::array<linalg::Vector3f,3> ReadRendererOrientation(nlohmann::json renderer,
+                                                       const std::string& layer_fields = "") {
+    renderer["name"] = "sprite";
+    ParticleScene fixture({{"/particle.json",ParticleFile(
+        R"({"name":"boxrandom","rate":1,"instantaneous":0,"distancemin":"0 0 0","distancemax":"0 0 0"})",
+        R"("maxcount":1,"renderer":[)" + renderer.dump() + "]")}},
+        OneParticleObject(layer_fields),
+        R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    std::array<linalg::Vector3f,3> basis {linalg::Vector3f::Zero(),linalg::Vector3f::Zero(),linalg::Vector3f::Zero()};
+    EXPECT_NE(fixture.scene,nullptr);
+    if (!fixture.scene) return basis;
+    auto* node=FindMeshNodeOnCamera(*fixture.scene->sceneGraph,"");
+    EXPECT_NE(node,nullptr);
+    if (!node) return basis;
+    auto& updater=*fixture.scene->shaderValueUpdater;
+    updater.InitUniforms(node,0,[](std::string_view name){
+        return name=="g_OrientationRight" || name=="g_OrientationUp" || name=="g_OrientationForward";
+    });
+    sprite_map_t sprites;
+    updater.UpdateUniforms(node,sprites,[&](std::string_view name,const ShaderValue& value){
+        const int index=name=="g_OrientationRight"?0:name=="g_OrientationUp"?1:name=="g_OrientationForward"?2:-1;
+        if(index>=0 && value.size()==3) basis[static_cast<std::size_t>(index)]={value[0],value[1],value[2]};
+    });
+    return basis;
+}
+
+TEST(ParticleOrientation, FixedUsesTheAuthoredForwardAxisAndZeroFallsBackToY) {
+    struct Case { const char* axis; std::array<linalg::Vector3f,3> basis; };
+    const Case cases[] {
+        {"0 0 0",{linalg::Vector3f(1,0,0),linalg::Vector3f(0,0,-1),linalg::Vector3f(0,1,0)}},
+        {"0 -1 0",{linalg::Vector3f(-1,0,0),linalg::Vector3f(0,0,-1),linalg::Vector3f(0,-1,0)}},
+        {"0 0 1",{linalg::Vector3f(1,0,0),linalg::Vector3f(0,1,0),linalg::Vector3f(0,0,1)}},
+        {"1 0 0",{linalg::Vector3f(0,0,-1),linalg::Vector3f(0,1,0),linalg::Vector3f(1,0,0)}}
+    };
+    for(const auto& c:cases) {
+        SCOPED_TRACE(c.axis);
+        const auto actual=ReadRendererOrientation({{"orientation","fixed"},{"axis",c.axis}});
+        for(std::size_t vector=0;vector<3;++vector)
+            EXPECT_TRUE(actual[vector].isApprox(c.basis[vector],1e-5)) << vector;
+    }
+}
+
+TEST(ParticleOrientation, WorldspaceFlagCarriesTheBasisThroughTheModelTranspose) {
+    // WE's scale(2,1,1), Z60-degree probe reads right=(1,-sqrt12)/sqrt13,
+    // forward=(sqrt12,1)/sqrt13. A rotation-only inverse would differ.
+    const auto basis=ReadRendererOrientation({{"orientation","fixed"},{"axis","0 1 0"},{"flags",1}},
+        R"("scale":"2 1 1","angles":"0 0 1.0471975511965976")");
+    EXPECT_TRUE(basis[0].isApprox(linalg::Vector3f(.277350098f,-.960768923f,0),1e-5));
+    EXPECT_TRUE(basis[1].isApprox(linalg::Vector3f(0,0,-1),1e-5));
+    EXPECT_TRUE(basis[2].isApprox(linalg::Vector3f(.960768923f,.277350098f,0),1e-5));
+}
+
+TEST(ParticleOrientation, LocalFixedAxesKeepTheReferenceNonuniformScaleEffect) {
+    // Bounded by the 8-bit WE basis probe: its independently normalized up and
+    // forward are not re-orthogonalized after nonuniform scaling.
+    const auto basis=ReadRendererOrientation({{"orientation","fixed"},{"axis","1 2 3"},{"flags",0}},
+        R"("scale":"2 1 1","angles":"0 0 1.0471975511965976")");
+    const std::array<linalg::Vector3f,3> expected {linalg::Vector3f(.6f,0,-.8f),
+        linalg::Vector3f(-.565685425f,.707106781f,-.424264069f),
+        linalg::Vector3f(.742781353f,.371390676f,.557086015f)};
+    for(std::size_t vector=0;vector<3;++vector)
+        EXPECT_LT((basis[vector]-expected[vector]).norm(),.02f) << vector;
+}
+
+TEST(ParticleOrientation, NumericAndUnrecognizedOrientationNamesFallBackToScreen) {
+    for(const auto& mode:std::vector<nlohmann::json>{2,"Fixed","unknown"}) {
+        SCOPED_TRACE(mode.dump());
+        const auto basis=ReadRendererOrientation({{"orientation",mode},{"axis","0 1 0"}});
+        EXPECT_TRUE(basis[0].isApprox(linalg::Vector3f(1,0,0)));
+        EXPECT_TRUE(basis[1].isApprox(linalg::Vector3f(0,1,0)));
+        EXPECT_TRUE(basis[2].isApprox(linalg::Vector3f(0,0,1)));
+    }
+}
+
+
+TEST(ParticleOrientation, UprightUsesTheAxisLocallyAndWorldYForTheWorldspaceFlag) {
+    const auto local=ReadRendererOrientation({{"orientation","upright"},{"axis","1 0 0"}});
+    EXPECT_TRUE(local[0].isApprox(linalg::Vector3f(0,-1,0),1e-5));
+    EXPECT_TRUE(local[1].isApprox(linalg::Vector3f(1,0,0),1e-5));
+    EXPECT_TRUE(local[2].isApprox(linalg::Vector3f(0,0,1),1e-5));
+    for(const char* axis:{"1 0 0","0 0 1","1 2 3"}) {
+        SCOPED_TRACE(axis);
+        const auto world=ReadRendererOrientation({{"orientation","upright"},{"axis",axis},{"flags",1}},
+            R"("scale":"2 1 1","angles":"0 0 1.0471975511965976")");
+        EXPECT_TRUE(world[0].isApprox(linalg::Vector3f(.277350098f,-.960768923f,0),1e-5));
+        EXPECT_TRUE(world[1].isApprox(linalg::Vector3f(.960768923f,.277350098f,0),1e-5));
+        EXPECT_TRUE(world[2].isApprox(linalg::Vector3f(0,0,1),1e-5));
+    }
+}
+
+TEST(ParticleOrientation, ParallelUprightAxisDoesNotInventAFixedFallback) {
+    const auto basis=ReadRendererOrientation({{"orientation","upright"},{"axis","0 0 1"}});
+    for(const auto vector:{0u,2u}) for(int lane=0;lane<3;++lane)
+        EXPECT_TRUE(std::isnan(basis[vector][lane]));
+    EXPECT_TRUE(basis[1].isApprox(linalg::Vector3f(0,0,1)));
+}
+
+TEST(ParticleOrientation, RenderersSharingParticlesKeepIndependentAxes) {
+    ParticleScene fixture({{"/particle.json",ParticleFile(
+        R"({"name":"boxrandom","rate":1})",
+        R"("maxcount":1,"renderer":[{"name":"sprite","orientation":"fixed","axis":"1 0 0"},{"name":"sprite","orientation":"fixed","axis":"0 0 1"}])")}},
+        OneParticleObject(),R"("bloom":false,"orthogonalprojection":{"width":640,"height":360})");
+    ASSERT_NE(fixture.scene,nullptr);
+    std::vector<SceneNode*> nodes;
+    const auto collect=[&](const auto& self,SceneNode* node)->void {
+        if(node->Mesh()!=nullptr)nodes.push_back(node);
+        for(const auto& child:node->GetChildren())self(self,child.get());
+    };
+    collect(collect,fixture.scene->sceneGraph.get());
+    ASSERT_EQ(nodes.size(),2u);
+    auto& updater=*fixture.scene->shaderValueUpdater;
+    std::array<linalg::Vector3f,2> forward {linalg::Vector3f::Zero(),linalg::Vector3f::Zero()};
+    for(std::size_t index=0;index<nodes.size();++index) {
+        updater.InitUniforms(nodes[index],0,[](std::string_view name){return name=="g_OrientationForward";});
+        sprite_map_t sprites;
+        bool written = false;
+        updater.UpdateUniforms(nodes[index],sprites,[&](std::string_view name,const ShaderValue& value){
+            if(name=="g_OrientationForward" && value.size()==3) {
+                forward[index]={value[0],value[1],value[2]}; written=true;
+            }
+        });
+        EXPECT_TRUE(written);
+    }
+    EXPECT_TRUE(forward[0].isApprox(linalg::Vector3f(1,0,0)));
+    EXPECT_TRUE(forward[1].isApprox(linalg::Vector3f(0,0,1)));
+}
+
 } // namespace
+} // namespace wallpaper
+
+namespace wallpaper {
+
+TEST(Renderers, ASpriteTrailSelectsThickLayoutForEveryRendererSharingItsParticles) {
+    for (const bool first : {false, true}) {
+        const std::string renderers = first
+            ? R"([{"name":"spritetrail"},{"name":"sprite"},{"name":"ropetrail"}])"
+            : R"([{"name":"sprite"},{"name":"ropetrail"},{"name":"spritetrail"}])";
+        ParticleScene scene({{"/particle.json", ParticleFile(kThreeInABurst,
+            R"("maxcount":4,"renderer":)" + renderers,
+            R"({"name":"lifetimerandom","min":100,"max":100})", "mat_probe.json")}}, OneParticleObject());
+        ASSERT_NE(scene.scene, nullptr);
+        const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+        ASSERT_EQ(meshes.size(), 3u);
+        for (auto* mesh : meshes) {
+            EXPECT_TRUE(KindOf(*mesh).thick);
+            EXPECT_TRUE(ActiveUniforms(*mesh).count("g_ProbeThick"));
+        }
+    }
+}
+
+TEST(RopeGeometry, ATrailRecordsHistoryAfterASpriteRenderer) {
+    for (const bool first : {false, true}) {
+        const std::string renderers = first
+            ? R"([{"name":"ropetrail","length":1,"segments":4},{"name":"sprite"}])"
+            : R"([{"name":"sprite"},{"name":"ropetrail","length":1,"segments":4}])";
+        ParticleScene scene({{"/particle.json", ParticleFile(
+            R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+            R"("maxcount":1,"renderer":)" + renderers + R"(,"operator":[{"name":"movement","drag":0}])",
+            R"({"name":"lifetimerandom","min":100,"max":100},{"name":"velocityrandom","min":"20 0 0","max":"20 0 0"})")}},
+            OneParticleObject());
+        ASSERT_NE(scene.scene, nullptr);
+        scene.Step(12, 0.125);
+        const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+        ASSERT_EQ(meshes.size(), 2u);
+        const auto* trail = meshes[first ? 0 : 1];
+        EXPECT_GT(trail->GetIndexArray(0).DrawIndexCount(), 6u);
+        ASSERT_EQ(scene.Sub().Instances().size(), 1u);
+        ASSERT_EQ(scene.Sub().Instances()[0]->Trails().size(), 1u);
+        EXPECT_EQ(scene.Sub().Instances()[0]->Trails()[0].Count(), 4u);
+    }
+}
+
+// A scrolling rope trail is drawn by the shader's TRAILSCROLLALPHA branch, which fades its
+// ends itself (0x1401D2340 sets TRAILSCROLLALPHA and the fade bits; 0x1402366F0 sets
+// g_RenderVar0.x/.w to the history less one, scaled by 1 / uvscale in .w).
+constexpr const char* kScrollProbeFragment =
+    "// [COMBO] {\"material\":\"s\",\"combo\":\"TRAILSCROLLALPHA\",\"type\":\"options\",\"default\":0}\n"
+    "// [COMBO] {\"material\":\"a\",\"combo\":\"TRAILFADEALPHA\",\"type\":\"options\",\"default\":0}\n"
+    "uniform sampler2D g_Texture0;\n"
+    "#if TRAILSCROLLALPHA\nuniform float g_ProbeScroll; // {\"material\":\"probe scroll\",\"default\":1}\n#endif\n"
+    "#if TRAILFADEALPHA\nuniform float g_ProbeFade; // {\"material\":\"probe fade\",\"default\":1}\n#endif\n"
+    "varying vec2 v_TexCoord;\n"
+    "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n"
+    "#if TRAILSCROLLALPHA\n  gl_FragColor.r += g_ProbeScroll;\n#endif\n"
+    "#if TRAILFADEALPHA\n  gl_FragColor.g += g_ProbeFade;\n#endif\n}\n";
+
+TEST(RopeGeometry, AScrollingTrailIsDrawnByTheShadersScrollingBranch) {
+    for (const bool scroll : { false, true }) {
+        SCOPED_TRACE(scroll);
+        const json renderer = { { "name", "ropetrail" }, { "length", 1 }, { "segments", 4 }, { "subdivision", 0 },
+                                { "uvscrolling", scroll }, { "uvscale", 2 }, { "fadealpha", true } };
+        ParticleScene scene({ { "/particle.json", ParticleFile(
+                                  R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+                                  R"("maxcount":1,"renderer":[)" + renderer.dump() + "]",
+                                  R"({"name":"lifetimerandom","min":100,"max":100})", "mat_probe.json") },
+                              { "/shaders/genericropeparticle.frag", kScrollProbeFragment } },
+                            OneParticleObject());
+        ASSERT_NE(scene.scene, nullptr);
+        const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+        ASSERT_EQ(meshes.size(), 1u);
+        const auto active = ActiveUniforms(*meshes[0]);
+        EXPECT_EQ(active.count("g_ProbeScroll"), scroll ? 1u : 0u);
+        EXPECT_EQ(active.count("g_ProbeFade"), scroll ? 1u : 0u) << "the fade bits ride with the scroll";
+        const auto& var0 = meshes[0]->Material()->customShader.constValues.at("g_RenderVar0");
+        EXPECT_FLOAT_EQ(var0[3], scroll ? 1.5f : 3.5f);
+        if (scroll) EXPECT_FLOAT_EQ(var0[0], 3.0f);
+    }
+}
+
+TEST(RopeGeometry, TrailFadeWeightsReachBothEndsOnlyWhileTheTextureScrolls) {
+    for (const bool scroll : {false, true}) for (const bool alpha : {false, true}) for (const bool size : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "scroll=" << scroll << " alpha=" << alpha << " size=" << size);
+        const json renderer = {{"name","ropetrail"},{"length",1},{"segments",4},{"subdivision",1},
+            {"uvscrolling",scroll},{"fadealpha",alpha},{"fadesize",size}};
+        ParticleScene scene({{"/particle.json", ParticleFile(
+            R"({"name":"boxrandom","rate":0,"instantaneous":1,"directions":"1 1 1","distancemax":"0 0 0"})",
+            R"("maxcount":1,"renderer":[)" + renderer.dump() + R"(],"operator":[{"name":"movement","drag":0}])",
+            R"({"name":"lifetimerandom","min":100,"max":100},{"name":"sizerandom","min":20,"max":20},{"name":"velocityrandom","min":"20 0 0","max":"20 0 0"})")}},
+            OneParticleObject());
+        ASSERT_NE(scene.scene, nullptr);
+        scene.Step(20, 0.125);
+        const auto meshes = CollectMeshes(*scene.scene->sceneGraph);
+        ASSERT_EQ(meshes.size(), 1u);
+        const auto& vertices = meshes[0]->GetVertexArray(0);
+        ASSERT_GT(vertices.VertexCount(), 4u);
+        const auto attributes = vertices.GetAttrOffsetMap();
+        const auto colour = attributes.at(std::string(WE_IN_COLOR)).offset / sizeof(float);
+        const auto position = attributes.at(std::string(WE_IN_POSITIONVEC4)).offset / sizeof(float);
+        float min_alpha=1, max_alpha=0, min_size=1000, max_size=0;
+        for (std::size_t i=0; i<vertices.VertexCount(); ++i) {
+            const auto* vertex = vertices.Data()+i*vertices.OneSize();
+            min_alpha=std::min(min_alpha,vertex[colour+3]);
+            max_alpha=std::max(max_alpha,vertex[colour+3]);
+            min_size=std::min(min_size,vertex[position+3]);
+            max_size=std::max(max_size,vertex[position+3]);
+        }
+        EXPECT_GT(max_alpha,0.6f);
+        EXPECT_GT(max_size,1.0f);
+        if (scroll && alpha) EXPECT_LT(min_alpha,0.2f);
+        else EXPECT_FLOAT_EQ(min_alpha,1.0f);
+        if (scroll && size) EXPECT_LT(min_size,max_size*0.2f);
+        else EXPECT_FLOAT_EQ(min_size,max_size);
+    }
+}
+
 } // namespace wallpaper

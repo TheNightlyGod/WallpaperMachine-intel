@@ -10,6 +10,8 @@ enum ShellPopover: Hashable, Sendable {
   case history
   /// Now Playing's details: what the bar names, at a size that has room for it.
   case nowPlaying
+  /// Now Playing's playlist: what the target display rotates through, and Change now and Stop.
+  case playlist
   /// The downloads button's list.
   case downloads
 }

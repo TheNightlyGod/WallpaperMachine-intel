@@ -18,9 +18,10 @@ struct PanelRootView: View {
 
 /// The page with its inspector, the Now Playing bar, and what sits over them. There is no sidebar:
 /// the pages are tabs in the title bar (`PanelTabs`), and Settings lists its sections in its own
-/// page.
+/// page. While a season is on, its horizon stands on the Now Playing bar across the window.
 private struct PanelWindowContent: View {
   @Environment(PanelController.self) private var controller
+  @Environment(\.panelTheme) private var theme
 
   /// Counts the Settings reveals the app asked for (Check for Updates, the update notice), which
   /// arrive through the navigation model from outside the window.
@@ -33,6 +34,9 @@ private struct PanelWindowContent: View {
     let shell = controller.shell
     VStack(spacing: 0) {
       PanelDetail()
+      if let season = theme.season {
+        SeasonHorizon(season: season).frame(height: SeasonHorizon.groundHeight)
+      }
       NowPlayingBar()
     }
     // Command-F belongs to the page, not to what has the keyboard, so it is bound out here.
@@ -47,6 +51,7 @@ private struct PanelWindowContent: View {
     .toolbarVisibility(shell.isWelcomeOpen ? .hidden : .automatic, for: .automatic)
     .overlay { WelcomeOverlayHost() }
     .background { DownloadDialogHost() }
+    .background { TranslationTaskHost() }
     // The width of the window decides whether the inspector starts open (`ShellLayout`). Reported
     // only when the window crosses a width; the model lets the resize settle first.
     .onGeometryChange(for: ShellLayout.Width.self) { ShellLayout.Width(width: $0.size.width) }

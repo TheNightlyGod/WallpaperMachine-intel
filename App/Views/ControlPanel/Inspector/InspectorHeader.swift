@@ -123,23 +123,18 @@ struct InspectorActionRow: View {
 
   var body: some View {
     let target = controller.targetDisplay
-    let reapplies = InspectorPolicy.reapplies(row.id, target: target)
-    let applyKey = PanelActionCoordinator.key(reapplies ? "reapplyWallpaper" : "activate", id: row.id)
-    let canActivate = InspectorPolicy.canActivate(kind: row.kind, target: target)
+    let offer = ApplyOffer(
+      wallpaperID: row.id, shownID: target?.wallpaperID,
+      canApply: InspectorPolicy.canActivate(kind: row.kind, target: target),
+      isBusy: { controller.isBusy($0) })
     let isFavorite = controller.favoriteIDs.contains(row.id)
     let favoriteKey = PanelActionCoordinator.key("favorite", id: row.id)
     HStack(spacing: 8) {
       Button {
-        controller.launch(applyKey) {
-          if reapplies {
-            try await controller.reapply(row.id)
-          } else {
-            try await controller.activate(row.id)
-          }
-        }
+        controller.launch(offer.key) { try await controller.apply(offer) }
       } label: {
         Group {
-          if reapplies {
+          if offer.reapplies {
             Label("Reapply wallpaper", systemImage: "arrow.clockwise")
           } else {
             Label("Apply wallpaper", systemImage: "play.fill")
@@ -149,8 +144,8 @@ struct InspectorActionRow: View {
         .minimumScaleFactor(0.8)
       }
       .buttonStyle(.panelPrimary(size: .regular, expands: true))
-      .disabled(!canActivate || controller.isBusy(applyKey))
-      .help(reapplies ? L("Reapply wallpaper") : L("Apply wallpaper"))
+      .disabled(!offer.isEnabled)
+      .help(offer.reapplies ? L("Reapply wallpaper") : L("Apply wallpaper"))
       .accessibilityIdentifier("inspector.apply")
 
       Button {
@@ -172,106 +167,16 @@ struct InspectorActionRow: View {
 }
 
 /// Preview, Show in Finder, Share, Apply to all displays, the playlist, Reinstall, the problem
-/// report and the Trash.
+/// report and the Trash: the items a right click on the wallpaper's tile offers too
+/// (`WallpaperActionItems`).
 struct InspectorMoreMenu: View {
   let row: LibraryRow
 
   @Environment(PanelController.self) private var controller
-  @Environment(\.panelTheme) private var theme
 
   var body: some View {
-    let target = controller.targetDisplay
-    let shared = controller.standaloneDisplayRows
-    let offersAll = InspectorPolicy.offersApplyToAll(row, sharedDisplayCount: shared.count)
-    let everywhere = InspectorPolicy.appliesEverywhereAlready(
-      row.id, sharedDisplayWallpapers: shared.map(\.wallpaperID))
-    let playlist = InspectorPolicy.playlistToggle(
-      row, target: target, listedIDs: target.map { controller.playlistState(for: $0.id).playlist.wallpaperIDs } ?? [])
-    let canReinstall = controller.canReinstall(row.id)
-    let issue = controller.inspectorIssueReportURL(for: row)
     Menu {
-      if InspectorPolicy.offersPreview(kind: row.kind, previewAvailable: controller.previewAvailable) {
-        Button {
-          controller.launch(PanelActionCoordinator.key("previewWallpaper", id: row.id)) {
-            try await controller.previewWithTypedText(row.id)
-          }
-        } label: {
-          Label("Preview wallpaper", systemImage: "eye")
-        }
-        .help(L("Open a live preview without changing your desktop"))
-      }
-      Button {
-        controller.launch(PanelActionCoordinator.key("reveal", id: row.id)) {
-          try await controller.reveal(row.id)
-        }
-      } label: {
-        Label("Show in Finder", systemImage: "folder")
-      }
-      // Only a Workshop wallpaper has a page to share.
-      if let share = controller.wallpaperShare(row.id) {
-        ShareLink(
-          item: share.url, subject: Text(verbatim: share.subject),
-          message: Text(verbatim: share.message)
-        ) {
-          Label("Share…", systemImage: "square.and.arrow.up")
-        }
-      }
-      if offersAll {
-        Button {
-          controller.launch(PanelActionCoordinator.key("activateAll", id: row.id)) {
-            try await controller.activateAll(row.id)
-          }
-        } label: {
-          Label("Apply to all displays", systemImage: "display.2")
-        }
-        .disabled(everywhere)
-      }
-      switch playlist {
-      case .hidden: EmptyView()
-      case .enabled(let isListed), .disabled(let isListed):
-        let enabled = playlist == .enabled(isListed: isListed)
-        Button {
-          controller.launch(PanelActionCoordinator.key("playlist", id: row.id)) {
-            if isListed {
-              try await controller.removeFromPlaylist(row.id)
-            } else {
-              try await controller.addToPlaylist([row.id])
-            }
-          }
-        } label: {
-          if isListed {
-            Label("Remove from this display’s playlist", systemImage: "text.badge.minus")
-          } else {
-            Label("Add to this display’s playlist", systemImage: "text.badge.plus")
-          }
-        }
-        .disabled(!enabled)
-      }
-      if canReinstall {
-        Button {
-          controller.launch(PanelActionCoordinator.key("workshopReinstall", id: row.id)) {
-            try await controller.reinstallWorkshopItem(id: row.id)
-          }
-        } label: {
-          Label("Reinstall from Workshop…", systemImage: "arrow.triangle.2.circlepath")
-        }
-      }
-      Divider()
-      if let issue {
-        Button {
-          ExternalLink.open(issue)
-        } label: {
-          Label("Report this problem on GitHub", systemImage: "exclamationmark.bubble")
-        }
-      }
-      Button(role: .destructive) {
-        controller.launch(PanelActionCoordinator.key("delete", id: row.id)) {
-          try await controller.delete(row.id)
-        }
-      } label: {
-        Label("Move wallpaper to Trash", systemImage: "trash")
-      }
-      .disabled(!controller.canMoveToTrash(row.id))
+      WallpaperActionItems(row: row, placement: .inspector)
     } label: {
       Image(systemName: "ellipsis")
     }
@@ -282,5 +187,10 @@ struct InspectorMoreMenu: View {
     .help(L("More actions"))
     .accessibilityLabel(L("More actions"))
     .accessibilityIdentifier("inspector.more")
+    // The subscription item's label needs the account's subscriptions, as Discover's tiles do;
+    // asked again for another wallpaper or sign-in, which also retries a read that failed.
+    .task(id: "\(row.id) \(controller.workshop.steamWebSession?.steamID ?? "")") {
+      if InspectorPolicy.isWorkshopID(row.id) { controller.workshopBrowser.readSubscriptionsOnce() }
+    }
   }
 }

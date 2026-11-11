@@ -11,10 +11,14 @@ final class WallpaperSpaceParkingTests: XCTestCase {
         var sent: [(UInt32, [String])] = []
         var hostPlans: [WallpaperSpaceParking.Plan] = []
         var failing = false
+        var loaded: Set<String> = []
+        var preloads: [String] = []
+        var holdPreload: CheckedContinuation<Void, Never>?
+        var blockPreload = false
         let center = NotificationCenter()
         private(set) var parking: WallpaperSpaceParking!
 
-        init() {
+        init(preloading: Bool = false) {
             parking = WallpaperSpaceParking(
                 plan: { [unowned self] in self.plan },
                 send: { [unowned self] display, wallpapers in
@@ -22,6 +26,14 @@ final class WallpaperSpaceParkingTests: XCTestCase {
                     self.sent.append((display, wallpapers))
                 },
                 hosts: { [unowned self] in self.hostPlans.append($0) },
+                prepared: { [unowned self] display, wallpaper in !preloading || self.loaded.contains("\(display):\(wallpaper)") },
+                preload: { [unowned self] display, wallpaper in
+                    let key = "\(display):\(wallpaper)"
+                    self.preloads.append(key)
+                    if self.blockPreload { await withCheckedContinuation { self.holdPreload = $0 } }
+                    try Task.checkCancellation()
+                    self.loaded.insert(key)
+                },
                 footprint: { 1_000 },
                 center: center)
         }
@@ -44,6 +56,45 @@ final class WallpaperSpaceParkingTests: XCTestCase {
         }
 
         var sentLists: [String] { sent.map { "\($0.0): \($0.1.joined(separator: ","))" } }
+    }
+
+    func testUnvisitedWallpapersLoadWithoutAVisitAndExistingInstancesAreShared() async {
+        let rig = Rig(preloading: true)
+        rig.loaded = ["1:aurora"]
+        rig.plan = [1: ["aurora", "basalt"], 2: ["cobalt"]]
+        rig.parking.start()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while rig.loaded.count < 3, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertEqual(rig.preloads, ["1:basalt", "2:cobalt"])
+        rig.parking.update()
+        await rig.settle()
+        XCTAssertEqual(rig.preloads.count, 2, "updates reuse the prepared instances")
+        rig.parking.stop()
+    }
+
+    func testMemoryPressureReleasesThePlanWhileAFirstFrameWaitsAndResumesPreparationAfterwards() async {
+        let rig = Rig(preloading: true)
+        rig.blockPreload = true
+        rig.plan = [1: ["aurora", "basalt"]]
+        rig.parking.start()
+        let deadline = ContinuousClock.now + .seconds(2)
+        while rig.holdPreload == nil, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertNotNil(rig.holdPreload)
+        rig.parking.setUnderPressure(true)
+        await rig.sends(2)
+        XCTAssertEqual(rig.hostPlans.last, [:], "releasing does not wait for the pending first frame")
+        XCTAssertEqual(rig.sentLists.last, "1: ")
+        rig.blockPreload = false
+        rig.holdPreload?.resume()
+        rig.holdPreload = nil
+        await rig.settle()
+        XCTAssertTrue(rig.loaded.isEmpty, "the cancelled load is not retained")
+        XCTAssertEqual(rig.preloads.count, 1)
+        rig.parking.setUnderPressure(false)
+        let resumed = ContinuousClock.now + .seconds(2)
+        while rig.loaded.count < 2, ContinuousClock.now < resumed { await Task.yield() }
+        XCTAssertEqual(rig.loaded, ["1:aurora", "1:basalt"])
+        rig.parking.stop()
     }
 
     func testEachDisplayIsToldTheWallpapersItsDesktopsAreSetTo() async {

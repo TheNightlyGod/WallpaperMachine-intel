@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 
 @testable import WallpaperMachine
@@ -22,7 +23,8 @@ final class VideoWallpaperPreviewSurfaceTests: XCTestCase {
       .init(
         wallpaperId: "clip", title: "Clip", kind: .video, projectPath: root.path, entryFile: entry,
         assetsPath: root.path, propertiesJson: "{}", fps: 30, scalingMode: .fill, scalingFactor: 1,
-        volume: 0.5))
+        volume: 0.5, engineOptions: BridgeSnapshotFixtures.engineOptionValues(), lutPath: nil,
+        sceneQuality: .wallpaperEngineDefault))
     return VideoWallpaperPreviewSurface(request: request)
   }
 
@@ -66,5 +68,66 @@ final class VideoWallpaperPreviewSurfaceTests: XCTestCase {
       XCTFail("a released preview cannot start")
     } catch is CancellationError {
     }
+  }
+
+  private func videoLayer(of surface: VideoWallpaperPreviewSurface) throws -> AVPlayerLayer {
+    try XCTUnwrap(surface.view.layer?.sublayers?.compactMap { $0 as? AVPlayerLayer }.first)
+  }
+
+  func testIdentityOptionsDoNotAddAVideoCompositionToThePreview() async throws {
+    let url = try await SyntheticVideoFixture.write(
+      .constantRate(name: "identity", numerator: 30, denominator: 1, frames: 4), into: root)
+    let surface = try surface(entry: url.lastPathComponent)
+    defer { surface.stop() }
+    try await surface.start()
+    let player = try XCTUnwrap(try videoLayer(of: surface).player)
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while player.currentItem == nil && ContinuousClock.now < deadline {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    let item = try XCTUnwrap(player.currentItem)
+    XCTAssertNil(item.videoComposition, "default options keep AVFoundation's unfiltered path")
+  }
+
+  func testOptionsEditedWhileThePreviewPreparesAreTheOptionsItStartsWith() async throws {
+    let url = try await SyntheticVideoFixture.write(
+      .constantRate(name: "edited", numerator: 30, denominator: 1, frames: 4), into: root)
+    let surface = try surface(entry: url.lastPathComponent)
+    defer { surface.stop() }
+    var edited = WallpaperEngineOptions.identity
+    edited.playbackRate = 150
+    edited.flipHorizontal = true
+    try surface.applyEngineOptions(edited)
+    try await surface.start()
+    let layer = try videoLayer(of: surface)
+    XCTAssertEqual(layer.player?.defaultRate, 1.5)
+    XCTAssertEqual(layer.affineTransform(), CGAffineTransform(scaleX: -1, y: 1))
+  }
+
+  func testSwitchingThePreviewFilterOnAndOffRestoresDirectPlayback() async throws {
+    let url = try await SyntheticVideoFixture.write(
+      .constantRate(name: "switch", numerator: 30, denominator: 1, frames: 30), into: root)
+    let surface = try surface(entry: url.lastPathComponent)
+    defer { surface.stop() }
+    try surface.setPaused(true)
+    try await surface.start()
+    let player = try XCTUnwrap(try videoLayer(of: surface).player)
+    var options = WallpaperEngineOptions.identity
+    options.colorEnabled = true
+    options.brightness = 75
+    try surface.applyEngineOptions(options)
+    let filteredDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while player.currentItem?.videoComposition == nil && ContinuousClock.now < filteredDeadline {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    XCTAssertNotNil(player.currentItem?.videoComposition)
+    try surface.applyEngineOptions(.identity)
+    let directDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while (player.currentItem == nil || player.currentItem?.videoComposition != nil) && ContinuousClock.now < directDeadline {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    XCTAssertNotNil(player.currentItem)
+    XCTAssertNil(player.currentItem?.videoComposition)
+    XCTAssertEqual(player.rate, 0, "changing colour options keeps the user's paused state")
   }
 }

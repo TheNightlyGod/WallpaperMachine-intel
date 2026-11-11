@@ -21,7 +21,7 @@ function(wm_media_test name)
     gtest_discover_tests(${name} PROPERTIES TIMEOUT 120 DISCOVERY_TIMEOUT 60)
 endfunction()
 
-wm_media_test(media_core_tests core_tests.cpp byte_source_tests.cpp sample_order_tests.cpp
+wm_media_test(media_core_tests core_tests.cpp byte_source_tests.cpp sample_order_tests.cpp disposable_sample_tests.cpp
               av1_sequence_header_tests.cpp)
 wm_media_test(media_isobmff_tests isobmff_tests.cpp isobmff_corpus_tests.cpp)
 wm_media_test(media_matroska_tests matroska_tests.cpp matroska_corpus_tests.cpp)

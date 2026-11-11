@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The Collections group of the Library's filters panel: one row per collection with its size,
 /// which shows that collection in the grid (and pressed again, every wallpaper), New collection…
-/// under them, and Rename… and Delete… in each row's menu.
+/// under them, and Play, Shuffle, Rename… and Delete… in each row's menu.
 ///
 /// A new collection or a rename is typed in a field in the group itself: Return saves, Escape
 /// cancels, and a refusal of the name is written under the field. Deleting asks first. The result
@@ -31,7 +31,7 @@ struct CollectionsFilterGroup: View {
         CollectionNameRow(editor: editor)
       }
       if collections.isEmpty && !editor.isOpen {
-        CollectionsNote(Text("Group wallpapers for browsing and for playlists."))
+        CollectionsNote(Text("Group wallpapers to browse them together or play them in turn."))
       }
       Button {
         editor.beginCreate()
@@ -91,17 +91,50 @@ private struct CollectionFilterRow: View {
     .buttonStyle(.plain)
     .onHover { isHovering = $0 }
     .contextMenu {
+      Button {
+        play(order: .sequential)
+      } label: {
+        Label("Play", systemImage: "play.fill")
+      }
+      .disabled(!canPlay)
+      Button {
+        play(order: .shuffle)
+      } label: {
+        Label("Shuffle", systemImage: "shuffle")
+      }
+      .disabled(!canPlay)
+      Divider()
       Button("Rename…") { editor.beginRename(collection.id) }
         .disabled(editor.isChanging)
       Button("Delete…", role: .destructive) { editor.requestDelete(collection.id) }
         .disabled(editor.isChanging)
     }
     .help(isShown ? L("Show all wallpapers") : "")
-    // The same two commands for VoiceOver, which does not open a context menu.
+    // The same commands for VoiceOver, which does not open a context menu.
+    .accessibilityAction(named: Text("Play")) { if canPlay { play(order: .sequential) } }
+    .accessibilityAction(named: Text("Shuffle")) { if canPlay { play(order: .shuffle) } }
     .accessibilityAction(named: Text("Rename…")) { editor.beginRename(collection.id) }
     .accessibilityAction(named: Text("Delete…")) { editor.requestDelete(collection.id) }
     .accessibilityAddTraits(isShown ? .isSelected : [])
     .accessibilityIdentifier("collection-\(collection.id)")
+  }
+
+  /// Play's action key, shared with Installed's Play and Shuffle.
+  private static let playKey = PanelActionCoordinator.key("playlistPlay")
+
+  /// Play needs a wallpaper in the collection that can play, a target display with a playlist of
+  /// its own, and no Play request still pending.
+  private var canPlay: Bool {
+    controller.targetDisplay?.isSelectable == true && !controller.isBusy(Self.playKey)
+      && controller.canPlay(.collection(id: collection.id))
+  }
+
+  /// The target display rotates through the collection and changes to it at once.
+  private func play(order: PlaylistOrder) {
+    let source = PlaylistSourceChoice.collection(id: collection.id)
+    controller.launch(Self.playKey) { [controller] in
+      try await controller.playPlaylist(source, order: order)
+    }
   }
 
   private var background: Color {

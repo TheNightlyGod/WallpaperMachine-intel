@@ -1,0 +1,13 @@
+{
+  "images": [
+    {
+      "filename": "tree-tall.png",
+      "idiom": "mac",
+      "scale": "2x"
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  }
+}

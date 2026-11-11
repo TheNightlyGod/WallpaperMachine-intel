@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace wallpaper
@@ -82,6 +83,15 @@ struct StaticPassDesc
     /// absent: they never change once uploaded, so they impose no dependency.
     std::vector<std::string> inputs;
     uint32_t dynamic_reasons { 0 };
+    /// Inputs read before their producer runs this frame. A target can consume
+    /// both versions through different writers, so these are kept separately.
+    std::vector<std::string> previous_inputs;
+};
+
+struct StaticPreviousFrameInput
+{
+    std::size_t pass;
+    std::string_view key;
 };
 
 /// Per-frame varying state of one pass, reduced to a single value.
@@ -116,9 +126,30 @@ public:
 
     void Reset();
 
-    /// Builds the target table from the linearised pass list. Passes must be in
-    /// execution order.
+    /// Builds the target table from the linearised pass list. The supplied
+    /// indices stay stable; SetExecutionOrder can change their execution order.
     void Compile(std::span<const StaticPassDesc> passes);
+
+    /// Replaces the delayed-input set without losing retained signatures or
+    /// allocations. Pass numbers remain those supplied to Compile.
+    void SetPreviousFrameInputs(std::span<const StaticPreviousFrameInput> inputs);
+
+    /// Changes execution order while keeping stable pass numbers. A read before
+    /// its source's first writer consumes the previous frame; other reads use
+    /// the current version. Call only when the order changes.
+    void SetExecutionOrder(std::span<const std::size_t> execution_order);
+
+    /// The just-planned frame left a delayed consumer one source version behind.
+    /// One more frame is needed even when no input advances on its own.
+    bool HasPendingDelayedInputs() const { return m_pending_delayed_inputs; }
+    bool HasDelayedInputs() const { return m_has_delayed_inputs; }
+    /// A cycle that includes a prior-frame edge. Current-frame snapshots can
+    /// make target reuse unsafe without keeping the scene clock running.
+    bool HasFeedbackCycles() const { return m_has_feedback_cycles; }
+    bool TargetReadFromPreviousFrame(std::size_t index) const
+    {
+        return m_targets[index].previous_input;
+    }
 
     std::size_t TargetCount() const { return m_targets.size(); }
     const std::string& TargetKey(std::size_t index) const { return m_targets[index].key; }
@@ -139,13 +170,12 @@ public:
     /// cannot back a span.
     void Plan(std::span<const StaticPassSample> samples, std::span<uint8_t> out_skip);
 
-    /// Whether `Plan` reads this pass's sample. Only the writers of a
-    /// cacheable target fold into a signature; every other pass executes
-    /// whatever its sample says, so a caller need not take one for it.
+    /// Whether Plan needs this pass's sample: cacheable writers and acyclic
+    /// sources needed to detect a delayed consumer's bounded catch-up.
     bool PassSampled(std::size_t pass) const
     {
         return pass < m_pass_target.size() && m_pass_target[pass] != kNoTarget &&
-               m_targets[m_pass_target[pass]].cacheable;
+               m_targets[m_pass_target[pass]].sampled;
     }
 
     /// Drops every cached result without losing the compiled analysis. Used
@@ -159,10 +189,20 @@ private:
     {
         std::string key;
         std::vector<std::size_t> writers;
-        /// Indices into `m_targets`, deduplicated.
-        std::vector<std::size_t> inputs;
+        struct Input
+        {
+            std::size_t target;
+            bool current { false };
+            bool previous { false };
+        };
+        /// One entry per source; a consumer may need both source versions.
+        std::vector<Input> inputs;
         uint32_t dynamic_reasons { 0 };
         bool cacheable { false };
+        bool sampled { false };
+        bool cyclic { false };
+        bool previous_input { false };
+        std::size_t signature_group { 0 };
         bool pinned { false };
         bool rendered_once { false };
         uint64_t pinned_bytes { 0 };
@@ -174,20 +214,47 @@ private:
     /// Clears `cacheable` for every target reachable from a dynamic one, and
     /// for every target caught in a dependency cycle.
     void propagateDynamic();
+    void buildSignatureGroups();
     void orderTargets();
+    void updateInputVersions();
+
+    struct InputUse
+    {
+        std::size_t source;
+        std::size_t edge;
+        bool previous;
+    };
+
+    struct SignatureGroup
+    {
+        std::vector<std::size_t> targets;
+        bool sampled { false };
+        bool feedback { false };
+    };
 
     std::vector<Target> m_targets;
+    std::vector<SignatureGroup> m_signature_groups;
     /// Pass index to target index, or `kNoTarget`.
     std::vector<std::size_t> m_pass_target;
-    /// Cacheable targets in dependency order, inputs first.
+    std::vector<std::vector<InputUse>> m_pass_inputs;
+    std::vector<std::size_t> m_execution_rank;
+    /// Signature groups in current-input dependency order. Current-frame
+    /// snapshot cycles share a group; actual temporal cycles are not sampled.
     std::vector<std::size_t> m_plan_order;
     Stats m_stats;
+    bool m_has_execution_order { false };
+    bool m_pending_delayed_inputs { false };
+    bool m_has_delayed_inputs { false };
+    bool m_has_feedback_cycles { false };
 
     static constexpr std::size_t kNoTarget = static_cast<std::size_t>(-1);
 };
 
 /// Stable 64-bit mix used to fold per-frame values into a pass sample. Exposed
-/// so the renderer and the tests agree on one definition.
+/// so the renderer and the tests agree on one definition. Values live only in
+/// memory and only their equality is ever asked: what one is, is not a contract.
+/// `StaticHashMix` folds one 64-bit value; `StaticHashBytes` folds a run of bytes
+/// eight at a time, then its length.
 uint64_t StaticHashMix(uint64_t seed, uint64_t value);
 uint64_t StaticHashBytes(uint64_t seed, const void* data, std::size_t size);
 

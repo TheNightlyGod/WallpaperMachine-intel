@@ -105,7 +105,7 @@ fn shipped_programs_legalize_and_compile_through_naga() {
     };
     let files = shader_files(&root);
     let includes = Layered { dirs: vec![root.clone()] };
-    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/") || n.starts_with("volumetricsfront"));
+    let s = sweep(&files, &includes, |n| n.starts_with("HLSL/"));
     report("shipped programs", &s);
     // One shipped file cannot be translated by anyone: the shadow-caster vertex stage of the
     // foliage model reads `g_Texture1Texel`, which no shipped file declares (it is the only use
@@ -241,7 +241,7 @@ fn shipped_programs_with_a_video_plane_compile_or_are_refused_by_name() {
     let files = shader_files(&root);
     let includes = Layered { dirs: vec![root.clone()] };
     for slots in [[0u8], [1u8]] {
-        let s = sweep_with_planes(&files, &includes, |n| n.starts_with("HLSL/") || n.starts_with("volumetricsfront"), &slots);
+        let s = sweep_with_planes(&files, &includes, |n| n.starts_with("HLSL/"), &slots);
         report(&format!("shipped programs with slot {} as video planes", slots[0]), &s);
         for (cause, labels) in &s.failures {
             let known = cause.contains("cannot be sampled as planes") || cause.contains("Unknown variable: g_Texture1Texel");

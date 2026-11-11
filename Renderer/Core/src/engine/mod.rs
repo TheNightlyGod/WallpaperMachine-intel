@@ -67,6 +67,8 @@ pub struct SceneWindowEntry {
     pub window_number: Option<isize>,
     /// Kept paused rather than shown as the display's live scene.
     pub parked: bool,
+    /// A frame is available, including for a scene prepared before its first visit.
+    pub ready: bool,
 }
 
 impl SceneWindowEntry {
@@ -77,6 +79,7 @@ impl SceneWindowEntry {
             desc: runtime.desc.clone(),
             window_number: runtime.window_number(),
             parked,
+            ready: runtime.has_presented(),
         }
     }
 }
@@ -455,6 +458,10 @@ impl WallpaperEngine {
         self.ask_actor(messages::SetParkedScenes { display_id, scene_paths }).await
     }
 
+    pub async fn preload_scene(&self, desc: SceneDesc, render_scale: f64) -> Result<(), EngineError> {
+        self.ask_actor(messages::PreloadScene { desc, render_scale }).await
+    }
+
     #[cfg(test)]
     pub async fn actor_ping_for_test(&self) -> Result<(), EngineError> {
         self.ask_actor(messages::Ping).await
@@ -736,6 +743,35 @@ impl WallpaperEngine {
         self.backend.set_scene_video_plane_sampling_enabled(enabled)
     }
 
+    /// Turns SDR display framing on or off inside native Metal scenes.
+    ///
+    /// Off by default. An SDR scene at Display resolution whose canvas
+    /// overhangs the display (Fill, or original size, crops it) then draws
+    /// only the part the display shows instead of the whole layout cropped.
+    /// It is not byte-identical to drawing the whole layout. A running scene
+    /// takes the change at its next frame, sizing its targets again in place;
+    /// nothing is rebuilt. `WALLPAPER_MACHINE_SDR_FRAMING` overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the renderer rejects the call.
+    pub fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.backend.set_scene_display_framing_enabled(enabled)
+    }
+
+    /// Brings a scene drawn below full resolution back to full size with
+    /// MetalFX instead of a bilinear stretch, for every scene.
+    ///
+    /// Off by default. Nothing changes at render scale 1. A scene picks it up
+    /// at its next presented frame; nothing is rebuilt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the renderer rejects the call.
+    pub fn set_metalfx_upscaling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        self.backend.set_metalfx_upscaling_enabled(enabled)
+    }
+
     /// Chooses how many pixels a 2D scene is rasterized with: the canvas it
     /// was authored at, or the size it is presented at on the display.
     ///
@@ -991,6 +1027,29 @@ impl WallpaperEngine {
             flat_json,
         })
         .await
+    }
+
+    /// Shows Wallpaper Engine's per-wallpaper options on the running scene
+    /// without keeping them (an edit that is not saved yet), with the same
+    /// wallpaper check and the same forgetting on reload as
+    /// [`Self::preview_property_override`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] for out-of-range options, an unknown handle, or a
+    /// renderer that refuses them.
+    pub async fn preview_user_options<S>(
+        &self,
+        handle: SceneHandle,
+        scene_path: S,
+        options: crate::project::SceneUserOptions,
+    ) -> Result<PropertyPreview, EngineError>
+    where
+        S: Into<String> + Send,
+    {
+        options.validate()?;
+        self.ask_actor(messages::PreviewUserOptions { handle, expected_scene_path: scene_path.into(), options })
+            .await
     }
 
     pub async fn reset_property_override(&self, handle: SceneHandle) -> Result<(), EngineError> {

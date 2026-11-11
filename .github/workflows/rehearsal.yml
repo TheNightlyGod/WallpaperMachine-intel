@@ -1,0 +1,73 @@
+# Rehearse a release: build, sign, notarize and verify the next version of a branch
+# exactly as a release would, and tag, write notes for and publish nothing.
+#
+# A tag is never taken back (docs/release.md#recovering-a-failed-release), so a release
+# whose build fails after its tag burns that version: 1.7.0 (a bundled library the
+# packaging could not relocate) and 1.9.0 (the signing certificate's import) did, each
+# costing a second release and changelog surgery. A rehearsal fails the same way and
+# takes no version. Run it from Actions -> Rehearsal -> Run workflow, or
+#
+#   gh workflow run rehearsal.yml --ref <branch> -f spec=patch
+#
+# before landing a change to the release path (these workflows, prepare-build,
+# scripts/build.py, scripts/package.py and scripts/lib/, project.yml's bundle or signing
+# settings, the Homebrew libraries, a runner image), and before any release that must
+# not slip. It calls Build with `rehearsal: true`: the same jobs, runners, caches and
+# signing secrets as a release. The signed, notarized disk image is kept for three days
+# as the run's `rehearsal-<tag>` artifact, to try before releasing. A rehearsal on main
+# reads the caches a release reads; like every run off main, one on a branch never
+# saves them.
+name: Rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      spec:
+        description: "The version to rehearse: patch, minor, major, or x.y.z"
+        required: true
+        default: patch
+        type: string
+
+permissions:
+  contents: read
+
+# A newer rehearsal of the same branch replaces one still running.
+concurrency:
+  group: rehearsal-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    name: Plan the version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Plan the version
+        id: plan
+        # The version the spec gives this branch, as the bump job would; nothing is
+        # written or pushed.
+        env:
+          SPEC: ${{ inputs.spec }}
+        run: python3 scripts/bump_version.py --spec "$SPEC"
+
+  rehearse:
+    name: Rehearse ${{ needs.plan.outputs.tag }}
+    needs: plan
+    uses: ./.github/workflows/build.yml
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+      ref: ${{ github.sha }}
+      rehearsal: true
+    # The Developer ID certificate and the notary key, as a release uses them.
+    secrets: inherit
+    # Build declares what its publish job needs even when, as here, that job is skipped;
+    # the build job itself only reads.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      actions: read

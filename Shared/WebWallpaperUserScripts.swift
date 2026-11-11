@@ -15,6 +15,8 @@ extension WebWallpaperProtocol {
     /// The font aliases (`WebWallpaperFontAliases`) go into every frame of a local page too,
     /// since a subframe sets text in the fonts it names as the wallpaper does, and so does
     /// `requestIdleCallback` (`WebWallpaperIdleCallbacks`), which Chromium has in every frame.
+    /// V8's `Error().stack` format (`WebWallpaperErrorStacks`) goes into every frame as well,
+    /// first, so the scripts after it build their errors through it like the page.
     ///
     /// The drag guard (`noDragScript`) goes into every frame too, local or remote,
     /// since an image or link in a subframe starts a drag as readily.
@@ -23,6 +25,9 @@ extension WebWallpaperProtocol {
     /// keeps WebKit's behaviour.
     static func userScripts(seed: Seed = Seed()) -> [WKUserScript] {
         [
+            WKUserScript(
+                source: WebWallpaperErrorStacks.script, injectionTime: .atDocumentStart,
+                forMainFrameOnly: false),
             WKUserScript(source: compatScript, injectionTime: .atDocumentStart, forMainFrameOnly: false),
             WKUserScript(
                 source: WebWallpaperIdleCallbacks.script, injectionTime: .atDocumentStart,

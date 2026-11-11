@@ -40,7 +40,9 @@ struct WelcomeLanguagePage: View {
       ) {
         WelcomeColumn(spacing: 10) {
           systemLanguageTile
-          WelcomeTileRow(spacing: 10) {
+          // Six names share one row: tighter spacing, and a long name shrinks a little rather
+          // than breaking inside a word.
+          WelcomeTileRow(spacing: 8) {
             ForEach(languages, id: \.tag) { language in
               WelcomeTile(
                 isSelected: model.languageChoice == language.tag,
@@ -49,6 +51,8 @@ struct WelcomeLanguagePage: View {
                 // A language is named in itself, whatever the interface speaks.
                 Text(verbatim: language.name)
                   .font(.system(size: 13, weight: .semibold))
+                  .lineLimit(1)
+                  .minimumScaleFactor(0.75)
                   .frame(maxWidth: .infinity)
               }
             }
@@ -145,7 +149,7 @@ private struct WelcomeInlineLabelStyle: LabelStyle {
   }
 }
 
-/// The app icon the person chose for the Dock, over the welcome.
+/// The app icon the Dock shows (the person's choice, or the season's), over the welcome.
 struct WelcomeHero: View {
   @Environment(PanelController.self) private var controller
   @Environment(\.welcomeIsCompact) private var compact
@@ -153,7 +157,7 @@ struct WelcomeHero: View {
   @State private var hasAppeared = false
 
   var body: some View {
-    Image(controller.themePreferences.icon.imageName)
+    Image(controller.dockIconName)
       .resizable()
       .interpolation(.high)
       .aspectRatio(contentMode: .fit)

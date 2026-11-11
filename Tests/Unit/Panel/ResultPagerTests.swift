@@ -55,4 +55,11 @@ final class ResultPagerTests: XCTestCase {
     XCTAssertFalse(loading.canGoForward)
     XCTAssertFalse(loading.canJump)
   }
+
+  func testAPageFieldKeepsOnlyFiveASCIIDigits() {
+    XCTAssertEqual(ResultPager.sanitizedPageText("12"), "12")
+    XCTAssertEqual(ResultPager.sanitizedPageText("1a2.5"), "125")
+    XCTAssertEqual(ResultPager.sanitizedPageText("１２"), "", "full-width digits are not a page number")
+    XCTAssertEqual(ResultPager.sanitizedPageText("1234567"), "12345")
+  }
 }

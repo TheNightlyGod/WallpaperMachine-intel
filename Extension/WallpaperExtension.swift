@@ -209,10 +209,14 @@ private struct NativeWallpaperConfiguration: AppExtensionConfiguration {
     // Counted before the connection resumes, so a pending idle exit cannot end
     // the process under it; the close always follows on the main queue.
     WallpaperController.idleExit.connectionOpened()
+    WallpaperRuntime.recordHostRelease(false)
     let pid = connection.processIdentifier
     connection.invalidationHandler = {
       DispatchQueue.main.async {
         WallpaperController.idleExit.connectionClosed()
+        if WallpaperController.idleExit.openConnections == 0 {
+          WallpaperRuntime.recordHostRelease(true)
+        }
         // served=0 is a connection that opened and closed without asking for anything.
         WallpaperRuntime.log(
           "Connection closed pid=\(pid) served=\(trace.served) "

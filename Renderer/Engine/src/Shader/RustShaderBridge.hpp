@@ -46,6 +46,7 @@ struct RustShaderTextureInfo {
     std::string           format { "rgba8" };
     std::array<bool, 4>   components { false, false, false, false };
     RustShaderVideoPlanes video_planes { RustShaderVideoPlanes::None };
+    std::optional<uint32_t> sample_count;
 };
 
 struct RustShaderPropertyValue {
@@ -66,6 +67,7 @@ struct RustShaderRequest {
     Combos                              combos;
     std::vector<RustShaderTextureInfo>  textures;
     std::vector<RustShaderProperty>     properties;
+    std::shared_ptr<const WPPointGeometryShader> point_geometry;
 };
 
 // One shader resource and the Metal argument-table slot it was bound to.

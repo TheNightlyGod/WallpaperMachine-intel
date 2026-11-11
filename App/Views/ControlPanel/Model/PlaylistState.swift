@@ -7,6 +7,8 @@ struct PlaylistState: Equatable, Sendable {
   let playlist: DisplayPlaylist
   /// When the display changes on its own next; nil until the scheduler dates it.
   let nextChange: Date?
+  /// While a change that fell due waits for the video on screen to finish: when it is made anyway.
+  var clipWaitLimit: Date? = nil
   /// The playlist waits because the user removed this display's wallpaper, until a wallpaper is put
   /// on it or the playlist is resumed.
   let isHeld: Bool
@@ -30,6 +32,34 @@ struct PlaylistState: Equatable, Sendable {
   /// A held playlist is shown as paused only while it has something to resume; a playlist that is
   /// off waits for nothing.
   var showsResume: Bool { isHeld && playlist.mode != .off }
+
+  /// What the Wallpapers menu says for the source in use: also the name Now Playing gives the
+  /// rotation.
+  @MainActor func sourceTitle(collections: [CollectionRow]) -> String {
+    switch source {
+    case .all: L("All wallpapers")
+    case .favorites: L("Favorites")
+    case .list: L("This display’s list (\(listedCount))")
+    case .collection(let id): collections.first { $0.id == id }?.name ?? L("A collection that no longer exists")
+    case .missingCollection: L("A collection that no longer exists")
+    }
+  }
+
+  /// When the rotation changes next, in words.
+  @MainActor var nextNote: String {
+    if playlist.trigger == .unlock {
+      return L("Changes when you unlock the Mac, while wallpapers are playing.")
+    }
+    // The deadline has passed while the video plays: the change comes when the clip ends.
+    if let limit = clipWaitLimit {
+      let time = Self.changeTime(limit, locale: PanelLocale.shared.locale)
+      return L("When the video finishes, by \(time) at the latest.")
+    }
+    if let time = nextChangeText(locale: PanelLocale.shared.locale) {
+      return L("Around \(time), if wallpapers are playing then.")
+    }
+    return L("Starts counting once wallpapers play.")
+  }
 
   /// `nextChange` as the page worded it: the time alone when it falls today, with the short weekday
   /// otherwise, in `locale`'s language and conventions. Nil when the change is not dated.

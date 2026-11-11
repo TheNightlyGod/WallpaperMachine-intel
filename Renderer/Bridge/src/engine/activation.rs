@@ -10,6 +10,7 @@ use std::{
 
 use wallpaper_core::{
     DisplayDesc, DisplaySnapshotEntry,
+    media::audio::AudioVolume,
     project::{ScalingMode, SceneDesc, SceneFraming, WallpaperProjectType},
 };
 
@@ -20,6 +21,46 @@ use crate::{
     paths::BridgePaths,
     project::{ProjectModel, PropertyKind, PropertyValue},
 };
+
+/// A gain every wallpaper's own volume is multiplied by while the host wants
+/// wallpapers turned down without muting them: 1 leaves the volume alone and
+/// 0 silences it. Transient like the mute on top of a saved mute, and never
+/// saved: the saved volume stays what the user chose.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AudioGain(f32);
+
+impl AudioGain {
+    /// Every wallpaper at the volume saved for it.
+    pub const UNITY: Self = Self(1.0);
+
+    /// # Errors
+    ///
+    /// Returns an invalid-input error unless `gain` is a number from 0 to 1.
+    pub fn new(gain: f32) -> Result<Self, BridgeError> {
+        if gain.is_finite() && (0.0..=1.0).contains(&gain) {
+            Ok(Self(gain))
+        } else {
+            Err(BridgeError::invalid_input(format!(
+                "audio gain {gain} is outside the range 0 to 1"
+            )))
+        }
+    }
+
+    /// `volume` as it plays under this gain. Every host takes the product
+    /// here, so the volume a scene opens with, the one a live change sends
+    /// and the one an unchanged check compares against are the same number.
+    #[must_use]
+    pub fn applied_to(self, volume: f32) -> f32 {
+        volume * self.0
+    }
+
+    /// [`Self::applied_to`] for a scene's validated volume.
+    #[must_use]
+    pub fn applied_to_volume(self, volume: AudioVolume) -> AudioVolume {
+        // Two numbers from 0 to 1 multiply to one, so the fallback is never taken.
+        AudioVolume::try_from(self.applied_to(f32::from(volume))).unwrap_or(volume)
+    }
+}
 
 pub struct ActivationInputs<'a> {
     pub app_config: &'a AppConfig,
@@ -52,6 +93,10 @@ pub struct ActivationInputs<'a> {
     pub frame_rate_cap: Option<u32>,
     /// Transient mute composed on top of each slot's saved mute for every playback host.
     pub audio_suppressed: bool,
+    /// Transient gain composed on top of each slot's saved volume. Web and
+    /// native-video descriptors carry the product because those hosts have no
+    /// later volume change of their own; a scene takes it in `live_scene`.
+    pub audio_gain: AudioGain,
     /// Wallpapers the load journal holds back because the app died while
     /// opening them in consecutive sessions. They get no scene, web or
     /// native-video descriptor, so a display assigned one keeps what it
@@ -68,6 +113,10 @@ pub struct ActivationInputs<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeVideoWallpaperDesc {
     pub display: DisplayDesc,
+    /// The display whose assignment this plays: its own, or for a mirror its source's, which it
+    /// takes through `..source`. Independent assignments of one clip stay separate. The host lets
+    /// one member of each group be heard, as it does for web pages.
+    pub audio_source_display_id: u32,
     pub wallpaper_id: String,
     pub media_path: PathBuf,
     /// Identifies the media the host plays: the file, its length and its modification time.
@@ -88,6 +137,10 @@ pub struct NativeVideoWallpaperDesc {
     pub muted: bool,
     pub scaling_mode: ScalingMode,
     pub scaling_factor: f64,
+    /// Wallpaper Engine's per-wallpaper options as saved; a mirror shows its source's.
+    pub engine_options: crate::config::EngineOptionsCfg,
+    /// The project's `schemecolor` property, the border colour in Fit-style modes.
+    pub border_color: Option<[f32; 3]>,
 }
 
 /// What plays the video on one display, and whether it can.
@@ -354,7 +407,7 @@ impl ActivationInputs<'_> {
                 entry_file,
                 fps,
                 paused,
-                volume: slot.wallpaper.audio.volume,
+                volume: self.audio_gain.applied_to(slot.wallpaper.audio.volume),
                 muted: slot.wallpaper.audio.muted || self.audio_suppressed,
                 audio_response_enabled: slot.wallpaper.audio.response_enabled,
                 properties,
@@ -384,7 +437,7 @@ impl ActivationInputs<'_> {
                 display: mirror.display,
                 fps,
                 paused,
-                volume: mirror.settings.volume,
+                volume: self.audio_gain.applied_to(mirror.settings.volume),
                 muted: mirror.settings.muted || self.audio_suppressed,
                 ..source
             });
@@ -571,6 +624,7 @@ impl ActivationInputs<'_> {
                 self.displays,
             );
             videos.push(NativeVideoWallpaperDesc {
+                audio_source_display_id: slot.display.display_id,
                 wallpaper_id: slot.wallpaper_id.to_string(),
                 media_path: admission.media_path,
                 admission_key: admission.admission_key,
@@ -578,12 +632,14 @@ impl ActivationInputs<'_> {
                     .map(|render| render.framing.to_scene())
                     .unwrap_or_default(),
                 paused: self.display_paused(slot.display.display_id),
-                volume: slot.wallpaper.audio.volume,
+                volume: self.audio_gain.applied_to(slot.wallpaper.audio.volume),
                 muted: slot.wallpaper.audio.muted || self.audio_suppressed,
                 scaling_mode: render
                     .map(crate::config::wallpaper::MonitorRender::parse_scaling_mode)
                     .unwrap_or_default(),
                 scaling_factor: render.map_or(1.0, |render| render.scaling_factor),
+                engine_options: slot.wallpaper.engine_options.clone(),
+                border_color: self.scheme_color(slot.wallpaper_id, slot.wallpaper),
                 display: slot.display,
             });
         }
@@ -613,7 +669,7 @@ impl ActivationInputs<'_> {
             videos.push(NativeVideoWallpaperDesc {
                 framing: SceneFraming::default(),
                 paused: self.display_paused(mirror.display.display_id),
-                volume: mirror.settings.volume,
+                volume: self.audio_gain.applied_to(mirror.settings.volume),
                 muted: mirror.settings.muted || self.audio_suppressed,
                 scaling_mode: mirror.settings.parse_scaling_mode(),
                 scaling_factor: mirror.settings.scaling_factor,
@@ -623,6 +679,18 @@ impl ActivationInputs<'_> {
         }
 
         Ok(videos)
+    }
+
+    /// The value of the project's `schemecolor` property for this wallpaper (its override, else
+    /// the project default) when it is a colour. Wallpaper Engine packs it as a video's border
+    /// colour (`sub_1400FFCB0`); absent means black.
+    pub fn scheme_color(&self, wallpaper_id: &str, wallpaper: &WallpaperConfig) -> Option<[f32; 3]> {
+        let model = self.project_models.get(wallpaper_id)?;
+        let property = model.properties.iter().find(|property| property.id == "schemecolor")?;
+        match property.effective_value(&model.override_values(&wallpaper.property_overrides)) {
+            PropertyValue::ColorRgb(red, green, blue) => Some([red, green, blue]),
+            _ => None,
+        }
     }
 
     fn web_model(&self, wallpaper_id: &str) -> Option<&ProjectModel> {

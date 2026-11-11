@@ -56,7 +56,7 @@ struct HotKey: Codable, Equatable, Sendable {
 final class HotKeyPreferences {
     static let shared = HotKeyPreferences()
     static let didChangeNotification = Notification.Name("WallpaperMachine.hotKeysDidChange")
-    private static let key = "WallpaperMachine.hotKeys"
+    nonisolated static let bindingsKey = "WallpaperMachine.hotKeys"
 
     private let defaults: UserDefaults
     private(set) var bindings: [HotKeyAction: HotKey]
@@ -66,7 +66,7 @@ final class HotKeyPreferences {
 
     init(defaults: UserDefaults = ClientPreferences.defaults) {
         self.defaults = defaults
-        let stored = defaults.data(forKey: Self.key)
+        let stored = defaults.data(forKey: Self.bindingsKey)
             .flatMap { try? JSONDecoder().decode([String: HotKey].self, from: $0) } ?? [:]
         var bindings: [HotKeyAction: HotKey] = [:]
         for (name, hotKey) in stored {
@@ -87,7 +87,7 @@ final class HotKeyPreferences {
         bindings[action] = hotKey
         failures[action] = nil
         let stored = Dictionary(uniqueKeysWithValues: bindings.map { ($0.key.rawValue, $0.value) })
-        if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.key) }
+        if let data = try? JSONEncoder().encode(stored) { defaults.set(data, forKey: Self.bindingsKey) }
         NotificationCenter.default.post(name: Self.didChangeNotification, object: self)
     }
 

@@ -61,8 +61,12 @@ struct InspectorNotices: View {
 // MARK: - Shared scene resources
 
 /// A scene cannot play until Wallpaper Engine's shared resources are installed: the one-time setup,
-/// offered as the notice's own button, or their download when it is already under way.
-struct SceneResourcesNotice: View {
+/// offered as the notice's own button, or their download when it is already under way. The
+/// Installed inspector and the Workshop's show the same notice; each draws **Show in downloads** in
+/// its own link style.
+struct SceneResourcesNotice<LinkStyle: ButtonStyle>: View {
+  let linkStyle: LinkStyle
+
   @Environment(PanelController.self) private var controller
 
   var body: some View {
@@ -70,7 +74,7 @@ struct SceneResourcesNotice: View {
       Text("Shared scene resources are required before playback.")
       if controller.sceneResourcesArePending {
         Button("Show in downloads") { controller.downloads.showDownloads() }
-          .buttonStyle(.inspectorLink)
+          .buttonStyle(linkStyle)
       } else {
         Button {
           controller.downloads.requestSceneAssets()
@@ -78,11 +82,16 @@ struct SceneResourcesNotice: View {
           Label("Get shared resources", systemImage: "shippingbox")
         }
         .buttonStyle(.panelPrimary(size: .compact))
-        .disabled(controller.isBusy(PanelActionCoordinator.key("requestDownload", id: "")))
+        .disabled(controller.isBusy(DownloadsModel.sceneAssetsKey))
       }
     }
     .accessibilityElement(children: .contain)
   }
+}
+
+extension SceneResourcesNotice where LinkStyle == InspectorLinkButtonStyle {
+  /// The Installed inspector's notice, with its links.
+  init() { self.init(linkStyle: .inspectorLink) }
 }
 
 // MARK: - Update

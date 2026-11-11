@@ -1,4 +1,5 @@
 #include "graph_contract_support.hpp"
+#include "Runtime/SceneRuntimeContext.hpp"
 #include <gtest/gtest.h>
 #include <cmath>
 
@@ -134,6 +135,38 @@ TEST(RenderGraph, generatedPuppetMaskSubmeshesRoutePrepassAndMainClip) {
     REQUIRE(clip.textures[8] == maskTarget);
     REQUIRE(clip.preserve_target_contents);
 }
+TEST(RenderGraph, aMaskSubmeshThatClearsItsTargetIsDrawnOntoAClearedTarget) {
+    // Wallpaper Engine clears _rt_FullAlphaMask (or the intermediate) before each
+    // mask draw (sub_14020D6A0), so a second mask in one frame starts empty; the
+    // multiply that follows keeps what is there.
+    Scene s;
+    defaults(s);
+    const std::string intermediate = "_rt_puppet_mask_intermediate";
+    target(s, maskTarget, 32, 24, true, false);
+    target(s, intermediate, 32, 24, true, false);
+    auto n = append(s, "base_piece", { "picture" });
+    n->Mesh()->AddMaterial(material("first_mask", { "picture", "mask_picture" }));
+    n->Mesh()->AddMaterial(material("nested_mask", { "picture", "mask_picture" }));
+    n->Mesh()->AddMaterial(material("multiply", { intermediate }));
+    const std::array<SceneMesh::DrawRange, 1> range { { { 0, 3 } } };
+    submesh(*n->Mesh(), 0, {}, range);
+    submesh(*n->Mesh(), 1, maskTarget, range);
+    n->Mesh()->Submeshes().back().clear_output = true;
+    submesh(*n->Mesh(), 2, intermediate, range);
+    n->Mesh()->Submeshes().back().clear_output = true;
+    submesh(*n->Mesh(), 3, maskTarget, range);
+    Observation g(s);
+    const auto clearBefore = [&](std::string_view draw) {
+        const std::size_t at = g.drawIndex(draw);
+        return at > 0 && g.steps[at - 1].type == rg::PassNode::Type::Clear;
+    };
+    REQUIRE(clearBefore("first_mask"));
+    REQUIRE(clearBefore("nested_mask"));
+    REQUIRE(! clearBefore("multiply"));
+    REQUIRE(g.draw("multiply").output == maskTarget);
+    REQUIRE(g.draw("multiply").preserve_target_contents);
+    REQUIRE(g.draw("nested_mask").clear_on_first_use);
+}
 TEST(RenderGraph, parsedMaskedPuppetMaterialSlotsReachRenderGraph) {
     auto files = ordinaryAssets();
     asset(
@@ -234,7 +267,7 @@ TEST(RenderGraph, forceClearDoesNotChangeDefaultOutputPreservation) {
     append(s, "first");
     append(s, "second");
     Observation g(s);
-    requirePolicy(g.draw("first"), false, false);
+    requirePolicy(g.draw("first"), false, true);
     requirePolicy(g.draw("second"), false, true);
 }
 TEST(RenderGraph, renderTargetSampleCountPropagatesToCustomPassDesc) {
@@ -304,6 +337,93 @@ TEST(RenderGraph, defaultOutputUsesSceneClearEnabledWhileNonDefaultWritesAlpha) 
     REQUIRE(h.draw("clear_scene").clear_on_first_use);
     REQUIRE(! h.draw("clear_scene").write_alpha);
 }
+TEST(RenderGraph, childrenOfANoCopyBackgroundLayerDrawWithAlphaMax) {
+    // Wallpaper Engine draws a layer's children with alpha MAX while its
+    // copybackground is off, nested children included (sub_1401ECB20); the
+    // layer itself and what follows it blend with their material's factors.
+    Scene s;
+    defaults(s);
+    auto parent = append(s, "parent");
+    parent->SetChildrenAlphaMax(true);
+    auto first = node("child_a");
+    auto second = node("child_b");
+    auto nested = node("grandchild");
+    parent->AppendChild(first);
+    parent->AppendChild(second);
+    second->AppendChild(nested);
+    append(s, "after");
+    Observation g(s);
+    REQUIRE(g.draw("parent").alpha_rule == AlphaBlendRule::Material);
+    REQUIRE(g.draw("child_a").alpha_rule == AlphaBlendRule::Max);
+    REQUIRE(g.draw("child_b").alpha_rule == AlphaBlendRule::Max);
+    REQUIRE(g.draw("grandchild").alpha_rule == AlphaBlendRule::Max);
+    REQUIRE(g.draw("after").alpha_rule == AlphaBlendRule::Material);
+    // Alpha MAX writes RGBA, even onto the scene output.
+    REQUIRE(! g.draw("parent").write_alpha);
+    REQUIRE(g.draw("child_a").write_alpha);
+}
+TEST(RenderGraph, aReferencedLayersOwnPictureEntersItsCompositeWithSourceOverAlpha) {
+    // Its composite is the layer's first chain buffer in Wallpaper Engine
+    // (sub_1401EA500), which keeps the picture's alpha As, not As * As.
+    Scene s;
+    defaults(s);
+    auto card = append(s, "referenced_card");
+    card->ID() = 7;
+    s.layer_texture_sources.insert(7);
+    Observation g(s);
+    const auto draws = g.nodeDraws("referenced_card");
+    REQUIRE(draws.size() == 2);
+    for (const auto* draw : draws) {
+        if (std::string_view(draw->output).starts_with(WE_IMAGE_LAYER_COMPOSITE_PREFIX))
+            REQUIRE(draw->alpha_rule == AlphaBlendRule::SourceOver);
+        else REQUIRE(draw->alpha_rule == AlphaBlendRule::Material);
+    }
+}
+TEST(RenderGraph, alphaWritingDecidesTheMask) {
+    Scene s;
+    defaults(s);
+    target(s, auxiliary);
+    auto enabled = append(s, "enabled_scene");
+    enabled->Mesh()->MaterialSlots()[0]->alpha_writing = AlphaWriting::Enabled;
+    auto disabled = append(s, "disabled_auxiliary", {}, auxiliary);
+    disabled->Mesh()->MaterialSlots()[0]->alpha_writing = AlphaWriting::Disabled;
+    auto parent = append(s, "max_parent");
+    parent->SetChildrenAlphaMax(true);
+    auto child = node("disabled_under_max");
+    child->Mesh()->MaterialSlots()[0]->alpha_writing = AlphaWriting::Disabled;
+    parent->AppendChild(child);
+    Observation g(s);
+    REQUIRE(g.draw("enabled_scene").write_alpha);
+    REQUIRE(! g.draw("disabled_auxiliary").write_alpha);
+    REQUIRE(g.draw("disabled_under_max").write_alpha);
+}
+TEST(RenderGraph, parsedAlphaWritingAndCopyBackgroundReachTheDraws) {
+    // `alphawriting` words are exact (sub_1401577E0): "Enabled" is the default.
+    // A layer with copybackground off draws its children with alpha MAX.
+    auto files = ordinaryAssets();
+    asset(files, "/models/enabled.json",
+          R"({"width":64,"height":40,"material":"materials/enabled.json"})");
+    asset(files, "/materials/enabled.json",
+          R"({"passes":[{"shader":"contract_card","textures":["contract_picture"],)"
+          R"("blending":"translucent","alphawriting":"enabled","cullmode":"nocull"}]})");
+    asset(files, "/models/cased.json",
+          R"({"width":64,"height":40,"material":"materials/cased.json"})");
+    asset(files, "/materials/cased.json",
+          R"({"passes":[{"shader":"contract_card","textures":["contract_picture"],)"
+          R"("blending":"translucent","alphawriting":"Enabled","cullmode":"nocull"}]})");
+    ParseFixture parser(std::move(files));
+    auto         s = parser.parse(sceneJson(
+        imageJson(111, "writes_alpha", "models/enabled.json") + ',' +
+        imageJson(112, "cased_word", "models/cased.json") + ',' +
+        imageJson(113, "no_copy_parent", "models/card.json", "\"copybackground\":false") + ',' +
+        imageJson(114, "max_child", "models/card.json", "\"parent\":113")));
+    Observation  g(*s);
+    REQUIRE(g.nodeDraw("writes_alpha").write_alpha);
+    REQUIRE(! g.nodeDraw("cased_word").write_alpha);
+    REQUIRE(g.nodeDraw("no_copy_parent").alpha_rule == AlphaBlendRule::Material);
+    REQUIRE(g.nodeDraw("max_child").alpha_rule == AlphaBlendRule::Max);
+    REQUIRE(g.nodeDraw("max_child").write_alpha);
+}
 TEST(RenderGraph, postProcessesAppendPassesAndCopiesAfterSceneGraph) {
     Scene s;
     defaults(s);
@@ -317,6 +437,32 @@ TEST(RenderGraph, postProcessesAppendPassesAndCopiesAfterSceneGraph) {
     REQUIRE(g.draw("post_draw").output == auxiliary);
     REQUIRE(g.drawIndex("ordinary") < g.drawIndex("post_draw"));
     REQUIRE(g.drawIndex("post_draw") < g.copyIndex(auxiliary, "_rt_contract_post_copy"));
+}
+TEST(RenderGraph, mipMappedFrameBufferIsCopiedBeforePostProcesses) {
+    // Wallpaper Engine fills _rt_MipMappedFrameBuffer from the drawn scene before
+    // bloom and the combine run (sub_14017FA70), so a reflection never samples
+    // the scene's own bloom; with reflection off it is not updated at all.
+    for (const bool reflection : { true, false }) {
+        Scene s;
+        defaults(s);
+        s.reflection_enabled = reflection;
+        const std::string mip(WE_MIP_MAPPED_FRAME_BUFFER);
+        target(s, mip);
+        append(s, "reflective", { mip });
+        auto chain = post(s);
+        chain->steps.emplace_back(
+            ScenePostProcessPass { node("post_draw"), std::string(SpecTex_Default), 0 });
+        Observation g(s);
+        bool        copied = false;
+        for (const auto& step : g.steps)
+            if (step.copy && step.copy->desc().src == SpecTex_Default &&
+                step.copy->desc().dst == WE_MIP_MAPPED_FRAME_BUFFER)
+                copied = true;
+        REQUIRE(copied == reflection);
+        if (reflection)
+            REQUIRE(g.copyIndex(SpecTex_Default, WE_MIP_MAPPED_FRAME_BUFFER) <
+                    g.drawIndex("post_draw"));
+    }
 }
 TEST(RenderGraph, nullPostProcessPassNodesAreSkipped) {
     Scene s;
@@ -384,11 +530,11 @@ TEST(RenderGraph, parsedInvisibleDependencySourceResolvesLinkedRenderTexture) {
     const auto   link = GenLinkTex(221);
     const auto&  d    = g.nodeDraw("visible_consumer");
     REQUIRE(d.textures.size() == 1);
-    REQUIRE(d.textures[0] == link);
+    REQUIRE(d.textures[0] == LayerCompositeTargetKey(221));
     bool copied = false;
     for (const auto& step : g.steps)
         if (step.copy && step.copy->desc().dst == link) copied = true;
-    REQUIRE(copied);
+    REQUIRE(!copied);
 }
 
 // These assets describe real parser inputs; empty .tex entrances are graph-only, not decoded
@@ -411,14 +557,14 @@ AssetMap accumulationAssets() {
           "/shaders/contract_accumulate.frag",
           "uniform sampler2D g_Texture0;\nuniform sampler2D g_Texture1;\nvarying vec2 "
           "v_ContractUV;\nvoid "
-          "main(){gl_FragColor=0.6*texture2D(g_Texture0,v_ContractUV)+0.4*texture2D(g_Texture1,v_"
+          "main(){gl_FragColor=0.6*texSample2D(g_Texture0,v_ContractUV)+0.4*texSample2D(g_Texture1,v_"
           "ContractUV);}\n");
     materialAsset(files, "materials/combine.json", "contract_combine", "[null]");
     shaderAsset(files, "contract_combine");
     asset(
         files,
         "/effects/accumulate.json",
-        R"({"name":"contract accumulation","fbos":[{"name":"_rt_FullCompoBuffer_contract_a","scale":1},{"name":"_rt_FullCompoBuffer_contract_b","scale":1},{"name":"contract_tiny","scale":512}],"passes":[{"material":"materials/accumulate.json","target":"_rt_FullCompoBuffer_contract_b","bind":[{"name":"previous","index":0},{"name":"_rt_FullCompoBuffer_contract_a","index":1}]},{"command":"copy","source":"_rt_FullCompoBuffer_contract_b","target":"_rt_FullCompoBuffer_contract_a"},{"material":"materials/combine.json","bind":[{"name":"_rt_FullCompoBuffer_contract_b","index":0}]}]})");
+        R"({"name":"contract accumulation","fbos":[{"name":"_rt_FullCompoBuffer_contract_a","format":"rgba8888","scale":1},{"name":"_rt_FullCompoBuffer_contract_b","format":"rgba8888","scale":1},{"name":"contract_tiny","format":"rgba8888","scale":512}],"passes":[{"material":"materials/accumulate.json","target":"_rt_FullCompoBuffer_contract_b","bind":[{"name":"previous","index":0},{"name":"_rt_FullCompoBuffer_contract_a","index":1}]},{"command":"copy","source":"_rt_FullCompoBuffer_contract_b","target":"_rt_FullCompoBuffer_contract_a"},{"material":"materials/combine.json","bind":[{"name":"_rt_FullCompoBuffer_contract_b","index":0}]}]})");
     return files;
 }
 TEST(RenderGraph, parsedZeroHeightDependencyEffectUsesNonZeroRenderTargets) {
@@ -433,11 +579,11 @@ TEST(RenderGraph, parsedZeroHeightDependencyEffectUsesNonZeroRenderTargets) {
     const auto  link     = GenLinkTex(231);
     const auto& consumer = g.nodeDraw("flat_consumer");
     REQUIRE(consumer.textures.size() == 1);
-    REQUIRE(consumer.textures[0] == link);
+    REQUIRE(consumer.textures[0] == LayerCompositeTargetKey(231));
     bool copied = false;
     for (const auto& step : g.steps)
         if (step.copy && step.copy->desc().dst == link) copied = true;
-    REQUIRE(copied);
+    REQUIRE(!copied);
     std::size_t full = 0, ping = 0, tiny = 0;
     for (const auto& [key, t] : s->renderTargets) {
         const bool isFull = key.find(WE_FULL_COMPO_BUFFER_PREFIX) != std::string::npos;
@@ -551,7 +697,7 @@ TEST(RenderGraph, parsedFullscreenScaledFbosStayValidAfterScreenBindSizing) {
     asset(
         files,
         "/effects/tiny.json",
-        R"({"name":"tiny framebuffer","fbos":[{"name":"contract_fullscreen_tiny","scale":512}],"passes":[{"material":"materials/tiny.json","target":"contract_fullscreen_tiny","bind":[{"name":"previous","index":0}]},{"material":"materials/tiny.json","bind":[{"name":"contract_fullscreen_tiny","index":0}]}]})");
+        R"({"name":"tiny framebuffer","fbos":[{"name":"contract_fullscreen_tiny","format":"rgba8888","scale":512}],"passes":[{"material":"materials/tiny.json","target":"contract_fullscreen_tiny","bind":[{"name":"previous","index":0}]},{"material":"materials/tiny.json","bind":[{"name":"contract_fullscreen_tiny","index":0}]}]})");
     ParseFixture parser(std::move(files));
     auto         s = parser.parse(
         sceneJson(imageJson(261,
@@ -612,4 +758,78 @@ TEST(RenderGraph, screenBoundSizingHonorsTinyAuthoredDefaultExtent) {
     }
 }
 } // namespace
+} // namespace graph_contract
+
+namespace graph_contract {
+TEST(RenderGraph, CustomSortOrderChangesDrawsStablyWithoutChangingTheLayerList) {
+    Scene scene;
+    defaults(scene);
+    scene.runtime = wallpaper::CreateSceneRuntimeContext(wallpaper::SceneRuntimeBootstrap{});
+    scene.runtime->AttachScene(&scene);
+    auto first = append(scene, "first");
+    auto second = append(scene, "second");
+    auto third = append(scene, "third");
+    for (const auto& node : {first, second, third}) scene.runtime->RegisterNode(node->Name(), node.get());
+    scene.runtime->RegisterNodeSortOrder("first", 10);
+    scene.runtime->RegisterNodeSortOrder("second", -10);
+    scene.runtime->RegisterNodeSortOrder("third", -10);
+    scene.runtime->SetCustomSortOrder(true);
+    {
+        Observation order(scene);
+        EXPECT_LT(order.drawIndex("second"), order.drawIndex("third"));
+        EXPECT_LT(order.drawIndex("third"), order.drawIndex("first"));
+        EXPECT_EQ(scene.runtime->LayerNameAt(0), "first");
+    }
+    scene.runtime->ConsumeSceneGraphMutationFlag();
+    ASSERT_TRUE(scene.runtime->SetNodeSortOrder("first", -10));
+    EXPECT_TRUE(scene.runtime->ConsumeSceneGraphMutationFlag());
+    {
+        Observation order(scene);
+        EXPECT_LT(order.drawIndex("first"), order.drawIndex("second"));
+        EXPECT_LT(order.drawIndex("second"), order.drawIndex("third"));
+    }
+    scene.runtime->SetCustomSortOrder(false);
+    ASSERT_TRUE(scene.runtime->SetNodeSortOrder("first", 20));
+    {
+        Observation order(scene);
+        EXPECT_LT(order.drawIndex("first"), order.drawIndex("second"));
+    }
+}
+} // namespace graph_contract
+
+namespace graph_contract {
+TEST(RenderGraph, CustomSortOrderCrossesOrdinaryParentsButKeepsInheritedAlphaMax) {
+    Scene scene;
+    defaults(scene);
+    scene.runtime = wallpaper::CreateSceneRuntimeContext(wallpaper::SceneRuntimeBootstrap{});
+    scene.runtime->AttachScene(&scene);
+    auto first_parent = node("first-parent");
+    auto last_parent = node("last-parent");
+    auto red = node("red");
+    auto green = node("green");
+    first_parent->SetChildrenAlphaMax(true);
+    first_parent->AppendChild(red);
+    last_parent->AppendChild(green);
+    scene.sceneGraph->AppendChild(first_parent);
+    scene.sceneGraph->AppendChild(last_parent);
+    for (const auto& item : {first_parent, last_parent, red, green})
+        scene.runtime->RegisterNode(item->Name(), item.get());
+    scene.runtime->RegisterNodeSortOrder("first-parent", -100);
+    scene.runtime->RegisterNodeSortOrder("last-parent", 100);
+    scene.runtime->RegisterNodeSortOrder("red", 10);
+    scene.runtime->RegisterNodeSortOrder("green", -10);
+    scene.runtime->SetCustomSortOrder(true);
+    {
+        Observation order(scene);
+        EXPECT_LT(order.drawIndex("green"), order.drawIndex("red"));
+        EXPECT_EQ(order.draw("red").alpha_rule, wallpaper::AlphaBlendRule::Max);
+    }
+    for (const auto& item : {first_parent, last_parent, red, green})
+        scene.runtime->SetNodeSortOrder(item->Name(), 0);
+    {
+        Observation order(scene);
+        EXPECT_LT(order.drawIndex("last-parent"), order.drawIndex("red"));
+        EXPECT_LT(order.drawIndex("red"), order.drawIndex("green"));
+    }
+}
 } // namespace graph_contract

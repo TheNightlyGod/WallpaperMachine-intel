@@ -1,3 +1,4 @@
-# The Sponsor button on the repository page. Supporter is sold on the website;
-# SPONSORS.md explains what it includes.
-custom: ["https://www.wallpapermachine.app/pricing/"]
+# The Sponsor button on the repository page: sponsoring MMFoundation, which makes
+# WallpaperMachine, on Open Collective. Priority Support is a paid service sold on the
+# website's pricing page, not a way to sponsor; SPONSORS.md explains both.
+open_collective: mmfoundation

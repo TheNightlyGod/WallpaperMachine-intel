@@ -1,7 +1,7 @@
 import Foundation
 
-/// Reports what conditions of the whole Mac ask for: Low Power Mode, a hot Mac and a low battery,
-/// each as the user chose under Playback, and whatever a Focus filter set.
+/// Reports what conditions of the whole Mac ask for: Low Power Mode, a hot Mac, a low battery and
+/// an inactive Mac, each as the user chose under Playback, and whatever a Focus filter set.
 ///
 /// `actions` are rule actions. They join the app rules' actions in `WallpaperPresentationPolicy`,
 /// so they pause, mute or stop wallpapers the same way and never change the user's own
@@ -15,7 +15,9 @@ import Foundation
 ///
 /// Only notifications are observed; nothing is polled. The one source added for the battery is
 /// IOKit's power-source notification, and it is observed only while a low-battery action is
-/// chosen.
+/// chosen. An inactive Mac is `UserInactivityMonitor`'s to tell, and it watches only while an
+/// inactivity action is chosen: one deadline timer while the Mac is in use, and a tolerant read
+/// every two seconds only once it is inactive.
 @MainActor
 final class SystemConditionMonitor {
     var onChange: (@MainActor () -> Void)?
@@ -32,6 +34,7 @@ final class SystemConditionMonitor {
     private let thermalState: @MainActor () -> ProcessInfo.ThermalState
     private let battery: any BatteryLevelSource
     private let state: SystemConditionState
+    private let inactivity: UserInactivityMonitor
     private var lowBatteryGate = LowBatteryGate()
     private var isObservingBattery = false
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
@@ -44,7 +47,8 @@ final class SystemConditionMonitor {
         isLowPowerModeEnabled: (@MainActor () -> Bool)? = nil,
         thermalState: (@MainActor () -> ProcessInfo.ThermalState)? = nil,
         battery: (any BatteryLevelSource)? = nil,
-        state: SystemConditionState? = nil
+        state: SystemConditionState? = nil,
+        inactivity: UserInactivityMonitor? = nil
     ) {
         self.preferences = preferences
         self.focus = focus
@@ -55,6 +59,8 @@ final class SystemConditionMonitor {
         self.battery = battery ?? SystemBatteryLevel()
         // The app passes the shared state; anything else publishes where no panel reads it.
         self.state = state ?? SystemConditionState()
+        self.inactivity = inactivity ?? UserInactivityMonitor()
+        self.inactivity.onChange = { [weak self] in self?.recompute() }
     }
 
     /// Serious and critical are the states in which macOS itself starts throttling.
@@ -86,6 +92,7 @@ final class SystemConditionMonitor {
         for (center, token) in observers { center.removeObserver(token) }
         observers.removeAll()
         stopObservingBattery()
+        inactivity.setTimeout(nil)
         publish(Contributions())
     }
 
@@ -111,6 +118,9 @@ final class SystemConditionMonitor {
         if let choice = lowBatteryAction() {
             next.add(choice, for: .lowBattery)
         }
+        if let choice = inactivityAction() {
+            next.add(choice, for: .inactivity)
+        }
         publish(next)
     }
 
@@ -129,7 +139,9 @@ final class SystemConditionMonitor {
             switch choice {
             case .keepRunning: return
             case .reduceQuality:
-                qualityReductions.insert(condition.qualityReduction)
+                // Only a condition that offers Reduced quality has one to ask for.
+                guard let reduction = condition.qualityReduction else { return }
+                qualityReductions.insert(reduction)
                 if pausesWhenReducing { actions.insert(.pause) }
                 effect = pausesWhenReducing ? .pause : .reducedQuality
             case .pause:
@@ -164,6 +176,19 @@ final class SystemConditionMonitor {
                 : "battery at \(charge): low-battery rule released (threshold \(threshold)%)")
         }
         return engaged ? action : nil
+    }
+
+    /// The inactivity action while the Mac has had no input for the chosen time, nil otherwise.
+    /// Chosen means watched, as for the battery: the monitor runs for as long as an action other
+    /// than keep running is saved, and starts over when the time changes.
+    private func inactivityAction() -> SystemConditionAction? {
+        let action = preferences.inactivityAction
+        guard action != .keepRunning else {
+            inactivity.setTimeout(nil)
+            return nil
+        }
+        inactivity.setTimeout(TimeInterval(preferences.inactivityMinutes * 60))
+        return inactivity.isInactive ? action.conditionAction : nil
     }
 
     private func startObservingBattery() {

@@ -13,6 +13,7 @@
 #include <limits>
 #include <random>
 #include <utility>
+#include <type_traits>
 
 using namespace wallpaper;
 
@@ -50,6 +51,9 @@ struct EmitterConfig {
     std::function<float()>                audio;
     ParticleEmitterTiming                 timing;
     std::shared_ptr<ParticleSpawnContext> spawn;
+    /// A box with every direction zero: WE divides its particles' velocity by the
+    /// zero length of the spread (0x140238B3C), so they are not a number.
+    bool                                  undirected_box { false };
 };
 
 /// Where an emitter is in its timetable and how much it owes. One lives in each
@@ -144,8 +148,9 @@ double PlanStep(const EmitterConfig& cfg, Schedule& s, double dt) {
         s.delay_left -= dt;
         return 0.0;
     }
+    const bool expired = cfg.timing.duration > 0.0f && s.duration_left < 0.0;
     bool last_step = false;
-    if (cfg.timing.duration > 0.0f) {
+    if (cfg.timing.duration > 0.0f && !expired) {
         s.duration_left -= dt;
         last_step = s.duration_left <= 0.0;
     }
@@ -162,7 +167,7 @@ double PlanStep(const EmitterConfig& cfg, Schedule& s, double dt) {
                     emit            = BurstSize(cfg.burst, l * factor);
                 } else {
                     s.balance += cfg.rate * l * factor * dt;
-                    const double due = WholeDue(s.balance);
+                    const double due = expired ? 0.0 : WholeDue(s.balance);
                     s.balance -= due;
                     emit = due;
                 }
@@ -174,7 +179,7 @@ double PlanStep(const EmitterConfig& cfg, Schedule& s, double dt) {
         } else {
             s.balance += cfg.rate * factor * dt;
             if (! std::isfinite(s.balance)) s.balance = 0.0;
-            const double due   = WholeDue(s.balance);
+            const double due   = expired ? 0.0 : WholeDue(s.balance);
             double       paid  = due;
             if (cfg.one_per_frame) paid = std::min(paid, 1.0);
             if (cfg.timing.periodic && cfg.timing.maxToEmitPerPeriod > 0) {
@@ -195,8 +200,11 @@ double PlanStep(const EmitterConfig& cfg, Schedule& s, double dt) {
         }
     }
 
-    if (last_step) s.finished = true;
-    if (cfg.rate == 0.0 && cfg.timing.duration <= 0.0f && ! s.burst_pending &&
+    if (last_step) {
+        s.duration_left = -1.0;
+        s.finished = true;
+    }
+    if (cfg.rate * factor == 0.0 && (cfg.timing.duration <= 0.0f || expired) && ! s.burst_pending &&
         ! (cfg.timing.periodic && cfg.burst > 0)) {
         s.finished = true;
     }
@@ -273,6 +281,7 @@ Particle MakeParticle(const EmitterConfig& cfg, const Vec3& raw_offset,
     if (point != nullptr) position += point->offset;
     PM::MoveTo(p, position);
     PM::InitVelocity(p, heading * speed);
+    if (cfg.undirected_box) PM::InitVelocity(p, Vec3::Constant(std::numeric_limits<double>::quiet_NaN()));
     return p;
 }
 
@@ -294,7 +303,12 @@ void FinishBirth(Particle& p) {
 template<class Place>
 void EmitInto(const EmitterConfig& cfg, Schedule& schedule, Place& place,
               std::vector<Particle>& slots, std::vector<ParticleInitOp>& initializers,
-              u32 maxcount, double dt_in, std::span<const ParticleControlpoint> controlpoints) {
+              u32 maxcount, double dt_in, std::span<const ParticleControlpoint> controlpoints,
+              ParticleEmitterControl& control) {
+    if (!control.scheduled && control.extra == 0) {
+        control.finished = schedule.finished;
+        return;
+    }
     const double dt = (std::isfinite(dt_in) && dt_in > 0.0) ? dt_in : 0.0;
 
     const i32                   index = cfg.controlpoint < 0 ? 7 : cfg.controlpoint;
@@ -305,18 +319,33 @@ void EmitInto(const EmitterConfig& cfg, Schedule& schedule, Place& place,
             cfg.spawn->has_world_linear ? point->world_linear : linalg::Matrix3d::Identity();
     }
 
-    const double wanted = PlanStep(cfg, schedule, dt);
+    const bool charged = control.scheduled && !schedule.finished && schedule.delay_left <= 0.0;
+    const double planned = control.scheduled ? PlanStep(cfg, schedule, dt) : 0.0;
+    const double wanted = planned + control.extra;
+    // D20 adds the manual count to each emitter, outside the rate/window cap,
+    // but charges that count against an active scheduler's balance.
+    if (charged) schedule.balance -= control.extra;
+    if (!control.scheduled && control.extra != 0 && schedule.delay_left <= 0.0 &&
+        schedule.duration_left <= 0.0 && cfg.rate <= 0.0 &&
+        !(cfg.timing.periodic && cfg.burst > 0)) schedule.finished = true;
     if (wanted >= 1.0) {
         const double duration = cfg.rate > 0.0 ? 1.0 / cfg.rate : 0.0;
         std::size_t  cursor   = 0;
         for (double made = 0.0; made < wanted; made += 1.0) {
             while (cursor < slots.size() && PM::LifetimeOk(slots[cursor])) ++cursor;
+            if (cursor == slots.size() && slots.size() >= maxcount) break;
+            Particle p;
+            if constexpr (std::is_same_v<std::invoke_result_t<Place>, std::optional<Particle>>) {
+                auto placed = place();
+                if (! placed) break;
+                p = std::move(*placed);
+            } else {
+                p = MakeParticle(cfg, place(), point, index);
+            }
             if (cursor == slots.size()) {
-                if (slots.size() >= maxcount) break;
                 slots.emplace_back();
             }
             Particle& slot = slots[cursor++];
-            Particle  p    = MakeParticle(cfg, place(), point, index);
             SealBirth(p, Uniform());
             for (auto& init : initializers) init(p, duration);
             FinishBirth(p);
@@ -324,6 +353,7 @@ void EmitInto(const EmitterConfig& cfg, Schedule& schedule, Place& place,
         }
     }
     if (cfg.sort) OrderSlots(slots);
+    control.finished = schedule.finished;
 }
 
 template<class Place>
@@ -335,8 +365,20 @@ ParticleEmittOp MakeOp(EmitterConfig cfg, Place place) {
     return [cfg = std::move(cfg), schedule, place](std::vector<Particle>&           slots,
                                                     std::vector<ParticleInitOp>&     initializers,
                                                     u32 maxcount, double dt,
-                                                    std::span<const ParticleControlpoint> points) mutable {
-        EmitInto(cfg, schedule, place, slots, initializers, maxcount, dt, points);
+                                                    std::span<const ParticleControlpoint> points,
+                                                    ParticleEmitterControl& control) mutable {
+        using Command = ParticleEmitterControl::Command;
+        if (control.command != Command::Step) {
+            if (control.command == Command::Stop) schedule.finished = true;
+            if (control.command == Command::Play) schedule.finished = false;
+            // Rebinding an instance reopens positive-rate emitters, including a
+            // stopped one. It does not reset elapsed duration, delay or bursts.
+            if (control.command == Command::ApplyOverride &&
+                cfg.rate * CountMultiplier(cfg, schedule) > 0.0) schedule.finished = false;
+            control.finished = schedule.finished;
+            return;
+        }
+        EmitInto(cfg, schedule, place, slots, initializers, maxcount, dt, points, control);
     };
 }
 
@@ -361,6 +403,7 @@ ParticleEmittOp ParticleBoxEmitterArgs::MakeEmittOp(ParticleBoxEmitterArgs a) {
     const Vec3 dir = cfg.directions;
     const Vec3 lo  = ToVec(a.minDistance);
     const Vec3 hi  = ToVec(a.maxDistance);
+    cfg.undirected_box = dir.isZero(0.0);
     return MakeOp(std::move(cfg), [dir, lo, hi]() {
         Vec3 offset;
         for (int i = 0; i < 3; ++i) {
@@ -411,4 +454,19 @@ ParticleEmittOp ParticleSphereEmitterArgs::MakeEmittOp(ParticleSphereEmitterArgs
         }
         return Vec3(unit * Lerp(lo, hi, length));
     });
+}
+
+ParticleEmittOp ParticlePlacedEmitterArgs::MakeEmittOp(ParticlePlacedEmitterArgs a) {
+    EmitterConfig cfg;
+    cfg.rate          = a.emitSpeed;
+    cfg.burst         = a.instantaneous;
+    cfg.one_per_frame = a.one_per_frame;
+    cfg.sort          = a.sort;
+    cfg.controlpoint  = a.controlpoint;
+    cfg.directions    = Vec3::Zero();
+    cfg.count         = std::move(a.countMultiplier);
+    cfg.audio         = std::move(a.audioResponse);
+    cfg.timing        = a.timing;
+    cfg.spawn         = std::move(a.spawn);
+    return MakeOp(std::move(cfg), std::move(a.particle));
 }

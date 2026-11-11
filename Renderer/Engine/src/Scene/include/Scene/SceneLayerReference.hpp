@@ -23,7 +23,8 @@ class VFS;
 /// ping-pong suffix. `_a` (or no suffix) is that layer's produced output.
 /// Inside the layer's own effect chain both are the chain's ping-pong buffers,
 /// the image the effect works on (`IsOwnEffectChainInput`); a layer's own `_a` or
-/// `_b` anywhere else is its composite as the frame before left it, which the
+/// `_b` anywhere else, or a reference from an earlier layer to a later layer,
+/// is the composite as the frame before left it, which the
 /// render graph keeps for it, so it is not a reason to refuse a scene.
 inline constexpr std::string_view kLayerTextureMissingTarget =
     "a texture names a layer that does not exist";
@@ -31,8 +32,6 @@ inline constexpr std::string_view kLayerTextureDuplicateName =
     "a texture names a layer whose name is not unique";
 inline constexpr std::string_view kLayerTextureDuplicateId =
     "a texture names a layer whose id is not unique";
-inline constexpr std::string_view kLayerTextureIllegalCycle =
-    "layer texture references form a cycle";
 
 struct LayerObjectIndex {
     struct Entry {
@@ -95,8 +94,8 @@ std::vector<LayerTextureRef> CollectLayerTextureRefs(const nlohmann::json&   obj
 std::unordered_set<int32_t> CollectReachableLayerIds(const nlohmann::json&   objects,
                                                      const LayerObjectIndex& index, fs::VFS* vfs);
 
-/// First non-empty reason for missing/duplicate/cycle/history. Empty if every
-/// reference is a same-frame legal dependency or a same-frame snapshot.
+/// First non-empty reason for a missing or duplicate target. Empty when every
+/// referenced layer exists uniquely.
 std::string ClassifyLayerTextureReferences(const std::vector<LayerTextureRef>& refs,
                                            const LayerObjectIndex&             index);
 

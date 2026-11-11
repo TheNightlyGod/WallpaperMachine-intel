@@ -119,7 +119,7 @@ impl BridgeActorState {
             .map(|model| model.override_values(&config.property_overrides))
             .unwrap_or_default();
         let active_enabled_displays = self.enabled_selectors(&wallpaper_id);
-        Ok(super::snapshot_projection::project_options(
+        let mut snapshot = super::snapshot_projection::project_options(
             entry,
             &draft,
             &active_enabled_displays,
@@ -236,7 +236,14 @@ impl BridgeActorState {
                     asset_source_path,
                 }
             },
-        ))
+        );
+        snapshot.engine_options = super::engine_options::project(
+            entry.kind,
+            &config.engine_options,
+            self.scene_traits.get(&wallpaper_id),
+            self.image_filters(),
+        );
+        Ok(snapshot)
     }
 
     pub fn monitor_info(
@@ -408,6 +415,7 @@ impl BridgeActorState {
             project_models: &self.project_models,
             frame_rate_cap: self.active_target_fps_cap_for_app(candidate),
             audio_suppressed: self.audio_suppressed,
+            audio_gain: self.audio_gain,
             held: &self.held_wallpapers,
         }
         .render_backends();
@@ -480,6 +488,7 @@ impl BridgeActorState {
                     failure_reason: report.failure.as_ref().map(|failure| failure.reason.clone()),
                     video_path: report.video_path.name().to_string(),
                     optimization_applied: report.optimization_applied,
+                    quality_in_force: report.quality_in_force.map(Into::into),
                 }
             })
             .collect();
@@ -519,13 +528,16 @@ impl BridgeActorState {
             video_backends,
             scene_optimization_enabled: candidate.quality.scene_optimization_enabled,
             scene_on_demand_enabled: candidate.quality.scene_on_demand_enabled,
+            metalfx_upscaling_enabled: candidate.quality.metalfx_upscaling_enabled,
             scene_video_plane_sampling_enabled: candidate
                 .experimental
                 .scene_video_plane_sampling,
+            scene_display_framing_enabled: candidate.experimental.scene_display_framing,
             scene_resolution: match candidate.quality.scene_resolution {
                 SceneResolutionCfg::Canvas => SCENE_RESOLUTION_CANVAS.to_string(),
                 SceneResolutionCfg::Display => SCENE_RESOLUTION_DISPLAY.to_string(),
             },
+            scene_quality: candidate.quality.scene.to_scene().into(),
             scene_update_modes,
             scene_renderers,
             user_assets_path: paths.user_assets_root().to_string_lossy().into_owned(),
@@ -539,6 +551,17 @@ impl BridgeActorState {
             quality_throttle: self.quality_throttle.iter().copied().collect(),
             effective_frame_rate_cap: self.active_target_fps_cap_for_app(candidate),
             render_scale_supported: backends.render_scale_supported,
+            muted_wallpaper_count: u32::try_from(
+                self.library
+                    .iter()
+                    .filter(|entry| {
+                        self.wallpaper_configs
+                            .get(&entry.id)
+                            .is_some_and(|config| config.audio.muted)
+                    })
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
         }
     }
 }
@@ -642,5 +665,39 @@ mod tests {
             snapshot.scene_update_modes.is_empty() && snapshot.scene_renderers.is_empty(),
             "nothing was observed, so nothing may be reported as running"
         );
+    }
+
+    #[test]
+    fn settings_snapshot_counts_installed_wallpapers_muted_on_their_own() {
+        use crate::api::{BridgeWallpaperEntry, BridgeWallpaperKind};
+        use crate::config::WallpaperConfig;
+
+        let root = tempfile::tempdir().unwrap();
+        let paths = BridgePaths::for_home(root.path());
+        let mut state = crate::actor::state::BridgeActorState::default();
+        state.replace_library(
+            ["quiet", "loud", "unsaved"]
+                .into_iter()
+                .map(|id| BridgeWallpaperEntry {
+                    id: id.to_owned(),
+                    title: id.to_owned(),
+                    kind: BridgeWallpaperKind::ProjectScene,
+                    supported: true,
+                    active: false,
+                    selected: false,
+                    preview_path: None,
+                })
+                .collect(),
+        );
+        // A muted config left behind by a wallpaper that is no longer installed.
+        for (id, muted) in [("quiet", true), ("loud", false), ("removed", true)] {
+            let mut config = WallpaperConfig::new_for(id, "scene");
+            config.audio.muted = muted;
+            state.wallpaper_configs.insert(id.to_owned(), config);
+        }
+
+        let snapshot = state.settings(&[], LaunchAtLoginStatus::Unavailable, &paths, &[]);
+
+        assert_eq!(snapshot.muted_wallpaper_count, 1);
     }
 }

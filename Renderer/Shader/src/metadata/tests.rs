@@ -33,6 +33,7 @@ fn tex(slot: u8, present: bool, enabled: bool, flags: [bool; 4]) -> TextureRecor
         format: TextureFormat::Unknown,
         components: TextureComponents { compo1: flags[0], compo2: flags[1], compo3: flags[2], compo4: flags[3] },
         video_planes: VideoPlanes::None,
+        sample_count: None,
     }
 }
 
@@ -103,6 +104,23 @@ fn combos_merge_inside_a_stage_keeping_position_and_taking_the_later_spelling() 
 fn combos_inside_inactive_branches_before_main_are_recorded() {
     let m = run("#if 0\n// [COMBO] {\"combo\":\"HIDDEN\",\"default\":1}\n#endif\nvoid main() {}\n");
     assert_eq!(combos(&m), [("HIDDEN", "1")]);
+}
+
+#[test]
+fn angle_conversion_is_preserved_in_the_metadata_document_only_when_requested() {
+    let metadata = run(r#"
+uniform float g_Angle; // {"material":"angle","conversion":"rad2deg"}
+uniform float g_Gain; // {"material":"gain"}
+uniform float g_Other; // {"material":"other","conversion":"deg2rad"}
+uniform float g_Case; // {"material":"case","conversion":"RAD2DEG"}
+"#);
+    let crate::json::Value::Object(fields) = crate::json::parse(&metadata.to_json().unwrap()).unwrap() else { panic!() };
+    let crate::json::Value::Array(aliases) = &fields.iter().find(|(key, _)| key == "aliases").unwrap().1 else { panic!() };
+    let flags: Vec<_> = aliases.iter().map(|entry| {
+        let crate::json::Value::Object(fields) = entry else { panic!() };
+        fields.iter().find(|(key, _)| key == "rad2deg").map(|(_, value)| value.clone())
+    }).collect();
+    assert_eq!(flags, vec![Some(crate::json::Value::Bool(true)), None, None, None]);
 }
 
 #[test]

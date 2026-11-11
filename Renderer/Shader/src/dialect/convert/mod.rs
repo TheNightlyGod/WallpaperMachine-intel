@@ -14,7 +14,7 @@ use crate::diagnostic::{Diagnostic, Pass, Span as DiagSpan};
 use crate::request::StageKind;
 
 use super::ast::*;
-use super::builtins::is_reserved_identifier;
+use super::builtins::{is_reserved_identifier, unsupported_reason};
 use super::ty::*;
 
 mod call;
@@ -96,14 +96,12 @@ pub(super) struct Converter {
     pub scopes: Vec<HashMap<String, Var>>,
     pub next_id: u32,
     pub cur_ret: Option<Ty>,
+    /// Locals needed to capture side effects at an out-argument call site.
+    pub call_temps: Vec<VarDecl>,
     pub helpers: Helpers,
     pub renames: HashMap<String, String>,
     /// Global initializers that run at the start of `main` (R72).
     pub relocated: Vec<Stmt>,
-    /// Names of the colour outputs of a fragment stage and the last whole-vec4 source
-    /// assigned to the colour output in the current function (R83).
-    pub color_outputs: HashSet<String>,
-    pub color_source: Option<(String, u32)>,
     /// The stage defines `main`, so initializers can move into it.
     pub has_main: bool,
     /// Stage inputs by variable id, and the ones the shader writes (R75).
@@ -113,6 +111,8 @@ pub(super) struct Converter {
     pub specials: HashMap<usize, special::Special>,
     /// Specialised functions waiting to be emitted ahead of the function being converted.
     pub pending: Vec<Item>,
+    /// What the program's combos decide about the dialect's own types (E-D8).
+    pub options: super::ConvertOptions,
 }
 
 /// The identifiers of the stage, collected before conversion so generated names never collide.
@@ -121,7 +121,12 @@ pub fn collect_identifiers(tokens: &[crate::lexer::Token]) -> HashSet<String> {
 }
 
 /// Converts a parsed stage. On success the converted module; on failure the diagnostics.
-pub fn convert(module: Module, kind: StageKind, taken: HashSet<String>) -> Result<Module, Vec<Diagnostic>> {
+pub fn convert(
+    module: Module,
+    kind: StageKind,
+    taken: HashSet<String>,
+    options: super::ConvertOptions,
+) -> Result<Module, Vec<Diagnostic>> {
     let mut prefix = String::from("_wm_");
     let mut n = 0;
     while taken.iter().any(|t| t.starts_with(&prefix)) {
@@ -140,16 +145,16 @@ pub fn convert(module: Module, kind: StageKind, taken: HashSet<String>) -> Resul
         scopes: vec![HashMap::new()],
         next_id: 0,
         cur_ret: None,
+        call_temps: Vec::new(),
         helpers: Helpers::default(),
         renames: HashMap::new(),
         relocated: Vec::new(),
-        color_outputs: HashSet::new(),
-        color_source: None,
         has_main: false,
         inputs: HashMap::new(),
         written_inputs: std::collections::BTreeSet::new(),
         specials: HashMap::new(),
         pending: Vec::new(),
+        options,
     };
     let out = c.module(module);
     if c.diags.is_empty() { Ok(out) } else { Err(c.diags) }
@@ -206,6 +211,27 @@ impl Converter {
     }
 
     // ----- types -----
+
+    /// The WE prelude does not name these types in shader bodies. Its uniform
+    /// declaration reader does accept ivec4; uvec4 works in both positions (T13 B).
+    pub(super) fn unsupported_type(&self, name: &str, uniform: bool) -> Option<&'static str> {
+        if let Some(reason) = unsupported_reason(name) { return Some(reason); }
+        if self.options.glsl_builtins { return None; }
+        match name {
+            "ivec2" | "ivec3" | "uvec2" | "uvec3" | "bvec2" | "bvec3" | "bvec4" =>
+                Some("Wallpaper Engine does not define this GLSL type; use the HLSL int/uint/bool vector spelling"),
+            "ivec4" if !uniform => Some("Wallpaper Engine accepts ivec4 uniforms, but shader bodies use int4"),
+            _ => None,
+        }
+    }
+
+    /// Keep HLSL spelling through author validation, then emit the GLSL type.
+    /// Doing this in the parser would make a valid int2 look like authored ivec2.
+    pub(super) fn emit_type_alias(ty: &mut TypeRef) {
+        if matches!(ty.name.as_str(), "int2" | "int3" | "int4" | "uint2" | "uint3" | "uint4" | "bool2" | "bool3" | "bool4") {
+            ty.name = builtin_type(&ty.name).and_then(|t| t.glsl_name()).expect("an integer/bool vector alias");
+        }
+    }
 
     /// The type a `TypeRef` names, with the extra array dimensions of a declarator.
     pub fn resolve_type(&mut self, tr: &TypeRef, extra: &[Option<Expr>]) -> Ty {

@@ -51,6 +51,13 @@ thiserror = "1"
 # the synchronisation primitives and timers.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync", "time", "io-util"] }
 
+# Steam depot content (Workshop downloads signed in with a QR code) arrives as
+# zstd, raw LZMA or zip; macOS has no public decoder for the first two. All three
+# are pure Rust: ruzstd and lzma-rs are MIT, flate2 is MIT OR Apache-2.0.
+flate2 = "1.1"
+lzma-rs = "0.3"
+ruzstd = "0.9"
+
 # UniFFI generates the Swift bindings from the exported records. The `cli`
 # feature builds the generator into this package's own `uniffi-bindgen`
 # binary, so the bindings are always made by the version that is locked.

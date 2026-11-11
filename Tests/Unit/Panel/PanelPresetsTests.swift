@@ -187,13 +187,20 @@ final class PanelPresetsTests: XCTestCase {
         controller.presetsState?.status, L("Property preset imported. Apply it to change this wallpaper."))
       XCTAssertEqual(context.bridge.events, before, "importing never applies it")
 
-      // Only a regular file is read: a link or a folder is refused.
+      // Only a regular file is read: a link or a folder is refused, with what a preset file has to
+      // be. The user picked it, so it is not reported as a control sending an invalid value.
       let link = context.panel.root.appendingPathComponent("link.json")
       try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
-      context.panel.dialogs.chosenURL = link
-      await assertInspectorInvalidValue("a symbolic link") { try await controller.importPreset(into: "wp") }
-      context.panel.dialogs.chosenURL = context.panel.root
-      await assertInspectorInvalidValue("a folder") { try await controller.importPreset(into: "wp") }
+      for (what, url) in [("a symbolic link", link), ("a folder", context.panel.root)] {
+        context.panel.dialogs.chosenURL = url
+        do {
+          try await controller.importPreset(into: "wp")
+          XCTFail("Accepted \(what)")
+        } catch is WallpaperActionError {
+        } catch {
+          XCTFail("Refused \(what) with \(error)")
+        }
+      }
       XCTAssertEqual(controller.presetsState?.items.count, 2)
     }
   }

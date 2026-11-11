@@ -91,7 +91,7 @@ struct LockScreenExtensionProcesses: Sendable {
         // same build as the registered executable is kept, a different one cannot serve it.
         return runsAnotherBuild(process) ? (process, .deletedBuild) : nil
       }
-      if !LockScreenExtensionDiagnostics.isSameBundle(bundle, expected) {
+      if !FileLocation.isSame(bundle, expected) {
         return (process, .otherCopy)
       }
       if let stamp = stamp(executable), stamp > process.startedAt {

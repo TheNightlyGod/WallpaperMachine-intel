@@ -16,6 +16,7 @@
 #include "Fs/MemBinaryStream.h"
 #include "Fs/VFS.h"
 #include "support/byte_fs.hpp"
+#include "support/font_assets.hpp"
 #include "Project/ProjectProperties.hpp"
 #include "Runtime/DynamicValue.hpp"
 #include "Runtime/SceneRuntimeContext.hpp"
@@ -164,7 +165,7 @@ void main() {
 constexpr std::string_view kFrag = R"(uniform sampler2D g_Texture0;
 varying vec2 v_TexCoord;
 void main() {
-  gl_FragColor = texture(g_Texture0, v_TexCoord);
+  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);
 }
 )";
 
@@ -253,7 +254,7 @@ std::unique_ptr<LoadedScene> Load(std::string_view objects, const ProjectPropert
         { "/materials/solid.tex", "" },
     };
     files.insert(more_files.begin(), more_files.end());
-    if (! loaded_scene->vfs.Mount("/assets", MakeTextFs(files))) return nullptr;
+    if (! loaded_scene->vfs.Mount("/assets", MakeTextFs(test::WithFontAssets(std::move(files))))) return nullptr;
     loaded_scene->scene = loaded_scene->parser.Parse(
         SceneParseRequest {
             .scene_id                    = "property-preview",

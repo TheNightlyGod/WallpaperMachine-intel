@@ -7,6 +7,7 @@
 #include <map>
 #include "Utils/BitFlags.hpp"
 #include "Core/Literals.hpp"
+#include "Particle/ParticleOrientation.h"
 
 namespace wallpaper
 {
@@ -23,19 +24,31 @@ public:
     {
         link_mouse = 0,
         worldspace = 1,
+        copyfromparent = 2,
+        rawvalue = 3,
     };
     using EFlags = BitFlags<FlagEnum>;
 
+    /// The loader (0x1401C5490) places entry j of the list in slot j and
+    /// reads no `id`.
     bool                 FromJson(const nlohmann::json&);
     EFlags               flags { 0 };
-    i32                  id { -1 };
     std::array<float, 3> offset { 0, 0, 0 };
+    /// Euler angles in radians (x, y, z), applied Z * Y * X.
+    std::array<float, 3> angles { 0, 0, 0 };
+    bool                 has_angles { false };
+    uint32_t             parentcontrolpoint { 0 };
 };
 
 class ParticleRender {
 public:
     bool        FromJson(const nlohmann::json&);
     std::string name;
+    ParticleOrientation orientation { ParticleOrientation::Screen };
+    std::array<float, 3> axis { 0.0f, 1.0f, 0.0f };
+    uint8_t flags { 0 };
+    bool        fadealpha { false };
+    bool        fadesize { false };
     float       length { 0.05f };
     float       maxlength { 10.0f };
     /// Points added between two connected particles (rope) or two recorded
@@ -69,6 +82,10 @@ public:
         one_per_frame = 1,
         // Emit in windows separated by pauses (flags & 4).
         periodic = 2,
+        image_colour = 16,
+        image_refresh = 17,
+        image_motion = 18,
+        image_offsets = 19,
     };
     using EFlags = BitFlags<FlagEnum>;
 
@@ -82,6 +99,8 @@ public:
     u32                    instantaneous { 0 };
     float                  speedmin { 0 };
     float                  speedmax { 0 };
+    std::array<float, 3>   offsetmin { 0, 0, 0 };
+    std::array<float, 3>   offsetmax { 0, 0, 0 };
     u32                    audioprocessingmode { 0 };
     // What the audio-processing keys read when a particle file leaves them out.
     std::array<float, 2> audioprocessingbounds { 0.8f, 1.0f };
@@ -117,6 +136,15 @@ public:
         // its emitters, movement, turbulence, vortex, control point attraction
         // and position oscillation (the editor's "ignore speed override").
         ignorespeedoverride   = 4,
+        // Flag 8: the colour records (colorrandom, hsvcolorrandom, colorlist,
+        // colorchange) are not retinted by `instanceoverride.color`, and the
+        // override brightness is not applied (0x1401D15A0).
+        ignorecoloroverride   = 3,
+        // Flag 32: `instanceoverride.count` reaches neither the emitter rates
+        // nor the mapsequence counts.
+        ignorecountoverride   = 5,
+        // Flag 64: `instanceoverride.lifetime` does not reach `lifetimerandom`.
+        ignorelifetimeoverride = 6,
         // The file keeps the scene object's `instanceoverride.size` away from its
         // `sizerandom` draws and its `sizechange` ramps (the editor's "ignore size
         // override").
@@ -134,6 +162,9 @@ public:
     /// Whether the scene object's size override reaches this file's size
     /// records: the size draw and every size ramp.
     bool AppliesSizeOverride() const { return ! flags[FlagEnum::ignoresizeoverride]; }
+    bool AppliesColourOverride() const { return ! flags[FlagEnum::ignorecoloroverride]; }
+    bool AppliesCountOverride() const { return ! flags[FlagEnum::ignorecountoverride]; }
+    bool AppliesLifetimeOverride() const { return ! flags[FlagEnum::ignorelifetimeoverride]; }
 
     std::vector<Emitter>              emitters;
     std::vector<nlohmann::json>       initializers;
@@ -157,7 +188,8 @@ public:
         return ! flags[FlagEnum::spritenoframeblending] && animationmode != "randomframe";
     }
     float       sequencemultiplier { 1.0f };
-    uint32_t    maxcount { 1 };
+    /// A file without the key holds no particles (loader L1793 writes 0).
+    uint32_t    maxcount { 0 };
     /// Seconds the system is simulated for before its first frame.
     float       starttime { 0.0f };
     EFlags      flags { 0 };
@@ -168,8 +200,10 @@ public:
 
     std::string type { "static" };
     std::string name;
-    i32         maxcount { 20 };
+    /// Instances per parent; Wallpaper Engine's default is 10 (0x1401C1430).
+    i32         maxcount { 10 };
 
+    uint32_t flags { 0 };
     i32   controlpointstartindex { 0 };
     float probability { 1.0f };
 

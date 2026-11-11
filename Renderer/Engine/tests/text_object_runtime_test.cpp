@@ -45,6 +45,7 @@
 #include <vector>
 
 #include <unistd.h>
+#include "support/font_assets.hpp"
 
 namespace wallpaper
 {
@@ -77,7 +78,7 @@ private:
 };
 
 void MountAssets(fs::VFS& vfs, std::map<std::string, std::string> files = {}) {
-    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+    ASSERT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(wallpaper::test::WithFontAssets(std::move(files)))));
 }
 
 // A 640x360 canvas, a camera looking down -z, everything dark and no parallax; `objects_json`
@@ -193,7 +194,7 @@ struct TextEffectScene {
             { "/effects/gradient/effect.json",
               with_buffer ? R"JSON({
                 "name": "gradient", "version": 1,
-                "fbos": [ { "name": "_rt_BlurBuffer", "scale": 2 } ],
+                "fbos": [ { "name": "_rt_BlurBuffer", "format": "rgba8888", "scale": 2 } ],
                 "passes": [
                   { "material": "materials/effects/gradient.json",
                     "bind": [ { "name": "previous", "index": 0 } ],
@@ -213,13 +214,13 @@ struct TextEffectScene {
               "in vec3 a_Position;\n"
               "in vec2 a_TexCoord;\n"
               "out vec2 v_TexCoord;\n"
-              "void main() { gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0); v_TexCoord = a_TexCoord; }\n" },
+              "void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix); v_TexCoord = a_TexCoord; }\n" },
             { "/shaders/effects/gradient.frag",
               "uniform sampler2D g_Texture0;\n"
               "in vec2 v_TexCoord;\n"
-              "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n" },
+              "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n" },
         };
-        if (! vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files)))) return false;
+        if (! vfs.Mount("/assets", std::make_unique<MemoryFs>(wallpaper::test::WithFontAssets(std::move(files))))) return false;
         SceneParseRequest request { .scene_id = std::string(scene_id), .project_properties = &properties };
         scene = parser.Parse(request,
                              MinimalSceneObjects(
@@ -276,7 +277,7 @@ TEST(TextObjectRuntime, WidthAndRowLimitsProduceTheSamePixelsAsExplicitLineBreak
         const auto width = static_cast<uint32_t>(std::ceil(size.x()));
         const auto height = static_cast<uint32_t>(std::ceil(size.y()));
         std::vector<uint8_t> rgba(static_cast<size_t>(width) * height * 4, 0);
-        RasterizeTextLayer(text, width, height, rgba);
+        RasterizeTextGlyphsForTests(text, width, height, rgba);
         return std::make_pair(std::array<uint32_t, 2> {width, height}, rgba);
     };
     for (const std::string word : {std::string("WW"), std::string("éé")}) {
@@ -315,8 +316,8 @@ TEST(TextObjectRuntime, EllipsisFitsTheLastVisibleRowAndLimitFlagsRemainIndepend
     const auto width = static_cast<uint32_t>(std::ceil(size.x()));
     const auto height = static_cast<uint32_t>(std::ceil(size.y()));
     std::vector<uint8_t> actual(static_cast<size_t>(width) * height * 4, 0), reference(actual.size(), 0);
-    RasterizeTextLayer(limited, width, height, actual);
-    RasterizeTextLayer(expected, width, height, reference);
+    RasterizeTextGlyphsForTests(limited, width, height, actual);
+    RasterizeTextGlyphsForTests(expected, width, height, reference);
     EXPECT_EQ(actual, reference);
     EXPECT_TRUE(std::any_of(actual.begin(), actual.end(), [](uint8_t byte) { return byte != 0; }));
     limited.limit_width = false;
@@ -372,7 +373,7 @@ std::string ParallaxTextScene(std::string objects_json) {
 linalg::Vector2f ParallaxDisplacement(WPShaderValueUpdater& updater, SceneNode& node) {
     sprite_map_t sprites;
     ShaderValue  model;
-    updater.UpdateUniforms(&node, sprites, [&](std::string_view name, const ShaderValue& value) {
+    updater.UpdateUniforms(&node, 1, sprites, [&](std::string_view name, const ShaderValue& value) {
         if (name == "g_ModelMatrix") model = value;
     });
     node.UpdateTrans();
@@ -407,7 +408,7 @@ TEST(TextObjectRuntime, CameraParallaxMovesAPlainTextLayerByItsDepth) {
     auto* updater = dynamic_cast<WPShaderValueUpdater*>(scene->shaderValueUpdater.get());
     ASSERT_NE(node, nullptr);
     ASSERT_NE(updater, nullptr);
-    updater->InitUniforms(node, [](std::string_view name) {
+    updater->InitUniforms(node, 1, [](std::string_view name) {
         return name == "g_ModelMatrix" || name == "g_ModelViewProjectionMatrix";
     });
     node->UpdateTrans();
@@ -458,7 +459,7 @@ TEST(TextObjectRuntime, ATextLayerUnderAGroupRidesTheGroupsParallax) {
     ASSERT_EQ(group->GetChildren().size(), 1u);
     auto* node = group->GetChildren().front().get();
     ASSERT_EQ(node->Name(), "caption");
-    updater->InitUniforms(node, [](std::string_view name) { return name == "g_ModelMatrix"; });
+    updater->InitUniforms(node, 1, [](std::string_view name) { return name == "g_ModelMatrix"; });
 
     // The group sits at the centre of the view, so the cursor centred leaves the tree alone.
     updater->FrameBegin();
@@ -488,11 +489,11 @@ TEST(TextObjectRuntime, TextEffectVisibilityFollowsTheBoundUserProperty) {
             "in vec3 a_Position;\n"
             "in vec2 a_TexCoord;\n"
             "out vec2 v_TexCoord;\n"
-            "void main() { gl_Position = g_ModelViewProjectionMatrix * vec4(a_Position, 1.0); v_TexCoord = a_TexCoord; }\n";
+            "void main() { gl_Position = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix); v_TexCoord = a_TexCoord; }\n";
         files["/shaders/effects/" + name + ".frag"] =
             "uniform sampler2D g_Texture0;\n"
             "in vec2 v_TexCoord;\n"
-            "void main() { gl_FragColor = texture(g_Texture0, v_TexCoord); }\n";
+            "void main() { gl_FragColor = texSample2D(g_Texture0, v_TexCoord); }\n";
     }
     MountAssets(vfs, files);
     audio::SoundManager sound_manager;
@@ -650,12 +651,11 @@ TEST(TextObjectRuntime, ACardThatChangesInTexelsResizesTheBuffersOncePerTextChan
     EXPECT_EQ(pingpong->height, expected_height);
     EXPECT_EQ(static_cast<int>(fixture.camera->Width()), expected_width);
     EXPECT_EQ(static_cast<int>(fixture.camera->Height()), expected_height);
-    // Every buffer bound to the first one follows it; the buffer of the effect's own is
-    // sized from the card as the first one was.
+    // The effect's half-size buffer follows the card with its authored divisor.
     for (const auto& [key, target] : fixture.scene->renderTargets) {
         if (! target.bind.enable || target.bind.name != fixture.effect_layer->FirstTarget()) continue;
-        EXPECT_EQ(target.width, expected_width) << key;
-        EXPECT_EQ(target.height, expected_height) << key;
+        EXPECT_EQ(target.width, std::max(4, int(std::lround(expected_width / 2.0)))) << key;
+        EXPECT_EQ(target.height, std::max(4, int(std::lround(expected_height / 2.0)))) << key;
     }
     EXPECT_NEAR(MeshSize(fixture.effect_layer->FinalMesh()).x(), static_cast<float>(expected_width), 1.0e-3f);
     const auto uv = MeshTexCoordBounds(fixture.effect_layer->FinalMesh());
@@ -701,7 +701,7 @@ TEST(TextObjectRuntime, ResourceFreeShaderUsesItsValidEmptyRustReflection) {
     request.cache_enabled = false;
     request.stages = {
         {ShaderType::VERTEX, "void main(){gl_Position=vec4(0.0,0.0,0.0,1.0);}"},
-        {ShaderType::FRAGMENT, "void main(){gl_FragColor=vec4(1.0);}"},
+        {ShaderType::FRAGMENT, "void main(){gl_FragColor=vec4(1.0, 1.0, 1.0, 1.0);}"},
     };
     shader::RustShaderOutput compiled;
     ASSERT_TRUE(shader::CompileRustShaderProgram(request, compiled)) << shader::LastRustShaderError();
@@ -736,7 +736,7 @@ TEST(TextObjectRuntime, EveryTexelOfRasterizedTextCarriesTheTextsColourWhateverI
     constexpr uint32_t   width  = 420;
     constexpr uint32_t   height = 220;
     std::vector<uint8_t> rgba(static_cast<std::size_t>(width) * height * 4u, 0u);
-    RasterizeTextLayer(state, width, height, rgba);
+    RasterizeTextGlyphsForTests(state, width, height, rgba);
 
     std::size_t clear = 0, partial = 0, solid = 0, off_colour = 0;
     for (std::size_t offset = 0; offset < rgba.size(); offset += 4u) {
@@ -750,39 +750,6 @@ TEST(TextObjectRuntime, EveryTexelOfRasterizedTextCarriesTheTextsColourWhateverI
     EXPECT_GT(partial, 0u);
     EXPECT_GT(solid, 0u);
     EXPECT_EQ(off_colour, 0u) << "a texel is not the text's colour";
-}
-
-// The styled text's channels are coverage masks, not a colour: a clear texel is no mask in all
-// three, or an outline or a shadow would fill the whole card.
-TEST(TextObjectRuntime, StyledTextLeavesEveryTexelOutsideItsMasksClear) {
-    TextLayerState state {
-        .text                   = "H",
-        .font_key               = "systemfont_Helvetica",
-        .resolved_font_kind     = "system",
-        .resolved_font_identity = "Helvetica",
-        .resolved_font_path     = ResolveInstalledFamily("Helvetica").path,
-        .point_size             = 40.0f,
-        .padding                = { 4.0f, 4.0f },
-        .color                  = linalg::Vector3f(1.0f, 0.5f, 0.25f),
-    };
-    state.style.outline = true;
-#ifdef __APPLE__
-    ASSERT_FALSE(state.resolved_font_path.empty());
-#endif
-
-    constexpr uint32_t   width  = 220;
-    constexpr uint32_t   height = 220;
-    std::vector<uint8_t> rgba(static_cast<std::size_t>(width) * height * 4u, 0u);
-    RasterizeTextLayer(state, width, height, rgba);
-
-    std::size_t clear = 0, coloured_clear = 0;
-    for (std::size_t offset = 0; offset < rgba.size(); offset += 4u) {
-        if (rgba[offset + 3u] != 0u) continue;
-        ++clear;
-        if (rgba[offset] != 0u || rgba[offset + 1u] != 0u || rgba[offset + 2u] != 0u) ++coloured_clear;
-    }
-    EXPECT_GT(clear, 0u);
-    EXPECT_EQ(coloured_clear, 0u);
 }
 
 TEST(TextObjectRuntime, SansSerifAliasRasterizesClockDigits) {
@@ -802,14 +769,14 @@ TEST(TextObjectRuntime, SansSerifAliasRasterizesClockDigits) {
     ASSERT_FALSE(state.resolved_font_path.empty());
 #endif
 
-    const auto     size   = TextLayerRasterSize(state);
+    const auto     size   = MeasureTextLayerSize(state);
     const uint32_t width  = static_cast<uint32_t>(std::ceil(size.x()));
     const uint32_t height = static_cast<uint32_t>(std::ceil(size.y()));
     ASSERT_GT(width, 0u);
     ASSERT_GT(height, 0u);
 
     std::vector<uint8_t> rgba(static_cast<std::size_t>(width) * height * 4u, 0u);
-    RasterizeTextLayer(state, width, height, rgba);
+    RasterizeTextGlyphsForTests(state, width, height, rgba);
 
     int visible_pixels = 0;
     int max_alpha      = 0;
@@ -1266,11 +1233,11 @@ TEST(TextObjectRuntime, FontFallbackHandlesFamiliesMissingFilesAndCorruptAssets)
             };
             if (reference.resolved_font_path.empty()) reference.resolved_font_path = reference_path;
             const auto raster = [](const TextLayerState& state) {
-                const auto size = TextLayerRasterSize(state);
+                const auto size = MeasureTextLayerSize(state);
                 const auto width = static_cast<uint32_t>(std::ceil(size.x()));
                 const auto height = static_cast<uint32_t>(std::ceil(size.y()));
                 std::vector<uint8_t> rgba(width * height * 4, 0);
-                RasterizeTextLayer(state, width, height, rgba);
+                RasterizeTextGlyphsForTests(state, width, height, rgba);
                 return rgba;
             };
             const auto expected = raster(reference);
@@ -1279,7 +1246,7 @@ TEST(TextObjectRuntime, FontFallbackHandlesFamiliesMissingFilesAndCorruptAssets)
                 auto state = reference;
                 state.resolved_font_path = failure == 0 ? "" : "/missing/workshop/font.ttf";
                 if (failure == 2) state.resolved_font_data = std::vector<uint8_t>{1,2,3,4};
-                EXPECT_EQ(TextLayerRasterSize(state), TextLayerRasterSize(reference));
+                EXPECT_EQ(MeasureTextLayerSize(state), MeasureTextLayerSize(reference));
                 EXPECT_EQ(raster(state), expected);
             }
             // A valid embedded font wins even when the requested family is absent.
@@ -1313,11 +1280,11 @@ TEST(TextObjectRuntime, MissingWindowsFontUsesRealGlyphsInsteadOfRectangles) {
     ASSERT_FALSE(state.resolved_font_path.empty());
     EXPECT_TRUE(std::filesystem::exists(state.resolved_font_path));
     EXPECT_FALSE(ResolveSceneFont("systemfont_missing-workshop-font-12345").path.empty());
-    const auto size = TextLayerRasterSize(state);
+    const auto size = MeasureTextLayerSize(state);
     const auto width = static_cast<uint32_t>(std::ceil(size.x()));
     const auto height = static_cast<uint32_t>(std::ceil(size.y()));
     std::vector<uint8_t> rgba(width * height * 4, 0);
-    RasterizeTextLayer(state, width, height, rgba);
+    RasterizeTextGlyphsForTests(state, width, height, rgba);
     uint32_t min_y = height, max_y = 0;
     std::size_t antialiased = 0;
     for (uint32_t y = 0; y < height; ++y) {
@@ -1354,7 +1321,7 @@ TEST(TextObjectRuntime, AWaitingClockIsNotStarvedByNewerReadoutUpdates) {
       ])"), vfs, sound);
     ASSERT_NE(scene, nullptr);
     auto& runtime = *scene->runtime;
-    const auto before = scene->imageParser->Parse(TextTextureName("clock"));
+    const auto before = scene->imageParser->Parse(TextAtlasName("clock"));
     ASSERT_NE(before, nullptr);
     struct Gate {
         std::mutex mutex;
@@ -1403,7 +1370,7 @@ TEST(TextObjectRuntime, AWaitingClockIsNotStarvedByNewerReadoutUpdates) {
     gate->cv.notify_all();
     ASSERT_TRUE(wait_for(2));
     runtime.PumpTextLayerCache();
-    const auto updated = scene->imageParser->Parse(TextTextureName("clock"));
+    const auto updated = scene->imageParser->Parse(TextAtlasName("clock"));
     ASSERT_NE(updated, nullptr);
     EXPECT_NE(updated->key, before->key);
     EXPECT_FALSE(runtime.NodeTextDirty("clock"));
@@ -1421,18 +1388,14 @@ TEST(TextObjectRuntime, AWaitingClockIsNotStarvedByNewerReadoutUpdates) {
     ASSERT_TRUE(runtime.SetNodeText("caption", "fourth"));
     runtime.PumpTextLayerCache();
     const auto expect_pixels = [&](const TextLayerState& state) {
-        const auto image = scene->imageParser->Parse(TextTextureName("caption"));
-        ASSERT_NE(image, nullptr);
-        ASSERT_FALSE(image->slots.empty());
-        ASSERT_FALSE(image->slots[0].mipmaps.empty());
-        const auto& mip = image->slots[0].mipmaps[0];
-        const auto size = TextLayerRasterSize(state);
-        ASSERT_EQ(mip.width, static_cast<int>(std::ceil(size.x())));
-        ASSERT_EQ(mip.height, static_cast<int>(std::ceil(size.y())));
-        std::vector<uint8_t> expected(static_cast<std::size_t>(mip.width) * mip.height * 4);
-        RasterizeTextLayer(state, mip.width, mip.height, expected);
-        ASSERT_NE(mip.data, nullptr);
-        EXPECT_TRUE(std::equal(expected.begin(), expected.end(), mip.data.get()));
+        // The layer's mesh holds the glyphs of `state`, from the atlas published for it.
+        ASSERT_TRUE(scene->imageParser->Parse(TextAtlasName("caption")) != nullptr);
+        auto* node = FindRootChild(*scene, "caption");
+        ASSERT_NE(node, nullptr);
+        const auto& indices = node->Mesh()->Submeshes().at(1).GetIndexArray(0);
+        const auto  build   = BuildTextGlyphs(state);
+        ASSERT_FALSE(build.glyphs.empty());
+        EXPECT_EQ(indices.DrawIndexCount(), build.glyphs.size() * 6u);
     };
     expect_pixels(third);
     EXPECT_EQ(runtime.NodeText("caption"), "fourth");
@@ -1575,12 +1538,12 @@ struct Rastered {
 };
 
 Rastered RasterOf(const TextLayerState& state) {
-    const auto size = TextLayerRasterSize(state);
+    const auto size = MeasureTextLayerSize(state);
     Rastered   out;
     out.width  = static_cast<uint32_t>(std::ceil(size.x()));
     out.height = static_cast<uint32_t>(std::ceil(size.y()));
     out.rgba.assign(static_cast<std::size_t>(out.width) * out.height * 4u, 0u);
-    RasterizeTextLayer(state, out.width, out.height, out.rgba);
+    RasterizeTextGlyphsForTests(state, out.width, out.height, out.rgba);
     return out;
 }
 
@@ -2041,15 +2004,18 @@ struct TextSceneFixture {
                      ProjectProperties initial_properties = {},
                      std::string scene_general_extra = {})
         : properties(std::move(initial_properties)) {
-        EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(std::move(files))));
+        EXPECT_TRUE(vfs.Mount("/assets", std::make_unique<MemoryFs>(wallpaper::test::WithFontAssets(std::move(files)))));
         auto document = MinimalSceneObjects(objects);
         if (! scene_general_extra.empty()) {
             // Extra keys of the scene's `general` block, written as `"key":value,`.
             const auto at = document.find("\"general\": {");
             document.insert(at + std::string("\"general\": {").size(), scene_general_extra);
         }
+        // Ultra post-processing keeps an HDR scene's HDR pipeline.
         scene = parser.Parse(SceneParseRequest { .scene_id = std::move(scene_id),
-                                                 .project_properties = &properties },
+                                                 .project_properties = &properties,
+                                                 .quality = SceneQuality {
+                                                     .post_processing = static_cast<int>(PostProcessing::Ultra) } },
                              document, vfs, sound);
     }
 
@@ -2066,10 +2032,10 @@ std::map<std::string, std::string> HdrBloomAssets() {
                              "varying vec2 v_TexCoord;\nvoid main() {\n"
                              "  gl_Position = vec4(a_Position, 1.0);\n  v_TexCoord = a_TexCoord;\n}\n";
     const std::string frag = "uniform sampler2D g_Texture0;\nvarying vec2 v_TexCoord;\n"
-                             "void main() {\n  gl_FragColor = texture(g_Texture0, v_TexCoord);\n}\n";
+                             "void main() {\n  gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n}\n";
     std::map<std::string, std::string> files;
     for (const auto* material : { "hdr_downsample_bloom", "hdr_downsample", "hdr_upsample",
-                                  "hdr_upsample_cubic", "combine_hdr_upsample_linear" }) {
+                                  "hdr_upsample_cubic", "combine_hdr_upsample" }) {
         files[std::string("/materials/util/") + material + ".json"] =
             std::string(R"({"passes":[{"blending":"normal","cullmode":"nocull","depthtest":"disabled",)"
                         R"("depthwrite":"disabled","shader":")") + material + R"("}]})";
@@ -2097,9 +2063,9 @@ uniform sampler2D g_Texture4; // {"hidden":true,"default":"_rt_FullFrameBuffer"}
 uniform vec4 g_Color4;
 varying vec2 v_TexCoord;
 void main() {
-  gl_FragColor = texture(g_Texture0, v_TexCoord) * g_Color4;
+  gl_FragColor = texSample2D(g_Texture0, v_TexCoord) * g_Color4;
 #if BLENDMODE
-  gl_FragColor.rgb += texture(g_Texture4, v_TexCoord).rgb;
+  gl_FragColor.rgb += texSample2D(g_Texture4, v_TexCoord).rgb;
 #endif
 }
 )";
@@ -2281,6 +2247,21 @@ TEST(TextObjectRuntime, ACardKeepsItsPaddingOnlyWhileAnEffectPassIsVisible) {
     EXPECT_EQ(runtime.scriptErrorCount(), 0u);
 }
 
+// -1 for a text layer without an effect chain, 0 while it draws straight onto the scene and 1
+// while it is a composite (slot 0 of its mesh is the composite's seed, T.7.1).
+float CompositeOf(Scene& scene, std::string_view name) {
+    auto* node = FindRootChild(scene, name);
+    if (node == nullptr || node->Mesh() == nullptr) return -2.0f;
+    const auto* seed = node->Mesh()->MaterialForSlot(0);
+    if (seed != nullptr && seed->customShader.shader != nullptr && seed->customShader.shader->name == "text_seed") {
+        return 1.0f;
+    }
+    const bool chain = std::any_of(scene.cameras.begin(), scene.cameras.end(), [](const auto& entry) {
+        return entry.first.rfind("__effect_layer_", 0) == 0 && entry.second != nullptr && entry.second->HasImgEffect();
+    });
+    return chain ? 0.0f : -1.0f;
+}
+
 TEST(TextObjectRuntime, AnEffectWithNoPassCountsForNeitherTheMarginNorTheComposite) {
     // An effect that has no pass draws nothing, so it is not an effect pass Wallpaper Engine
     // counts: a layer whose only visible effect is one is plain text, and one that has a real
@@ -2317,8 +2298,7 @@ TEST(TextObjectRuntime, AnEffectWithNoPassCountsForNeitherTheMarginNorTheComposi
         EXPECT_FALSE(state.layout_pending) << "the margin was changed as the scene loaded";
         auto* node = FindRootChild(*fixture.scene, "caption");
         ASSERT_NE(node, nullptr);
-        const auto& values = node->Mesh()->Material()->customShader.constValues;
-        EXPECT_FLOAT_EQ(values.contains("g_Composite") ? values.at("g_Composite")[0] : -1.0f, item.composite);
+        EXPECT_FLOAT_EQ(CompositeOf(*fixture.scene, "caption"), item.composite);
     }
 }
 
@@ -2347,9 +2327,12 @@ TEST(TextObjectRuntime, OnlyATextThroughVisibleEffectsReadsTheSceneForItsComposi
         { "one effect", R"(,"effects":[)" + tint + "]", 1, false, 1.0f },
         { "two effects", R"(,"effects":[)" + tint + "," + off + "," + tint + "]", 1, false, 1.0f },
         { "effect off", R"(,"effects":[)" + off + "]", 0, false, -1.0f },
-        { "colour blend", R"(,"colorBlendMode":12)", 1, true, -1.0f },
+        // The colour blend composites too (T.7.1): the seed reads the scene into the chain, the
+        // blend's passthrough reads it onto the scene.
+        { "colour blend", R"(,"colorBlendMode":12)", 2, true, 1.0f },
         { "scripted on", R"(,"effects":[)" + scripted(true) + "]", 1, false, 1.0f },
-        { "scripted off", R"(,"effects":[)" + scripted(false) + "]", 1, false, 0.0f },
+        // Every effect off: the glyphs go straight onto the scene and nothing reads it (T.7.2).
+        { "scripted off", R"(,"effects":[)" + scripted(false) + "]", 0, false, 0.0f },
     };
     for (const auto& item : cases) {
         SCOPED_TRACE(item.name);
@@ -2359,17 +2342,17 @@ TEST(TextObjectRuntime, OnlyATextThroughVisibleEffectsReadsTheSceneForItsComposi
         ASSERT_NE(fixture.scene, nullptr);
         const auto graph = sceneToRenderGraph(*fixture.scene);
         ASSERT_NE(graph, nullptr);
-        std::size_t readers = 0;
+        std::size_t readers = 0, onto_scene = 0;
         for (const auto* pass : CustomPasses(*graph)) {
             if (! SamplesScreen(*pass)) continue;
             ++readers;
-            EXPECT_EQ(pass->desc().output == SpecTex_Default, item.onto_scene);
+            if (pass->desc().output == SpecTex_Default) ++onto_scene;
         }
         EXPECT_EQ(readers, item.readers);
+        EXPECT_EQ(onto_scene, item.onto_scene ? 1u : 0u);
         auto* node = FindRootChild(*fixture.scene, "caption");
         ASSERT_NE(node, nullptr);
-        const auto& values = node->Mesh()->Material()->customShader.constValues;
-        EXPECT_FLOAT_EQ(values.contains("g_Composite") ? values.at("g_Composite")[0] : -1.0f, item.composite);
+        EXPECT_FLOAT_EQ(CompositeOf(*fixture.scene, "caption"), item.composite);
     }
 }
 
@@ -2406,11 +2389,11 @@ TEST(TextObjectRuntime, ASceneWithFogPadsEveryTextLayerWhateverItsEffects) {
     EXPECT_TRUE(off.State("plain").padding.isApprox(none));
 }
 
-TEST(TextObjectRuntime, StyleColoursFollowTheirPropertiesAndTheBakedKeysAreReadOnceAndHeld) {
-    // The outline and shadow colours are uniforms of the card's shader, so a bound
-    // one drives it live. Sizes, offsets, opacity and the switches are baked into
-    // the card's pixels: a bound one is read as the scene loads, with the value
-    // the user has chosen, and noted as load-only so a preview holds it.
+TEST(TextObjectRuntime, StyleValuesFollowTheirPropertiesAndTheSwitchesAreReadOnceAndHeld) {
+    // The outline and shadow colours, sizes and opacity are uniforms of the font shader
+    // (`g_RenderVar0..3`, T.8), so a bound one drives it live with no layout. The switches
+    // pick the shader's combos and the atlas kind: a bound one is read as the scene loads,
+    // with the value the user has chosen, and noted as load-only so a preview holds it.
     TextSceneFixture fixture(R"([
       {"id":1,"name":"caption","text":"a","font":"Arial","visible":true,
        "outline":{"user":"edge","value":false},
@@ -2440,40 +2423,43 @@ TEST(TextObjectRuntime, StyleColoursFollowTheirPropertiesAndTheBakedKeysAreReadO
     EXPECT_FLOAT_EQ(style.shadow_size, 1.5f);
     EXPECT_FLOAT_EQ(style.shadow_opacity, 0.25f);
 
-    // The baked keys are held, the colours are not.
+    // The switch is held, the values are not.
     const auto held = runtime.LoadOnlyProperties();
-    EXPECT_EQ(held, (std::vector<std::string> { "dim", "edge", "soft", "thick" }));
+    EXPECT_EQ(held, (std::vector<std::string> { "edge" }));
 
     auto* node = FindRootChild(*fixture.scene, "caption");
     ASSERT_NE(node, nullptr);
     ASSERT_NE(node->Mesh(), nullptr);
-    const auto* material = node->Mesh()->Material();
+    const auto* material = node->Mesh()->MaterialForSlot(1);
     ASSERT_NE(material, nullptr);
     const auto colour = [&](const char* name) {
         const auto& value = material->customShader.constValues.at(name);
         return linalg::Vector3f(value[0], value[1], value[2]);
     };
-    EXPECT_TRUE(colour("g_OutlineColor").isApprox(linalg::Vector3f(1.0f, 0.0f, 0.0f)));
-    EXPECT_TRUE(colour("g_ShadowColor").isApprox(linalg::Vector3f(0.0f, 0.0f, 1.0f)));
+    EXPECT_TRUE(colour("g_RenderVar1").isApprox(linalg::Vector3f(1.0f, 0.0f, 0.0f)));
+    EXPECT_TRUE(colour("g_RenderVar2").isApprox(linalg::Vector3f(0.0f, 0.0f, 1.0f)));
     runtime.ApplyProjectPropertyOverride({ { "ink", RuntimeScalarValue::String("0 1 0") },
                                            { "shade", RuntimeScalarValue::String("1 1 0") } });
     runtime.Tick(1.0 / 60.0);
-    EXPECT_TRUE(colour("g_OutlineColor").isApprox(linalg::Vector3f(0.0f, 1.0f, 0.0f)));
-    EXPECT_TRUE(colour("g_ShadowColor").isApprox(linalg::Vector3f(1.0f, 1.0f, 0.0f)));
+    EXPECT_TRUE(colour("g_RenderVar1").isApprox(linalg::Vector3f(0.0f, 1.0f, 0.0f)));
+    EXPECT_TRUE(colour("g_RenderVar2").isApprox(linalg::Vector3f(1.0f, 1.0f, 0.0f)));
 
-    // A document that asks for other baked values is held at the ones the scene
-    // loaded with and says so; the colours move (`shade`, left out, returns to the
-    // value the scene loaded with).
+    // A document that asks for another switch is held at the one the scene loaded with
+    // and says so; the values move (`shade`, left out, returns to the value the scene
+    // loaded with), the outline's width with them.
+    const float width_before = material->customShader.constValues.at("g_RenderVar0")[1];
     const auto preview = runtime.PreviewProjectPropertyOverride({
         { "edge", RuntimeScalarValue::Bool(false) },
         { "thick", RuntimeScalarValue::Float(9.0f) },
         { "ink", RuntimeScalarValue::String("0 0 1") },
     });
-    EXPECT_EQ(preview.changed, (std::vector<std::string> { "ink", "shade" }));
-    EXPECT_EQ(preview.deferred, (std::vector<std::string> { "edge", "thick" }));
+    EXPECT_EQ(preview.changed, (std::vector<std::string> { "ink", "shade", "thick" }));
+    EXPECT_EQ(preview.deferred, (std::vector<std::string> { "edge" }));
     runtime.Tick(1.0 / 60.0);
-    EXPECT_TRUE(colour("g_OutlineColor").isApprox(linalg::Vector3f(0.0f, 0.0f, 1.0f)));
-    EXPECT_FLOAT_EQ(fixture.State("caption").style.outline_thickness, 2.0f);
+    EXPECT_TRUE(colour("g_RenderVar1").isApprox(linalg::Vector3f(0.0f, 0.0f, 1.0f)));
+    EXPECT_FLOAT_EQ(fixture.State("caption").style.outline_thickness, 9.0f);
+    EXPECT_TRUE(fixture.State("caption").style.outline) << "the held switch moved";
+    EXPECT_GT(material->customShader.constValues.at("g_RenderVar0")[1], width_before);
 }
 
 // Wallpaper Engine reads the two alignment keys as enumerations. A key that is
@@ -2585,10 +2571,10 @@ TEST(TextObjectRuntime, TextBrightnessAppliesOnlyInTheHdrPipeline) {
         const auto brightness = [&](const char* name) {
             auto* node = FindRootChild(*fixture.scene, name);
             EXPECT_NE(node, nullptr);
-            if (node == nullptr || node->Mesh() == nullptr || node->Mesh()->Material() == nullptr) {
+            if (node == nullptr || node->Mesh() == nullptr || node->Mesh()->MaterialForSlot(1) == nullptr) {
                 return -1.0f;
             }
-            return node->Mesh()->Material()->customShader.constValues.at("g_Brightness")[0];
+            return node->Mesh()->MaterialForSlot(1)->customShader.constValues.at("g_Color4")[0];
         };
         EXPECT_FLOAT_EQ(brightness("dark"), pipeline.hdr ? 0.0f : 1.0f);
         EXPECT_FLOAT_EQ(brightness("bright"), pipeline.hdr ? 2.39f : 1.0f);
@@ -2630,7 +2616,9 @@ TEST(TextObjectRuntime, ABrightnessScriptStillRunsWhereBrightnessDoesNothing) {
 // The background of an opaque card is the layer's `backgroundcolor` times its
 // `backgroundbrightness`, the brightness only in the HDR pipeline as the text's is, and the
 // card lies in its raster by the room the style needs around it, which follows the text.
-TEST(TextObjectRuntime, AnOpaqueBackgroundsColourBrightnessAndInsetReachTheCardsMaterial) {
+TEST(TextObjectRuntime, AnOpaqueBackgroundIsTheFontBackgroundQuadInItsColourAndBrightness) {
+    // The background is Wallpaper Engine's `fontbackground` material on the card quad, slot 0 of
+    // the layer's mesh, its `g_Color` the colour times the brightness where the scene renders HDR.
     struct Pipeline {
         const char* general;
         bool        hdr;
@@ -2642,66 +2630,31 @@ TEST(TextObjectRuntime, AnOpaqueBackgroundsColourBrightnessAndInsetReachTheCards
            "backgroundcolor":"0.2 0.4 0.6","backgroundbrightness":2,"visible":true},
           {"id":2,"name":"plain","text":"a","font":"Arial","pointsize":20,"visible":true},
           {"id":3,"name":"bound","text":"a","font":"Arial","pointsize":20,"opaquebackground":true,
-           "backgroundbrightness":{"user":"glow","value":0.5},"visible":true},
-          {"id":4,"name":"styled","text":"a","font":"Arial","pointsize":20,"opaquebackground":true,
-           "outline":true,"outlinethickness":4,"visible":true}
+           "backgroundcolor":"1 1 1","backgroundbrightness":{"user":"glow","value":0.5},"visible":true}
         ])", "text-plate-constants", HdrBloomAssets(),
                                  ProjectProperties { { "glow", RuntimeScalarValue::Float(3.0f) } },
                                  pipeline.general);
         ASSERT_NE(fixture.scene, nullptr);
         ASSERT_NE(fixture.scene->runtime, nullptr);
-        EXPECT_EQ(fixture.scene->hdr, pipeline.hdr);
         auto& runtime = *fixture.scene->runtime;
-        const auto constants = [&](const char* name) -> const ShaderValues& {
-            static const ShaderValues none;
+        const auto background = [&](const char* name) -> const SceneMaterial* {
             auto* node = FindRootChild(*fixture.scene, name);
-            EXPECT_NE(node, nullptr);
-            if (node == nullptr || node->Mesh() == nullptr || node->Mesh()->Material() == nullptr) return none;
-            return node->Mesh()->Material()->customShader.constValues;
+            return node != nullptr && node->Mesh() != nullptr ? node->Mesh()->MaterialForSlot(0) : nullptr;
         };
-
-        const auto& plate = constants("plate");
-        ASSERT_TRUE(plate.contains("g_Background"));
-        EXPECT_FLOAT_EQ(plate.at("g_Background")[0], 0.2f);
-        EXPECT_FLOAT_EQ(plate.at("g_Background")[1], 0.4f);
-        EXPECT_FLOAT_EQ(plate.at("g_Background")[2], 0.6f);
-        EXPECT_FLOAT_EQ(plate.at("g_BackgroundBrightness")[0], pipeline.hdr ? 2.0f : 1.0f);
-        // A card with no background has nothing of the kind, and costs nothing for it.
-        EXPECT_FALSE(constants("plain").contains("g_Background"));
-        EXPECT_FALSE(constants("plain").contains("g_CardInset"));
-        EXPECT_FLOAT_EQ(constants("bound").at("g_BackgroundBrightness")[0], pipeline.hdr ? 3.0f : 1.0f);
-
-        // A text with no style fills its raster, and a styled one leaves the room around the card.
-        EXPECT_FLOAT_EQ(plate.at("g_CardInset")[0], 0.0f);
-        EXPECT_FLOAT_EQ(plate.at("g_CardInset")[1], 0.0f);
-        const auto inset_of = [&](const char* name) {
-            const auto state = fixture.State(name);
-            return TextCardInsetInRaster(state, MeasureTextLayerLayout(state));
-        };
-        EXPECT_GT(inset_of("styled").x(), 0.0f);
-        EXPECT_GT(inset_of("styled").y(), 0.0f);
-        EXPECT_NEAR(constants("styled").at("g_CardInset")[0], inset_of("styled").x(), 1.0e-5f);
-        EXPECT_NEAR(constants("styled").at("g_CardInset")[1], inset_of("styled").y(), 1.0e-5f);
-
-        // The raster grows with the text and the room around the card does not, so the card's
-        // inset shrinks: the constant follows the layout.
-        const auto before = inset_of("styled");
-        ASSERT_TRUE(runtime.SetNodeText("styled", "a much longer caption\nover two rows"));
-        for (int attempt = 0; attempt < 200 && runtime.NodeTextDirty("styled"); ++attempt) {
-            runtime.PumpTextLayerCache();
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        runtime.Tick(1.0 / 60.0);
-        const auto after = inset_of("styled");
-        EXPECT_LT(after.x(), before.x());
-        EXPECT_LT(after.y(), before.y());
-        EXPECT_NEAR(constants("styled").at("g_CardInset")[0], after.x(), 1.0e-5f);
-        EXPECT_NEAR(constants("styled").at("g_CardInset")[1], after.y(), 1.0e-5f);
-
+        const auto* plate = background("plate");
+        ASSERT_NE(plate, nullptr);
+        EXPECT_EQ(plate->blenmode, BlendMode::Translucent);
+        const float scale = pipeline.hdr ? 2.0f : 1.0f;
+        EXPECT_FLOAT_EQ(plate->customShader.constValues.at("g_Color")[0], 0.2f * scale);
+        EXPECT_FLOAT_EQ(plate->customShader.constValues.at("g_Color")[2], 0.6f * scale);
+        // A card with no background draws no quad.
+        EXPECT_EQ(background("plain"), nullptr);
         // The bound brightness follows its property where it counts.
+        runtime.Tick(1.0 / 60.0);
+        EXPECT_FLOAT_EQ(background("bound")->customShader.constValues.at("g_Color")[0], pipeline.hdr ? 3.0f : 1.0f);
         runtime.ApplyProjectPropertyOverride({ { "glow", RuntimeScalarValue::Float(0.25f) } });
         runtime.Tick(1.0 / 60.0);
-        EXPECT_FLOAT_EQ(constants("bound").at("g_BackgroundBrightness")[0], pipeline.hdr ? 0.25f : 1.0f);
+        EXPECT_FLOAT_EQ(background("bound")->customShader.constValues.at("g_Color")[0], pipeline.hdr ? 0.25f : 1.0f);
     }
 }
 
@@ -2754,24 +2707,29 @@ TEST(TextObjectRuntime, ColorBlendModeMixesTextWithTheScreenThroughThePassthroug
     const auto* ping_pong = blended.scene->FindRenderTarget(
         std::string(WE_EFFECT_PPONG_PREFIX_A.data()) + node->Camera());
     ASSERT_NE(ping_pong, nullptr);
-    const auto card = TextLayerRasterSize(blended.State("caption"));
+    const auto card = MeasureTextLayerSize(blended.State("caption"));
     EXPECT_LE(ping_pong->width, static_cast<int32_t>(std::ceil(card.x())) + 1);
     EXPECT_LE(ping_pong->height, static_cast<int32_t>(std::ceil(card.y())) + 1);
 
     const auto graph = sceneToRenderGraph(*blended.scene);
     ASSERT_NE(graph, nullptr);
-    std::size_t screen_readers = 0;
+    std::size_t screen_readers = 0, seeds = 0;
     for (const auto* pass : CustomPasses(*graph)) {
         if (! SamplesScreen(*pass)) continue;
+        // The composite's seed reads the scene into the chain's buffer (T.7.1).
+        if (pass->desc().output != SpecTex_Default) {
+            ++seeds;
+            continue;
+        }
         ++screen_readers;
-        // It is the pass that draws onto the scene, as an image layer's is, with
-        // the layer's final blend.
-        EXPECT_EQ(pass->desc().output, SpecTex_Default);
+        // The blend's passthrough draws onto the scene, as an image layer's does, with the
+        // layer's final blend.
         const auto* material = pass->desc().node->Mesh()->MaterialForSlot(pass->desc().material_slot);
         ASSERT_NE(material, nullptr);
         EXPECT_EQ(material->blenmode, BlendMode::Translucent);
     }
     EXPECT_EQ(screen_readers, 1u);
+    EXPECT_EQ(seeds, 1u);
 
     // Mode "none" keeps the plain translucent card and no effect chain.
     TextSceneFixture plain(R"([{"id":1,"name":"caption","text":"hello","font":"Arial",
@@ -2780,7 +2738,7 @@ TEST(TextObjectRuntime, ColorBlendModeMixesTextWithTheScreenThroughThePassthroug
     auto* plain_node = FindRootChild(*plain.scene, "caption");
     ASSERT_NE(plain_node, nullptr);
     EXPECT_TRUE(plain_node->Camera().empty());
-    EXPECT_EQ(plain_node->Mesh()->Material()->blenmode, BlendMode::Translucent);
+    EXPECT_EQ(plain_node->Mesh()->MaterialForSlot(1)->blenmode, BlendMode::Translucent);
 }
 
 TEST(TextObjectRuntime, AddColorBlendTextIsDrawnAdditivelyOntoTheSceneUnlessItGoesThroughEffects) {
@@ -2797,7 +2755,7 @@ TEST(TextObjectRuntime, AddColorBlendTextIsDrawnAdditivelyOntoTheSceneUnlessItGo
     auto* node = FindRootChild(*bare->scene, "caption");
     ASSERT_NE(node, nullptr);
     EXPECT_TRUE(node->Camera().empty());
-    EXPECT_EQ(node->Mesh()->Material()->blenmode, BlendMode::Additive);
+    EXPECT_EQ(node->Mesh()->MaterialForSlot(1)->blenmode, BlendMode::Additive);
 
     // With an effect the layer is drawn through a composite, and Wallpaper Engine forces the last
     // pass of it translucent whatever the colour blend mode: "add" included. The card's pass is
@@ -2975,157 +2933,54 @@ TextLayerState StyledState(float point_size = 40.0f) {
 }
 } // namespace
 
-TEST(TextObjectRuntime, OutlineGrowsTheGlyphByItsThicknessInPixels) {
-    auto plain = StyledState();
-    auto outlined          = plain;
-    outlined.style.outline = true;
-    outlined.style.outline_thickness = 3.0f;
-    ASSERT_TRUE(TextStyleActive(outlined.style));
-    ASSERT_FALSE(TextStyleActive(plain.style));
+TEST(TextObjectRuntime, StyleRenderVarsAreTheFontShadersUniforms) {
+    // sub_1401B3B60 (decompiles/G-F5.md): k = 32 / pointsize * 0.24; RV0 = (24, outline,
+    // blur, shadow) capped 5.1 / 6 / 6 with outline + blur <= 5.1; offsets in RV1.w / RV2.w
+    // capped one-sided at 6; opacity in RV3.x. A switch that is off sends 0 (G-F4).
+    TextStyle style;
+    style.outline           = true;
+    style.outline_thickness = 4.0f;
+    style.blur              = true;
+    style.blur_size         = 6.0f;
+    style.drop_shadow       = true;
+    style.shadow_size       = 6.0f;
+    style.shadow_opacity    = 0.5f;
+    style.shadow_offset     = { 4.0f, 4.0f };
+    auto vars = TextStyleRenderVars(style, 32.0f);
+    EXPECT_FLOAT_EQ(vars.rv0[0], 24.0f);
+    EXPECT_NEAR(vars.rv0[1], 0.96f, 1e-5f);
+    EXPECT_NEAR(vars.rv0[2], 1.44f, 1e-5f);
+    EXPECT_NEAR(vars.rv0[3], 1.44f, 1e-5f);
+    EXPECT_NEAR(vars.rv1[3], 0.96f, 1e-5f);
+    EXPECT_NEAR(vars.rv2[3], 0.96f, 1e-5f);
+    EXPECT_FLOAT_EQ(vars.rv3[0], 0.5f);
+    EXPECT_TRUE(vars.outline && vars.blur && vars.shadow);
 
-    const auto glyph = RasterOf(outlined);
-    const auto fill  = ChannelBounds(glyph, 0, 128);
-    const auto outer = ChannelBounds(glyph, 1, 128);
-    ASSERT_TRUE(fill.Any() && outer.Any());
-    // One unit of thickness is one pixel of the finished text.
-    EXPECT_NEAR(fill.min_x - outer.min_x, 3, 1);
-    EXPECT_NEAR(outer.max_x - fill.max_x, 3, 1);
-    EXPECT_NEAR(fill.min_y - outer.min_y, 3, 1);
-    EXPECT_NEAR(outer.max_y - fill.max_y, 3, 1);
+    TextStyle wide;
+    wide.outline           = true;
+    wide.outline_thickness = 40.0f;
+    EXPECT_NEAR(TextStyleRenderVars(wide, 8.0f).rv0[1], 5.1f, 1e-5f);
+    wide.blur      = true;
+    wide.blur_size = 40.0f;
+    // Blur takes its 6, so the outline has nothing left of its 5.1.
+    EXPECT_FLOAT_EQ(TextStyleRenderVars(wide, 8.0f).rv0[1], 0.0f);
 
-    // The glyph itself is where plain text puts it, shifted by the room the
-    // style asks around the card.
-    const auto bare   = RasterOf(plain);
-    const auto bare_box = InkBounds(bare.rgba, bare.width, bare.height);
-    const int  margin = static_cast<int>((glyph.width - bare.width) / 2u);
-    EXPECT_GE(margin, 4);
-    EXPECT_EQ(glyph.height - bare.height, static_cast<uint32_t>(2 * margin));
-    EXPECT_NEAR(fill.min_x - margin, bare_box.min_x, 1);
-    EXPECT_NEAR(fill.max_x - margin, bare_box.max_x, 1);
-    EXPECT_NEAR(fill.min_y - margin, bare_box.min_y, 1);
-    EXPECT_NEAR(fill.max_y - margin, bare_box.max_y, 1);
-    // Reconstructed from the distance field, the glyph keeps its antialiasing:
-    // nearly every pixel agrees with plain coverage.
-    std::size_t differing = 0, covered = 0;
-    for (uint32_t y = 0; y < bare.height; ++y) {
-        for (uint32_t x = 0; x < bare.width; ++x) {
-            const int a = bare.rgba[(static_cast<std::size_t>(y) * bare.width + x) * 4u + 3u];
-            const int r = glyph.rgba[(static_cast<std::size_t>(y + margin) * glyph.width +
-                                      (x + margin)) * 4u];
-            if (a > 0 || r > 0) ++covered;
-            if (std::abs(a - r) > 40) ++differing;
-        }
-    }
-    ASSERT_GT(covered, 100u);
-    EXPECT_LT(differing * 50u, covered) << differing << " of " << covered;
-}
-
-TEST(TextObjectRuntime, OutlineThicknessIsCappedWithTheGlyphAtlasAndNeverBelowOnePixel) {
-    auto state                   = StyledState();
-    state.style.outline          = true;
-    state.style.outline_thickness = 100.0f;
-    const auto huge = RasterOf(state);
-    const auto huge_gap = ChannelBounds(huge, 0, 128).min_x - ChannelBounds(huge, 1, 128).min_x;
-    // 5.1 pixels of a 32 pixel atlas em, at 166 pixels to the em.
-    EXPECT_NEAR(huge_gap, 26.6f, 2.0f);
-
-    state.style.outline_thickness = 0.1f;
-    const auto thin = RasterOf(state);
-    const auto thin_gap = ChannelBounds(thin, 0, 128).min_x - ChannelBounds(thin, 1, 128).min_x;
-    EXPECT_NEAR(thin_gap, 1, 1);
-}
-
-TEST(TextObjectRuntime, BlurSoftensEdgesOverItsSizeAndKeepsTheGlyphWhereItIs) {
-    auto crisp = StyledState();
-    crisp.style.outline = true; // an active style that does not blur
-    crisp.style.outline_thickness = 1.0f;
-    auto soft          = StyledState();
-    soft.style.blur    = true;
-    soft.style.blur_size = 3.0f;
-
-    const auto sharp = RasterOf(crisp);
-    const auto blurred = RasterOf(soft);
-    const auto partial = [](const Rastered& image) {
-        std::size_t count = 0;
-        for (uint32_t index = 0; index < image.width * image.height; ++index) {
-            const auto value = image.rgba[static_cast<std::size_t>(index) * 4u];
-            if (value > 20u && value < 235u) ++count;
-        }
-        return count;
-    };
-    EXPECT_GT(partial(blurred), partial(sharp) * 2u);
-
-    // The half-coverage edge stays on the glyph's outline; the tail runs past it by a
-    // few pixels, on a smoothstep three pixels either side.
-    const auto half = ChannelBounds(blurred, 0, 128);
-    const auto tail = ChannelBounds(blurred, 0, 8);
-    ASSERT_TRUE(half.Any() && tail.Any());
-    EXPECT_GE(half.min_x - tail.min_x, 1);
-    EXPECT_LE(half.min_x - tail.min_x, 4);
-}
-
-TEST(TextObjectRuntime, DropShadowFollowsItsOffsetAndOpacityAndOutlineWidth) {
-    auto state                    = StyledState();
-    state.style.drop_shadow       = true;
-    state.style.shadow_size       = 1.0f;
-    state.style.shadow_opacity    = 0.5f;
-    state.style.shadow_offset     = { 6.0f, 4.0f };
-    const auto shadowed = RasterOf(state);
-    const auto glyph    = ChannelBounds(shadowed, 0, 128);
-    const auto shadow   = ChannelBounds(shadowed, 2, 32);
-    ASSERT_TRUE(glyph.Any() && shadow.Any());
-    // The same shape, 6 pixels right and 4 down, a little soft at the edge.
-    EXPECT_NEAR((shadow.max_x - glyph.max_x), 6, 2);
-    EXPECT_NEAR((shadow.max_y - glyph.max_y), 4, 2);
-    EXPECT_NEAR((shadow.min_x - glyph.min_x), 6, 2);
-    EXPECT_NEAR((shadow.min_y - glyph.min_y), 4, 2);
-    // Opacity is in the mask: the blue channel never reaches more than half.
-    int strongest = 0;
-    for (std::size_t offset = 2; offset < shadowed.rgba.size(); offset += 4u) {
-        strongest = std::max<int>(strongest, shadowed.rgba[offset]);
-    }
-    EXPECT_NEAR(strongest, 128, 3);
-
-    // Outlined text casts the shadow of the outlined shape.
-    auto outlined                    = state;
-    outlined.style.outline           = true;
-    outlined.style.outline_thickness = 3.0f;
-    const auto both        = RasterOf(outlined);
-    const auto both_glyph  = ChannelBounds(both, 0, 128);
-    const auto both_shadow = ChannelBounds(both, 2, 32);
-    EXPECT_NEAR(both_shadow.max_x - both_glyph.max_x, 6 + 3, 2);
-    EXPECT_NEAR(both_shadow.max_y - both_glyph.max_y, 4 + 3, 2);
-}
-
-TEST(TextObjectRuntime, StyledTextCardGrowsOutwardAndKeepsTheLayoutBoxWhereItWas) {
-    auto state             = HelveticaState("Hg", 30.0f);
-    state.horizontal_align = "left";
-    state.vertical_align   = "top";
-    const auto plain_size   = TextLayerRasterSize(state);
-    const auto plain_bounds = TextLayerRenderBoundsForLayout(state, MeasureTextLayerLayout(state));
-    EXPECT_EQ(TextStyleMargin(state), 0.0f);
-
-    state.style.outline = true;
-    state.style.outline_thickness = 4.0f;
-    const float margin = TextStyleMargin(state);
-    ASSERT_GE(margin, 5.0f);
-    const auto size = TextLayerRasterSize(state);
-    EXPECT_TRUE(size.isApprox(plain_size + linalg::Vector2f::Constant(2.0f * margin)));
-    // The layout card, which the layer is placed by, does not move: the raster gains
-    // the margin on every side.
-    EXPECT_TRUE(MeasureTextLayerSize(state).isApprox(plain_size));
-    const auto bounds = TextLayerRenderBoundsForLayout(state, MeasureTextLayerLayout(state));
-    EXPECT_FLOAT_EQ(bounds.left, plain_bounds.left - margin);
-    EXPECT_FLOAT_EQ(bounds.right, plain_bounds.right + margin);
-    EXPECT_FLOAT_EQ(bounds.top, plain_bounds.top + margin);
-    EXPECT_FLOAT_EQ(bounds.bottom, plain_bounds.bottom - margin);
-    // And the text sits in the card where it would without the style.
-    const auto styled = RasterOf(state);
-    const auto box    = ChannelBounds(styled, 1, 128);
-    ASSERT_TRUE(box.Any());
-    EXPECT_GE(box.min_x, 1);
-    EXPECT_GE(box.min_y, 1);
-    EXPECT_LT(box.max_x, static_cast<int>(styled.width) - 1);
+    // Off is 0, on floors: outline 1, blur and shadow 0.01.
+    TextStyle off;
+    off.outline_thickness = 9.0f;
+    off.blur_size         = 9.0f;
+    const auto none = TextStyleRenderVars(off, 32.0f);
+    EXPECT_FALSE(none.outline || none.blur || none.shadow);
+    EXPECT_FLOAT_EQ(none.rv0[1], 0.0f);
+    EXPECT_FLOAT_EQ(none.rv0[2], 0.0f);
+    TextStyle thin;
+    thin.outline = true;
+    thin.outline_thickness = 0.1f;
+    thin.blur = true;
+    thin.blur_size = 0.0f;
+    const auto floored = TextStyleRenderVars(thin, 32.0f);
+    EXPECT_NEAR(floored.rv0[1], 0.24f, 1e-5f);
+    EXPECT_NEAR(floored.rv0[2], 0.0024f, 1e-6f);
 }
 
 TEST(TextObjectRuntime, ParserReadsTheFontShaderStyleAndPicksTheStyledShader) {
@@ -3174,63 +3029,24 @@ TEST(TextObjectRuntime, ParserReadsTheFontShaderStyleAndPicksTheStyledShader) {
     EXPECT_TRUE(defaults.shadow_offset.isApprox(linalg::Vector2f(4.0f, 4.0f)));
     EXPECT_TRUE(defaults.outline_color.isZero());
 
-    const auto shader_of = [&](std::string_view name) -> const SceneMaterial* {
+    // The glyphs are drawn with Wallpaper Engine's font material (slot 1), its style uniforms
+    // `TextStyleRenderVars` of the layer's style (sub_1401B3B60, G-F5): the outline's width
+    // in atlas pixels and its colour, and nothing for a layer without an outline.
+    const auto glyphs_of = [&](std::string_view name) -> const SceneMaterial* {
         auto* node = FindRootChild(*fixture.scene, name);
-        return node != nullptr && node->Mesh() != nullptr ? node->Mesh()->Material() : nullptr;
+        return node != nullptr && node->Mesh() != nullptr ? node->Mesh()->MaterialForSlot(1) : nullptr;
     };
-    const auto* plain_material    = shader_of("plain");
-    const auto* outlined_material = shader_of("outlined");
-    const auto* shadowed_material = shader_of("shadowed");
+    const auto* plain_material    = glyphs_of("plain");
+    const auto* outlined_material = glyphs_of("outlined");
     ASSERT_NE(plain_material, nullptr);
     ASSERT_NE(outlined_material, nullptr);
-    ASSERT_NE(shadowed_material, nullptr);
-    EXPECT_EQ(plain_material->customShader.shader->name, "text");
-    // The glyph is mixed with the outline's colour only for a layer with an
-    // outline; a shadow or a blur alone leaves the glyph the layer's colour.
-    EXPECT_EQ(outlined_material->customShader.shader->name, "text_styled_outline");
-    EXPECT_EQ(shadowed_material->customShader.shader->name, "text_styled");
-    // Only the glyph takes the layer's colour; the outline and shadow keep their own.
-    const auto& values = outlined_material->customShader.constValues;
-    ASSERT_TRUE(values.contains("g_OutlineColor"));
-    ASSERT_TRUE(values.contains("g_ShadowColor"));
-    EXPECT_FLOAT_EQ(values.at("g_OutlineColor")[1], 0.5f);
-    EXPECT_FALSE(plain_material->customShader.constValues.contains("g_OutlineColor"));
-    EXPECT_FALSE(shadowed_material->customShader.constValues.contains("g_OutlineColor"));
-    EXPECT_TRUE(shadowed_material->customShader.constValues.contains("g_ShadowColor"));
-}
-
-TEST(TextObjectRuntime, StyledTextCardCoversTheStyleWhenTheLayerIsParsed) {
-    // A layer with an outline gets a larger raster than its text, and its card
-    // mesh the same room, so the outline is not cut off at the layout box.
-    TextSceneFixture fixture(R"([
-      {"id":1,"name":"plain","text":"Hg","font":"Arial","pointsize":20,"visible":true,
-       "origin":[100,100,0],"horizontalalign":"left","verticalalign":"top"},
-      {"id":2,"name":"outlined","text":"Hg","font":"Arial","pointsize":20,"visible":true,
-       "outline":true,"outlinethickness":4,"origin":[100,100,0],"horizontalalign":"left",
-       "verticalalign":"top"}
-    ])", "text-style-card");
-    ASSERT_NE(fixture.scene, nullptr);
-    auto* plain    = FindRootChild(*fixture.scene, "plain");
-    auto* outlined = FindRootChild(*fixture.scene, "outlined");
-    ASSERT_NE(plain, nullptr);
-    ASSERT_NE(outlined, nullptr);
-    const auto plain_card    = MeshLocalBounds(*plain->Mesh());
-    const auto outlined_card = MeshLocalBounds(*outlined->Mesh());
-    const float margin = TextStyleMargin(fixture.State("outlined"));
-    ASSERT_GT(margin, 4.0f);
-    EXPECT_NEAR(outlined_card.min_x, plain_card.min_x - margin, 0.01f);
-    EXPECT_NEAR(outlined_card.max_x, plain_card.max_x + margin, 0.01f);
-    EXPECT_NEAR(outlined_card.min_y, plain_card.min_y - margin, 0.01f);
-    EXPECT_NEAR(outlined_card.max_y, plain_card.max_y + margin, 0.01f);
-    // The layer's size, which places it and answers the cursor, is the text's.
-    EXPECT_TRUE(fixture.scene->runtime->NodeSize("outlined").isApprox(
-        fixture.scene->runtime->NodeSize("plain")));
-    // And the texture is that large, with the outline in it.
-    auto* material = outlined->Mesh()->MaterialForSlot(0);
-    ASSERT_NE(material, nullptr);
-    auto image = fixture.scene->imageParser->Parse(material->textures.front());
-    ASSERT_NE(image, nullptr);
-    EXPECT_NEAR(image->header.width, plain_card.max_x - plain_card.min_x + 2.0f * margin, 1.0f);
+    const auto& outlined_values = outlined_material->customShader.constValues;
+    ASSERT_TRUE(outlined_values.contains("g_RenderVar0"));
+    ASSERT_TRUE(outlined_values.contains("g_RenderVar1"));
+    EXPECT_FLOAT_EQ(outlined_values.at("g_RenderVar0")[0], 24.0f);
+    EXPECT_NEAR(outlined_values.at("g_RenderVar0")[1], 32.0f / 26.0f * 0.24f * 2.45f, 1e-5f);
+    EXPECT_FLOAT_EQ(outlined_values.at("g_RenderVar1")[1], 0.5f);
+    EXPECT_FLOAT_EQ(plain_material->customShader.constValues.at("g_RenderVar0")[1], 0.0f);
 }
 
 TEST(TextObjectRuntime, ATextLayerRegistersItsSolidAndPropagationFlagsForTheCursor) {
@@ -3297,7 +3113,8 @@ TEST(TextObjectRuntime, TextMeasuresToTheCardsWallpaperEngineSaved) {
 
 namespace
 {
-// The runtime texture a text layer's card shows: its size in texels, and the first and
+// The picture a text layer's card shows, composed from what it draws (the glyph quads of its
+// mesh over the atlas it publishes): its size in whole pixels of the card, and the first and
 // last columns that hold ink.
 struct TextTexture {
     int width { 0 };
@@ -3308,19 +3125,40 @@ struct TextTexture {
 
 TextTexture TextureOfTextLayer(Scene& scene, SceneNode& node) {
     TextTexture out;
-    const auto* material = node.Mesh() != nullptr ? node.Mesh()->MaterialForSlot(0) : nullptr;
-    if (material == nullptr || material->textures.empty()) return out;
-    const auto image = scene.imageParser->Parse(material->textures.front());
+    auto* mesh = node.Mesh();
+    if (mesh == nullptr || mesh->Submeshes().size() < 2) return out;
+    const auto* glyphs = mesh->MaterialForSlot(1);
+    if (glyphs == nullptr || glyphs->textures.empty()) return out;
+    const auto image = scene.imageParser->Parse(glyphs->textures.front());
     if (image == nullptr || image->slots.empty() || image->slots[0].mipmaps.empty()) return out;
-    const auto& mip = image->slots[0].mipmaps[0];
-    out.width       = mip.width;
-    out.height      = mip.height;
-    for (int y = 0; y < mip.height; ++y) {
-        for (int x = 0; x < mip.width; ++x) {
-            if (mip.data.get()[(static_cast<std::size_t>(y) * mip.width + x) * 4u + 3u] == 0u) continue;
-            if (out.first_ink_column < 0) out.first_ink_column = x;
-            out.first_ink_column = std::min(out.first_ink_column, x);
-            out.last_ink_column  = std::max(out.last_ink_column, x);
+    const auto& atlas = image->slots[0].mipmaps[0];
+    const std::size_t bpp = image->header.format == TextureFormat::R8 ? 1u : 4u;
+    const auto  card  = MeshLocalBounds(*mesh);
+    out.width  = static_cast<int>(std::ceil(card.max_x - card.min_x));
+    out.height = static_cast<int>(std::ceil(card.max_y - card.min_y));
+    const auto& submesh  = mesh->Submeshes()[1];
+    const auto& vertices = submesh.GetVertexArray(0);
+    const std::size_t stride = vertices.OneSize();
+    const std::size_t quads  = submesh.GetIndexArray(0).DrawIndexCount() / 6;
+    for (std::size_t q = 0; q < quads; ++q) {
+        const float* lb = vertices.Data() + (q * 4 + 0) * stride; // left-bottom: x, y, _, _, u, v1
+        const float* rt = vertices.Data() + (q * 4 + 3) * stride; // right-top:   x, y, _, _, u1, v0
+        const int x0 = static_cast<int>(std::lround(lb[0] - card.min_x));
+        const int x1 = static_cast<int>(std::lround(rt[0] - card.min_x));
+        const int y0 = static_cast<int>(std::lround(card.max_y - rt[1]));
+        const int y1 = static_cast<int>(std::lround(card.max_y - lb[1]));
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                const float u = lb[4] + (rt[4] - lb[4]) * (static_cast<float>(x - x0) + 0.5f) / static_cast<float>(x1 - x0);
+                const float v = rt[5] + (lb[5] - rt[5]) * (static_cast<float>(y - y0) + 0.5f) / static_cast<float>(y1 - y0);
+                const int ax = std::clamp(static_cast<int>(u * static_cast<float>(atlas.width)), 0, atlas.width - 1);
+                const int ay = std::clamp(static_cast<int>(v * static_cast<float>(atlas.height)), 0, atlas.height - 1);
+                const uint8_t* texel = atlas.data.get() + (static_cast<std::size_t>(ay) * atlas.width + ax) * bpp;
+                if (texel[bpp == 1 ? 0 : 3] == 0u || x < 0 || x >= out.width) continue;
+                if (out.first_ink_column < 0) out.first_ink_column = x;
+                out.first_ink_column = std::min(out.first_ink_column, x);
+                out.last_ink_column  = std::max(out.last_ink_column, x);
+            }
         }
     }
     return out;
@@ -3448,7 +3286,7 @@ TEST(TextObjectRuntime, ATextCardIsBuiltAtItsTruncatedSizeInTexels) {
     ASSERT_NE(node, nullptr);
     ASSERT_FALSE(node->Camera().empty());
 
-    const auto card = TextLayerRasterSize(fixture.State("caption"));
+    const auto card = MeasureTextLayerSize(fixture.State("caption"));
     // A fraction of .5 or more: rounding and cutting it off differ.
     ASSERT_NE(std::lround(card.x()), static_cast<long>(card.x())) << card.x();
     const auto* ping_pong = fixture.scene->FindRenderTarget(
@@ -4186,7 +4024,7 @@ TEST(TextObjectRuntime, TheBoxesOfTheFallbackAreSetByTheRuleTheGlyphsAre) {
             };
             const auto layout = TextLayerBoxLayoutForTests(state);
             ASSERT_EQ(layout.rows, 3u);
-            const auto size = layout.card + linalg::Vector2f::Constant(2.0f * TextStyleMargin(state));
+            const auto size = layout.card;
             Rastered   image;
             image.width  = static_cast<uint32_t>(std::ceil(size.x()));
             image.height = static_cast<uint32_t>(std::ceil(size.y()));
@@ -4475,7 +4313,7 @@ TEST(TextObjectRuntime, AFontTheWallpaperShipsIsNotOpenedFromAFile) {
 #endif
 }
 
-TEST(TextObjectRuntime, TheFaceCacheKeepsEightFacesAndDropsTheOneUnusedLongest) {
+TEST(TextObjectRuntime, TheFaceCacheKeepsTenFacesAndDropsTheOneUnusedLongest) {
 #ifdef __APPLE__
     std::vector<SystemFontFace> fonts;
     for (const char* family : {"Arial", "Courier New", "Georgia", "Impact", "Tahoma", "Trebuchet MS",
@@ -4487,25 +4325,25 @@ TEST(TextObjectRuntime, TheFaceCacheKeepsEightFacesAndDropsTheOneUnusedLongest) 
         });
         if (! font.path.empty() && ! seen) fonts.push_back(font);
     }
-    if (fonts.size() < 10u) GTEST_SKIP() << "fewer than ten of the fonts macOS ships are installed";
+    if (fonts.size() < 12u) GTEST_SKIP() << "fewer than twelve of the fonts macOS ships are installed";
 
     // A space is in every font, so no layout here asks for a second face.
     const auto lay_out = [&](std::size_t font) {
         LayOutAndRaster(StateInFace(fonts[font], " ", 20.0f));
     };
     ResetTextFontCacheForTests();
-    for (std::size_t font = 0; font < 10; ++font) lay_out(font);
-    EXPECT_EQ(TextFontFilesOpenedForTests(), 10u);
-    EXPECT_EQ(TextFontFacesCachedForTests(), 8u);
+    for (std::size_t font = 0; font < 12; ++font) lay_out(font);
+    EXPECT_EQ(TextFontFilesOpenedForTests(), 12u);
+    EXPECT_EQ(TextFontFacesCachedForTests(), 10u);
 
-    lay_out(9);
-    EXPECT_EQ(TextFontFilesOpenedForTests(), 10u) << "the face used last was not kept";
-    lay_out(8);
+    lay_out(11);
+    EXPECT_EQ(TextFontFilesOpenedForTests(), 12u) << "the face used last was not kept";
+    lay_out(10);
     lay_out(2);
-    EXPECT_EQ(TextFontFilesOpenedForTests(), 10u) << "a face among the last eight was dropped";
+    EXPECT_EQ(TextFontFilesOpenedForTests(), 12u) << "a face among the last ten was dropped";
     lay_out(0);
-    EXPECT_EQ(TextFontFilesOpenedForTests(), 11u) << "the face unused longest was kept";
-    EXPECT_EQ(TextFontFacesCachedForTests(), 8u);
+    EXPECT_EQ(TextFontFilesOpenedForTests(), 13u) << "the face unused longest was kept";
+    EXPECT_EQ(TextFontFacesCachedForTests(), 10u);
 #endif
 }
 
@@ -5136,6 +4974,8 @@ TEST(TextObjectRuntime, CjkPunctuationIsNotDrawnByTheSymbolFace) {
         const ProbeFace pingfang_face(library, pingfang);
         const ProbeFace arial_face(library, ResolveSceneFont("systemfont_arial"));
         const ProbeFace segoe_face(library, ResolveSceneFont("systemfont_segoe"));
+        // Segoe UI Emoji's stand-in comes second in the list, so a mark it has is a colour glyph.
+        const ProbeFace emoji_face(library, ResolveInstalledFamily("Apple Color Emoji"));
         const auto ink = [](const TextLayerState& state) { return InkMass(RasterOf(state)); };
         const auto in_braille = [&](std::string text) {
             TextLayerState state = HelveticaState(std::move(text), 40.0f);
@@ -5163,7 +5003,7 @@ TEST(TextObjectRuntime, CjkPunctuationIsNotDrawnByTheSymbolFace) {
         std::size_t symbol_marks = 0;
         for (uint32_t codepoint = 0x2100u; codepoint <= 0x2BFFu; ++codepoint) {
             if (! symbol_face.Has(codepoint) || ! pingfang_face.Has(codepoint)) continue;
-            if (arial_face.Has(codepoint) || segoe_face.Has(codepoint)) continue;
+            if (arial_face.Has(codepoint) || segoe_face.Has(codepoint) || emoji_face.Has(codepoint)) continue;
             const auto text = Utf8Of(codepoint);
             if (alone(symbols, text) == 0u || alone(symbols, text) == alone(pingfang, text)) continue;
             ++symbol_marks;
@@ -5226,32 +5066,313 @@ TEST(TextObjectRuntime, AFamilyThatMovedOrAppearedIsFoundAgain) {
     std::filesystem::remove_all(directory);
 }
 
-TEST(TextObjectRuntime, StyledTextKeepsItsMarginWhenItsTextChanges) {
-    TextSceneFixture fixture(R"([
-      {"id":1,"name":"caption","text":"Hg","font":"Arial","pointsize":20,"visible":true,
-       "outline":true,"outlinethickness":4,"dropshadow":true,"dropshadowoffset":"6 6",
-       "origin":[100,100,0],"horizontalalign":"left","verticalalign":"top"}
-    ])", "text-style-relayout");
-    ASSERT_NE(fixture.scene, nullptr);
-    auto& runtime = *fixture.scene->runtime;
-    const float margin = TextStyleMargin(fixture.State("caption"));
-    ASSERT_GT(margin, 6.0f);
+// ---------------------------------------------------------------------------
+// Shaping: Wallpaper Engine shapes each run of one face with HarfBuzz
+// (artifacts/we-parity/decompiles/G-F1.md, G-F2.md), so GPOS kerning, ligatures
+// and complex scripts take effect, and a run HarfBuzz guesses to be right to left
+// is set right to left; runs are not reordered between themselves.
+// ---------------------------------------------------------------------------
 
-    ASSERT_TRUE(runtime.SetNodeText("caption", "Hello, world"));
-    PumpTextUntilClean(runtime);
-    auto* node = FindRootChild(*fixture.scene, "caption");
-    ASSERT_NE(node, nullptr);
-    auto* material = node->Mesh()->MaterialForSlot(0);
-    ASSERT_NE(material, nullptr);
-    auto image = fixture.scene->imageParser->Parse(material->textures.front());
-    ASSERT_NE(image, nullptr);
-    // The layer's size is the text's; the texture and the card hold the margin too.
-    const auto layout = runtime.NodeSize("caption");
-    EXPECT_NEAR(image->header.width, layout.x() + 2.0f * margin, 1.0f);
-    EXPECT_NEAR(image->header.height, layout.y() + 2.0f * margin, 1.0f);
-    const auto card = MeshLocalBounds(*node->Mesh());
-    EXPECT_NEAR(card.max_x - card.min_x, layout.x() + 2.0f * margin, 0.5f);
-    EXPECT_NEAR(card.max_y - card.min_y, layout.y() + 2.0f * margin, 0.5f);
+namespace
+{
+// A layer drawn with the installed family `family` (skips when it is not installed).
+std::optional<TextLayerState> FamilyState(std::string text, const char* family) {
+    const auto font = ResolveInstalledFamily(family);
+    if (font.path.empty()) return std::nullopt;
+    auto state                   = HelveticaState(std::move(text), 32.0f);
+    state.font_key               = std::string("systemfont_") + family;
+    state.resolved_font_identity = family;
+    state.resolved_font_path     = font.path;
+    state.resolved_font_face     = font.postscript_name;
+    return state;
+}
+
+// The glyph index `codepoint` has in the cmap of the face `state` names.
+FT_UInt CmapGlyph(const TextLayerState& state, uint32_t codepoint) {
+    FT_Library library = nullptr;
+    if (FT_Init_FreeType(&library) != 0) return 0;
+    FT_UInt glyph = 0;
+    FT_Face face  = nullptr;
+    if (FT_New_Face(library, state.resolved_font_path.c_str(), 0, &face) == 0) {
+        for (FT_Long index = 1; ! state.resolved_font_face.empty() && index < face->num_faces; ++index) {
+            const char* name = FT_Get_Postscript_Name(face);
+            if (name != nullptr && state.resolved_font_face == name) break;
+            FT_Done_Face(face);
+            face = nullptr;
+            if (FT_New_Face(library, state.resolved_font_path.c_str(), index, &face) != 0) break;
+        }
+        if (face != nullptr) {
+            glyph = FT_Get_Char_Index(face, codepoint);
+            FT_Done_Face(face);
+        }
+    }
+    FT_Done_FreeType(library);
+    return glyph;
+}
+
+const TextGlyphPlacementForTests* GlyphOfSource(const std::vector<TextGlyphPlacementForTests>& glyphs,
+                                                uint32_t source) {
+    for (const auto& glyph : glyphs) {
+        if (glyph.source == source) return &glyph;
+    }
+    return nullptr;
+}
+} // namespace
+
+TEST(TextObjectRuntime, GposKerningNarrowsAPairTheKernTableDoesNotHave) {
+    constexpr const char* kPath = "/System/Library/Fonts/SFNS.ttf";
+    if (! std::filesystem::exists(kPath)) GTEST_SKIP() << "SF NS (" << kPath << ") is not installed";
+    FT_Library library = nullptr;
+    ASSERT_EQ(FT_Init_FreeType(&library), 0);
+    FT_Face face = nullptr;
+    ASSERT_EQ(FT_New_Face(library, kPath, 0, &face), 0);
+    ASSERT_EQ(FT_Set_Char_Size(face, 0, 32 * 64, 300, 300), 0);
+    // The pair can only be kerned through GPOS: the font has no legacy kern table.
+    ASSERT_FALSE(FT_HAS_KERNING(face));
+    FT_Fixed advance = 0;
+    ASSERT_EQ(FT_Get_Advance(face, FT_Get_Char_Index(face, 'A'), FT_LOAD_NO_HINTING, &advance), 0);
+    FT_Done_Face(face);
+    FT_Done_FreeType(library);
+    const float unkerned = std::floor(static_cast<float>((advance + 512) >> 10) / 64.0f);
+
+    auto state                   = HelveticaState("AV", 32.0f);
+    state.font_key               = "systemfont_sfns";
+    state.resolved_font_identity = "sfns";
+    state.resolved_font_path     = kPath;
+    const auto glyphs = TextLayerGlyphsForTests(state);
+    ASSERT_EQ(glyphs.size(), 2u);
+    EXPECT_LE(glyphs[1].pen, unkerned - 2.0f);
+}
+
+TEST(TextObjectRuntime, ALigatureIsOneGlyph) {
+    const auto state = FamilyState("fi", "Hoefler Text");
+    if (! state) GTEST_SKIP() << "Hoefler Text is not installed";
+    const auto glyphs = TextLayerGlyphsForTests(*state);
+    ASSERT_EQ(glyphs.size(), 1u);
+    EXPECT_NE(glyphs[0].glyph_index, CmapGlyph(*state, 'f'));
+}
+
+TEST(TextObjectRuntime, ArabicIsJoinedAndSetRightToLeft) {
+    const auto state = FamilyState("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85", "Geeza Pro"); // سلام
+    if (! state) GTEST_SKIP() << "Geeza Pro is not installed";
+    const auto glyphs = TextLayerGlyphsForTests(*state);
+    const auto* first = GlyphOfSource(glyphs, 0);
+    const auto* last  = GlyphOfSource(glyphs, 3);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(last, nullptr);
+    // Seen joins the lam after it: its initial form, not the isolated form the cmap maps
+    // to. (Meem follows alef, which does not join forward, so it stays isolated.)
+    EXPECT_NE(first->glyph_index, CmapGlyph(*state, 0x0633));
+    EXPECT_GT(first->pen, last->pen);
+}
+
+TEST(TextObjectRuntime, DevanagariPreBaseMatraIsDrawnBeforeItsConsonant) {
+    const auto state = FamilyState("\xE0\xA4\x95\xE0\xA4\xBF", "Kohinoor Devanagari"); // कि
+    if (! state) GTEST_SKIP() << "Kohinoor Devanagari is not installed";
+    const auto glyphs = TextLayerGlyphsForTests(*state);
+    ASSERT_FALSE(glyphs.empty());
+    EXPECT_NE(glyphs.front().glyph_index, CmapGlyph(*state, 0x0915));
+}
+
+// Wallpaper Engine has no bidi algorithm (G-F2.md): a Hebrew word in the same face as the Latin
+// around it is part of one left-to-right run and keeps its logical order, while a run HarfBuzz
+// guesses to be Hebrew is set right to left.
+TEST(TextObjectRuntime, OnlyARunGuessedRightToLeftIsSetRightToLeft) {
+    const auto mixed = FamilyState("abc \xD7\x90\xD7\x91\xD7\x92 def", "Arial"); // abc אבג def
+    if (! mixed) GTEST_SKIP() << "Arial is not installed";
+    const auto glyphs = TextLayerGlyphsForTests(*mixed);
+    ASSERT_NE(GlyphOfSource(glyphs, 4), nullptr);
+    ASSERT_NE(GlyphOfSource(glyphs, 6), nullptr);
+    EXPECT_LT(GlyphOfSource(glyphs, 4)->pen, GlyphOfSource(glyphs, 6)->pen);
+    EXPECT_LT(GlyphOfSource(glyphs, 0)->pen, GlyphOfSource(glyphs, 4)->pen);
+    EXPECT_GT(GlyphOfSource(glyphs, 8)->pen, GlyphOfSource(glyphs, 6)->pen);
+
+    const auto hebrew = FamilyState("\xD7\x90\xD7\x91\xD7\x92", "Arial"); // אבג
+    const auto alone  = TextLayerGlyphsForTests(*hebrew);
+    ASSERT_EQ(alone.size(), 3u);
+    EXPECT_GT(GlyphOfSource(alone, 0)->pen, GlyphOfSource(alone, 2)->pen);
+}
+
+// A space between two runs of different faces stays with the run before it (G-F14.md).
+TEST(TextObjectRuntime, ASpaceStaysInTheRunBeforeIt) {
+    auto state = FamilyState("A \xE4\xB8\xAD", "Arial"); // A 中
+    if (! state) GTEST_SKIP() << "Arial is not installed";
+    const auto glyphs = TextLayerGlyphsForTests(*state);
+    ASSERT_EQ(glyphs.size(), 3u);
+    EXPECT_EQ(glyphs[1].face, glyphs[0].face);
+    EXPECT_NE(glyphs[2].face, glyphs[0].face);
+}
+
+
+// ---------------------------------------------------------------------------
+// Glyph atlases (Appendix G T.5, T.6; decompiles/G-F6.md, G-F7.md, G-F16.md).
+// ---------------------------------------------------------------------------
+
+namespace
+{
+// The face (first if a collection) `state` names, for its units per em.
+FT_Long UnitsPerEm(const TextLayerState& state) {
+    FT_Library library = nullptr;
+    if (FT_Init_FreeType(&library) != 0) return 0;
+    FT_Long units = 0;
+    FT_Face face  = nullptr;
+    if (FT_New_Face(library, state.resolved_font_path.c_str(), 0, &face) == 0) {
+        units = face->units_per_EM;
+        FT_Done_Face(face);
+    }
+    FT_Done_FreeType(library);
+    return units;
+}
+} // namespace
+
+TEST(TextObjectRuntime, TheDistanceFieldPathIsTakenForMsdfOrAnyStyle) {
+    // sub_140256F20 (G-F4): distance field <=> msdf || outline || blur || dropshadow.
+    TextLayerState state;
+    EXPECT_FALSE(TextUsesDistanceField(state));
+    for (int which = 0; which < 4; ++which) {
+        TextLayerState on;
+        on.msdf              = which == 0;
+        on.style.outline     = which == 1;
+        on.style.blur        = which == 2;
+        on.style.drop_shadow = which == 3;
+        EXPECT_TRUE(TextUsesDistanceField(on)) << which;
+    }
+}
+
+TEST(TextObjectRuntime, MsdfCellsAreThirtyTwoPixelsToTheEmWithATwelvePixelMargin) {
+    auto state = HelveticaState("H", 40.0f);
+    if (state.resolved_font_path.empty()) GTEST_SKIP() << "Helvetica is not installed";
+    state.msdf = true;
+    ResetTextAtlasesForTests();
+    const auto build = BuildTextGlyphs(state);
+    ASSERT_TRUE(build.distance_field);
+    ASSERT_EQ(build.glyphs.size(), 1u);
+    ASSERT_TRUE(build.atlas.rgba);
+    // A 512 page to start with (G-F6).
+    EXPECT_EQ(build.atlas.width, 512u);
+    const auto& quad = build.glyphs[0];
+    const float cell_h = (quad.v1 - quad.v0) * static_cast<float>(build.atlas.height);
+    // The cell is the glyph's box at 32 pixels to the em plus 2 x 12 of margin: for an H of
+    // Helvetica (cap height about 0.72 em) some 23 + 24 pixels.
+    const FT_Long units = UnitsPerEm(state);
+    ASSERT_GT(units, 0);
+    EXPECT_GT(cell_h, 24.0f + 0.6f * 32.0f);
+    EXPECT_LT(cell_h, 24.0f + 0.8f * 32.0f);
+    // The quad is the cell scaled by ppem / 32: ppem = 40 pt at 300 dpi.
+    const float ppem = 40.0f * 300.0f / 72.0f;
+    EXPECT_NEAR(quad.top - quad.bottom, cell_h * ppem / 32.0f, 0.01f);
+    // Bytes: the median is past its edge at the stem and inside nothing at the corner.
+    const auto& bytes = *build.atlas.bytes;
+    const auto texel = [&](float u, float v) {
+        const auto x = static_cast<std::size_t>(u * build.atlas.width);
+        const auto y = static_cast<std::size_t>(v * build.atlas.height);
+        const uint8_t* p = &bytes[(y * build.atlas.width + x) * 4u];
+        return std::max(std::min(p[0], p[1]), std::min(std::max(p[0], p[1]), p[2]));
+    };
+    EXPECT_LT(texel(quad.u0 + 0.5f / 512.0f, quad.v0 + 0.5f / 512.0f), 100);
+    // The left stem of the H lies 12 px plus a few in from the cell's left edge.
+    const float stem_u = quad.u0 + (12.0f + 2.0f) / 512.0f;
+    const float mid_v  = (quad.v0 + quad.v1) * 0.5f;
+    EXPECT_GT(texel(stem_u, mid_v), 128);
+    EXPECT_EQ(bytes[3], 255u) << "alpha is 255";
+}
+
+TEST(TextObjectRuntime, PostScriptOutlineFacesOrientTheirMsdfContours) {
+    // OpenType CFF (.otf) and CJK faces store outer contours in PostScript winding order,
+    // opposite to TrueType. Wallpaper Engine calls msdfgen::Shape::orientContours (sub_140281900
+    // in sub_1401AE080, G-F6) before colouring and generating the MSDF cell so that the margin
+    // around the glyph stays outside (< 128) and the stroke interior stays inside (> 128).
+    std::size_t tested = 0;
+    for (const char* family : { "Apple SD Gothic Neo", "PingFang SC" }) {
+        SCOPED_TRACE(family);
+        auto state = FamilyState("H", family);
+        if (! state) continue;
+        ++tested;
+        state->msdf = true;
+        ResetTextAtlasesForTests();
+        const auto build = BuildTextGlyphs(*state);
+        ASSERT_TRUE(build.distance_field);
+        ASSERT_EQ(build.glyphs.size(), 1u);
+        ASSERT_TRUE(build.atlas.rgba);
+        const auto& quad  = build.glyphs[0];
+        const auto& bytes = *build.atlas.bytes;
+        const auto  texel = [&](float u, float v) {
+            const auto x = static_cast<std::size_t>(u * build.atlas.width);
+            const auto y = static_cast<std::size_t>(v * build.atlas.height);
+            const uint8_t* p = &bytes[(y * build.atlas.width + x) * 4u];
+            return std::max(std::min(p[0], p[1]), std::min(std::max(p[0], p[1]), p[2]));
+        };
+        const float half_px = 0.5f / static_cast<float>(build.atlas.width);
+        EXPECT_LT(texel(quad.u0 + half_px, quad.v0 + half_px), 100);
+        EXPECT_LT(texel(quad.u1 - half_px, quad.v0 + half_px), 100);
+        EXPECT_LT(texel(quad.u0 + half_px, quad.v1 - half_px), 100);
+        EXPECT_LT(texel(quad.u1 - half_px, quad.v1 - half_px), 100);
+        const float stem_u = quad.u0 + (12.0f + 2.0f) / static_cast<float>(build.atlas.width);
+        const float mid_v  = (quad.v0 + quad.v1) * 0.5f;
+        EXPECT_GT(texel(stem_u, mid_v), 128);
+    }
+    if (tested == 0u) GTEST_SKIP() << "no PostScript-outline CJK face is installed";
+}
+
+TEST(TextObjectRuntime, AClockDoesNotRegenerateItsDigitCells) {
+    // The atlas persists for the font, size and kind across layouts (G-F16).
+    auto state = HelveticaState("12:34", 40.0f);
+    if (state.resolved_font_path.empty()) GTEST_SKIP() << "Helvetica is not installed";
+    ResetTextAtlasesForTests();
+    (void)BuildTextGlyphs(state);
+    const auto first = TextGlyphCellsMadeForTests();
+    EXPECT_GE(first, 5u);
+    state.text = "12:35";
+    (void)BuildTextGlyphs(state);
+    EXPECT_LE(TextGlyphCellsMadeForTests() - first, 1u);
+    state.text = "21:43";
+    (void)BuildTextGlyphs(state);
+    EXPECT_LE(TextGlyphCellsMadeForTests() - first, 1u);
+}
+
+TEST(TextObjectRuntime, AnEmojiIsAColourGlyphFromTheColourAtlas) {
+    auto state = HelveticaState("A\U0001F600", 40.0f);
+    state.text = "A\xF0\x9F\x98\x80";
+    if (state.resolved_font_path.empty()) GTEST_SKIP() << "Helvetica is not installed";
+    if (ResolveInstalledFamily("Apple Color Emoji").path.empty()) GTEST_SKIP() << "no colour emoji face";
+    for (const bool msdf : { false, true }) {
+        SCOPED_TRACE(msdf);
+        state.msdf = msdf;
+        const auto build = BuildTextGlyphs(state);
+        EXPECT_EQ(build.glyphs.size(), 1u);
+        ASSERT_EQ(build.color_glyphs.size(), 1u);
+        ASSERT_NE(build.color_atlas.bytes, nullptr);
+        ASSERT_TRUE(build.color_atlas.rgba);
+        // One UV addresses both: the colour atlas is the main one times its scale (G-F7).
+        EXPECT_EQ(build.color_atlas.width % build.atlas.width, 0u);
+        const auto& quad = build.color_glyphs[0];
+        const auto& bytes = *build.color_atlas.bytes;
+        bool saturated = false;
+        const auto w = build.color_atlas.width;
+        for (uint32_t y = uint32_t(quad.v0 * w); y < uint32_t(quad.v1 * w) && ! saturated; ++y) {
+            for (uint32_t x = uint32_t(quad.u0 * w); x < uint32_t(quad.u1 * w); ++x) {
+                const uint8_t* p = &bytes[(std::size_t(y) * w + x) * 4u];
+                if (p[3] > 128 && std::max({ p[0], p[1], p[2] }) - std::min({ p[0], p[1], p[2] }) > 64) {
+                    saturated = true;
+                    break;
+                }
+            }
+        }
+        EXPECT_TRUE(saturated) << "the colour glyph is not in colour";
+        // Sized to the layer's text, not the strike: about an em tall.
+        const float ppem = 40.0f * 300.0f / 72.0f;
+        EXPECT_GT(quad.top - quad.bottom, 0.6f * ppem);
+        EXPECT_LT(quad.top - quad.bottom, 1.8f * ppem);
+    }
+}
+
+TEST(TextObjectRuntime, AZwjSequenceIsOneColourGlyph) {
+    auto state = HelveticaState("\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7", 40.0f);
+    if (state.resolved_font_path.empty()) GTEST_SKIP() << "Helvetica is not installed";
+    if (ResolveInstalledFamily("Apple Color Emoji").path.empty()) GTEST_SKIP() << "no colour emoji face";
+    const auto build = BuildTextGlyphs(state);
+    EXPECT_EQ(build.color_glyphs.size(), 1u);
+    EXPECT_TRUE(build.glyphs.empty());
 }
 
 } // namespace wallpaper

@@ -22,11 +22,6 @@ enum InspectorPolicy {
     canRun(kind) && target?.isSelectable == true
   }
 
-  /// Applying what the target display already shows does nothing, so that button restarts it.
-  static func reapplies(_ wallpaperID: String, target: TargetDisplayOption?) -> Bool {
-    target?.wallpaperID == wallpaperID
-  }
-
   /// One step for every display, offered only where there is more than one to put it on. A mirror
   /// follows its source and a disabled display shows nothing, so neither counts.
   static func offersApplyToAll(_ row: LibraryRow, sharedDisplayCount: Int) -> Bool {
@@ -176,6 +171,11 @@ enum InspectorPolicy {
   /// Displays opens by itself once the wallpaper is on a display. The state is the person's from the
   /// first draw on, so a later change of the rows never opens or closes it.
   static func displaysOpenByDefault(_ options: InspectorOptions) -> Bool { !options.displays.isEmpty }
+
+  /// Wallpaper Engine options opens when one of them differs from its default.
+  static func engineOptionsOpenByDefault(_ options: InspectorOptions) -> Bool {
+    options.engineHiddenModified || (options.engineOptions ?? []).contains { $0.row.isModified }
+  }
 
   /// Collections opens for a wallpaper that belongs to one.
   static func collectionsOpenByDefault(_ collections: [CollectionRow], wallpaperID: String) -> Bool {

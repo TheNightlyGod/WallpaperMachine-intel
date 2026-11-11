@@ -8,7 +8,9 @@
 #include "RenderCommon/SceneToRenderGraph.hpp"
 #include "RenderGraph/RenderGraph.hpp"
 #include "Scene/SceneShader.h"
+#include "RenderCommon/ScenePass.hpp"
 #include "SpecTexs.hpp"
+#include "Text/TextGlyphMesh.hpp"
 #include "WPShaderValueUpdater.hpp"
 #include "support/scene_package.hpp"
 
@@ -41,7 +43,8 @@ void main() {
 
 /// Installs a one- or two-pass effect that copies the card through.
 void PutPassThroughEffect(TextWorld& world, bool with_buffer, const char* fragment = kPassThroughFragment,
-                          const Json& material_constants = Json::object())
+                          const Json& material_constants = Json::object(),
+                          const Json& buffer_settings = Json::object())
 {
     Json passes;
     if (with_buffer) {
@@ -54,7 +57,11 @@ void PutPassThroughEffect(TextWorld& world, bool with_buffer, const char* fragme
         passes = Json::array({ { { "material", "materials/effects/gradient.json" } } });
     }
     Json effect = { { "name", "gradient" }, { "version", 1 }, { "passes", passes } };
-    if (with_buffer) effect["fbos"] = Json::array({ { { "name", "_rt_BlurBuffer" }, { "scale", 2 } } });
+    if (with_buffer) {
+        Json buffer = { { "name", "_rt_BlurBuffer" }, { "format", "rgba8888" }, { "scale", 2 } };
+        for (const auto& [key, value] : buffer_settings.items()) buffer[key] = value;
+        effect["fbos"] = Json::array({ std::move(buffer) });
+    }
     world.PutAsset(kEffectFile, effect.dump());
 
     Json pass = { { "shader", "effects/gradient" }, { "textures", Json::array({ nullptr }) } };
@@ -107,15 +114,15 @@ struct Chain {
     [[nodiscard]] Box FinalUv() const { return TexCoordBox(layer->FinalMesh()); }
 };
 
-/// The buffer covers the final card: `buffer width * u extent` reaches the card's width, capped
-/// at the target the chain renders to.
-void ExpectBufferCoversFinalCard(const SceneRenderTarget& buffer, const SceneMesh& final_mesh, int target_w,
-                                 int target_h)
+/// Sampling a half-resolution buffer still covers the whole final card through unit UVs.
+void ExpectHalfBufferCoversFinalCard(const SceneRenderTarget& buffer, const SceneMesh& final_mesh, int target_w,
+                                     int target_h)
 {
     const Box uv = TexCoordBox(final_mesh);
-    const Box fm = PositionBox(final_mesh);
-    EXPECT_GE(buffer.width * (uv.max_x - uv.min_x) + 1e-3, std::min<double>(target_w, std::ceil(fm.W())));
-    EXPECT_GE(buffer.height * (uv.max_y - uv.min_y) + 1e-3, std::min<double>(target_h, std::ceil(fm.H())));
+    EXPECT_EQ(buffer.width, std::max(4, int(std::lround(target_w / 2.0))));
+    EXPECT_EQ(buffer.height, std::max(4, int(std::lround(target_h / 2.0))));
+    EXPECT_FLOAT_EQ(uv.max_x - uv.min_x, 1.0f);
+    EXPECT_FLOAT_EQ(uv.max_y - uv.min_y, 1.0f);
 }
 
 void ExpectUnitTexCoords(const Box& uv)
@@ -179,6 +186,44 @@ TEST_F(TextEffectChain, AnEffectOnATextLayerReceivesFrameTime)
     EXPECT_EQ(time, 0.5f);
 }
 
+TEST_F(TextEffectChain, ALayerWithEveryEffectOffDrawsStraightOntoTheScene)
+{
+    // While an effect of a text layer runs, its glyphs are drawn into the chain's first buffer
+    // over the composite's seed; once every effect is switched off the layer draws its glyphs
+    // straight onto the scene, as Wallpaper Engine draws a layer with no effect pass (T.7.2).
+    PutPassThroughEffect(world, false);
+    ASSERT_TRUE(Load(SceneDocument({ EffectCaption(
+        "a", { { "effects", Json::array({ EffectEntry(
+                                { { "visible", { { "value", true },
+                                                 { "script", "export function update() { return engine.runtime < 0.5; }" } } } }) }) } }) })));
+    const auto glyph_output = [&]() -> std::optional<std::string> {
+        auto* node  = RootChild(*scene, "caption");
+        auto  graph = sceneToRenderGraph(*scene);
+        if (node == nullptr || graph == nullptr) return std::nullopt;
+        for (const auto id : graph->topologicalOrder()) {
+            const auto* pass = dynamic_cast<const rg::DrawPass*>(graph->getPass(id));
+            if (pass != nullptr && pass->desc().node == node && pass->desc().material_slot == kTextGlyphSubmesh) {
+                return pass->desc().output;
+            }
+        }
+        return std::nullopt;
+    };
+    Runtime().Tick(kFrame);
+    Chain running(*scene);
+    ASSERT_TRUE(running.Ok()) << "the running effect does not make the layer a composite";
+    const auto into_chain = glyph_output();
+    ASSERT_TRUE(into_chain.has_value());
+    EXPECT_NE(*into_chain, SpecTex_Default);
+
+    for (int frame = 0; frame < 45; ++frame) Runtime().Tick(kFrame);
+    auto* node = RootChild(*scene, "caption");
+    ASSERT_NE(node, nullptr);
+    EXPECT_EQ(node->Camera(), "") << "the layer still draws through the chain's camera";
+    const auto onto_scene = glyph_output();
+    ASSERT_TRUE(onto_scene.has_value());
+    EXPECT_EQ(*onto_scene, SpecTex_Default);
+}
+
 TEST_F(TextEffectChain, TheChainFollowsACardThatGrows)
 {
     PutPassThroughEffect(world, true);
@@ -212,7 +257,7 @@ TEST_F(TextEffectChain, TheChainFollowsACardThatGrows)
     EXPECT_EQ(static_cast<int>(chain.camera->Width()), chain.PingPong()->width);
     EXPECT_EQ(static_cast<int>(chain.camera->Height()), chain.PingPong()->height);
     ASSERT_NE(chain.Buffer(), nullptr);
-    ExpectBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
+    ExpectHalfBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
                                 chain.PingPong()->height);
     EXPECT_GT(chain.Buffer()->width, b0);
 
@@ -250,6 +295,37 @@ TEST_F(TextEffectChain, AFractionalCardIsCutOffNeverRounded)
     EXPECT_NEAR(final_box.W(), std::floor(layout->card.x()), 1e-3f);
     EXPECT_NEAR(final_box.H(), std::floor(layout->card.y()), 1e-3f);
     ExpectUnitTexCoords(chain.FinalUv());
+}
+
+TEST_F(TextEffectChain, ScaledBuffersFollowTextWhileExplicitExtentsStayFixed)
+{
+    for (const auto& settings : { Json::object(), Json { { "width", 80 } },
+                                 Json { { "height", 40 } }, Json { { "width", 80 }, { "height", 40 } },
+                                 Json { { "fit", 32 } } }) {
+        SCOPED_TRACE(settings.dump());
+        PutPassThroughEffect(world, true, kPassThroughFragment, Json::object(), settings);
+        ASSERT_TRUE(Load(SceneDocument({ EffectCaption("MMMM", { { "padding", 0 } }) })));
+        Chain chain(*scene);
+        ASSERT_TRUE(chain.Ok());
+        ASSERT_NE(chain.Buffer(), nullptr);
+        const auto before = std::pair { chain.Buffer()->width, chain.Buffer()->height };
+        if (settings.contains("width")) EXPECT_EQ(before.first, 40);
+        if (settings.contains("height")) EXPECT_EQ(before.second, 20);
+        if (settings.contains("fit")) EXPECT_EQ(std::max(before.first, before.second), 16);
+        DrainFlags();
+        ASSERT_TRUE(Runtime().SetNodeText("caption", Longer()));
+        ASSERT_TRUE(Runtime().SetNodeTextStyle("caption", "pointsize", "40"));
+        ASSERT_TRUE(PumpUntilClean(Runtime(), { "caption" }));
+        if (settings.empty()) {
+            EXPECT_GT(chain.Buffer()->width, before.first);
+            ExpectHalfBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(),
+                                            chain.PingPong()->width, chain.PingPong()->height);
+        } else {
+            EXPECT_EQ((std::pair { chain.Buffer()->width, chain.Buffer()->height }), before);
+        }
+        EXPECT_FALSE(Runtime().ConsumeSceneGraphMutationFlag());
+        EXPECT_TRUE(Runtime().ConsumeRenderTargetResizeFlag());
+    }
 }
 
 TEST_F(TextEffectChain, AScriptSetTextKeepsTheFinalCardWhole)
@@ -314,7 +390,7 @@ TEST_F(TextEffectChain, ARightBottomTextWithAnEffectFollowsTheMeasuredRenderFram
     EXPECT_EQ(std::lround(chain.camera->Width()), chain.PingPong()->width);
     EXPECT_EQ(std::lround(chain.camera->Height()), chain.PingPong()->height);
     ASSERT_NE(chain.Buffer(), nullptr);
-    ExpectBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
+    ExpectHalfBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
                                 chain.PingPong()->height);
 
     const Box final_box = chain.FinalBox();
@@ -372,7 +448,7 @@ TEST_F(TextEffectChain, AStaticAlignedTextWithAnEffectCoversItsRasterWithoutScal
     EXPECT_NEAR(position.x(), text_box.CX(), 1e-4);
     EXPECT_NEAR(position.y(), text_box.CY(), 1e-4);
     ASSERT_NE(chain.Buffer(), nullptr);
-    ExpectBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
+    ExpectHalfBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
                                 chain.PingPong()->height);
 
     const Box final_box = chain.FinalBox();
@@ -414,7 +490,7 @@ TEST_F(TextEffectChain, ACardPastTheBufferLimitIsCutOffToIt)
     EXPECT_GT(chain.TextBox().W(), static_cast<float>(chain.PingPong()->width))
         << "the text card itself is not cut";
     ASSERT_NE(chain.Buffer(), nullptr);
-    ExpectBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
+    ExpectHalfBufferCoversFinalCard(*chain.Buffer(), chain.layer->FinalMesh(), chain.PingPong()->width,
                                 chain.PingPong()->height);
 
     const Box final_box = chain.FinalBox();

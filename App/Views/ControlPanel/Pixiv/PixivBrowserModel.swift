@@ -34,6 +34,8 @@ final class PixivBrowserModel {
   private(set) var draft: PixivQuery
   /// The folded groups of the Filters sidebar: kept while the page lives, all open at first.
   var collapsedGroups: Set<PixivFilterGroup> = []
+  /// What the page field holds: the page on show until the person types another.
+  var pageText = "1"
 
   /// Test seam: the clock of the search debounce and of the scroll report.
   @ObservationIgnored var sleep: @Sendable (Duration) async throws -> Void = {
@@ -227,6 +229,17 @@ final class PixivBrowserModel {
     let pager = controller.pixivBrowse.pager
     if let target = pager.jumpTarget(typed: text) { showPage(target) }
     return Self.shownNumber(typed: text, in: pager)
+  }
+
+  /// The page field's Return or **Go**: asks for the page `pageText` names and rewrites the field
+  /// with it (`jump(typed:)`).
+  func jump() {
+    pageText = String(jump(typed: pageText))
+  }
+
+  /// Puts the page on show into the page field, after a page arrived or the listing changed.
+  func syncPageText() {
+    pageText = String(controller.pixivBrowse.pager.page)
   }
 
   /// What a typed page number comes to once rounded and held to the pager's pages.

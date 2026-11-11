@@ -4,11 +4,16 @@
 #include "RenderGraph/Pass.hpp"
 #include "SpecTexs.hpp"
 #include "SpriteAnimation.hpp"
+#include "Type.hpp"
 
+#include "Scene/SceneMaterial.h"
+
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <optional>
 #include <vector>
 
 namespace wallpaper
@@ -35,6 +40,9 @@ namespace rg
 class ClearPass : public Pass {
 public:
     struct Desc {
+        /// Atomic scene object whose passes move together during transparent sorting.
+        SceneNode* sort_owner { nullptr };
+        bool reflection_pass { false };
         std::string result { SpecTex_Default };
         bool        transparent { false };
     };
@@ -53,6 +61,8 @@ private:
 class CopyPass : public Pass {
 public:
     struct Desc {
+        SceneNode* sort_owner { nullptr };
+        bool reflection_pass { false };
         std::string src;
         std::string dst;
     };
@@ -71,6 +81,8 @@ private:
 class DrawPass : public Pass {
 public:
     struct Desc {
+        SceneNode*               sort_owner { nullptr };
+        bool                     reflection_pass { false };
         SceneNode*               node { nullptr };
         /// The node whose visibility decides whether the draw happens; the
         /// layer an effect or compose step belongs to rather than the step's
@@ -94,6 +106,30 @@ public:
         /// The samples per pixel the target asks for (1, 2, 4, 8, 16, 32 or 64).
         /// What a backend can give is its own decision.
         uint32_t                 samples { 1 };
+        /// Post-processing consumes the resolved scene and continues in that image.
+        bool                     force_single_sample { false };
+        /// How a blended draw combines its alpha with the target's; the colour
+        /// factors stay the material's.
+        AlphaBlendRule           alpha_rule { AlphaBlendRule::Material };
+        /// The part of the target the draw covers, as (x, y, width, height) fractions of the
+        /// target, y down: a tile of the shadow atlas. The whole target by default.
+        std::array<float, 4>     viewport_uv { 0.0f, 0.0f, 1.0f, 1.0f };
+        /// The output is a depth target and the draw writes depth only (a shadow caster).
+        bool                     depth_only { false };
+        /// The rasteriser's depth bias (a shadow caster's): the slope-scale factor that
+        /// multiplies the primitive's depth slope, and the clamp on the resulting bias, in
+        /// depth units. Zero leaves depth as the vertex shader wrote it.
+        float                    depth_bias_slope { 0.0f };
+        float                    depth_bias_clamp { 0.0f };
+        /// Front faces wind clockwise instead of counter-clockwise (a mirrored view).
+        bool                     flip_winding { false };
+        /// A depth-only draw that opens the frame's use of its target clears it first (to 0,
+        /// the far plane of the reversed depth it is drawn with).
+        bool                     clear_depth_on_first_use { false };
+        float                    depth_clear {0.0f};
+        /// The depth state the draw uses instead of the one its material and target imply.
+        std::optional<SceneDepthState> depth_override;
+        std::optional<CullMode> cull_override;
         sprite_map_t             sprites_map;
     };
 

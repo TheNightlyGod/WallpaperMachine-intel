@@ -1,0 +1,142 @@
+name: Sync issues to ClickUp
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch: # manual run = backfill all currently open issues
+
+permissions:
+  issues: read
+
+concurrency:
+  group: clickup-sync-${{ github.event.issue.number || 'manual' }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync to ClickUp
+        env:
+          CLICKUP_TOKEN: ${{ secrets.CLICKUP_TOKEN }}
+          CLICKUP_LIST_ID: ${{ vars.CLICKUP_LIST_ID }}
+          GH_TOKEN: ${{ github.token }}
+          STATUS_OPEN: "to do"
+          STATUS_CLOSED: "complete"
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.request, urllib.error
+
+          CU = "https://api.clickup.com/api/v2"
+          TOKEN = os.environ["CLICKUP_TOKEN"]
+          LIST_ID = os.environ["CLICKUP_LIST_ID"]
+          S_OPEN, S_CLOSED = os.environ["STATUS_OPEN"], os.environ["STATUS_CLOSED"]
+          # GitHub label -> ClickUp tag (labels not listed here are ignored)
+          TAGS = {"bug": "bug", "feature": "feature", "enhancement": "enhancement",
+                  "documentation": "docs", "docs": "docs", "refactor": "refactor",
+                  "question": "question"}
+
+          def call(method, url, body=None, headers=None):
+              data = json.dumps(body).encode() if body is not None else None
+              h = {"Content-Type": "application/json", **(headers or {})}
+              for attempt in range(4):
+                  req = urllib.request.Request(url, data=data, method=method, headers=h)
+                  try:
+                      with urllib.request.urlopen(req, timeout=30) as r:
+                          raw = r.read()
+                          return json.loads(raw) if raw else {}
+                  except urllib.error.HTTPError as e:
+                      if e.code == 429 or e.code >= 500:
+                          time.sleep(2 ** attempt)
+                          continue
+                      sys.exit(f"{method} {url} -> {e.code}: {e.read().decode()[:300]}")
+              sys.exit(f"{method} {url} failed after retries")
+
+          def cu(method, path, body=None):
+              return call(method, CU + path, body, {"Authorization": TOKEN})
+
+          def find_task(number):
+              prefix = f"[#{number}] "
+              page = 0
+              while True:
+                  r = cu("GET", f"/list/{LIST_ID}/task?include_closed=true&page={page}")
+                  tasks = r.get("tasks", [])
+                  for t in tasks:
+                      if t["name"].startswith(prefix):
+                          return t
+                  if not tasks or r.get("last_page") or len(tasks) < 100:
+                      return None
+                  page += 1
+
+          def tags_of(issue):
+              return sorted({TAGS[l["name"].lower()] for l in issue.get("labels", [])
+                             if l["name"].lower() in TAGS})
+
+          def upsert(issue):
+              n = issue["number"]
+              closed = issue["state"] == "closed"
+              name = f"[#{n}] {issue['title']}"
+              body = (issue.get("body") or "").strip()[:20000]
+              desc = (f"**GitHub:** {issue['html_url']}\n"
+                      f"**Opened by:** @{issue['user']['login']}\n\n---\n\n{body}")
+              desired = tags_of(issue)
+
+              task = find_task(n)
+              if task is None:
+                  task = cu("POST", f"/list/{LIST_ID}/task", {
+                      "name": name, "markdown_description": desc,
+                      "status": S_CLOSED if closed else S_OPEN})
+                  for t in desired:
+                      cu("POST", f"/task/{task['id']}/tag/{t}")
+                  return task
+
+              update = {"name": name, "markdown_description": desc}
+              is_closed = task["status"]["type"] == "closed"
+              # only touch status when open/closed state actually differs, so
+              # in progress / in review set in ClickUp are never overwritten
+              if closed and not is_closed:
+                  update["status"] = S_CLOSED
+              elif not closed and is_closed:
+                  update["status"] = S_OPEN
+              cu("PUT", f"/task/{task['id']}", update)
+
+              existing = {t["name"] for t in task.get("tags", [])}
+              for t in desired:
+                  if t not in existing:
+                      cu("POST", f"/task/{task['id']}/tag/{t}")
+              for t in existing & set(TAGS.values()):
+                  if t not in desired:
+                      cu("DELETE", f"/task/{task['id']}/tag/{t}")
+              return task
+
+          event = os.environ["GITHUB_EVENT_NAME"]
+          with open(os.environ["GITHUB_EVENT_PATH"]) as f:
+              payload = json.load(f)
+
+          if event == "workflow_dispatch":
+              repo = os.environ["GITHUB_REPOSITORY"]
+              gh = {"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                    "Accept": "application/vnd.github+json"}
+              page = 1
+              while True:
+                  items = call("GET", f"https://api.github.com/repos/{repo}/issues"
+                                      f"?state=open&per_page=100&page={page}", headers=gh)
+                  for it in items:
+                      if "pull_request" not in it:
+                          upsert(it)
+                  if len(items) < 100:
+                      break
+                  page += 1
+          elif event == "issues":
+              upsert(payload["issue"])
+          elif event == "issue_comment":
+              issue = payload["issue"]
+              if "pull_request" in issue:
+                  sys.exit(0)  # PR conversation, not an issue
+              task = upsert(issue)
+              c = payload["comment"]
+              cu("POST", f"/task/{task['id']}/comment", {
+                  "comment_text": f"💬 {c['user']['login']} on GitHub:\n\n{c['body'][:5000]}"})
+          PY

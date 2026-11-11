@@ -153,6 +153,7 @@ final class SteamCMDSetupStore {
     @ObservationIgnored private let sessionConfiguration: URLSessionConfiguration
     @ObservationIgnored private let runtimeProvider: any SteamCMDRuntimeProviding
     @ObservationIgnored private let processRunner: any SteamCMDProcessRunning
+    @ObservationIgnored private let now: () -> Date
     @ObservationIgnored private var operation: Task<Void, Never>?
     @ObservationIgnored private var discardOperation: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
@@ -171,13 +172,22 @@ final class SteamCMDSetupStore {
     private var discarding = false
     private var pendingURL: URL { supportDirectory.appendingPathComponent("SteamCMDPending.json") }
     private static let preferenceKey = "WallpaperMachineSteamCMDPath"
+    /// When Valve's package manifest was last read to see whether the managed SteamCMD is current.
+    private static let updateCheckKey = "WallpaperMachineSteamCMDUpdateCheck"
+    /// Downloads are launched with `-inhibitbootstrap`, so SteamCMD never updates itself: the app
+    /// compares its copy with Valve's newest this often, before a download starts.
+    nonisolated static let updateCheckInterval: TimeInterval = 24 * 60 * 60
+    /// A sign-in that ends for no reason Steam gave checks again sooner, but not on every retry.
+    nonisolated static let failureUpdateCheckInterval: TimeInterval = 10 * 60
     private var managedURL: URL { supportDirectory.appendingPathComponent("SteamCMD", isDirectory: true) }
 
     init(downloader: any SteamCMDDownloadActivity, supportDirectory: URL = ClientPaths.supportURL,
          defaults: UserDefaults = ClientPreferences.defaults, sessionConfiguration: URLSessionConfiguration = .ephemeral,
          runtimeProvider: any SteamCMDRuntimeProviding = SteamCMDRuntimeService(),
-         processRunner: any SteamCMDProcessRunning = SteamCMDProcessRunner()) {
+         processRunner: any SteamCMDProcessRunning = SteamCMDProcessRunner(),
+         now: @escaping () -> Date = Date.init) {
         self.downloader = downloader
+        self.now = now
         // Normalize only Apple's fixed system aliases, never a user-selected runtime symlink.
         let path = supportDirectory.path
         if path.hasPrefix("/var/") || path.hasPrefix("/tmp/") {
@@ -277,6 +287,102 @@ final class SteamCMDSetupStore {
         begin(state: .checking) { store, token in
             try await store.performInstall(replacingExisting: replacingExisting, token: token)
         }
+    }
+
+    /// Whether the managed SteamCMD is due to be compared with Valve's newest. A copy the user
+    /// located elsewhere is theirs to update; a retained candidate waits for the user's decision.
+    func updateCheckIsDue(within interval: TimeInterval = updateCheckInterval) -> Bool {
+        guard !isBusy, !downloader.isRunning, pending == nil, managedRuntimeSelected else { return false }
+        guard let last = defaults.object(forKey: Self.updateCheckKey) as? Date else { return true }
+        let elapsed = now().timeIntervalSince(last)
+        // A clock set back must not postpone the check for as long as it was moved.
+        return elapsed < 0 || elapsed >= interval
+    }
+
+    /// Reads Valve's package manifest and, when it lists a SteamCMD other than the installed one,
+    /// installs that through the same checks as **Install SteamCMD**, replacing the managed copy only
+    /// once the new one has passed them. Steam stops accepting a client that falls too far behind,
+    /// and downloads never let SteamCMD update itself. The check starts here, before this returns,
+    /// so a download resolved next waits for it as it waits for setup. Reading the manifest is
+    /// recorded first, so an offline Mac does not retry it on every download; a failed read leaves
+    /// the installed copy in use and says nothing. Returns whether a check started.
+    @discardableResult
+    func startUpdateCheck(within interval: TimeInterval = updateCheckInterval) -> Bool {
+        guard updateCheckIsDue(within: interval), let installed = selectedRuntime else { return false }
+        defaults.set(now(), forKey: Self.updateCheckKey)
+        let before = Self.installedVersion(at: installed.rootURL)
+        begin(state: .checking) { store, token in
+            let manifestData: Data
+            let manifest: SteamCMDPackageManifest
+            do {
+                manifestData = try await store.fetchManifest()
+                manifest = try SteamCMDPackageManifest(data: manifestData)
+            } catch {
+                try store.check(token)
+                AppLog.warn("SteamCMD update check: Valve's package manifest could not be read (\(error.localizedDescription))")
+                store.state = .ready
+                return
+            }
+            try store.check(token)
+            // Valve's own updater follows the manifest both ways, so a withdrawn build is left too.
+            guard manifest.version != before else {
+                store.state = .ready
+                return
+            }
+            AppLog.info("SteamCMD update: installed \(before ?? "unknown"), Valve publishes \(manifest.version)")
+            do {
+                try await store.performInstall(replacingExisting: true, prefetchedManifest: manifestData, token: token)
+            } catch {
+                // A download that failed part-way is tried again the next day, quietly, while the copy
+                // in use still validates; a candidate that waits for approval is the user's to see.
+                guard !Task.isCancelled, !(error is CancellationError),
+                      (error as? SteamCMDSetupIssue)?.kind != .securityApprovalRequired else { throw error }
+                let issue = Self.issue(error)
+                try store.check(token)
+                guard (try? await store.checkedRuntime(installed.executableURL)) != nil else { throw issue }
+                try store.check(token)
+                AppLog.warn("SteamCMD update to \(manifest.version) failed; keeping \(before ?? "the installed copy"): \(issue.detail)")
+                store.state = .ready
+            }
+        }
+        return true
+    }
+
+    /// `startUpdateCheck`, awaited: returns whether a different SteamCMD is installed afterwards.
+    @discardableResult
+    func updateIfOutdated(within interval: TimeInterval = updateCheckInterval) async -> Bool {
+        let before = selectedRuntime.flatMap { Self.installedVersion(at: $0.rootURL) }
+        guard startUpdateCheck(within: interval) else { return false }
+        await operation?.value
+        guard let current = selectedRuntime else { return false }
+        return Self.installedVersion(at: current.rootURL) != before
+    }
+
+    private var managedRuntimeSelected: Bool {
+        guard let runtime = selectedRuntime else { return false }
+        return Self.resolvedPath(runtime.rootURL) == Self.resolvedPath(managedURL.appendingPathComponent("MacOS", isDirectory: true))
+    }
+
+    /// The version of Valve's manifest an installation was made from, nil when none is on record.
+    nonisolated static func installedVersion(at root: URL) -> String? {
+        let record = root.appendingPathComponent("package/steam_cmd_osx.manifest")
+        guard let data = try? Data(contentsOf: record), data.count <= SteamCMDPackageManifest.maximumSize else { return nil }
+        return try? SteamCMDPackageManifest(data: data).version
+    }
+
+    /// Valve's package manifest, read into a private folder that is removed again.
+    private func fetchManifest() async throws -> Data {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("steamcmd-manifest-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("steam_cmd_osx")
+        // A download waits for this check, so a stalled server is given seconds, not minutes.
+        _ = try await SteamCMDDownload(source: SteamCMDPackageManifest.url, destination: file,
+                                       maximum: SteamCMDPackageManifest.maximumSize,
+                                       configuration: sessionConfiguration, timeout: 30).start()
+        return try Data(contentsOf: file)
     }
 
     func retryInstallation() {
@@ -460,7 +566,9 @@ final class SteamCMDSetupStore {
         try FileManager.default.removeItem(at: staging)
     }
 
-    private func performInstall(replacingExisting: Bool, token: UUID) async throws {
+    /// `prefetchedManifest` is the manifest an update check has just read, so the version it
+    /// compared is the one installed.
+    private func performInstall(replacingExisting: Bool, prefetchedManifest: Data? = nil, token: UUID) async throws {
         let fm = FileManager.default
         try Self.requireSafeDirectory(supportDirectory, mayBeMissing: true)
         try fm.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
@@ -491,12 +599,17 @@ final class SteamCMDSetupStore {
         state = .downloading(received: 0, expected: nil)
         // The manifest Valve's own updater reads lists the universal runtime's packages. Installing
         // them directly replaces running the 2020 Intel-only bootstrap under Rosetta to fetch them.
-        let manifestFile = downloads.appendingPathComponent("steam_cmd_osx")
-        _ = try await SteamCMDDownload(source: SteamCMDPackageManifest.url, destination: manifestFile,
-                                       maximum: SteamCMDPackageManifest.maximumSize,
-                                       configuration: sessionConfiguration).start()
+        let manifestData: Data
+        if let prefetchedManifest {
+            manifestData = prefetchedManifest
+        } else {
+            let manifestFile = downloads.appendingPathComponent("steam_cmd_osx")
+            _ = try await SteamCMDDownload(source: SteamCMDPackageManifest.url, destination: manifestFile,
+                                           maximum: SteamCMDPackageManifest.maximumSize,
+                                           configuration: sessionConfiguration).start()
+            manifestData = try Data(contentsOf: manifestFile)
+        }
         try check(token)
-        let manifestData = try Data(contentsOf: manifestFile)
         let manifest = try SteamCMDPackageManifest(data: manifestData)
         AppLog.info("SteamCMD setup: Valve package manifest \(manifest.version), \(manifest.packages.count) packages, \(manifest.totalSize) bytes")
         let total = manifest.totalSize

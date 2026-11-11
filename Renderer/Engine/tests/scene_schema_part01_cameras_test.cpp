@@ -5,6 +5,7 @@
 
 #include "Scene/SceneCamera.h"
 #include "Scene/SceneUpdateDemand.hpp"
+#include "Runtime/SceneSettingResolver.hpp"
 
 #include <gtest/gtest.h>
 
@@ -348,4 +349,251 @@ TEST(PerspectiveCameras, ACameraObjectDoesNotTakeACanvasSceneOffItsCanvas)
     EXPECT_NEAR(upper_right[1], 1.0, 1e-6);
 }
 
+} // namespace
+
+namespace {
+FileMap CameraFadeAssets() {
+    auto files = PathAssets({CameraPathClip(0)});
+    files["/global-path.json"] = R"({"paths":[{"duration":1,"transforms":[{"timestamp":0,"eye":"0 0 10","center":"0 0 0","up":"0 1 0"},{"timestamp":1,"eye":"2 0 10","center":"2 0 0","up":"0 1 0"}]}]})";
+    files["/materials/util/fade.json"] = R"({"passes":[{"shader":"fade","blending":"translucent","depthtest":"disabled","depthwrite":"disabled","cullmode":"nocull"}]})";
+    files["/shaders/fade.vert"] = "attribute vec3 a_Position;\nvoid main(){gl_Position=vec4(a_Position,1.0);}\n";
+    files["/shaders/fade.frag"] = "uniform float g_Alpha;\nuniform vec3 color;\nvoid main(){gl_FragColor=vec4(color*0.7,g_Alpha);}\n";
+    return files;
+}
+Json GlobalPathScene() {
+    auto scene = PerspectiveScene(Json::array());
+    scene["camera"]["paths"] = Json::array({"global-path.json"});
+    scene["general"]["bloom"] = false;
+    return scene;
+}
+std::shared_ptr<SceneNode> CameraFadePass(Scene& scene) {
+    for (const auto& post : scene.post_processes) {
+        for (const auto& step : post->steps) {
+            if (const auto* pass = std::get_if<ScenePostProcessPass>(&step)) return pass->node;
+        }
+    }
+    return {};
+}
+
+TEST(PerspectiveCameras, CameraPathFadeTracksBothEndsWithoutRebuildingItsGraph) {
+    ParseRig rig(CameraFadeAssets());
+    auto document = GlobalPathScene();
+    document["general"]["bloom"] = false;
+    auto scene = rig.Parse(document, {.live=true});
+    ASSERT_NE(scene, nullptr);
+    auto node = CameraFadePass(*scene);
+    ASSERT_NE(node, nullptr);
+    ASSERT_NE(node->Mesh(), nullptr);
+    auto material = node->Mesh()->MaterialSlotPtr(0);
+    ASSERT_NE(material, nullptr);
+    scene->runtime->ConsumeSceneGraphMutationFlag();
+    for (const float expected : {0.5f, 0.0f, 0.5f, 1.0f}) {
+        scene->runtime->Tick(0.25);
+        ASSERT_TRUE(material->customShader.constValues.contains("g_Alpha"));
+        EXPECT_FLOAT_EQ(material->customShader.constValues.at("g_Alpha")[0], expected);
+        EXPECT_EQ(node->Visible(), expected > 0);
+        EXPECT_FALSE(scene->runtime->ConsumeSceneGraphMutationFlag());
+    }
+}
+
+TEST(PerspectiveCameras, CameraFadeAllocatesNoPassWhenDisabledOrWithoutAPath) {
+    for (const bool path : {false,true}) {
+        for (const bool enabled : {false,true}) {
+            if (path && enabled) continue;
+            ParseRig rig(CameraFadeAssets());
+            auto document=GlobalPathScene();
+            document["general"]["bloom"]=false;
+            document["general"]["camerafade"]=enabled;
+            if (!path) document["camera"].erase("paths");
+            auto scene=rig.Parse(document,{.live=true});
+            ASSERT_NE(scene,nullptr);
+            EXPECT_TRUE(scene->post_processes.empty());
+        }
+    }
+}
+
+TEST(PerspectiveCameras, AnObjectCameraPathDoesNotAllocateAGlobalCameraFade) {
+    ParseRig rig(CameraFadeAssets());
+    auto document=PathScene();
+    document["general"]["bloom"]=false;
+    auto scene=rig.Parse(document,{.live=true});
+    ASSERT_NE(scene,nullptr);
+    EXPECT_EQ(CameraFadePass(*scene),nullptr);
+}
+
+TEST(PerspectiveCameras, GlobalCameraPathsUseHalfSlopeInterpolationBeforeAdvancingTheClock) {
+    ParseRig rig(CameraFadeAssets());
+    auto scene=rig.Parse(GlobalPathScene(),{.live=true});
+    ASSERT_NE(scene,nullptr);
+    scene->runtime->Tick(0.25);
+    ExpectPosition(*scene->activeCamera,{0,0,10});
+    scene->runtime->Tick(0.25);
+    ExpectPosition(*scene->activeCamera,{0.40625,0,10});
+    EXPECT_NE(scene->runtime->DescribeTimeAdvancingWork() & kAnimationDemand,0u);
+}
+
+TEST(PerspectiveCameras, GlobalCameraQueueUsesTheLastFileAndDropsOvershootAtACut) {
+    auto files=CameraFadeAssets();
+    const auto path=[](int x) {
+        return Json{{"duration",1},{"transforms",Json::array({
+            {{"eye",std::to_string(x)+" 0 10"},{"center",std::to_string(x)+" 0 0"},{"up","0 1 0"}},
+            {{"eye",std::to_string(x+2)+" 0 10"},{"center",std::to_string(x+2)+" 0 0"},{"up","0 1 0"}}})}};
+    };
+    auto disabled=path(999);disabled["disabled"]=true;
+    files["/replacement.json"]=Json{{"paths",Json::array({disabled,path(100),path(200)})}}.dump();
+    ParseRig rig(files);
+    auto document=GlobalPathScene();
+    document["camera"]["paths"].push_back("replacement.json");
+    auto scene=rig.Parse(document,{.live=true});
+    ASSERT_NE(scene,nullptr);
+    scene->runtime->Tick(0.75);
+    ExpectPosition(*scene->activeCamera,{100,0,10});
+    scene->runtime->Tick(0.5);
+    ExpectPosition(*scene->activeCamera,{101.59375,0,10});
+    scene->runtime->Tick(0.25);
+    ExpectPosition(*scene->activeCamera,{200,0,10});
+}
+
+TEST(PerspectiveCameras, AVisibleCameraLayerPausesTheGlobalQueue) {
+    ParseRig rig(CameraFadeAssets());
+    auto document=GlobalPathScene();
+    document["objects"]=Json::array({ShotObject(7,"override","default",Json::array({42,0,10}))});
+    auto scene=rig.Parse(document,{.live=true});
+    ASSERT_NE(scene,nullptr);
+    scene->runtime->Tick(0.75);
+    ExpectPosition(*scene->activeCamera,{42,0,10});
+    EXPECT_EQ(scene->runtime->DescribeTimeAdvancingWork() & kAnimationDemand,0u);
+    ASSERT_TRUE(scene->runtime->SetNodeVisible("override",false));
+    scene->runtime->Tick(0.25);
+    ExpectPosition(*scene->activeCamera,{0,0,10});
+    scene->runtime->Tick(0.25);
+    ExpectPosition(*scene->activeCamera,{0.40625,0,10});
+}
+
+TEST(PerspectiveCameras, TheEndFadeWinsWhenAShortGlobalSegmentHasOverlappingRamps) {
+    auto files=CameraFadeAssets();
+    auto paths=Json::parse(files.at("/global-path.json"));
+    paths["paths"][0]["duration"]=0.6;
+    paths["paths"][0]["transforms"][1]["timestamp"]=0.6;
+    files["/global-path.json"]=paths.dump();
+    ParseRig rig(files);
+    auto scene=rig.Parse(GlobalPathScene(),{.live=true});
+    ASSERT_NE(scene,nullptr);
+    auto fade=CameraFadePass(*scene);
+    ASSERT_NE(fade,nullptr);
+    scene->runtime->Tick(0.2);
+    EXPECT_NEAR(fade->Mesh()->Material()->customShader.constValues.at("g_Alpha")[0],0.2f,1e-6f);
+}
+
+TEST(PerspectiveCameras, GlobalPathMissingPoseVectorsDefaultToZero) {
+    const auto paths = ParseGlobalCameraPaths({{"paths", Json::array({{
+        {"duration", 1}, {"transforms", Json::array({
+            {{"eye", "0 0 10"}, {"up", "0 1 0"}},
+            {{"center", "0 0 -1"}, {"up", "0 1 0"}},
+            {{"eye", "0 0 10"}, {"center", "0 0 0"}}
+        })}
+    }})}});
+    ASSERT_EQ(paths.size(), 1u);
+    ASSERT_EQ(paths[0].keys.size(), 3u);
+    for (std::size_t lane = 0; lane < 3; ++lane) {
+        EXPECT_EQ(paths[0].keys[0].pose[3 + lane], 0.0);
+        EXPECT_EQ(paths[0].keys[1].pose[lane], 0.0);
+        EXPECT_EQ(paths[0].keys[2].pose[6 + lane], 0.0);
+    }
+    for (const auto& key : paths[0].keys) EXPECT_EQ(key.pose[9], 1.0);
+}
+
+FileMap CanvasGlobalPathAssets(const char* eye, const char* center, const char* up) {
+    auto files = BasicAssets();
+    Json first{{"timestamp", 0}, {"eye", eye}, {"center", center}, {"up", up}, {"zoom", 2}};
+    auto last = first;
+    last["timestamp"] = 4;
+    files["/global-path.json"] = Json{{"paths", Json::array({{
+        {"duration", 4}, {"transforms", Json::array({first, last})}
+    }})}}.dump();
+    return files;
+}
+
+Json CanvasGlobalPathScene(bool with_path) {
+    auto scene = CanvasWithCameraObject({{"visible", true}, {"zoom", 1}});
+    scene["general"]["zoom"] = 1.25;
+    scene["general"]["bloom"] = false;
+    scene["general"]["camerafade"] = false;
+    if (with_path) scene["camera"]["paths"] = Json::array({"global-path.json"});
+    return scene;
+}
+
+TEST(PerspectiveCameras, CanvasGlobalZoomPreservesBaseExtentAcrossShotOverrides) {
+    ParseRig rig(CanvasGlobalPathAssets("0 0 0", "0 0 -1", "0 1 0"));
+    const auto scene = rig.Parse(CanvasGlobalPathScene(true), {.live=true});
+    ASSERT_NE(scene, nullptr);
+    auto& camera = *scene->cameras.at("global");
+    const double width = camera.Width(), height = camera.Height();
+    ASSERT_NEAR(width, 512.0, 1e-6);
+    ASSERT_TRUE(scene->runtime->SetNodeVisible("shot", false));
+    scene->runtime->Tick(0.1);
+    EXPECT_EQ(camera.Width(), width);
+    EXPECT_EQ(camera.Height(), height);
+    EXPECT_NEAR(camera.VisibleWidth(), width / 2.0, 1e-6);
+    ASSERT_TRUE(scene->runtime->SetNodeVisible("shot", true));
+    scene->runtime->Tick(0.1);
+    EXPECT_EQ(camera.Width(), width);
+    EXPECT_NEAR(camera.VisibleWidth(), width, 1e-6);
+    ASSERT_TRUE(scene->runtime->SetNodeVisible("shot", false));
+    scene->runtime->Tick(0.1);
+    EXPECT_EQ(camera.Width(), width);
+    EXPECT_NEAR(camera.VisibleWidth(), width / 2.0, 1e-6);
+}
+
+TEST(PerspectiveCameras, ACanvasShotDoesNotInheritTheGlobalPathsRotationOrDepth) {
+    ParseRig baseline_rig(BasicAssets());
+    const auto baseline = baseline_rig.Parse(CanvasGlobalPathScene(false), {.live=true});
+    ASSERT_NE(baseline, nullptr);
+    baseline->runtime->Tick(0.1);
+    ParseRig rig(CanvasGlobalPathAssets("7 11 31", "0 0 0", "1 0 0"));
+    const auto scene = rig.Parse(CanvasGlobalPathScene(true), {.live=true});
+    ASSERT_NE(scene, nullptr);
+    ASSERT_TRUE(scene->runtime->SetNodeVisible("shot", false));
+    scene->runtime->Tick(0.1);
+    EXPECT_GT((scene->activeCamera->GetViewProjectionMatrix() -
+               baseline->activeCamera->GetViewProjectionMatrix()).norm(), 1e-3);
+    ASSERT_TRUE(scene->runtime->SetNodeVisible("shot", true));
+    scene->runtime->Tick(0.1);
+    for (const char* name : {"global", "global_perspective"}) {
+        SCOPED_TRACE(name);
+        EXPECT_LT((scene->cameras.at(name)->GetViewProjectionMatrix() -
+                   baseline->cameras.at(name)->GetViewProjectionMatrix()).norm(), 1e-7);
+    }
+    ASSERT_TRUE(scene->runtime->SetNodeVisible("shot", false));
+    scene->runtime->Tick(0.1);
+    EXPECT_GT((scene->activeCamera->GetViewProjectionMatrix() -
+               baseline->activeCamera->GetViewProjectionMatrix()).norm(), 1e-3);
+}
+
+TEST(PerspectiveCameras, GlobalPathCutsUseTheFloatClockAndLoadedTimestamps) {
+    struct Case { double duration; int ticks; bool next; };
+    for (const Case c : { Case{1.0,30,true}, Case{1.0/30.0,1,false} }) {
+        SCOPED_TRACE(c.duration);
+        auto files = CameraFadeAssets();
+        const auto path = [&](int x) {
+            return Json{{"duration", c.duration}, {"transforms", Json::array({
+                {{"timestamp",0}, {"eye",std::to_string(x)+" 0 10"},
+                 {"center",std::to_string(x)+" 0 0"}, {"up","0 1 0"}},
+                {{"timestamp",c.duration}, {"eye",std::to_string(x+2)+" 0 10"},
+                 {"center",std::to_string(x+2)+" 0 0"}, {"up","0 1 0"}}
+            })}};
+        };
+        files["/global-path.json"] = Json{{"paths",Json::array({path(0),path(100)})}}.dump();
+        ParseRig rig(files);
+        const auto scene = rig.Parse(GlobalPathScene(), {.live=true});
+        ASSERT_NE(scene, nullptr);
+        for (int frame = 0; frame < c.ticks; ++frame) scene->runtime->Tick(1.0/30.0);
+        scene->runtime->Tick(1.0/30.0);
+        ExpectPosition(*scene->activeCamera, {c.next ? 100.0 : 2.0,0,10});
+        if (!c.next) {
+            scene->runtime->Tick(1.0/30.0);
+            ExpectPosition(*scene->activeCamera, {100,0,10});
+        }
+    }
+}
 } // namespace

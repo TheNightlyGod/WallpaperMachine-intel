@@ -33,6 +33,9 @@ final class SettingsBRenderTests: SettingsBTestCase {
   func testEverySectionAcceptsBothWindowSizesLightAndDarkInEnglish() async throws { try await everySection("en") }
   func testEverySectionAcceptsBothWindowSizesLightAndDarkInJapanese() async throws { try await everySection("ja") }
   func testEverySectionAcceptsBothWindowSizesLightAndDarkInKorean() async throws { try await everySection("ko") }
+  func testEverySectionAcceptsBothWindowSizesLightAndDarkInBrazilianPortuguese() async throws {
+    try await everySection("pt-BR")
+  }
   func testEverySectionAcceptsBothWindowSizesLightAndDarkInSimplifiedChinese() async throws {
     try await everySection("zh-Hans")
   }
@@ -43,6 +46,9 @@ final class SettingsBRenderTests: SettingsBTestCase {
   func testTheEditorsAndOpenDisclosuresStillFitTheNarrowestWindowInEnglish() async throws { try await openStates("en") }
   func testTheEditorsAndOpenDisclosuresStillFitTheNarrowestWindowInJapanese() async throws { try await openStates("ja") }
   func testTheEditorsAndOpenDisclosuresStillFitTheNarrowestWindowInKorean() async throws { try await openStates("ko") }
+  func testTheEditorsAndOpenDisclosuresStillFitTheNarrowestWindowInBrazilianPortuguese() async throws {
+    try await openStates("pt-BR")
+  }
   func testTheEditorsAndOpenDisclosuresStillFitTheNarrowestWindowInSimplifiedChinese() async throws {
     try await openStates("zh-Hans")
   }
@@ -52,7 +58,7 @@ final class SettingsBRenderTests: SettingsBTestCase {
 
   /// A language added to the app has to be added to the tests above.
   func testEveryShippedLanguageIsTestedAbove() {
-    XCTAssertEqual(Set(AppLanguage.supported.map(\.tag)), ["en", "ja", "ko", "zh-Hans", "zh-Hant"])
+    XCTAssertEqual(Set(AppLanguage.supported.map(\.tag)), ["en", "ja", "ko", "pt-BR", "zh-Hans", "zh-Hant"])
   }
 
   private func everySection(_ language: String) async throws {
@@ -95,8 +101,8 @@ final class SettingsBRenderTests: SettingsBTestCase {
       }
       XCTAssertEqual(panel.controller.automationState(for: "2").mode, .appearance)
       model.beginRule(display: "primary")
-      model.ruleEditor?.showsDaysError = true
-      model.ruleEditor?.weekdays = []
+      model.ruleEditing?.draft.showsDaysError = true
+      model.ruleEditing?.draft.weekdays = []
       // A name form takes the keyboard when it opens, and only one is open at a time.
       if language == "ja" || language == "zh-Hant" {
         model.beginSavingPlan(of: "2")

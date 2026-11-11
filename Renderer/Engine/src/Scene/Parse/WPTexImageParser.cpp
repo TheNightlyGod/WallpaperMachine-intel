@@ -6,6 +6,9 @@
 #include "Video/VideoContainerProbe.hpp"
 #include "Video/VideoTextureSource.hpp"
 #include "WPCommon.hpp"
+#include "WPTextureFormats.hpp"
+#include <nlohmann/json.hpp>
+#include <unordered_map>
 #include <cstdint>
 #include <lz4.h>
 
@@ -20,6 +23,16 @@
 #if (defined(__aarch64__) || defined(__arm64__)) && !defined(STBI_NO_SIMD)
 #define STBI_NEON
 #endif
+// Only the formats a wallpaper's pictures come in are decoded: whatever else stb_image reads
+// (PSD, PIC, PNM, HDR) is code a crafted file could reach and no texture needs.
+#define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
+#define STBI_ONLY_BMP
+#define STBI_ONLY_GIF
+#define STBI_ONLY_TGA
+// No GPU texture is wider or taller than this, so a picture that is is refused before its
+// pixels are allocated.
+#define STBI_MAX_DIMENSIONS 16384
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
@@ -92,7 +105,13 @@ constexpr u32 kFlagPoint  = 1u << 0;
 constexpr u32 kFlagClamp  = 1u << 1;
 constexpr u32 kFlagSprite = 1u << 2;
 constexpr u32 kFlagVideo  = 1u << 5;
+// A volume: TEXI and every level header carry a slice count (`sub_14015C760`,
+// `sub_14015C8D0`, WE 2.8.0.42). The shipped colour-grading LUTs are 32x32x32 volumes.
+constexpr u32 kFlagVolume = 1u << 6;
 constexpr int kFirstComponentBit = 20;
+// The reference refuses a level beyond these (`Invalid texture resolution`, `sub_14015C8D0`).
+constexpr i32 kMaxSide  = 0x2000;
+constexpr i32 kMaxDepth = 0x80;
 
 // Largest level a compressed block may expand to, unless the format needs more.
 constexpr i64 kExpandCeiling = i64 { 1 } << 30;
@@ -102,6 +121,20 @@ constexpr i64 kLz4MaxRatio = 255;
 constexpr i64 kSniffBytes = 64;
 // How much of a loose JPEG is searched for its orientation.
 constexpr i64 kOrientationWindow = i64 { 1 } << 20;
+
+// A variant patch flag: blend the patch over the level by its alpha instead of copying it.
+constexpr u32 kPatchBlend = 1u << 0;
+// A variant patch flag: the patch's bytes replace the whole level.
+constexpr u32 kPatchReplace = 1u << 1;
+
+// One record of a TEXB0004 variant table: when its condition holds, every level patch whose
+// id is `key` is applied with the flags `value`.
+struct VariantRecord {
+    i32         id { 0 };
+    i32         key { 0 };
+    u32         value { 0 };
+    std::string json;
+};
 
 struct Container {
     int texv { 0 };
@@ -114,16 +147,21 @@ struct Container {
     i32 textureHeight { 0 };
     i32 imageWidth { 0 };
     i32 imageHeight { 0 };
+    i32 depth { 1 };
 
     i32  pictures { 0 };
     i32  imageType { -1 }; // FreeImage id, -1 when none is declared
-    i32  reserved { 0 };
-    bool hasReserved { false };
 
-    TextureFormat format { TextureFormat::RGBA8 };
+    std::vector<VariantRecord>                   variants;
+    std::unordered_map<i32, u32>                 patchFlags; // chosen patch id -> flags
+    std::unordered_map<std::string, std::string> choices;
+
+    const WeTextureFormat* row { nullptr };
+    TextureFormat          format { TextureFormat::RGBA8 };
 
     bool sprite() const { return (flags & kFlagSprite) != 0; }
     bool video() const { return (flags & kFlagVideo) != 0; }
+    bool volume() const { return (flags & kFlagVolume) != 0; }
     bool declaresPicture() const { return texb >= 3 && imageType != -1; }
 };
 
@@ -145,22 +183,56 @@ int ReadStamp(fs::IBinaryStream& file, char letter, bool needNul)
     return version;
 }
 
-bool FormatOfCode(i32 code, TextureFormat& format)
+// Bytes up to a NUL, which is consumed. False when the file ends first.
+bool ReadCString(fs::IBinaryStream& file, std::string& out)
 {
-    switch (code) {
-    case 0: format = TextureFormat::RGBA8; return true;
-    case 4: format = TextureFormat::BC3; return true;
-    case 6: format = TextureFormat::BC2; return true;
-    case 7: format = TextureFormat::BC1; return true;
-    case 8: format = TextureFormat::RG8; return true;
-    case 9: format = TextureFormat::R8; return true;
-    default: return false;
+    out.clear();
+    while (BytesLeft(file) > 0) {
+        char c = 0;
+        if (file.Read(&c, 1) != 1) return false;
+        if (c == '\0') return true;
+        out.push_back(c);
+    }
+    return false;
+}
+
+// Evaluates the variant records as `sub_14015C8D0` does. The JSON is
+// `{"condition": "<name>"}` (asks whether the name is set) or
+// `{"condition": {"name": ..., "condition": ...}}`. The first holding record of an id
+// chooses its key's patch flags.
+void ChooseVariants(Container& c, const IImageParser::VariantCondition& holds)
+{
+    std::unordered_map<i32, bool> seen;
+    for (const auto& record : c.variants) {
+        const auto json = nlohmann::json::parse(record.json, nullptr, false);
+        if (json.is_discarded() || ! json.is_object()) continue;
+        const auto cond = json.find("condition");
+        if (cond == json.end()) continue;
+        bool held = false;
+        if (cond->is_string()) {
+            const std::string name = cond->get<std::string>();
+            held                   = holds && holds(name, {});
+            c.choices[name]        = held ? "1" : "0";
+        } else if (cond->is_object()) {
+            const auto name  = cond->find("name");
+            const auto value = cond->find("condition");
+            if (name == cond->end() || value == cond->end() || ! name->is_string() || ! value->is_string())
+                continue;
+            const std::string key = name->get<std::string>();
+            const std::string want = value->get<std::string>();
+            held = holds && holds(key, want);
+            if (held) c.choices[key] = want;
+            else c.choices.try_emplace(key, "$__default");
+        } else {
+            continue;
+        }
+        if (held && seen.emplace(record.id, true).second) c.patchFlags[record.key] = record.value;
     }
 }
 
 // Reads the fixed part of the container. False (with the reason logged) for a
 // file that is not a texture this reader understands.
-bool ReadContainer(fs::IBinaryStream& file, Container& c)
+bool ReadContainer(fs::IBinaryStream& file, Container& c, const IImageParser::VariantCondition& holds)
 {
     c.texv = ReadStamp(file, 'V', false);
     c.texi = ReadStamp(file, 'I', false);
@@ -168,8 +240,9 @@ bool ReadContainer(fs::IBinaryStream& file, Container& c)
         LOG_ERROR("texture: the stamps are not TEXV and TEXI");
         return false;
     }
-    // format, flags, four sizes, a colour and the TEXB stamp.
-    if (BytesLeft(file) < 4 * 7 + 9) {
+    // format, flags and four sizes (`sub_14015C760`); then a slice count for a volume and a
+    // colour from TEXI0001 on; then the TEXB stamp.
+    if (BytesLeft(file) < 4 * 6) {
         LOG_ERROR("texture: the header is cut short");
         return false;
     }
@@ -179,7 +252,16 @@ bool ReadContainer(fs::IBinaryStream& file, Container& c)
     c.textureHeight = file.ReadInt32();
     c.imageWidth    = file.ReadInt32();
     c.imageHeight   = file.ReadInt32();
-    file.ReadInt32(); // a packed colour that nothing needs
+    if (BytesLeft(file) < (c.volume() ? 4 : 0) + (c.texi >= 1 ? 4 : 0) + 9) {
+        LOG_ERROR("texture: the header is cut short");
+        return false;
+    }
+    if (c.volume()) c.depth = file.ReadInt32();
+    if (c.texi >= 1) file.ReadInt32(); // a packed colour that nothing needs
+    if (c.depth < 1 || c.depth > kMaxDepth) {
+        LOG_ERROR("texture: the slice count %d is not usable", c.depth);
+        return false;
+    }
     c.texb = ReadStamp(file, 'B', true);
     if (c.texb < 1) {
         LOG_ERROR("texture: no TEXB stamp where one belongs");
@@ -194,13 +276,30 @@ bool ReadContainer(fs::IBinaryStream& file, Container& c)
     c.pictures = file.ReadInt32();
     if (c.texb >= 3) c.imageType = file.ReadInt32();
     if (c.texb >= 4) {
-        c.reserved    = file.ReadInt32();
-        c.hasReserved = true;
+        const u32 count = file.ReadUint32();
+        // Three numbers and at least a NUL each.
+        if (count > static_cast<u64>(BytesLeft(file)) / 13) {
+            LOG_ERROR("texture: the variant count is not usable");
+            return false;
+        }
+        c.variants.resize(count);
+        for (auto& record : c.variants) {
+            record.id    = file.ReadInt32();
+            record.key   = file.ReadInt32();
+            record.value = file.ReadUint32();
+            if (! ReadCString(file, record.json)) {
+                LOG_ERROR("texture: a variant record does not end");
+                return false;
+            }
+        }
+        ChooseVariants(c, holds);
     }
-    if (! FormatOfCode(c.formatCode, c.format)) {
+    c.row = WeFormatOfCode(c.formatCode);
+    if (c.row == nullptr) {
         LOG_ERROR("texture: unknown pixel format code %d", c.formatCode);
         return false;
     }
+    c.format = c.row->upload;
     return true;
 }
 
@@ -218,11 +317,15 @@ ImageHeader HeaderOf(const Container& c)
     h.height    = c.textureHeight;
     h.mapWidth  = c.imageWidth;
     h.mapHeight = c.imageHeight;
+    h.depth     = c.depth;
     h.count     = c.pictures;
     h.format    = c.format;
+    // A declared picture is decoded to RGBA8 before the shader sees it.
+    h.formatCode = c.declaresPicture() || c.video() ? 0 : c.formatCode;
     h.type      = DeclaredType(c);
     h.isSprite  = c.sprite();
     h.isVideo   = c.video();
+    h.variantChoices = c.choices;
 
     const TextureFilter filter = (c.flags & kFlagPoint) != 0 ? TextureFilter::NEAREST : TextureFilter::LINEAR;
     h.sample.minFilter         = filter;
@@ -231,11 +334,14 @@ ImageHeader HeaderOf(const Container& c)
     const TextureWrap wrap     = (c.flags & kFlagClamp) != 0 ? TextureWrap::CLAMP_TO_EDGE : TextureWrap::REPEAT;
     h.sample.wrapS             = wrap;
     h.sample.wrapT             = wrap;
+    // A texture loaded from a file filters anisotropically, 8x, unless it point-samples
+    // (Wallpaper Engine's sampler builder `sub_140099980`: filter 0x55 with MaxAnisotropy 8 for
+    // textures `sub_1400EC220` loads; engine-made ones, render targets and clips, filter linearly).
+    h.sample.maxAnisotropy = ((c.flags & kFlagPoint) != 0 || c.video()) ? 1 : 8;
 
     h.extraHeader["texv"].val = c.texv;
     h.extraHeader["texi"].val = c.texi;
     h.extraHeader["texb"].val = c.texb;
-    if (c.hasReserved) h.extraHeader["texb_reserved"].val = c.reserved;
     for (int i = 0; i < 4; ++i) {
         h.extraHeader["compo" + std::to_string(i + 1)].val =
             (c.flags >> (kFirstComponentBit + i)) & 1u ? 1 : 0;
@@ -255,21 +361,31 @@ void NoteFirstLevel(ImageHeader& h, i32 width, i32 height)
 
 // ---- levels ---------------------------------------------------------------
 
+// A rectangle of a variant, kept when its id was chosen.
+struct LevelPatch {
+    u32   flags { 0 };
+    i32   format { 0 };
+    i32   x { 0 }, y { 0 }, width { 0 }, height { 0 };
+    std::vector<uint8_t> bytes;
+};
+
 struct LevelHead {
     i32  width { 0 };
     i32  height { 0 };
+    i32  depth { 1 };
     bool compressed { false };
     i32  expanded { 0 };
     i32  stored { 0 };
 };
 
 // The fields of one level header; false when the file ends inside them.
-bool ReadLevelHead(fs::IBinaryStream& file, int texb, LevelHead& head)
+bool ReadLevelHead(fs::IBinaryStream& file, const Container& c, LevelHead& head)
 {
-    if (BytesLeft(file) < (texb >= 2 ? 20 : 12)) return false;
+    if (BytesLeft(file) < (c.texb >= 2 ? 20 : 12) + (c.volume() ? 4 : 0)) return false;
     head.width  = file.ReadInt32();
     head.height = file.ReadInt32();
-    if (texb >= 2) {
+    if (c.volume()) head.depth = file.ReadInt32();
+    if (c.texb >= 2) {
         head.compressed = file.ReadInt32() == 1;
         head.expanded   = file.ReadInt32();
     }
@@ -280,26 +396,52 @@ bool ReadLevelHead(fs::IBinaryStream& file, int texb, LevelHead& head)
 // A level whose header can be believed: the payload lies inside the file.
 bool LevelUsable(const fs::IBinaryStream& file, int texb, const LevelHead& head)
 {
-    return head.width > 0 && head.height > 0 && head.stored > 0 && head.stored <= BytesLeft(file) &&
+    return head.width > 0 && head.height > 0 && head.width <= kMaxSide && head.height <= kMaxSide &&
+           head.depth >= 1 && head.depth <= kMaxDepth && head.stored > 0 && head.stored <= BytesLeft(file) &&
            (texb < 2 || head.expanded >= 0);
 }
 
-// How many bytes of a raw or block-compressed level of this size the format needs.
-u64 RawBytes(TextureFormat format, i32 width, i32 height)
+// The variant patches that follow a level's payload when the container has variant records
+// (`sub_14015C8D0`): groups of entries `skip, id, x, y, w, h, format, size, bytes`. Only
+// chosen ids are kept. False when the file ends inside them.
+bool ReadLevelPatches(fs::IBinaryStream& file, const Container& c, std::vector<LevelPatch>* kept)
 {
-    if (width <= 0 || height <= 0) return 0;
-    const u64 w = static_cast<u64>(width);
-    const u64 h = static_cast<u64>(height);
-    const u64 blocks = ((w + 3) / 4) * ((h + 3) / 4);
-    switch (format) {
-    case TextureFormat::RGBA8: return w * h * 4;
-    case TextureFormat::RG8: return w * h * 2;
-    case TextureFormat::R8: return w * h;
-    case TextureFormat::BC1: return blocks * 8;
-    case TextureFormat::BC2:
-    case TextureFormat::BC3: return blocks * 16;
-    default: return w * h * 4;
+    if (c.variants.empty()) return true;
+    if (BytesLeft(file) < 4) return false;
+    const u32 groups = file.ReadUint32();
+    for (u32 g = 0; g < groups; ++g) {
+        if (BytesLeft(file) < 4) return false;
+        const u32 entries = file.ReadUint32();
+        for (u32 e = 0; e < entries; ++e) {
+            if (BytesLeft(file) < 4 * 8) return false;
+            file.ReadInt32(); // unread by the reference
+            const i32 id = file.ReadInt32();
+            LevelPatch patch;
+            patch.x      = file.ReadInt32();
+            patch.y      = file.ReadInt32();
+            patch.width  = file.ReadInt32();
+            patch.height = file.ReadInt32();
+            patch.format = file.ReadInt32();
+            const u32 size = file.ReadUint32();
+            if (size > static_cast<u64>(BytesLeft(file))) return false;
+            const auto chosen = c.patchFlags.find(id);
+            if (kept == nullptr || chosen == c.patchFlags.end()) {
+                if (! file.SeekCur(size)) return false;
+                continue;
+            }
+            patch.flags = chosen->second;
+            patch.bytes.resize(size);
+            if (size > 0 && file.Read(patch.bytes.data(), size) != size) return false;
+            kept->push_back(std::move(patch));
+        }
     }
+    return true;
+}
+
+// How many bytes of a raw or block-compressed level the file stores for this size.
+u64 RawBytes(const Container& c, i32 width, i32 height, i32 depth)
+{
+    return WeStoredBytes(*c.row, width, height, depth);
 }
 
 // The longer side of the level header that follows a payload of `payload` bytes
@@ -330,7 +472,7 @@ ImageDataPtr OwnArray(Bytes bytes)
 
 // The bytes of one level, expanded when the level is compressed. The compressed
 // bytes are dropped as soon as they have been expanded.
-Bytes ReadLevelBytes(fs::IBinaryStream& file, const LevelHead& head, TextureFormat format, i64& size)
+Bytes ReadLevelBytes(fs::IBinaryStream& file, const LevelHead& head, const Container& c, i64& size)
 {
     if (! head.compressed) {
         Bytes bytes = MakeBytes(static_cast<u64>(head.stored));
@@ -340,7 +482,8 @@ Bytes ReadLevelBytes(fs::IBinaryStream& file, const LevelHead& head, TextureForm
         size = head.stored;
         return bytes;
     }
-    const u64 ceiling = std::max<u64>(static_cast<u64>(kExpandCeiling), RawBytes(format, head.width, head.height));
+    const u64 ceiling =
+        std::max<u64>(static_cast<u64>(kExpandCeiling), RawBytes(c, head.width, head.height, head.depth));
     if (head.expanded <= 0 || static_cast<u64>(head.expanded) > ceiling ||
         i64 { head.expanded } > i64 { head.stored } * kLz4MaxRatio + kLz4MaxRatio) {
         LOG_ERROR("texture: a compressed level claims an impossible size");
@@ -430,11 +573,117 @@ struct DecodedLevel {
     ImageType sniffed { ImageType::UNKNOWN };
 };
 
+// The pixels of a patch, encoded as its level is: LZ4 when the level is, a picture when the
+// container declares one, raw otherwise (`sub_14015C8D0`). Empty when it does not decode.
+std::vector<uint8_t> PatchPixels(const Container& c, const LevelHead& head, const LevelPatch& patch)
+{
+    const u64 area = u64(patch.width) * u64(patch.height);
+    if (head.compressed) {
+        std::vector<uint8_t> out(area * 4);
+        const int got = LZ4_decompress_safe(reinterpret_cast<const char*>(patch.bytes.data()),
+                                            reinterpret_cast<char*>(out.data()),
+                                            static_cast<int>(patch.bytes.size()), static_cast<int>(out.size()));
+        if (got < 0) return {};
+        return out;
+    }
+    if (c.declaresPicture()) {
+        Bytes copy = MakeBytes(patch.bytes.size());
+        if (! copy || patch.bytes.empty()) return {};
+        std::memcpy(copy.get(), patch.bytes.data(), patch.bytes.size());
+        ImageData decoded;
+        if (! DecodePicture(std::move(copy), static_cast<i64>(patch.bytes.size()), decoded)) return {};
+        const auto* p = decoded.data.get();
+        return std::vector<uint8_t>(p, p + decoded.size);
+    }
+    return patch.bytes;
+}
+
+// Lays one patch over a level as `sub_14015C480` does: format 0 with the blend flag mixes
+// colour by the patch's alpha and keeps the larger alpha; otherwise rows are copied for the
+// formats the reference copies (0, 4, 6, 7, 8, 9) and the rest is left alone.
+void BlitPatch(i32 format, const LevelPatch& patch, const uint8_t* src, u64 src_size, uint8_t* level,
+               u64 level_size, i32 level_width)
+{
+    const u64 pw = u64(patch.width), ph = u64(patch.height), px = u64(patch.x), py = u64(patch.y);
+    const u64 lw = u64(level_width);
+    const auto copy = [&](u64 dst, u64 from, u64 n) {
+        if (dst + n <= level_size && from + n <= src_size) std::memcpy(level + dst, src + from, n);
+    };
+    if ((patch.flags & kPatchBlend) != 0) {
+        if (format != 0) return;
+        for (u64 y = 0; y < ph; ++y) {
+            for (u64 x = 0; x < pw; ++x) {
+                const u64 s = 4 * (x + y * pw), d = 4 * (x + px + lw * (y + py));
+                if (s + 4 > src_size || d + 4 > level_size) continue;
+                const u32 a = src[s + 3];
+                for (int ch = 0; ch < 3; ++ch) {
+                    const int delta = int(src[s + ch]) - int(level[d + ch]);
+                    level[d + ch]   = static_cast<uint8_t>(level[d + ch] + ((int(a) * delta) >> 8));
+                }
+                level[d + 3] = std::max<uint8_t>(level[d + 3], static_cast<uint8_t>(a));
+            }
+        }
+        return;
+    }
+    switch (format) {
+    case 0:
+        for (u64 y = 0; y < ph; ++y) copy(4 * (px + lw * (y + py)), 4 * y * pw, 4 * pw);
+        break;
+    case 4:
+    case 6:
+        for (u64 y = 0; y < ph; y += 4) copy(lw * (y + py) + 4 * px, y * pw, 4 * pw);
+        break;
+    case 7:
+        for (u64 y = 0; y < ph; y += 4) copy((lw * (y + py) + 4 * px) >> 1, (y * pw) >> 1, 2 * pw);
+        break;
+    case 8:
+        for (u64 y = 0; y < ph; ++y) copy(2 * (px + lw * (y + py)), 2 * y * pw, 2 * pw);
+        break;
+    case 9:
+        for (u64 y = 0; y < ph; ++y) copy(px + lw * (y + py), y * pw, pw);
+        break;
+    default: break;
+    }
+}
+
+// Applies a level's chosen patches in file order. Patches before the one ahead of the last
+// whole-level replacement are dropped (the reference's own trim), and a replacement ends the walk.
+void ApplyPatches(const Container& c, const LevelHead& head, std::vector<LevelPatch> patches, i32 format,
+                  ImageData& level)
+{
+    if (patches.empty() || ! level.data) return;
+    for (std::size_t i = patches.size(); i-- > 0;) {
+        if ((patches[i].flags & kPatchReplace) == 0) continue;
+        if (i != 0) patches.erase(patches.begin(), patches.begin() + static_cast<std::ptrdiff_t>(i - 1));
+        break;
+    }
+    for (const auto& patch : patches) {
+        if ((patch.flags & kPatchReplace) != 0) {
+            if (patch.bytes.size() < static_cast<u64>(level.size)) return;
+            Bytes bytes = MakeBytes(patch.bytes.size());
+            if (! bytes) return;
+            std::memcpy(bytes.get(), patch.bytes.data(), patch.bytes.size());
+            level.size = static_cast<isize>(patch.bytes.size());
+            level.data = OwnArray(std::move(bytes));
+            return;
+        }
+        if (patch.width <= 0 || patch.height <= 0 || patch.x < 0 || patch.y < 0 ||
+            patch.x > level.width || patch.width > level.width - patch.x || patch.y > level.height ||
+            patch.height > level.height - patch.y)
+            continue;
+        const auto pixels = PatchPixels(c, head, patch);
+        if (pixels.empty()) continue;
+        BlitPatch(format, patch, pixels.data(), pixels.size(), level.data.get(), static_cast<u64>(level.size),
+                  level.width);
+    }
+}
+
 // Decides what a level's bytes are (raw pixels, an embedded picture or a clip) and
 // produces the level's data. False when the level cannot be used.
-bool BuildLevel(const Container& c, const LevelHead& head, Bytes bytes, i64 size, DecodedLevel& out)
+bool BuildLevel(const Container& c, const LevelHead& head, Bytes bytes, i64 size, std::vector<LevelPatch> patches,
+                DecodedLevel& out)
 {
-    const u64 needed = RawBytes(c.format, head.width, head.height);
+    const u64 needed = RawBytes(c, head.width, head.height, head.depth);
     if (c.video()) {
         out.kind = Kind::Video;
     } else if (c.declaresPicture()) {
@@ -456,6 +705,17 @@ bool BuildLevel(const Container& c, const LevelHead& head, Bytes bytes, i64 size
             LOG_ERROR("texture: an embedded picture does not decode");
             return false;
         }
+        if (head.depth > 1) {
+            // A volume's picture is decoded as width x (height x depth): the slices stacked top
+            // to bottom (`sub_14015C8D0` asks the decoder for w, h*d), which is [z][y][x].
+            if (out.data.width != head.width || out.data.height != head.height * head.depth) {
+                LOG_ERROR("texture: a volume picture is not its slices stacked");
+                return false;
+            }
+            out.data.height = head.height;
+            out.data.depth  = head.depth;
+        }
+        ApplyPatches(c, head, std::move(patches), 0, out.data);
         return true;
     case Kind::Video:
         out.data.width  = head.width;
@@ -470,8 +730,10 @@ bool BuildLevel(const Container& c, const LevelHead& head, Bytes bytes, i64 size
         }
         out.data.width  = head.width;
         out.data.height = head.height;
+        out.data.depth  = head.depth;
         out.data.size   = static_cast<isize>(size);
         out.data.data   = OwnArray(std::move(bytes));
+        ApplyPatches(c, head, std::move(patches), c.formatCode, out.data);
         return true;
     }
     return false;
@@ -578,11 +840,11 @@ std::optional<video::VideoMetadata> ProbeBytes(const uint8_t* data, i64 size)
 
 // ---- describing a container ---------------------------------------------------
 
-ImageHeader DescribeContainer(std::shared_ptr<fs::IBinaryStream> stream)
+ImageHeader DescribeContainer(std::shared_ptr<fs::IBinaryStream> stream, const IImageParser::VariantCondition& holds)
 {
     fs::IBinaryStream& file = *stream;
     Container          c;
-    if (! ReadContainer(file, c)) return {};
+    if (! ReadContainer(file, c, holds)) return {};
     ImageHeader h = HeaderOf(c);
 
     if (c.sprite()) {
@@ -595,8 +857,8 @@ ImageHeader DescribeContainer(std::shared_ptr<fs::IBinaryStream> stream)
             if (levels < 0 || levels > BytesLeft(file) / 12) return h;
             for (i32 i = 0; i < levels; ++i) {
                 LevelHead head;
-                if (! ReadLevelHead(file, c.texb, head) || ! LevelUsable(file, c.texb, head) ||
-                    ! file.SeekCur(head.stored))
+                if (! ReadLevelHead(file, c, head) || ! LevelUsable(file, c.texb, head) ||
+                    ! file.SeekCur(head.stored) || ! ReadLevelPatches(file, c, nullptr))
                     return h;
                 if (i == 0) dims = { head.width, head.height };
             }
@@ -610,7 +872,7 @@ ImageHeader DescribeContainer(std::shared_ptr<fs::IBinaryStream> stream)
     const i32 levels = file.ReadInt32();
     if (levels < 1 || levels > BytesLeft(file) / 12) return h;
     LevelHead head;
-    if (! ReadLevelHead(file, c.texb, head)) return h;
+    if (! ReadLevelHead(file, c, head)) return h;
     NoteFirstLevel(h, head.width, head.height);
 
     const bool usable = head.stored > 0 && head.stored <= BytesLeft(file);
@@ -624,7 +886,7 @@ ImageHeader DescribeContainer(std::shared_ptr<fs::IBinaryStream> stream)
                 h.durationSeconds = meta->duration_seconds;
         } else {
             i64   size  = 0;
-            Bytes bytes = ReadLevelBytes(file, head, c.format, size);
+            Bytes bytes = ReadLevelBytes(file, head, c, size);
             if (bytes) {
                 if (const auto meta = ProbeBytes(bytes.get(), size)) h.durationSeconds = meta->duration_seconds;
             }
@@ -638,11 +900,13 @@ ImageHeader DescribeContainer(std::shared_ptr<fs::IBinaryStream> stream)
         if (file.Read(prefix.data(), want) == want) {
             const Magic magic = SniffMagic(prefix.data(), want);
             if (IsVideoMagic(magic)) {
-                h.isVideo = true;
+                h.isVideo    = true;
+                h.formatCode = 0;
                 if (const auto meta = ProbeStreamWindow(stream, static_cast<u64>(payload), static_cast<u64>(head.stored)))
                     h.durationSeconds = meta->duration_seconds;
             } else if (magic != Magic::None) {
-                h.type = PictureTypeOf(magic);
+                h.type       = PictureTypeOf(magic);
+                h.formatCode = 0;
             }
         }
     }
@@ -729,6 +993,7 @@ ImageHeader LooseHeader(i32 width, i32 height, ImageType type)
     h.sample.minFilter = TextureFilter::LINEAR;
     h.sample.magFilter = TextureFilter::LINEAR;
     h.sample.mipFilter = TextureFilter::LINEAR;
+    h.sample.maxAnisotropy = 8; // a picture file, as a .tex without the point flag
     for (int i = 1; i <= 4; ++i) h.extraHeader["compo" + std::to_string(i)].val = 1;
     return h;
 }
@@ -791,11 +1056,11 @@ std::optional<LooseFile> ResolveLooseFile(fs::VFS* vfs, const std::string& name)
 
 // A texture container found in the file space.
 std::shared_ptr<Image> LoadContainer(std::shared_ptr<fs::IBinaryStream> stream, const std::string& name,
-                                     uint64_t surfaceLongestSide)
+                                     uint64_t surfaceLongestSide, const IImageParser::VariantCondition& holds)
 {
     fs::IBinaryStream& file = *stream;
     Container          c;
-    if (! ReadContainer(file, c)) return nullptr;
+    if (! ReadContainer(file, c, holds)) return nullptr;
     const auto fail = [&](const char* why) -> std::shared_ptr<Image> {
         LOG_ERROR("texture \"%s\": %s", name.c_str(), why);
         return nullptr;
@@ -804,13 +1069,18 @@ std::shared_ptr<Image> LoadContainer(std::shared_ptr<fs::IBinaryStream> stream, 
 
     // Only a single-picture, plain texture whose levels are raw pixels or declared
     // pictures may lose levels to the display.
-    const bool eligible = c.pictures == 1 && ! c.sprite() && ! c.video() && (c.texb < 3 || c.declaresPicture());
+    const bool eligible = c.pictures == 1 && ! c.sprite() && ! c.video() && ! c.volume() &&
+                          (c.texb < 3 || c.declaresPicture());
     const std::size_t loaded = c.sprite() ? static_cast<std::size_t>(c.pictures) : 1;
 
     auto image = std::make_shared<Image>();
     image->key = name;
     ImageHeader header = HeaderOf(c);
     PictureDims dims(static_cast<std::size_t>(c.pictures));
+    // Every level is uploaded as the first one kept is: decoded pictures as RGBA, raw levels in
+    // the container's format, a clip as itself. A level of another kind would be read as the
+    // first one's pixels, past the end of its own bytes.
+    std::optional<Kind> kind;
 
     for (std::size_t p = 0; p < loaded; ++p) {
         if (BytesLeft(file) < 4) return fail("the file ends inside the level tables");
@@ -819,42 +1089,64 @@ std::shared_ptr<Image> LoadContainer(std::shared_ptr<fs::IBinaryStream> stream, 
         if (p == 0 && levels == 0) return fail("the first picture has no levels");
 
         Image::Slot slot;
+        bool        cut = false;
         for (i32 i = 0; i < levels; ++i) {
             LevelHead head;
-            if (! ReadLevelHead(file, c.texb, head) || ! LevelUsable(file, c.texb, head))
+            if (! ReadLevelHead(file, c, head) || ! LevelUsable(file, c.texb, head))
                 return fail("a level header is not usable");
             if (i == 0) {
                 dims[p] = { head.width, head.height };
                 if (p == 0) NoteFirstLevel(header, head.width, head.height);
             }
+            // Behind a level of another kind the chain has ended: what follows is skipped.
+            if (cut) {
+                if (! file.SeekCur(head.stored)) return fail("a level lies outside the file");
+                continue;
+            }
             // The level behind this one can cover the surface by itself: this one is
             // not needed. Its payload is skipped, never decoded.
             if (eligible && surfaceLongestSide > 0 && i + 1 < levels &&
                 NextLevelLongest(file, head.stored) >= surfaceLongestSide) {
-                if (! file.SeekCur(head.stored)) return fail("a level lies outside the file");
+                if (! file.SeekCur(head.stored) || ! ReadLevelPatches(file, c, nullptr))
+                    return fail("a level lies outside the file");
                 continue;
             }
 
             i64   size  = 0;
-            Bytes bytes = ReadLevelBytes(file, head, c.format, size);
+            Bytes bytes = ReadLevelBytes(file, head, c, size);
             if (! bytes) return fail("a level cannot be read");
+            std::vector<LevelPatch> patches;
+            if (! ReadLevelPatches(file, c, &patches)) return fail("a level's variant patches are cut short");
             DecodedLevel level;
-            if (! BuildLevel(c, head, std::move(bytes), size, level)) return fail("a level cannot be used");
+            if (! BuildLevel(c, head, std::move(bytes), size, std::move(patches), level))
+                return fail("a level cannot be used");
+            if (! kind) kind = level.kind;
+            if (level.kind != *kind) {
+                // A picture of a sheet that would begin with one has nothing to show.
+                if (slot.mipmaps.empty()) return fail("a picture's levels are not of the first picture's kind");
+                LOG_ERROR("texture \"%s\": a level is not of the first level's kind; it and the levels after it are dropped",
+                          name.c_str());
+                cut = true;
+                continue;
+            }
 
             if (p == 0 && slot.mipmaps.empty()) {
                 if (level.kind == Kind::Picture) {
                     // Decoded pictures are unpadded: the decoded size is the allocated one.
-                    header.format = TextureFormat::RGBA8;
+                    header.format     = TextureFormat::RGBA8;
+                    header.formatCode = 0;
                     if (i == 0) NoteFirstLevel(header, level.data.width, level.data.height);
                     if (level.sniffed != ImageType::UNKNOWN) header.type = level.sniffed;
                 } else if (level.kind == Kind::Video) {
                     header.isVideo = true;
-                    header.format  = TextureFormat::RGBA8;
+                    header.format     = TextureFormat::RGBA8;
+                    header.formatCode = 0;
                 }
             }
             if (slot.mipmaps.empty()) {
                 slot.width  = level.data.width;
                 slot.height = level.data.height;
+                slot.depth  = level.data.depth;
             }
             slot.mipmaps.push_back(std::move(level.data));
         }
@@ -884,7 +1176,8 @@ std::shared_ptr<Image> WPTexImageParser::Parse(const std::string& name) {
     const std::string container = "/assets/materials/" + name + ".tex";
     if (m_vfs->Contains(container)) {
         auto stream = m_vfs->Open(container);
-        return stream ? LoadContainer(std::move(stream), name, m_texture_surface_longest_side) : nullptr;
+        return stream ? LoadContainer(std::move(stream), name, m_texture_surface_longest_side, m_variant_condition)
+                      : nullptr;
     }
     return ParseLooseAsset(name);
 }
@@ -895,7 +1188,7 @@ ImageHeader WPTexImageParser::ParseHeader(const std::string& name) {
     const std::string container = "/assets/materials/" + name + ".tex";
     if (m_vfs->Contains(container)) {
         auto stream = m_vfs->Open(container);
-        return stream ? DescribeContainer(std::move(stream)) : ImageHeader {};
+        return stream ? DescribeContainer(std::move(stream), m_variant_condition) : ImageHeader {};
     }
     return ParseLooseAssetHeader(name);
 }
@@ -906,6 +1199,7 @@ ImageHeader VideoHeader(const video::VideoMetadata& meta)
 {
     ImageHeader h = LooseHeader(static_cast<i32>(meta.width), static_cast<i32>(meta.height), ImageType::UNKNOWN);
     h.isVideo         = true;
+    h.sample.maxAnisotropy = 1; // a clip is an engine-made texture, not a file the sampler reads
     h.durationSeconds = meta.duration_seconds;
     return h;
 }
@@ -966,6 +1260,8 @@ std::shared_ptr<Image> WPTexImageParser::ParseLooseAsset(const std::string& name
     const auto found = ResolveLooseFile(m_vfs, name);
     if (! found) {
         LOG_ERROR("texture \"%s\" not found", name.c_str());
+        // Neither a container nor a loose picture: named by the material folder it was looked for in.
+        fs::ReportMissingFile("/assets/materials/" + name);
         return nullptr;
     }
     // A clip is never read whole: it is played where it lies, or from a cache file.
@@ -1001,7 +1297,11 @@ std::shared_ptr<Image> WPTexImageParser::ParseLooseAsset(const std::string& name
 ImageHeader WPTexImageParser::ParseLooseAssetHeader(const std::string& name)
 {
     const auto found = ResolveLooseFile(m_vfs, name);
-    if (! found) return {};
+    if (! found) {
+        // The parse reads a texture's header only; the picture itself is loaded when drawn.
+        fs::ReportMissingFile("/assets/materials/" + name);
+        return {};
+    }
     if (found->video) {
         if (const std::string host = HostPathOf(m_vfs, *found); ! host.empty()) {
             const auto meta = ProbeHostFile(host);

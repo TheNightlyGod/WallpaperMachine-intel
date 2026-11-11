@@ -46,7 +46,8 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
           state.directories[property] = (state.directories[property] || []).filter(file => !files.includes(file));
         }
       };
-      window.wallpaperRegisterAudioListener(() => state.capture.push('audio-delivered'));
+      window.wallpaperRegisterAudioListener(bins => state.capture.push(
+        bins.length === 128 && Array.from(bins).every(value => value === 0) ? 'silence' : 'sound'));
       window.wallpaperRegisterMediaStatusListener(value => state.media = value);
       </script></body></html>
       """.write(to: project.appendingPathComponent("index.html"), atomically: true, encoding: .utf8)
@@ -59,10 +60,13 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     try? FileManager.default.removeItem(at: rootURL)
   }
 
-  private func make(entry: String = "index.html", properties: String = "{}", paused: Bool = false) throws -> ScreenSaverWebSurface {
+  private func make(
+    entry: String = "index.html", properties: String = "{}", fps: UInt32 = 30, paused: Bool = false,
+    scale: CGFloat = 1
+  ) throws -> ScreenSaverWebSurface {
     let surface = try ScreenSaverWebSurface(projectURL: project, entryFile: entry,
-      readAccessURL: rootURL, size: CGSize(width: 128, height: 96), scale: 1,
-      propertiesJSON: properties, fps: 30, paused: paused)
+      readAccessURL: rootURL, size: CGSize(width: 128, height: 96), scale: scale,
+      propertiesJSON: properties, fps: fps, paused: paused)
     surfaces.append(surface)
     let layer = CALayer()
     layer.frame = CGRect(x: 0, y: 0, width: 128, height: 96)
@@ -82,6 +86,21 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
   private func state(_ surface: ScreenSaverWebSurface) async throws -> [String: Any] {
     let result = try await surface.webView.callAsyncJavaScript("return window.state", arguments: [:], in: nil, contentWorld: .page)
     return try XCTUnwrap(result as? [String: Any])
+  }
+
+  /// Animation frames per second over one second of the page's own clock.
+  private func frameRate(_ surface: ScreenSaverWebSurface) async throws -> Double {
+    func sample() async throws -> (frames: Double, time: Double) {
+      let value = try await surface.webView.callAsyncJavaScript(
+        "return { frames: window.state.frames, time: performance.now() }",
+        arguments: [:], in: nil, contentWorld: .page)
+      let sample = try XCTUnwrap(value as? [String: Any])
+      return (try XCTUnwrap(sample["frames"] as? Double), try XCTUnwrap(sample["time"] as? Double))
+    }
+    let start = try await sample()
+    try await Task.sleep(for: .seconds(1))
+    let end = try await sample()
+    return (end.frames - start.frames) / ((end.time - start.time) / 1000)
   }
 
   private func poll(timeout: Duration = .seconds(5), _ condition: () async throws -> Bool) async throws {
@@ -109,10 +128,24 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     XCTAssertGreaterThan(color.greenComponent, 0.9)
     XCTAssertLessThan(color.blueComponent, 0.1)
     let before = try await state(surface)
-    try await Task.sleep(for: .milliseconds(150))
+    let frames = try XCTUnwrap(before["frames"] as? Int)
+    try await poll { (try await self.state(surface)["frames"] as? Int ?? 0) > frames }
     let after = try await state(surface)
     XCTAssertGreaterThan(try XCTUnwrap(after["frames"] as? Int), try XCTUnwrap(before["frames"] as? Int))
     XCTAssertEqual((after["general"] as? [String: Any])?["fps"] as? Int, 30)
+  }
+
+  /// The lock screen and the screen saver show what is under the root the surface was attached to,
+  /// not the snapshots readiness takes. AppKit pulls a view's own layer back into its window, so the
+  /// live page has to stay under that root once it has drawn, or only the first snapshot is shown.
+  func testTheLivePageStaysInTheLayerTreeItWasAttachedTo() async throws {
+    let surface = try make()
+    let root = try XCTUnwrap(roots.last)
+    try await start(surface)
+    try await Task.sleep(for: .milliseconds(100))
+    var layer = surface.webView.layer
+    while let current = layer, current !== root { layer = current.superlayer }
+    XCTAssertTrue(layer === root, "the web view's layers are not under the exported root")
   }
 
   func testCommittedPropertiesAndOwnedSiblingFilesLoadWithAuthorPathConvention() async throws {
@@ -180,6 +213,23 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     XCTAssertEqual(received["userKeys"] as? [[String]], [["color", "size"], ["color"]])
   }
 
+  /// The lock screen and the screen saver hold the page's animation to the published frame rate,
+  /// as the desktop does, rather than WebKit's own cadence near 60; a frame rate changed on the
+  /// running page (the reduced rate on battery) applies without a reload.
+  func testThePageAnimatesAtThePublishedFrameRateAndFollowsAChange() async throws {
+    let surface = try make(fps: 10)
+    try await start(surface)
+    let slow = try await frameRate(surface)
+    XCTAssertGreaterThan(slow, 5)
+    XCTAssertLessThan(slow, 14)
+
+    try surface.update(propertiesJSON: "{}", fps: 20, paused: false)
+    try await poll { (try await self.state(surface)["general"] as? [String: Any])?["fps"] as? Int == 20 }
+    let faster = try await frameRate(surface)
+    XCTAssertGreaterThan(faster, 14)
+    XCTAssertLessThan(faster, 26)
+  }
+
   func testPauseSuspendsUncooperativeTimersAndResumeRestoresAnimation() async throws {
     let surface = try make()
     try await start(surface)
@@ -191,11 +241,58 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     try await poll { (try await self.state(surface)["gap"] as? Double ?? 0) >= 400 }
     try await poll { try await self.state(surface)["paused"] as? Bool == false }
     let before = try await state(surface)
-    try await Task.sleep(for: .milliseconds(100))
+    let ticks = try XCTUnwrap(before["ticks"] as? Int)
+    let frames = try XCTUnwrap(before["frames"] as? Int)
+    try await poll {
+      let current = try await self.state(surface)
+      return (current["ticks"] as? Int ?? 0) > ticks && (current["frames"] as? Int ?? 0) > frames
+    }
     let after = try await state(surface)
     XCTAssertGreaterThan(try XCTUnwrap(after["ticks"] as? Int), try XCTUnwrap(before["ticks"] as? Int))
     XCTAssertGreaterThan(try XCTUnwrap(after["frames"] as? Int), try XCTUnwrap(before["frames"] as? Int))
     XCTAssertEqual(after["paused"] as? Bool, false)
+  }
+
+  /// A page busy for longer than a resume waits on it (a heavy page rebuilding after a resume, as
+  /// under its WebKit process's memory limit) is resumed all the same and can be paused again; it
+  /// is not a failure that takes the lock screen down.
+  func testABusyPageIsStillResumedAndPausedWithoutFailingTheSurface() async throws {
+    try """
+      <!doctype html><html><body><script>
+      window.state = {frames:0, held:false, busied:false};
+      const animate = () => { state.frames++; requestAnimationFrame(animate); };
+      requestAnimationFrame(animate);
+      // The first unpause after a pause is the resume, and it keeps the page busy.
+      window.wallpaperPropertyListener = {
+        setPaused(value) {
+          if (value) { state.held = true; return; }
+          if (!state.held || state.busied) return;
+          state.busied = true;
+          const until = performance.now() + 6000;
+          while (performance.now() < until) {}
+        }
+      };
+      </script></body></html>
+      """.write(to: project.appendingPathComponent("busy.html"), atomically: true, encoding: .utf8)
+    let surface = try make(entry: "busy.html")
+    var failure: Error?
+    surface.onFailure = { failure = $0 }
+    try await start(surface)
+    surface.setPaused(true)
+    try await poll { surface.isPaused }
+    surface.setPaused(false)
+    try await poll { !surface.isPaused }
+    try await Task.sleep(for: .seconds(6.5))
+    XCTAssertNil(failure, "a busy page is not a broken one")
+    XCTAssertFalse(surface.isStopped)
+    let before = try await state(surface)
+    let frames = try XCTUnwrap(before["frames"] as? Int)
+    try await poll { (try await self.state(surface)["frames"] as? Int ?? 0) > frames }
+    let after = try await state(surface)
+    XCTAssertGreaterThan(try XCTUnwrap(after["frames"] as? Int), try XCTUnwrap(before["frames"] as? Int))
+    surface.setPaused(true)
+    try await poll { surface.isPaused }
+    XCTAssertNil(failure)
   }
 
   func testMalformedAndEscapingEntriesAndAssetsAreDenied() throws {
@@ -326,6 +423,44 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
     XCTAssertEqual(main as? String, "object")
   }
 
+  /// Wallpaper Engine lays a page out in the display's device pixels, and the desktop does too
+  /// (`WebWallpaperDeviceLayoutTests`); the lock screen draws at the display's scale and lays the
+  /// page out the same way, so the wallpaper keeps its layout when the Mac locks.
+  func testAPageIsLaidOutInTheDevicePixelsOfTheScaleItDrawsAt() async throws {
+    let surface = try make(scale: 2)
+    try await start(surface)
+    let value = try await surface.webView.callAsyncJavaScript(
+      """
+      return { width: innerWidth, height: innerHeight, ratio: devicePixelRatio, screen: screen.width,
+               nativeScreen: Object.getOwnPropertyDescriptor(Screen.prototype, "width").get.call(screen) };
+      """, arguments: [:], in: nil, contentWorld: .page)
+    let layout = try XCTUnwrap(value as? [String: Any])
+    XCTAssertEqual(layout["width"] as? Double, 256)
+    XCTAssertEqual(layout["height"] as? Double, 192)
+    XCTAssertEqual(layout["ratio"] as? Double, 1)
+    XCTAssertEqual(layout["screen"] as? Double, (layout["nativeScreen"] as? Double).map { $0 * 2 })
+  }
+
+  /// Wallpaper Engine calls an audio listener on its cadence through silence too, and some pages
+  /// start their idle animation only once it has been called. A playing page is fed silence on the
+  /// desktop's quiet-stretch spacing, and again once it is resumed after a pause.
+  func testASubscribedPageHearsSilenceWhilePlayingAndAgainAfterAResume() async throws {
+    let surface = try make()
+    try await start(surface)
+    let deliveries = { (try await self.state(surface)["capture"] as? [String])?.count ?? 0 }
+    try await poll(timeout: .seconds(4)) { try await deliveries() >= 2 }
+    let current = try await state(surface)
+    let heard = try XCTUnwrap(current["capture"] as? [String])
+    XCTAssertEqual(Set(heard), ["silence"])
+
+    surface.setPaused(true)
+    try await poll { surface.isPaused }
+    surface.setPaused(false)
+    try await poll { !surface.isPaused }
+    let resumed = try await deliveries()
+    try await poll(timeout: .seconds(4)) { try await deliveries() > resumed }
+  }
+
   func testAudioAndDisplayCaptureAreDeniedWithoutHostSubscription() async throws {
     let surface = try make()
     try await start(surface)
@@ -340,7 +475,8 @@ final class ScreenSaverWebSurfaceTests: XCTestCase {
       """, arguments: [:], in: nil, contentWorld: .page)
     let reply = try XCTUnwrap(result as? [String: Any])
     XCTAssertEqual(reply["denied"] as? [Bool], [true, true])
-    XCTAssertEqual(reply["audio"] as? [String], [])
+    XCTAssertEqual(Set(try XCTUnwrap(reply["audio"] as? [String])).subtracting(["silence"]), [],
+      "The lock screen captures no audio: its listener only ever hears silence")
     XCTAssertEqual((reply["media"] as? [String: Any])?["enabled"] as? Bool, false)
     XCTAssertEqual(surface.webView.value(forKey: "_mediaMutedState") as? UInt, 7)
   }

@@ -9,7 +9,7 @@ use crate::lexer::Operator;
 use crate::request::StageKind;
 
 use super::super::ast::*;
-use super::super::builtins::{Class, class_of, is_dialect_call, unsupported_reason};
+use super::super::builtins::{Class, class_of, is_dialect_call, unsupported_reason, we_refused_call};
 use super::super::ty::*;
 use super::expr::product_type;
 use super::helpers::HelperKind;
@@ -88,14 +88,22 @@ impl Converter {
     pub(super) fn call(&mut self, callee: Callee, args: Vec<Expr>, span: Span) -> T {
         match callee {
             Callee::Type(tr) => self.ctor_call(tr, args, span),
+            Callee::Cast(tr) => {
+                if let Some(reason) = self.unsupported_type(&tr.name, false) {
+                    self.error(&span, format!("unsupported construct `{}`: {reason}", tr.name));
+                }
+                let ty = self.resolve_type(&tr, &[]);
+                let args = args.into_iter().map(|arg| self.expr(arg)).collect();
+                self.typed_ctor(ty, args, &span)
+            }
             Callee::Name(name) => self.named_call(name, args, span),
         }
     }
 
     // ----- constructors -----
 
-    fn ctor_call(&mut self, tr: TypeRef, args: Vec<Expr>, span: Span) -> T {
-        if let Some(reason) = unsupported_reason(&tr.name) {
+    fn ctor_call(&mut self, mut tr: TypeRef, args: Vec<Expr>, span: Span) -> T {
+        if let Some(reason) = self.unsupported_type(&tr.name, false) {
             self.error(&span, format!("unsupported construct `{}`: {reason}", tr.name));
         }
         let ty = self.resolve_type(&tr, &[]);
@@ -104,6 +112,19 @@ impl Converter {
             let t = self.expr(a);
             out.push(t);
         }
+        // WE's float-vector constructors consume exactly their component count.
+        // Scalar broadcasts and vector truncation belong to casts, not constructors.
+        // Generated GLSL and expressions synthesized by this converter retain GLSL's rules.
+        if !self.options.glsl_builtins && let Ty::Vec(Sc::Float, width) = ty {
+            let components: Option<usize> = out.iter().map(|arg| match &arg.ty {
+                Ty::Scalar(_) => Some(1),
+                Ty::Vec(_, width) => Some(usize::from(*width)),
+                _ => None,
+            }).sum();
+            if let Some(components) = components && components != usize::from(width) {
+                self.error(&span, format!("`{}` requires {width} numeric components, got {components}; use an explicit cast for broadcast or truncation", tr.name));
+            }
+        }
         let list = match &ty {
             Ty::Array(elem, _) => {
                 let elem = (**elem).clone();
@@ -111,6 +132,7 @@ impl Converter {
             }
             _ => self.constructor_args(&ty, out),
         };
+        Self::emit_type_alias(&mut tr);
         T::new(Expr::new(ExprKind::Call(Callee::Type(tr), list), span), ty)
     }
 
@@ -145,13 +167,24 @@ impl Converter {
             let args = args.into_iter().map(|a| self.expr(a).e).collect();
             return T::new(Expr::new(ExprKind::Call(Callee::Name(name), args), span), Ty::Unknown);
         }
+        // A GLSL built-in Wallpaper Engine's HLSL does not have, unless the stage declares a
+        // function of that name taking that many arguments (probes T6, T13).
+        let declared = self.fn_by_name.get(&name).is_some_and(|list| list.iter().any(|i| self.fns[*i].params.len() == args.len()));
+        let refused = if self.options.glsl_builtins { None } else { we_refused_call(&name, args.len()) };
+        if !declared && let Some(reason) = refused.as_ref() {
+            self.error(&span, format!("unsupported construct `{name}`: {reason}"));
+            let args = args.into_iter().map(|a| self.expr(a).e).collect();
+            return T::new(Expr::new(ExprKind::Call(Callee::Name(name), args), span), Ty::Unknown);
+        }
         if let Some(&i) = self.struct_by_name.get(&name) {
             let args = args.into_iter().map(|a| self.expr(a).e).collect();
             let emit = self.structs[i].name.clone();
             return T::new(Expr::new(ExprKind::Call(Callee::Name(emit), args), span), Ty::Struct(i));
         }
         let targs: Vec<T> = args.into_iter().map(|a| self.expr(a)).collect();
-        let builtin = is_dialect_call(&name) || class_of(&name).is_some();
+        // A name absent from HLSL has no competing intrinsic overload. An author's
+        // function still takes HLSL truncation/broadcast conversions at the call.
+        let builtin = refused.is_none() && (is_dialect_call(&name) || class_of(&name).is_some());
         match self.pick_user(&name, &targs) {
             Pick::Chosen { index, promotion_only } if !builtin || promotion_only => self.user_call(index, targs, span),
             Pick::Chosen { .. } | Pick::None => {
@@ -331,9 +364,63 @@ impl Converter {
                 return self.binary_typed(Operator::Mod, a, b, span);
             }
             ("clip", 1) if self.kind == StageKind::Fragment => return self.clip_call(targs.pop().unwrap(), span),
-            ("texSample2D" | "tex2D" | "texture2D", 2 | 3) => return self.texture_call("texture", targs, span),
+            // HLSL spellings (probe T13 compiles `rsqrt`, `asuint` and `countbits`).
+            // Keep their component types and vector widths: unsigned bit scans return
+            // 0xffffffff for a zero input, not the signed -1 of GLSL's findMSB/findLSB.
+            ("rsqrt", 1) => return self.shaped("inversesqrt", Class::Unary, targs, span),
+            ("countbits" | "firstbithigh" | "firstbitlow", 1) => {
+                let x = targs.pop().unwrap();
+                let kind = if name == "countbits" { Some(Sc::Uint) } else { x.ty.kind() };
+                let ty = match (kind, x.ty.width()) {
+                    (Some(k @ (Sc::Int | Sc::Uint)), Some(w)) => Ty::of(k, w),
+                    _ => Ty::Unknown,
+                };
+                let function = match name { "countbits" => "bitCount", "firstbithigh" => "findMSB", _ => "findLSB" };
+                let call = Expr::call(function, vec![x.e], span.clone());
+                let call = if ty.kind() == Some(Sc::Uint) { self.ctor_expr(&ty, vec![call], &span) } else { call };
+                return T::new(call, ty);
+            }
+            ("asuint" | "asint", 1) => {
+                let (to, from_float) = if name == "asuint" { (Sc::Uint, "floatBitsToUint") } else { (Sc::Int, "floatBitsToInt") };
+                let x = targs.pop().unwrap();
+                return match x.ty.kind() {
+                    Some(k) if k == to => x,
+                    // Between `int` and `uint` a conversion keeps the bits.
+                    Some(Sc::Int | Sc::Uint) => self.convert_kind(x, to),
+                    _ => Self::bit_cast_call(from_float, x, to, span),
+                };
+            }
+            ("asfloat", 1) => {
+                let x = targs.pop().unwrap();
+                return match x.ty.kind() {
+                    Some(Sc::Float) => x,
+                    Some(Sc::Int) => Self::bit_cast_call("intBitsToFloat", x, Sc::Float, span),
+                    Some(Sc::Uint) => Self::bit_cast_call("uintBitsToFloat", x, Sc::Float, span),
+                    _ => {
+                        let bits = Expr::call("uint", vec![x.e], span.clone());
+                        T::new(Expr::call("uintBitsToFloat", vec![bits], span), Ty::Unknown)
+                    }
+                };
+            }
+            ("modf", 2) => return self.modf_call(targs, span),
+            ("texSample2D", 2) => return self.texture_call("texture", targs, span),
+            ("tex2D" | "texture2D", 2 | 3) => return self.texture_call("texture", targs, span),
             ("texSample2DLod" | "texture2DLod" | "tex2DLod", 3) => return self.texture_call("textureLod", targs, span),
             ("texSample3D", 2) => return self.texture_call("texture", targs, span),
+            // E-D8: `s.SampleCmpLevelZero(s ## SamplerComparisonState, u, d)`.
+            ("texSample2DCompare", 3) => return self.compare_call(targs, span),
+            // E-D8: `s.Load(int3((u) * (r), 0))`.
+            ("texLoad2D", 3) => return self.texel_fetch_call(targs, span),
+            // E-D8: sample 0 at `int2((u) * (r))` of the multisampled back buffer, else an
+            // ordinary sample at `u`.
+            ("texSample2DBackBuffer", 3) => {
+                if self.options.backbuffer_ms {
+                    return self.texel_fetch_call(targs, span);
+                }
+                targs.pop();
+                return self.texture_call("texture", targs, span);
+            }
+            ("MAKE_SAMPLER2D_COMPARE_ARGUMENT", 1) => return targs.remove(0),
             _ => {}
         }
         let Some(class) = class_of(name) else {
@@ -354,12 +441,7 @@ impl Converter {
                 let args = targs.into_iter().map(|t| t.e).collect();
                 T::new(Expr::call(name, args, span), Ty::vec(3))
             }
-            Class::Matrix => self.matrix_call(name, targs, span),
-            Class::Compare => {
-                let ty = targs.first().and_then(|t| t.ty.vec_width()).map_or(Ty::Unknown, |w| Ty::Vec(Sc::Bool, w));
-                let args = targs.into_iter().map(|t| t.e).collect();
-                T::new(Expr::call(name, args, span), ty)
-            }
+            Class::Matrix => Self::matrix_call(name, targs, span),
             Class::Reduce => {
                 let ty = match (name, targs.first().and_then(|t| t.ty.vec_width())) {
                     ("isnan" | "isinf", Some(w)) => Ty::Vec(Sc::Bool, w),
@@ -371,13 +453,101 @@ impl Converter {
             Class::Texture => self.texture_call(name, targs, span),
             Class::Other => {
                 let ty = match name {
-                    "refract" | "faceforward" | "fma" => targs.first().map_or(Ty::Unknown, |t| t.ty.clone()),
+                    "refract" | "faceforward" => targs.first().map_or(Ty::Unknown, |t| t.ty.clone()),
                     _ => Ty::Unknown,
                 };
                 let args = targs.into_iter().map(|t| t.e).collect();
                 T::new(Expr::call(name, args, span), ty)
             }
         }
+    }
+
+    /// HLSL modf: truncate each component and return the remainder. The output
+    /// determines the overload: scalar inputs broadcast, vector inputs cannot
+    /// narrow into an output. Out conversions keep a separate float whole value.
+    fn modf_call(&mut self, mut args: Vec<T>, span: Span) -> T {
+        let output = args.pop().expect("two arguments");
+        let input = args.pop().expect("two arguments");
+        let (columns, rows, kind, value_ty) = match &output.ty {
+            Ty::Scalar(k) => (0, 1, *k, FLOAT),
+            Ty::Vec(k, w) => (0, *w, *k, Ty::vec(*w)),
+            Ty::Mat(c, r) => (*c, *r, Sc::Float, Ty::Mat(*c, *r)),
+            _ => {
+                self.error(&span, "modf requires a scalar, vector or matrix output argument");
+                return T::new(Expr::call("modf", vec![input.e, output.e], span), Ty::Unknown);
+            }
+        };
+        let fits = input.ty.is_scalar() || input.ty.is_unknown() ||
+            input.ty.with_kind(Sc::Float) == value_ty;
+        if !fits {
+            self.error(&span, "modf input and output shapes do not match");
+        }
+        let mut input = self.coerce(input, &value_ty);
+        let mut output = output.e;
+        let mut before = Vec::new();
+        if self.has_dynamic_output_index(&output) {
+            // Naga evaluates an out-argument's index for both its temporary and
+            // its write-back. Capture it once, after the input argument, as WE does.
+            let value = self.call_temporary(&value_ty, &span);
+            before.push(Self::call_assignment(value.clone(), input, &span));
+            input = value;
+            self.capture_output_indices(&mut output, &mut before);
+        }
+        self.helpers.need(HelperKind::Modf(columns, rows, kind));
+        let name = format!("{}modf_{columns}_{rows}_{}", self.prefix, kind.name());
+        let call = Expr::call(&name, vec![input, output], span.clone());
+        let expr = if before.is_empty() { call } else {
+            before.push(call);
+            Expr::new(ExprKind::Comma(before), span)
+        };
+        T::new(expr, value_ty)
+    }
+
+    fn has_dynamic_output_index(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Index(base, index) => self.eval_const_int(index).is_none() || self.has_dynamic_output_index(base),
+            ExprKind::Member(base, _) | ExprKind::Paren(base) => self.has_dynamic_output_index(base),
+            _ => false,
+        }
+    }
+
+    fn call_assignment(target: Expr, value: Expr, span: &Span) -> Expr {
+        Expr::new(ExprKind::Assign(Operator::Assign, Box::new(target), Box::new(value)), span.clone())
+    }
+
+    fn call_temporary(&mut self, ty: &Ty, span: &Span) -> Expr {
+        let name = format!("{}call_{}", self.prefix, self.next_id);
+        let emitted = self.declare(&name, ty.clone(), super::VarKind::Local, false, None);
+        let decl = VarDecl {
+            quals: Vec::new(),
+            ty: TypeRef::named(&ty.glsl_name().expect("a numeric call temporary")),
+            declarators: vec![Declarator { name: emitted.clone(), name_span: span.clone(), dims: Vec::new(), init: None }],
+            span: span.clone(),
+        };
+        if self.cur_ret.is_some() { self.call_temps.push(decl); }
+        else { self.relocated.push(Stmt::Decl(decl)); }
+        Expr::ident(&emitted, span.clone())
+    }
+
+    fn capture_output_indices(&mut self, expr: &mut Expr, before: &mut Vec<Expr>) {
+        match &mut expr.kind {
+            ExprKind::Index(base, index) => {
+                self.capture_output_indices(base, before);
+                if self.eval_const_int(index).is_none() {
+                    let value = self.call_temporary(&INT, &index.span);
+                    before.push(Self::call_assignment(value.clone(), (**index).clone(), &index.span));
+                    **index = value;
+                }
+            }
+            ExprKind::Member(base, _) | ExprKind::Paren(base) => self.capture_output_indices(base, before),
+            _ => {}
+        }
+    }
+
+    /// A bit reinterpretation preserves the scalar/vector shape of its argument.
+    fn bit_cast_call(name: &str, arg: T, kind: Sc, span: Span) -> T {
+        let ty = arg.ty.width().map_or(Ty::Unknown, |width| Ty::of(kind, width));
+        T::new(Expr::call(name, vec![arg.e], span), ty)
     }
 
     fn float_shape_ty(&self, ty: &Ty) -> Ty {
@@ -492,40 +662,43 @@ impl Converter {
         T::new(Expr::call(&name, vec![x.e], span), Ty::Void)
     }
 
-    fn matrix_call(&mut self, name: &str, targs: Vec<T>, span: Span) -> T {
+    fn matrix_call(name: &str, targs: Vec<T>, span: Span) -> T {
         let first = targs.first().map(|t| t.ty.clone()).unwrap_or(Ty::Unknown);
-        match name {
-            "inverse" if targs.len() == 1 => {
-                // The Metal writer has no `inverse`; a generated helper stands in (R87).
-                match first {
-                    Ty::Mat(c, r) if c == r => self.helpers.need(HelperKind::Inverse(c)),
-                    _ => {
-                        for n in 2..=4 {
-                            self.helpers.need(HelperKind::Inverse(n));
-                        }
-                    }
-                }
-                let emit = format!("{}inverse", self.prefix);
-                let ty = if matches!(first, Ty::Mat(..)) { first } else { Ty::Unknown };
-                T::new(Expr::call(&emit, targs.into_iter().map(|t| t.e).collect(), span), ty)
-            }
-            "transpose" => {
-                let ty = match first {
-                    Ty::Mat(c, r) => Ty::Mat(r, c),
-                    _ => Ty::Unknown,
-                };
-                T::new(Expr::call(name, targs.into_iter().map(|t| t.e).collect(), span), ty)
-            }
-            "determinant" => T::new(Expr::call(name, targs.into_iter().map(|t| t.e).collect(), span), FLOAT),
-            "outerProduct" => {
-                let ty = match (&first, targs.get(1).map(|t| &t.ty)) {
-                    (Ty::Vec(_, r), Some(Ty::Vec(_, c))) => Ty::Mat(*c, *r),
-                    _ => Ty::Unknown,
-                };
-                T::new(Expr::call(name, targs.into_iter().map(|t| t.e).collect(), span), ty)
-            }
-            _ => T::new(Expr::call(name, targs.into_iter().map(|t| t.e).collect(), span), first),
-        }
+        let ty = match (name, first) {
+            ("transpose", Ty::Mat(c, r)) => Ty::Mat(r, c),
+            ("determinant", _) => FLOAT,
+            _ => Ty::Unknown,
+        };
+        T::new(Expr::call(name, targs.into_iter().map(|t| t.e).collect(), span), ty)
+    }
+
+    /// The sampler argument of a call, with any parentheses an alias spelled it with removed.
+    fn sampler_arg(t: T) -> Expr {
+        if t.ty.is_sampler() { t.e.into_peeled() } else { t.e }
+    }
+
+    /// `texelFetch(s, ivec2(u * r), 0)`: the texel under a coordinate given in `[0, 1]` times a
+    /// resolution, truncated as HLSL's `int3((u) * (r), 0)` is (E-D8).
+    fn texel_fetch_call(&mut self, mut targs: Vec<T>, span: Span) -> T {
+        let r = targs.pop().expect("three arguments");
+        let uv = targs.pop().expect("three arguments");
+        let s = Self::sampler_arg(targs.pop().expect("three arguments"));
+        let uv = self.coordinate(uv, 2).paren();
+        let r = self.coordinate(r, 2).paren();
+        let at = Expr::ctor("ivec2", vec![Expr::binary(Operator::Mul, uv, r)], span.clone());
+        T::new(Expr::call("texelFetch", vec![s, at, Expr::number("0", span.clone())], span), Ty::vec(4))
+    }
+
+    /// `textureLod(s, vec3(u, d), 0.0)`: a level-0 comparison of a depth texture, as
+    /// `SampleCmpLevelZero` is (E-D8). The result is the comparison's float.
+    fn compare_call(&mut self, mut targs: Vec<T>, span: Span) -> T {
+        let d = targs.pop().expect("three arguments");
+        let uv = targs.pop().expect("three arguments");
+        let s = Self::sampler_arg(targs.pop().expect("three arguments"));
+        let uv = self.coordinate(uv, 2);
+        let d = self.coerce(d, &FLOAT);
+        let at = Expr::ctor("vec3", vec![uv, d], span.clone());
+        T::new(Expr::call("textureLod", vec![s, at, Expr::number("0.0", span.clone())], span), FLOAT)
     }
 
     /// Sampling calls (R19, R34, R84, R105): the coordinate keeps its leading components.
@@ -541,7 +714,7 @@ impl Converter {
             _ => None,
         };
         let dims = match kind {
-            Some(SamplerKind::D2) | Some(SamplerKind::Comparison) | None => 2,
+            Some(SamplerKind::D2) | Some(SamplerKind::Shadow) | Some(SamplerKind::D2Ms) | None => 2,
             Some(_) => 3,
         };
         let mut out: Vec<Expr> = Vec::with_capacity(targs.len());

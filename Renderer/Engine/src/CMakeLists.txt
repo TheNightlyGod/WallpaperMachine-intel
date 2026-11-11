@@ -1,6 +1,5 @@
 find_package(OpenGL REQUIRED)
 find_package(Threads REQUIRED)
-find_package(Freetype REQUIRED)
 pkg_check_modules(LZ4 REQUIRED IMPORTED_TARGET liblz4)
 
 include(TestBigEndian)
@@ -15,7 +14,7 @@ if(APPLE)
           ACCELERATE:Accelerate AUDIO_TOOLBOX:AudioToolbox AUDIO_UNIT:AudioUnit
           CORE_AUDIO:CoreAudio CORE_TEXT:CoreText CORE_GRAPHICS:CoreGraphics
           CORE_MEDIA:CoreMedia CORE_VIDEO:CoreVideo FOUNDATION:Foundation
-          IOSURFACE:IOSurface METAL:Metal QUARTZ_CORE:QuartzCore
+          IOSURFACE:IOSurface METAL:Metal METAL_FX:MetalFX QUARTZ_CORE:QuartzCore
           VIDEOTOOLBOX:VideoToolbox)
     string(REPLACE ":" ";" entry_parts "${entry}")
     list(GET entry_parts 0 framework_stem)
@@ -56,16 +55,20 @@ add_subdirectory(Scene/MetalRender)
 
 # Runtime, scripting, shader bridge and scene-parsing sources of the engine library.
 set(WESCENE_CORE_SOURCES
-  Runtime/SceneRuntimeContext.cpp Runtime/SceneSettingResolver.cpp Runtime/ScriptedDynamicValue.cpp
-  Runtime/VirtualAssetRegistry.cpp
-  Shader/RustShaderBridge.cpp Shader/SceneMetalVariants.cpp
-  Text/SystemFontResolver.cpp Text/TextLayer.cpp
-  Scripting/ScriptEngine.cpp Scripting/ScriptModuleSyntax.cpp
+  Runtime/SceneRuntimeContext.cpp Runtime/SceneCameraControl.cpp Runtime/SceneGeneral.cpp Runtime/SceneParticleControl.cpp Runtime/SceneModelData.cpp Runtime/SceneSettingResolver.cpp Runtime/ScriptedDynamicValue.cpp
+  Runtime/VirtualAssetRegistry.cpp Runtime/SceneScriptStorage.cpp
+  Shader/FallbackProgram.cpp Shader/RustShaderBridge.cpp Shader/SceneMetalVariants.cpp
+  Text/SystemFontResolver.cpp Text/TextLayer.cpp Text/TextShaper.cpp Text/TextGlyphMesh.cpp
+  Scripting/ScriptEngine.cpp Scripting/ModelDataInput.cpp Scripting/ScriptModuleSyntax.cpp
   Project/ProjectManifest.cpp Project/ProjectProperties.cpp
   Scene/SceneLayerReference.cpp Scene/WPShaderValueUpdater.cpp
-  Scene/Parse/WPParticleParser.cpp Scene/Parse/WPShaderParser.cpp Scene/Parse/WPSceneParser.cpp
-  Scene/Parse/WPTexImageParser.cpp Scene/Parse/WPVideoCache.cpp Scene/Parse/WPSoundParser.cpp
-  Scene/Parse/WPMdlParser.cpp Scene/Parse/WPPuppet.cpp
+  Scene/Parse/WPParticleParser.cpp Scene/Parse/WPParticleRemap.cpp Scene/Parse/WPShaderParser.cpp Scene/Parse/WPSceneParser.cpp
+  Scene/Parse/WPTexImageParser.cpp Scene/Parse/WPTextureFormats.cpp Scene/Parse/WPVideoCache.cpp Scene/Parse/WPSoundParser.cpp
+  Scene/Parse/WPMdlParser.cpp Scene/Parse/WPPuppet.cpp Scene/Parse/WPPuppetPhysics.cpp Scene/Parse/WPPuppetIk.cpp
+  Scene/Parse/WPPuppetMorph.cpp
+  Scene/Parse/WPSceneForces.cpp
+  Runtime/GlobalCameraPath.cpp
+  Runtime/SceneHierarchy.cpp
   Scene/Parse/wpscene/WPImageObject.cpp Scene/Parse/wpscene/WPParticleObject.cpp
   Scene/Parse/wpscene/WPMaterial.cpp Scene/Parse/wpscene/WPScene.cpp
   Scene/Parse/wpscene/WPLightObject.cpp)
@@ -88,6 +91,8 @@ add_library(
   Video/VideoTextureSourceFactory.cpp
   ${PLATFORM_APPLE_SOURCES}
   SceneSourceResolver.cpp
+  Scene/SceneProjectLoading.cpp
+  Scene/SceneCapabilityProbe.cpp
   Scene/SceneWallpaper.cpp)
 
 add_library(wescene::renderer ALIAS ${PROJECT_NAME})
@@ -136,7 +141,7 @@ target_link_libraries(
   ${PROJECT_NAME}
   PUBLIC wpUtils
   PRIVATE ${InteralLib} ${WESCENE_MEDIA_LIBS} wmSurface nlohmann_json::nlohmann_json quickjs::quickjs PkgConfig::LZ4
-          Freetype::Freetype
+          Freetype::Freetype harfbuzz msdfgen
           ${CMAKE_THREAD_LIBS_INIT} ${CMAKE_DL_LIBS})
 
 if(APPLE)

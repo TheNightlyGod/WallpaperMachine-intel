@@ -25,6 +25,9 @@ pub enum LegalizeError {
     CrossStage(Diagnostic),
     /// A program-level conflict: "invalid request".
     Request(String),
+    /// The fragment stage's varyings exceed the inter-stage component budget (R66): "invalid
+    /// request", kept apart so the pipeline can retry the program once with `GLSL` defined.
+    ComponentBudget(String),
     /// A uniform member that cannot be declared: "invalid request" with the contract's wording.
     Uniform(UniformError),
     /// The dialect front end refused a stage.
@@ -56,7 +59,7 @@ impl LegalizeError {
     pub fn message(&self) -> String {
         match self {
             LegalizeError::StageLocal(d) | LegalizeError::CrossStage(d) => d.message.clone(),
-            LegalizeError::Request(m) => m.clone(),
+            LegalizeError::Request(m) | LegalizeError::ComponentBudget(m) => m.clone(),
             LegalizeError::Uniform(e) => e.to_string(),
             LegalizeError::Front(list) => list.first().map(|d| d.message.clone()).unwrap_or_default(),
         }
@@ -67,13 +70,18 @@ impl LegalizeError {
         match self {
             LegalizeError::StageLocal(d) | LegalizeError::CrossStage(d) => vec![d.clone()],
             LegalizeError::Front(list) => list.clone(),
-            LegalizeError::Request(_) | LegalizeError::Uniform(_) => Vec::new(),
+            LegalizeError::Request(_) | LegalizeError::ComponentBudget(_) | LegalizeError::Uniform(_) => Vec::new(),
         }
     }
 
     /// True for the "invalid request" class.
     pub fn is_invalid_request(&self) -> bool {
-        matches!(self, LegalizeError::Request(_) | LegalizeError::Uniform(_))
+        matches!(self, LegalizeError::Request(_) | LegalizeError::ComponentBudget(_) | LegalizeError::Uniform(_))
+    }
+
+    /// True when the fragment stage's varyings exceed the inter-stage component budget (R66).
+    pub fn is_over_component_budget(&self) -> bool {
+        matches!(self, LegalizeError::ComponentBudget(_))
     }
 
     /// True when the failure is a cross-stage interface error.
@@ -93,7 +101,9 @@ impl std::error::Error for LegalizeError {}
 impl From<LegalizeError> for ShaderError {
     fn from(e: LegalizeError) -> ShaderError {
         match e {
-            LegalizeError::Request(m) => ShaderError::Request(RequestError::Program(m)),
+            LegalizeError::Request(m) | LegalizeError::ComponentBudget(m) => {
+                ShaderError::Request(RequestError::Program(m))
+            }
             LegalizeError::Uniform(u) => ShaderError::Uniform(u),
             LegalizeError::StageLocal(d) | LegalizeError::CrossStage(d) => {
                 ShaderError::Source { shader_name: None, failures: vec![FailedDiagnostic::without_source(d)] }

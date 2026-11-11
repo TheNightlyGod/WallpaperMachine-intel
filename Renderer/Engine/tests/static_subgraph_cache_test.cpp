@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -491,4 +493,495 @@ TEST(SceneDemandMapping, GeometryRewrittenOnAnEventIsNotAReasonToKeepDrawing)
                 << "target " << key << " was cached although its geometry may have been rewritten";
         }
     }
+}
+
+TEST(StaticSubgraphCache, ADelayedReaderCatchesUpAfterOneSourceChange)
+{
+    auto reader = Pass("reader");
+    reader.previous_inputs = { "source" };
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector { reader, Pass("source") });
+    PinAllCacheable(cache);
+    RunFrame(cache, { kStable, kStable });
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable }), (std::vector<uint8_t> { 0, 1 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable }), (std::vector<uint8_t> { 1, 1 }));
+
+    const StaticPassSample changed { .hash = 99 };
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 1, 0 }));
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 0, 1 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 1, 1 }));
+}
+
+TEST(StaticSubgraphCache, DelayedInputsRetainSignaturesFromUnpinnedSources)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector { Pass("reader", { "source" }), Pass("source") });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1 });
+    cache.SetTargetPinned(0, true, 1024);
+    RunFrame(cache, { kStable, kStable });
+    RunFrame(cache, { kStable, kStable });
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable }), (std::vector<uint8_t> { 1, 0 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+
+    const StaticPassSample changed { .hash = 99 };
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 1, 0 }));
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 0, 0 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+}
+
+TEST(StaticSubgraphCache, ChangingExecutionOrderChangesReadTimingWithoutDroppingPins)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector { Pass("reader", { "source" }), Pass("source") });
+    PinAllCacheable(cache);
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1 });
+    RunFrame(cache, { kStable, kStable });
+    RunFrame(cache, { kStable, kStable });
+    const auto pinned = cache.stats().pinned_bytes;
+
+    cache.SetExecutionOrder(std::vector<std::size_t> { 1, 0 });
+    const StaticPassSample changed { .hash = 99 };
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 0, 0 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(cache.stats().pinned_bytes, pinned);
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 1, 1 }));
+
+    cache.SetPreviousFrameInputs(std::vector<wallpaper::render::StaticPreviousFrameInput> {
+        { 0, "source" },
+    });
+    EXPECT_EQ(RunFrame(cache, { kStable, changed }), (std::vector<uint8_t> { 0, 1 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+}
+
+TEST(StaticSubgraphCache, OneTargetCanConsumeCurrentAndPreviousSourceVersions)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("reader", { "source" }), Pass("source"), Pass("reader", { "source" }),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2 });
+    PinAllCacheable(cache);
+    RunFrame(cache, { kStable, kStable, kStable });
+    RunFrame(cache, { kStable, kStable, kStable });
+    const StaticPassSample changed { .hash = 99 };
+    EXPECT_EQ(RunFrame(cache, { kStable, changed, kStable }),
+              (std::vector<uint8_t> { 0, 0, 0 }));
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, changed, kStable }),
+              (std::vector<uint8_t> { 0, 1, 0 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, changed, kStable }),
+              (std::vector<uint8_t> { 1, 1, 1 }));
+}
+
+TEST(StaticSubgraphCache, ADelayedEdgeDoesNotMakeAFeedbackCycleCacheable)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector { Pass("a", { "b" }), Pass("b", { "a" }) });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1 });
+    EXPECT_TRUE(cache.HasFeedbackCycles());
+    for (std::size_t i = 0; i < cache.TargetCount(); ++i) {
+        EXPECT_FALSE(cache.TargetCacheable(i));
+        EXPECT_TRUE(cache.TargetDynamicReasons(i) & DynamicReason::Feedback);
+    }
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable }), (std::vector<uint8_t> { 0, 0 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+}
+
+TEST(StaticSubgraphCache, DelayedEventGeometryKeepsOnlyItsCatchUpFramePending)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("reader", { "source" }),
+        Pass("source", {}, static_cast<uint32_t>(DynamicReason::EventMesh)),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1 });
+    EXPECT_TRUE(cache.PassSampled(0));
+    EXPECT_TRUE(cache.PassSampled(1));
+    EXPECT_FALSE(cache.TargetCacheable(0));
+    EXPECT_FALSE(cache.TargetCacheable(1));
+    RunFrame(cache, { kStable, kStable });
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    RunFrame(cache, { kStable, kStable });
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    RunFrame(cache, { kStable, { .hash = 99 } });
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    RunFrame(cache, { kStable, { .hash = 99 } });
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+}
+
+TEST(StaticSubgraphCache, ClearingRetainedPixelsRestartsDelayedInitialization)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector { Pass("reader", { "source" }), Pass("source") });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1 });
+    PinAllCacheable(cache);
+    RunFrame(cache, { kStable, kStable });
+    RunFrame(cache, { kStable, kStable });
+    cache.InvalidateAll();
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable }), (std::vector<uint8_t> { 0, 0 }));
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable }), (std::vector<uint8_t> { 0, 1 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+}
+
+TEST(StaticSubgraphCache, ADelayedChainRequestsOnlyItsRemainingPropagationFrames)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("last", { "middle" }), Pass("middle", { "source" }), Pass("source"),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2 });
+    PinAllCacheable(cache);
+    EXPECT_TRUE(cache.HasDelayedInputs());
+    EXPECT_FALSE(cache.HasFeedbackCycles());
+    EXPECT_TRUE(cache.TargetReadFromPreviousFrame(1));
+    EXPECT_TRUE(cache.TargetReadFromPreviousFrame(2));
+    for (int frame = 0; frame < 3; ++frame) RunFrame(cache, { kStable, kStable, kStable });
+    ASSERT_FALSE(cache.HasPendingDelayedInputs());
+
+    const StaticPassSample changed { .hash = 99 };
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable, changed }),
+              (std::vector<uint8_t> { 1, 1, 0 }));
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable, changed }),
+              (std::vector<uint8_t> { 1, 0, 1 }));
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable, changed }),
+              (std::vector<uint8_t> { 0, 1, 1 }));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    EXPECT_EQ(RunFrame(cache, { kStable, kStable, changed }),
+              (std::vector<uint8_t> { 1, 1, 1 }));
+}
+
+TEST(StaticSubgraphCache, CurrentFrameSnapshotCyclesDoNotKeepTheIdleClockRunning)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("scene"), Pass("snapshot", { "scene" }),
+        Pass("effect", { "snapshot" }), Pass("scene", { "effect" }),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3 });
+    EXPECT_FALSE(cache.HasDelayedInputs());
+    EXPECT_FALSE(cache.HasFeedbackCycles());
+    for (std::size_t i = 0; i < cache.TargetCount(); ++i)
+        EXPECT_FALSE(cache.TargetCacheable(i));
+
+    cache.SetExecutionOrder(std::vector<std::size_t> { 1, 2, 0, 3 });
+    EXPECT_TRUE(cache.HasDelayedInputs());
+    EXPECT_TRUE(cache.HasFeedbackCycles());
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3 });
+    EXPECT_FALSE(cache.HasFeedbackCycles());
+}
+
+TEST(StaticSubgraphCache, ADelayedReaderOfACurrentFrameCycleIsNotItselfFeedback)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("reader", { "effect" }), Pass("scene"),
+        Pass("snapshot", { "scene" }), Pass("effect", { "snapshot" }),
+        Pass("scene", { "effect" }),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3, 4 });
+    EXPECT_TRUE(cache.HasDelayedInputs());
+    EXPECT_FALSE(cache.HasFeedbackCycles());
+}
+
+TEST(StaticSubgraphCache, ADelayedReaderOfASnapshotCycleCatchesUpAfterAnEvent)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("reader", { "effect" }), Pass("scene"),
+        Pass("snapshot", { "scene" }), Pass("effect", { "snapshot" }),
+        Pass("scene", { "effect" }),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3, 4 });
+    ASSERT_FALSE(cache.HasFeedbackCycles());
+    for (std::size_t i = 0; i < 5; ++i) EXPECT_TRUE(cache.PassSampled(i));
+    RunFrame(cache, { kStable, kStable, kStable, kStable, kStable });
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    RunFrame(cache, { kStable, kStable, kStable, kStable, kStable });
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+
+    const StaticPassSample changed { .hash = 99 };
+    RunFrame(cache, { kStable, changed, kStable, kStable, kStable });
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    RunFrame(cache, { kStable, changed, kStable, kStable, kStable });
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    EXPECT_FALSE(cache.HasFeedbackCycles());
+}
+
+TEST(StaticSubgraphCache, ACurrentFrameCycleWithoutDelayedReadersDoesNotSampleWriters)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("scene"), Pass("snapshot", { "scene" }),
+        Pass("effect", { "snapshot" }), Pass("scene", { "effect" }),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3 });
+    for (std::size_t i = 0; i < 4; ++i) EXPECT_FALSE(cache.PassSampled(i));
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+    EXPECT_FALSE(cache.HasFeedbackCycles());
+}
+
+TEST(StaticSubgraphCache, ReorderedCopyWritersInvalidateTheirSharedTarget)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("red"), Pass("green"),
+        Pass("output", { "red" }), Pass("output", { "green" }),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3 });
+    PinAllCacheable(cache);
+    const std::vector<StaticPassSample> samples {
+        { .hash = 17 }, { .hash = 99 }, {}, {},
+    };
+    RunFrame(cache, samples);
+    ASSERT_EQ(RunFrame(cache, samples), (std::vector<uint8_t> { 1, 1, 1, 1 }));
+
+    // Both copies have identical per-pass samples and the same union of input
+    // targets. Only which source is copied last changes the retained picture.
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 3, 2 });
+    EXPECT_EQ(RunFrame(cache, samples), (std::vector<uint8_t> { 1, 1, 0, 0 }));
+    EXPECT_EQ(RunFrame(cache, samples), (std::vector<uint8_t> { 1, 1, 1, 1 }));
+}
+
+TEST(StaticSubgraphCache, ReorderedCopiesInsideASnapshotCycleRequestDelayedCatchUp)
+{
+    StaticSubgraphCache cache;
+    cache.Compile(std::vector {
+        Pass("reader", { "output" }), Pass("output"),
+        Pass("red", { "output" }), Pass("green"),
+        Pass("output", { "red" }), Pass("output", { "green" }),
+    });
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3, 4, 5 });
+    const std::vector<StaticPassSample> samples {
+        {}, {}, { .hash = 17 }, { .hash = 99 }, {}, {},
+    };
+    RunFrame(cache, samples);
+    RunFrame(cache, samples);
+    ASSERT_FALSE(cache.HasPendingDelayedInputs());
+    ASSERT_FALSE(cache.HasFeedbackCycles());
+
+    cache.SetExecutionOrder(std::vector<std::size_t> { 0, 1, 2, 3, 5, 4 });
+    RunFrame(cache, samples);
+    EXPECT_TRUE(cache.HasPendingDelayedInputs());
+    RunFrame(cache, samples);
+    EXPECT_FALSE(cache.HasPendingDelayedInputs());
+}
+
+// ---- the sample hash
+//
+// Only equality of two samples is ever asked, so what matters is that inputs
+// that differ give samples that differ, and that equal inputs give equal ones.
+
+TEST(StaticSampleHash, EveryByteOfARunCountsWhereverItIs)
+{
+    using wallpaper::render::StaticHashBytes;
+    // A matrix of doubles, as a node transform or a camera is folded.
+    std::array<unsigned char, 128> bytes {};
+    for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<unsigned char>(i * 37 + 11);
+    const uint64_t seed = 0xcbf29ce484222325ULL;
+    const auto     base = StaticHashBytes(seed, bytes.data(), bytes.size());
+    EXPECT_EQ(StaticHashBytes(seed, bytes.data(), bytes.size()), base);
+    for (std::size_t at = 0; at < bytes.size(); ++at) {
+        for (const unsigned char flip : { 0x01, 0x80, 0xFF }) {
+            auto changed = bytes;
+            changed[at] ^= flip;
+            EXPECT_NE(StaticHashBytes(seed, changed.data(), changed.size()), base)
+                << "byte " << at << " changed by " << int(flip) << " left the sample unchanged";
+        }
+    }
+    // Every length, so a tail of fewer than eight bytes counts as well.
+    for (std::size_t size = 1; size <= 17; ++size) {
+        auto changed = bytes;
+        changed[size - 1] ^= 0x10;
+        EXPECT_NE(StaticHashBytes(seed, changed.data(), size), StaticHashBytes(seed, bytes.data(), size))
+            << "the last byte of a run of " << size << " did not count";
+    }
+}
+
+TEST(StaticSampleHash, ARunIsNotAShorterRunNorTheSameBytesSplitElsewhere)
+{
+    using wallpaper::render::StaticHashBytes;
+    const uint64_t      seed = 0xcbf29ce484222325ULL;
+    const unsigned char zeros[9] {};
+    // A zero-padded tail is not a shorter run.
+    for (std::size_t size = 0; size < 9; ++size) {
+        EXPECT_NE(StaticHashBytes(seed, zeros, size), StaticHashBytes(seed, zeros, size + 1))
+            << size << " zero bytes hash like " << size + 1;
+    }
+    // A material constant's name and value are folded one after the other: a
+    // boundary that moves is a different pair.
+    const std::string text = "g_Strength0123";
+    for (std::size_t split = 1; split + 1 < text.size(); ++split) {
+        const auto first = StaticHashBytes(StaticHashBytes(seed, text.data(), split),
+                                           text.data() + split, text.size() - split);
+        const auto other = StaticHashBytes(StaticHashBytes(seed, text.data(), split + 1),
+                                           text.data() + split + 1, text.size() - split - 1);
+        EXPECT_NE(first, other) << "splitting at " << split << " or " << split + 1 << " collided";
+    }
+}
+
+TEST(StaticSampleHash, ValuesFoldedInAnotherOrderAreAnotherSample)
+{
+    using wallpaper::render::StaticHashMix;
+    const uint64_t                seed = 0xcbf29ce484222325ULL;
+    const std::array<uint64_t, 6> values { 0, 1, 2, 640, 0x3FF0000000000000ULL, ~0ULL };
+    for (const auto a : values) {
+        for (const auto b : values) {
+            if (a == b) continue;
+            EXPECT_NE(StaticHashMix(StaticHashMix(seed, a), b), StaticHashMix(StaticHashMix(seed, b), a))
+                << a << " then " << b << " folded like " << b << " then " << a;
+            EXPECT_NE(StaticHashMix(seed, a), StaticHashMix(seed, b));
+        }
+    }
+}
+
+namespace
+{
+
+/// What one pass of the random graphs below reads, kept whole: two values and a
+/// matrix, the shape of a pass sample's real inputs.
+struct PassInputs
+{
+    uint64_t               first { 0 };
+    uint64_t               second { 0 };
+    std::array<double, 16> matrix {};
+    bool                   visible { true };
+
+    std::string Exact() const
+    {
+        std::string out(reinterpret_cast<const char*>(&first), sizeof(first));
+        out.append(reinterpret_cast<const char*>(&second), sizeof(second));
+        out.append(reinterpret_cast<const char*>(matrix.data()), sizeof(double) * matrix.size());
+        out.push_back(visible ? '1' : '0');
+        return out;
+    }
+
+    StaticPassSample Sample() const
+    {
+        using wallpaper::render::StaticHashBytes;
+        using wallpaper::render::StaticHashMix;
+        uint64_t hash = 0xcbf29ce484222325ULL;
+        hash          = StaticHashMix(hash, first);
+        hash          = StaticHashMix(hash, second);
+        hash          = StaticHashBytes(hash, matrix.data(), sizeof(double) * matrix.size());
+        return { .hash = hash, .visible = visible };
+    }
+};
+
+} // namespace
+
+TEST(StaticSampleHash, ReuseDecisionsAreThoseOfComparingEveryInputExactly)
+{
+    // The hash decides nothing of its own: a target is reused exactly when every
+    // input of every pass that writes it, and of every target it reads, is what
+    // it was last frame. Random graphs and random edits -- one bit, one value,
+    // two values swapped, a matrix entry negated, a change undone the next frame
+    // -- are planned through the cache and against an oracle that compares the
+    // inputs themselves.
+    uint64_t   random_state = 0x9E3779B97F4A7C15ULL;
+    const auto random       = [&random_state](uint64_t bound) {
+        random_state ^= random_state << 13;
+        random_state ^= random_state >> 7;
+        random_state ^= random_state << 17;
+        return random_state % bound;
+    };
+    std::size_t reused = 0;
+    std::size_t drawn  = 0;
+    for (int graph = 0; graph < 20; ++graph) {
+        const std::size_t target_count = 4 + random(10);
+        const std::size_t pass_count   = target_count + random(target_count);
+        // Every target has a writer; a pass reads only targets before its own,
+        // so the graph has no cycle.
+        std::vector<std::size_t>              writes(pass_count);
+        std::vector<std::vector<std::size_t>> reads(pass_count);
+        std::vector<StaticPassDesc>           passes;
+        for (std::size_t p = 0; p < pass_count; ++p) {
+            writes[p] = p < target_count ? p : random(target_count);
+            std::vector<std::string> inputs;
+            for (std::size_t t = 0; t < writes[p]; ++t) {
+                if (random(3) != 0) continue;
+                reads[p].push_back(t);
+                inputs.push_back("t" + std::to_string(t));
+            }
+            passes.push_back(Pass("t" + std::to_string(writes[p]), inputs));
+        }
+        // Passes in the order of the targets they write, as the renderer's list is.
+        std::vector<std::size_t> order(pass_count);
+        for (std::size_t p = 0; p < pass_count; ++p) order[p] = p;
+        std::stable_sort(order.begin(), order.end(),
+                         [&](std::size_t a, std::size_t b) { return writes[a] < writes[b]; });
+        StaticSubgraphCache cache;
+        cache.Compile(passes);
+        cache.SetExecutionOrder(order);
+        PinAllCacheable(cache);
+        ASSERT_EQ(cache.stats().cacheable_targets, target_count);
+
+        std::vector<PassInputs> inputs(pass_count);
+        for (auto& pass : inputs) {
+            pass.first  = random(1000);
+            pass.second = random(4);
+            for (auto& value : pass.matrix) value = double(random(9)) - 4.0;
+        }
+        std::vector<std::string> last_exact(target_count);
+        bool                     first_frame = true;
+        std::vector<PassInputs>  undo;
+        for (int frame = 0; frame < 60; ++frame) {
+            // Edits, some of them undone on the next frame.
+            if (! undo.empty()) {
+                inputs = undo;
+                undo.clear();
+            }
+            const auto edits = random(3);
+            if (edits != 0 && random(4) == 0) undo = inputs;
+            for (uint64_t e = 0; e < edits; ++e) {
+                auto& pass = inputs[random(pass_count)];
+                switch (random(6)) {
+                case 0: pass.first += 1; break;
+                case 1: std::swap(pass.first, pass.second); break;
+                case 2: pass.matrix[random(16)] = -pass.matrix[random(16)]; break;
+                case 3: {
+                    auto* bytes = reinterpret_cast<unsigned char*>(pass.matrix.data());
+                    bytes[random(sizeof(double) * 16)] ^= static_cast<unsigned char>(1u << random(8));
+                    break;
+                }
+                case 4: pass.visible = ! pass.visible; break;
+                default: break; // written again with what it holds
+                }
+            }
+
+            // The oracle: each target's inputs in full, its sources' included.
+            std::vector<std::string> exact(target_count);
+            for (std::size_t t = 0; t < target_count; ++t) {
+                for (const auto p : order) {
+                    if (writes[p] != t) continue;
+                    exact[t] += inputs[p].Exact();
+                    for (const auto source : reads[p]) exact[t] += "<" + exact[source] + ">";
+                }
+            }
+            std::vector<StaticPassSample> samples;
+            for (const auto& pass : inputs) samples.push_back(pass.Sample());
+            const auto skip = RunFrame(cache, samples);
+            for (std::size_t p = 0; p < pass_count; ++p) {
+                const auto t        = writes[p];
+                const bool expected = ! first_frame && exact[t] == last_exact[t];
+                ASSERT_EQ(skip[p] != 0, expected)
+                    << "graph " << graph << ", frame " << frame << ", pass " << p << " (target t" << t
+                    << ")";
+                (expected ? reused : drawn) += 1;
+            }
+            last_exact  = exact;
+            first_frame = false;
+        }
+    }
+    // Both answers occurred, so neither half of the comparison is vacuous.
+    EXPECT_GT(reused, 1000u);
+    EXPECT_GT(drawn, 1000u);
 }

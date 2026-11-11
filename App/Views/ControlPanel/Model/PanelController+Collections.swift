@@ -72,9 +72,8 @@ extension PanelController {
   /// none empty (an empty batch is fine); with `requireInstalled`, one id that left the library
   /// refuses the whole batch.
   private func organizationIDs(_ ids: [String], requireInstalled: Bool) throws -> [String] {
-    guard ids.count <= 4096, ids.allSatisfy({ !$0.isEmpty && $0.count <= 65_536 }) else {
-      throw InvalidControlValue()
-    }
+    guard ids.count <= Self.batchLimit else { throw Self.batchTooLarge() }
+    guard ids.allSatisfy({ !$0.isEmpty && $0.count <= 65_536 }) else { throw InvalidControlValue() }
     if requireInstalled {
       let installed = Set(store.librarySnapshot.wallpapers.map(\.id))
       guard ids.allSatisfy(installed.contains) else {

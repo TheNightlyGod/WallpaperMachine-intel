@@ -73,7 +73,7 @@ final class WorkshopInspectorTests: MediaPanelTestCase {
     let id = "222"
     let keys = [
       WorkshopInspectorButton.download, .downloadAgain, .downloadAndApply, .resume, .cancel,
-      .removeFromQueue, .openCollection,
+      .removeFromQueue, .openCollection, .moveToTrash,
     ].map { $0.actionKey(forItem: id) }
     XCTAssertTrue(keys.allSatisfy { $0 != nil })
     XCTAssertEqual(keys[0], keys[2], "Download and its apply variant are one request: either holds both")
@@ -108,6 +108,13 @@ final class WorkshopInspectorTests: MediaPanelTestCase {
     let installed = download(item(), installed: true)
     XCTAssertTrue(installed.isInstalled)
     XCTAssertFalse(installed.offersDownloadAndApply, "never for an installed wallpaper")
+    XCTAssertEqual(WorkshopInspectorButton.buttons(for: installed), [.moveToTrash])
+    XCTAssertEqual(
+      WorkshopInspectorButton.buttons(for: download(item(), installed: true, canApply: false)),
+      [.moveToTrash], "removal does not require a display that can apply the wallpaper")
+    XCTAssertEqual(
+      WorkshopInspectorButton.buttons(for: download(item(collection: 3), installed: true)),
+      [.openCollection], "a collection never offers to delete its wallpapers")
   }
 
   // MARK: Tiles
@@ -128,9 +135,18 @@ final class WorkshopInspectorTests: MediaPanelTestCase {
     XCTAssertEqual(
       WorkshopTileCell.marks(of: tile(installed: true, favorite: true, tags: ["Approved"])),
       [.installed, .approved, .favorite], "the check, the trophy, then the heart")
+    XCTAssertEqual(WorkshopTileCell.marks(of: tile(tags: ["Scene", "Preset"])), [.preset])
+    var subscribed = tile()
+    subscribed.isSubscribed = true
+    XCTAssertEqual(WorkshopTileCell.marks(of: subscribed), [.subscribed])
+    XCTAssertEqual(
+      WorkshopTileCell.marks(of: tile(installed: true, tags: ["Preset", "Approved"])),
+      [.installed, .approved, .preset], "a preset is marked after what it shares with any wallpaper")
     XCTAssertEqual(WorkshopTileCell.Mark.installed.label, "In your library")
     XCTAssertEqual(WorkshopTileCell.Mark.approved.label, "Approved by Wallpaper Engine")
     XCTAssertEqual(WorkshopTileCell.Mark.favorite.label, "Favorite")
+    XCTAssertEqual(WorkshopTileCell.Mark.preset.label, "Preset")
+    XCTAssertEqual(WorkshopTileCell.Mark.subscribed.label, "Subscribed on Steam")
   }
 
   func testVoiceOversActionForATileIsNamedForWhatTheDoubleClickDoes() throws {
@@ -160,7 +176,7 @@ final class WorkshopInspectorTests: MediaPanelTestCase {
 
   func testEveryGlyphOfARingHasItsOwnSymbol() {
     let glyphs: [TileDownloadState.Glyph] = [.play, .shield, .download, .refresh]
-    let symbols = glyphs.map(WorkshopTileRing.symbol(for:))
+    let symbols = glyphs.map(\.systemImage)
     XCTAssertEqual(Set(symbols).count, glyphs.count)
     XCTAssertTrue(symbols.allSatisfy { !$0.isEmpty })
   }

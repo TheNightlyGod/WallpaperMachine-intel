@@ -20,6 +20,22 @@ final class DesktopActionsTests: XCTestCase {
     XCTAssertEqual(log.revealed.count, revealed + 1, "A reveal is recorded, never shown in Finder")
   }
 
+  /// Hiding the desktop icons writes Finder's preferences and restarts Finder; from a test it does
+  /// neither.
+  func testFindersDesktopIconsChangeOnlyTheStandInFinder() throws {
+    let log = DesktopActionLog.shared
+    let restarts = log.finderRestarts
+    defer { log.finderDesktopPreference = nil }
+    let icons = FinderDesktopIcons()
+    XCTAssertTrue(icons.areShown)
+
+    XCTAssertTrue(try icons.setShown(false))
+
+    XCTAssertEqual(log.finderDesktopWrites.last, false, "The write is recorded, never sent to Finder")
+    XCTAssertEqual(log.finderRestarts, restarts + 1, "and so is the restart")
+    XCTAssertFalse(icons.areShown)
+  }
+
   /// The update store opens the releases page and reveals downloads through its live workspace
   /// unless a test injects one; even then it must not reach the browser.
   func testTheUpdaterWithItsLiveWorkspaceOpensNothingFromATest() {

@@ -81,11 +81,14 @@ wallpaper::SceneNode* RootChild(wallpaper::Scene& scene, std::string_view name);
 /// The first texture key of material slot 0 of the node's mesh ("" when there is none).
 std::string CardTexture(wallpaper::SceneNode& node);
 
+/// How many glyph quads the layer's mono/MSDF glyph submesh draws.
+std::size_t GlyphQuads(wallpaper::SceneNode& node);
+
 /// Pumps the text worker until none of `names` is dirty; false if that never happens.
 bool PumpUntilClean(wallpaper::SceneRuntimeContext& runtime, std::initializer_list<std::string> names);
 bool PumpUntilClean(wallpaper::SceneRuntimeContext& runtime, const std::vector<std::string>& names);
 
-/// Counts texels of an RGBA8 mip with alpha above zero.
+/// Counts texels of an atlas mip with coverage above zero (R8 coverage, or RGBA8 alpha).
 std::size_t InkTexels(const wallpaper::Image& image);
 
 } // namespace we_test

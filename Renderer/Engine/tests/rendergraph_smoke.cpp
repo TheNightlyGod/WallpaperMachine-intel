@@ -116,7 +116,7 @@ uniform sampler2D g_Texture4; // {"hidden":true,"default":"_rt_FullFrameBuffer"}
     REQUIRE(blend_output != std::string::npos);
     blend_frag.insert(blend_output, R"(
 #if BLENDMODE
-  c.rgb *= texture(g_Texture4, v_ContractUV).rgb;
+  c.rgb *= texSample2D(g_Texture4, v_ContractUV).rgb;
 #endif
 )");
     asset(files, "/puppet_image.json",
@@ -172,7 +172,7 @@ uniform sampler2D g_Texture4; // {"hidden":true,"default":"_rt_FullFrameBuffer"}
     REQUIRE(blend_output != std::string::npos);
     frag.insert(blend_output, R"(
 #if BLENDMODE
-  c.rgb += texture(g_Texture4, v_ContractUV).rgb;
+  c.rgb += texSample2D(g_Texture4, v_ContractUV).rgb;
 #endif
 )");
     asset(files, "/models/util/solidlayer.json", R"({"material":"materials/util/solidlayer.json"})");
@@ -248,8 +248,66 @@ TEST(RenderGraph, aHiddenFirstWriterLeftOutKeepsTheSceneOutputsLoadAndClear) {
             const auto& first = observed.draw("first_drawn_writer");
             REQUIRE(first.output == SpecTex_Default);
             EXPECT_EQ(first.clear_on_first_use, clear);
-            EXPECT_EQ(first.preserve_target_contents, ! clear && hidden_first);
+            EXPECT_EQ(first.preserve_target_contents, ! clear);
         }
+    }
+}
+
+TEST(RenderGraph, aChainClosedOnAnEventDrivenCardKeepsTheClosingPassMaterial) {
+    // A text layer's card is laid out again on events, so its chain closes on a
+    // mesh with that update driver. The closing pass must still draw with the
+    // material its script, property or timeline writes, not with a copy taken
+    // when the chain was laid out (an opacity effect whose script fades the
+    // layer in would otherwise keep the value it had at that moment).
+    SceneNode owner;
+    auto layer = std::make_shared<SceneImageEffectLayer>(&owner, 16, 16, "_rt_ping_a", "_rt_ping_b");
+    layer->SetFinalMeshDynamic(wallpaper::MeshUpdate::OnEvent);
+
+    SceneMaterial authored;
+    authored.name = "effects/opacity";
+    authored.customShader.constValues["g_UserAlpha"] = wallpaper::ShaderValue(1.0f);
+    auto mesh = std::make_shared<SceneMesh>();
+    mesh->AddMaterial(std::move(authored));
+    auto pass = std::make_shared<SceneNode>();
+    pass->AddMesh(mesh);
+    const std::shared_ptr<SceneMaterial> driven = mesh->MaterialSlotPtr(0);
+
+    auto effect = std::make_shared<SceneImageEffect>();
+    effect->nodes.push_back({ std::string(SpecTex_Default), pass });
+    layer->AddEffect(effect);
+    layer->ResolveEffect(SceneMesh {}, "");
+
+    SceneNode* closing = layer->ResolvedFinalRenderNode();
+    ASSERT_EQ(closing, pass.get());
+    ASSERT_NE(closing->Mesh(), nullptr);
+    EXPECT_EQ(closing->Mesh()->UpdateDriver(), wallpaper::MeshUpdate::OnEvent);
+    EXPECT_EQ(closing->Mesh()->MaterialSlotPtr(0), driven);
+
+    driven->customShader.constValues["g_UserAlpha"] = wallpaper::ShaderValue(0.0f);
+    const auto* drawn = closing->Mesh()->Material();
+    ASSERT_NE(drawn, nullptr);
+    EXPECT_EQ(drawn->customShader.constValues.at("g_UserAlpha")[0], 0.0f);
+}
+
+TEST(RenderGraph, anOrdinarySceneHasNoDepthOnlyTiledOrMirroredDraw) {
+    // The shadow-atlas and mirrored-view draw options cost nothing when no light casts a
+    // shadow and nothing is reflected: no ordinary draw asks for them.
+    Scene scene;
+    defaults(scene);
+    scene.sceneGraph->AppendChild(node("first"));
+    scene.sceneGraph->AppendChild(node("second"));
+    const Observation observed(scene);
+    REQUIRE(! observed.steps.empty());
+    for (const auto& step : observed.steps) {
+        if (step.draw == nullptr) continue;
+        const auto& d = step.draw->desc();
+        EXPECT_FALSE(d.depth_only);
+        EXPECT_FALSE(d.flip_winding);
+        EXPECT_FALSE(d.clear_depth_on_first_use);
+        EXPECT_FALSE(d.depth_override.has_value());
+        EXPECT_EQ(d.depth_bias_slope, 0.0f);
+        EXPECT_EQ(d.depth_bias_clamp, 0.0f);
+        EXPECT_EQ(d.viewport_uv, (std::array<float, 4> { 0.0f, 0.0f, 1.0f, 1.0f }));
     }
 }
 

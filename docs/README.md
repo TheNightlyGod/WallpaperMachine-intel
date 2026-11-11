@@ -9,9 +9,11 @@ live under `testing/`.
 
 | Document | Purpose |
 |---|---|
-| [../README.md](../README.md) | What the app is, feature tour, FAQ, build quickstart, sponsor list; follows the website |
+| [../README.md](../README.md) | What the app is, feature tour, FAQ, build quickstart, Priority Support member list; follows the website |
 | [../README.zh-CN.md](../README.zh-CN.md) | README.md in 简体中文; changes with it, wording follows the app's zh-Hans catalog and the website's /zh/ pages |
-| [../SPONSORS.md](../SPONSORS.md) | Supporter pricing and benefits for users; follows the website's pricing page, policy in LICENSING.md |
+| [../README.pt-BR.md](../README.pt-BR.md) | README.md in Português; changes with it, wording follows the app's pt-BR catalog |
+| [../README.ko.md](../README.ko.md) | README.md in 한국어; changes with it, wording follows the app's ko catalog |
+| [../SPONSORS.md](../SPONSORS.md) | Sponsoring MMFoundation on Open Collective, and Priority Support (a paid service) for users; follows the website's pricing page, policy in LICENSING.md |
 | [../CONTRIBUTING.md](../CONTRIBUTING.md) | Contributor working agreement and day-to-day loop |
 | [../CODE_OF_CONDUCT.md](../CODE_OF_CONDUCT.md) | Conduct expected in issues, discussions, pull requests and reviews; how it is enforced |
 | [../SECURITY.md](../SECURITY.md) | Private vulnerability reporting, supported versions, scope, checking a download |
@@ -36,7 +38,7 @@ live under `testing/`.
 | [../CHANGELOG.md](../CHANGELOG.md) | Published versions, newest first; written by `scripts/release_notes.py` |
 | [development-tools.md](development-tools.md) | Optional diagnostic tools (Peekaboo, Instruments, `xctrace`), the safe setup check, and when a desktop run needs authorization |
 | [../AGENTS.md](../AGENTS.md) / [../CLAUDE.md](../CLAUDE.md) | Agent rules; CLAUDE.md is a symlink, not a separate policy |
-| [../LICENSING.md](../LICENSING.md) | GPL-3.0-only source policy, Supporter model (free signed download; sponsor place and priority support), Mac App Store questions, component licenses, distribution blockers |
+| [../LICENSING.md](../LICENSING.md) | GPL-3.0-only source license and its origin, Priority Support (free signed download; paid support, not software), corresponding source, component licenses, bundled notices |
 | [../LICENSE](../LICENSE) | GNU GPL version 3 text, the license of this repository's source |
 
 ## Testing
@@ -49,7 +51,7 @@ live under `testing/`.
 | [testing/scene-regressions.md](testing/scene-regressions.md) | Regressions that must stay covered in what a scene looks like and does: cameras, scripts, layers, alpha, text, puppets, shaders |
 | [testing/runtime-regressions.md](testing/runtime-regressions.md) | Regressions that must stay covered at runtime: native Metal, video, continuous playback, frame pacing, audio, host and display, startup |
 | [testing/manual-smoke.md](testing/manual-smoke.md) | Manual release smoke checklist |
-| [testing/power-benchmark.md](testing/power-benchmark.md) | Configuration manifest, per-process CPU/GPU, whole-machine and package-power measurement, runtime counters, condition matrix and comparison rules for power claims |
+| [testing/power-benchmark.md](testing/power-benchmark.md) | Configuration manifest, per-process CPU/GPU, whole-machine and package-power measurement, the headless A/B driver (`scripts/perf_bench.py`), runtime counters, condition matrix and comparison rules for power claims |
 | [testing/verification-log.md](testing/verification-log.md) | Dated verification history, ten newest entries |
 | [testing/archive/](testing/archive/) | Retired verification-log entries, one file per month, written by `scripts/log_verification.py`; historical only |
 | [testing/wallpaper-corpus.md](testing/wallpaper-corpus.md) | Local regression corpus checklist |
@@ -72,16 +74,17 @@ file; pass `rg -u` to search them deliberately.
 | Document | Purpose |
 |---|---|
 | [features/control-panel.md](features/control-panel.md) | The native window: language, tabs, toolbar, grid and inspector, pages and Settings, selection versus apply, Now Playing, target display, filtering and local collections, recently used, deleting, downloads and import |
-| [features/first-run.md](features/first-run.md) | The first-run guide over the window, the one-time support prompt after the first downloaded wallpaper, the later star prompt and the performance data question |
+| [features/first-run.md](features/first-run.md) | The first-run guide over the window, the one-time support prompt after the first downloaded wallpaper, the later star prompt, the performance data question, the battery question, the subscriptions offer and the Discord invitation |
 | [features/wallpaper-properties.md](features/wallpaper-properties.md) | Inspector properties, live preview, property presets, image placement, the compatibility check and the black-bar check |
 | [features/library-location.md](features/library-location.md) | Settings → Storage → Wallpaper library location: moving the library and downloads to another folder or an external drive and back, what moves, the copy now and the switch at the next launch, a drive that is not connected |
 | [features/backup-restore.md](features/backup-restore.md) | The Settings → Storage backup package (settings, allowlisted preferences, chosen user files) and restoring it |
-| [features/updates.md](features/updates.md) | In-app update checks, download and verification, installing, and the What's New window |
-| [features/workshop-downloads.md](features/workshop-downloads.md) | Discover, SteamCMD setup, download queue |
+| [features/updates.md](features/updates.md) | In-app update checks, the update window, automatic updates, download and verification, and installing |
+| [features/workshop-downloads.md](features/workshop-downloads.md) | Discover, SteamCMD setup, QR-code sign-in, download queue |
 | [features/automation.md](features/automation.md) | Weekday/time/solar/appearance rules, temporary Focus choices, global shortcuts, Shortcuts actions for wallpapers/playlists/presets, and `wallpapermachine://` links |
 | [features/display-layouts.md](features/display-layouts.md) | Saved multi-display wallpaper arrangements, copy/swap, preflight and recovery, Shortcuts, backup, mirror sets, AirPlay and a closed lid, and the per-Space boundary |
 | [features/spaces.md](features/spaces.md) | A different wallpaper for each desktop: choices by desktop UUID, windows kept on their desktop, saved posters for the others, visit/manual/Focus semantics and verification limits |
 | [features/wallpaper-switching.md](features/wallpaper-switching.md) | The switch hold: the previous picture stays on screen, then fades, while a newly chosen wallpaper loads; which switches it covers, its limits and Reduce Motion |
+| [features/desktop-widgets.md](features/desktop-widgets.md) | Clocks and dates drawn on the desktop over any wallpaper: adding, arranging and styling them in Settings, their windows, when they redraw, storage, backup and limits |
 | [features/desktop-picture.md](features/desktop-picture.md) | The static desktop picture macOS shows (Mission Control, after quit): posters, the journal of originals, refused writes, macOS 27, restoring on quit |
 | [features/playlists.md](features/playlists.md) | Per-display rotation and day/night selection, local collection sources, reusable named plans, scheduling and storage |
 | [features/pixiv.md](features/pixiv.md) | pixiv page: rankings and tag search, saving a page as a still wallpaper, pixiv sign-in and R-18 works |

@@ -34,9 +34,9 @@ TEST(SpriteAnimation, FirstPositiveTickStepsAndExplicitFrameKeepsItsDuration) {
     EXPECT_EQ(animation.GetAnimateFrame(0.03125).imageId, 1);
     EXPECT_EQ(animation.GetAnimateFrame(0.09375).imageId, 1);
     EXPECT_EQ(animation.GetAnimateFrame(0.03125).imageId, 2);
-    animation.SetFrame(5);
-    EXPECT_EQ(animation.GetAnimateFrame(0.125).imageId, 5);
-    EXPECT_EQ(animation.GetAnimateFrame(0.03125).imageId, 6);
+    animation.Command(1, false, 5);
+    EXPECT_EQ(animation.Present(0.125, true, 0.125).imageId, 5);
+    EXPECT_EQ(animation.Present(0.03125, true, 0.03125).imageId, 6);
 }
 
 TEST(SpriteAnimation, LongIntervalsSkipWholeCyclesAndUntimedFramesStayBounded) {

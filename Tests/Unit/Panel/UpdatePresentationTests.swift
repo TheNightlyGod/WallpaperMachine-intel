@@ -35,7 +35,7 @@ final class UpdatePresentationTests: PanelTestCase {
       Row(state: .manual(currentVersion: v, availableVersion: "1.1.0"), status: .manual, action: nil, releases: true, reveal: false),
       Row(
         state: .downloading(currentVersion: v, availableVersion: "1.1.0", percent: 42.4, transferred: 424, total: 1000, bytesPerSecond: 10),
-        status: .downloading, action: .downloadUpdate, releases: false, reveal: false),
+        status: .downloading, action: .cancelUpdate, releases: false, reveal: false),
       Row(state: .ready(currentVersion: v, availableVersion: "1.1.0"), status: .ready, action: .installUpdate, releases: false, reveal: true),
       Row(state: .preparing(currentVersion: v, availableVersion: "1.1.0"), status: .preparing, action: .cancelUpdate, releases: false, reveal: false),
       Row(
@@ -49,7 +49,7 @@ final class UpdatePresentationTests: PanelTestCase {
         status: .error, action: .checkForUpdates, releases: true, reveal: false),
       Row(
         state: .error(currentVersion: v, operation: .download, code: .verification, availableVersion: "1.1.0"),
-        status: .error, action: .checkForUpdates, releases: true, reveal: false),
+        status: .error, action: .retryUpdate, releases: true, reveal: false),
     ]
     for row in rows {
       let card = presentation(row.state)
@@ -99,7 +99,7 @@ final class UpdatePresentationTests: PanelTestCase {
     let card = presentation(
       .downloading(currentVersion: "1.0.0", availableVersion: "1.1.0", percent: 42.5, transferred: 425, total: 1000, bytesPerSecond: 0))
     XCTAssertEqual(card.statusText, "Downloading version 1.1.0 — 43 percent")
-    XCTAssertEqual(card.actionLabel, "Downloading 43 percent")
+    XCTAssertEqual(card.action, .cancelUpdate)
     XCTAssertEqual(card.download, UpdatePresentation.Download(percent: 42.5, transferred: 425, total: 1000))
     XCTAssertTrue(card.isBusy)
     XCTAssertNil(presentation(.checking(currentVersion: "1.0.0")).download, "Only a download has progress")

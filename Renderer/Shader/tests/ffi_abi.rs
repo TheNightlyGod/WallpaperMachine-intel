@@ -325,15 +325,34 @@ fn the_response_documents_are_compact_and_keyed_in_the_documented_order() {
         keys(&c.metadata()),
         ["combos", "aliases", "default_uniforms", "default_textures", "active_texture_slots"]
     );
+    // The textured quad draws its card unmoved through the matrix and never discards, so both
+    // coverage facts follow the four documented keys, and what it reads is known.
     #[cfg(not(feature = "observer-uniform-layout"))]
     assert_eq!(
         keys(&c.reflection()),
-        ["descriptor_bindings", "uniform_blocks", "vertex_inputs", "active_texture_slots"]
+        [
+            "descriptor_bindings",
+            "uniform_blocks",
+            "vertex_inputs",
+            "active_texture_slots",
+            "vertex_position",
+            "fragment_always_writes",
+            "read_uniforms"
+        ]
     );
     #[cfg(feature = "observer-uniform-layout")]
     assert_eq!(
         keys(&c.reflection()),
-        ["descriptor_bindings", "uniform_blocks", "vertex_inputs", "active_texture_slots", "observer_uniform_layout"]
+        [
+            "descriptor_bindings",
+            "uniform_blocks",
+            "vertex_inputs",
+            "active_texture_slots",
+            "vertex_position",
+            "fragment_always_writes",
+            "read_uniforms",
+            "observer_uniform_layout"
+        ]
     );
     let diagnostics = c.diagnostics();
     for entry in items(&diagnostics) {
@@ -733,7 +752,7 @@ fn an_include_is_resolved_through_the_callback_and_its_buffer_is_freed_once() {
 #[test]
 fn a_path_is_requested_at_most_once_per_compile() {
     let env = Env::new(vec![("a.h", Reply::Owned(b"#define A 1\n".to_vec()))]);
-    let fragment = "#include \"a.h\"\n#include \"a.h\"\nvoid main() { gl_FragColor = vec4(float(A)); }\n";
+    let fragment = "#include \"a.h\"\n#include \"a.h\"\nvoid main() { gl_FragColor = CAST4(float(A)); }\n";
     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
     assert_eq!(c.status, RS_SHADER_OK, "{}", last_error());
     assert_eq!(env.calls(), ["a.h"]);
@@ -752,7 +771,7 @@ fn a_path_is_requested_at_most_once_per_compile() {
 #[test]
 fn a_missing_include_on_an_active_path_names_the_path() {
     let env = Env::new(vec![("nope/x.h", Reply::NotFound)]);
-    let c = env.compile(&request(MINIMAL_VERTEX, "#include \"nope/x.h\"\nvoid main() { gl_FragColor = vec4(1.0); }"));
+    let c = env.compile(&request(MINIMAL_VERTEX, "#include \"nope/x.h\"\nvoid main() { gl_FragColor = CAST4(1.0); }"));
     assert_eq!(c.status, RS_SHADER_ERROR);
     assert!(last_error().contains("nope/x.h"), "{}", last_error());
     assert_eq!(env.calls(), ["nope/x.h"]);
@@ -762,7 +781,7 @@ fn a_missing_include_on_an_active_path_names_the_path() {
 #[test]
 fn an_include_in_an_untaken_branch_is_never_requested() {
     let env = Env::new(vec![]);
-    let fragment = "#if 0\n#include \"missing.h\"\n#endif\nvoid main() { gl_FragColor = vec4(1.0); }";
+    let fragment = "#if 0\n#include \"missing.h\"\n#endif\nvoid main() { gl_FragColor = CAST4(1.0); }";
     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
     assert_eq!(c.status, RS_SHADER_OK, "{}", last_error());
     assert!(env.calls().is_empty());
@@ -775,14 +794,14 @@ fn without_a_callback_every_reached_include_is_not_found() {
     let text = last_error();
     assert!(text.contains("common/colors.h") && text.contains("not found"), "{text}");
     // ... and an unreached one is fine without a callback
-    let c = compile_plain(&request(MINIMAL_VERTEX, "#if 0\n#include \"x.h\"\n#endif\nvoid main() { gl_FragColor = vec4(1.0); }"));
+    let c = compile_plain(&request(MINIMAL_VERTEX, "#if 0\n#include \"x.h\"\n#endif\nvoid main() { gl_FragColor = CAST4(1.0); }"));
     assert_eq!(c.status, RS_SHADER_OK, "{}", last_error());
 }
 
 #[test]
 fn an_empty_include_compiles() {
     let env = Env::new(vec![("empty.h", Reply::Empty)]);
-    let fragment = "#include \"empty.h\"\nvoid main() { gl_FragColor = vec4(1.0); }";
+    let fragment = "#include \"empty.h\"\nvoid main() { gl_FragColor = CAST4(1.0); }";
     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
     assert_eq!(c.status, RS_SHADER_OK, "{}", last_error());
     assert_eq!(env.frees(), 1, "an empty but non-null buffer is released");
@@ -792,7 +811,7 @@ fn an_empty_include_compiles() {
 #[test]
 fn a_null_pointer_with_a_length_is_a_provider_fault() {
     let env = Env::new(vec![("bad.h", Reply::Fault(12))]);
-    let fragment = "#include \"bad.h\"\nvoid main() { gl_FragColor = vec4(1.0); }";
+    let fragment = "#include \"bad.h\"\nvoid main() { gl_FragColor = CAST4(1.0); }";
     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
     assert_eq!(c.status, RS_SHADER_ERROR);
     let text = last_error();
@@ -803,7 +822,7 @@ fn a_null_pointer_with_a_length_is_a_provider_fault() {
 #[test]
 fn bytes_that_are_not_utf8_are_an_error_and_still_freed_once() {
     let env = Env::new(vec![("bin.h", Reply::Owned(vec![0xFF, 0xFE, 0x41]))]);
-    let fragment = "#include \"bin.h\"\nvoid main() { gl_FragColor = vec4(1.0); }";
+    let fragment = "#include \"bin.h\"\nvoid main() { gl_FragColor = CAST4(1.0); }";
     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
     assert_eq!(c.status, RS_SHADER_ERROR);
     let text = last_error();
@@ -814,7 +833,7 @@ fn bytes_that_are_not_utf8_are_an_error_and_still_freed_once() {
 #[test]
 fn a_provider_without_a_free_routine_is_never_freed() {
     let env = Env::new(vec![("u.h", Reply::Unowned(b"#define U 1\n".to_vec()))]);
-    let fragment = "#include \"u.h\"\nvoid main() { gl_FragColor = vec4(float(U)); }";
+    let fragment = "#include \"u.h\"\nvoid main() { gl_FragColor = CAST4(float(U)); }";
     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
     assert_eq!(c.status, RS_SHADER_OK, "{}", last_error());
     assert_eq!(env.frees(), 0);
@@ -828,7 +847,7 @@ fn buffers_are_freed_when_a_later_step_fails() {
     assert_eq!(c.status, RS_SHADER_ERROR);
     assert_eq!(env.frees(), 1);
     // the bytes were copied before the release poisoned them: a retry with a fixed shader works
-    let fixed = env.compile(&request(MINIMAL_VERTEX, "#include \"a.h\"\nvoid main() { gl_FragColor = vec4(float(A)); }"));
+    let fixed = env.compile(&request(MINIMAL_VERTEX, "#include \"a.h\"\nvoid main() { gl_FragColor = CAST4(float(A)); }"));
     assert_eq!(fixed.status, RS_SHADER_OK, "{}", last_error());
 }
 
@@ -838,7 +857,7 @@ fn an_include_cycle_names_the_chain_and_frees_every_buffer() {
         ("a.h", Reply::Owned(b"#include \"b.h\"\n".to_vec())),
         ("b.h", Reply::Owned(b"#include \"a.h\"\n".to_vec())),
     ]);
-    let fragment = "#include \"a.h\"\nvoid main() { gl_FragColor = vec4(1.0); }";
+    let fragment = "#include \"a.h\"\nvoid main() { gl_FragColor = CAST4(1.0); }";
     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
     assert_eq!(c.status, RS_SHADER_ERROR);
     let text = last_error();
@@ -861,7 +880,7 @@ fn invalid_paths_fail_before_the_callback_is_called() {
         "#include <>",
     ] {
         let env = Env::new(vec![("x.h", Reply::Owned(b"".to_vec()))]);
-        let fragment = format!("{directive}\nvoid main() {{ gl_FragColor = vec4(1.0); }}");
+        let fragment = format!("{directive}\nvoid main() {{ gl_FragColor = CAST4(1.0); }}");
         let c = env.compile(&request(MINIMAL_VERTEX, &fragment));
         assert_eq!(c.status, RS_SHADER_ERROR, "{directive}");
         assert!(env.calls().is_empty(), "{directive}: the callback was called for {:?}", env.calls());
@@ -872,7 +891,7 @@ fn invalid_paths_fail_before_the_callback_is_called() {
 
 #[test]
 fn an_include_directive_with_no_path_is_a_parse_failure() {
-    let c = compile_plain(&request(MINIMAL_VERTEX, "#include\nvoid main() { gl_FragColor = vec4(1.0); }"));
+    let c = compile_plain(&request(MINIMAL_VERTEX, "#include\nvoid main() { gl_FragColor = CAST4(1.0); }"));
     assert_eq!(c.status, RS_SHADER_ERROR);
     assert!(last_error().contains("#include expects a quoted include path"), "{}", last_error());
 }
@@ -913,7 +932,7 @@ fn includes_run_on_the_calling_thread_of_each_concurrent_compile() {
         for _ in 0..4 {
             scope.spawn(|| {
                 let env = Env::new(vec![("a.h", Reply::Owned(b"#define A 1\n".to_vec()))]);
-                let fragment = "#include \"a.h\"\nvoid main() { gl_FragColor = vec4(float(A)); }";
+                let fragment = "#include \"a.h\"\nvoid main() { gl_FragColor = CAST4(float(A)); }";
                 for _ in 0..10 {
                     let c = env.compile(&request(MINIMAL_VERTEX, fragment));
                     assert_eq!(c.status, RS_SHADER_OK, "{}", last_error());
@@ -943,14 +962,14 @@ fn hostile_nesting_fails_on_a_small_stack_without_crashing() {
             // Nesting with no bracket to count: statements inside statements, and structures
             // inside structures (R91).
             let unbraced = |head: &str, n: usize| {
-                format!("void main() {{ float x = 0.0; {}x = 1.0; gl_FragColor = vec4(x); }}", format!("{head} ").repeat(n))
+                format!("void main() {{ float x = 0.0; {}x = 1.0; gl_FragColor = CAST4(x); }}", format!("{head} ").repeat(n))
             };
             let else_chain = format!(
-                "void main() {{ float x = 0.0; if (x < 0.0) x = 1.0; {}gl_FragColor = vec4(x); }}",
+                "void main() {{ float x = 0.0; if (x < 0.0) x = 1.0; {}gl_FragColor = CAST4(x); }}",
                 "else if (x < 5.0) x = 2.0; ".repeat(2000)
             );
             let do_nest = format!(
-                "void main() {{ float x = 0.0; {}x = 1.0; {}gl_FragColor = vec4(x); }}",
+                "void main() {{ float x = 0.0; {}x = 1.0; {}gl_FragColor = CAST4(x); }}",
                 "do ".repeat(2000),
                 "while (x < 1.0); ".repeat(2000)
             );
@@ -959,11 +978,11 @@ fn hostile_nesting_fails_on_a_small_stack_without_crashing() {
                 for i in 1..3000 {
                     text.push_str(&format!("struct S{i} {{ S{} a; }};\n", i - 1));
                 }
-                text + "void main() { gl_FragColor = vec4(1.0); }"
+                text + "void main() { gl_FragColor = CAST4(1.0); }"
             };
             let fragments = [
-                format!("{parens}\nvoid main() {{ gl_FragColor = vec4(x); }}"),
-                format!("{deep_if}void main() {{ gl_FragColor = vec4(1.0); }}"),
+                format!("{parens}\nvoid main() {{ gl_FragColor = CAST4(x); }}"),
+                format!("{deep_if}void main() {{ gl_FragColor = CAST4(1.0); }}"),
                 format!("void main() {{ gl_FragColor = vec4({}1.0{}); }}", "(".repeat(5000), ")".repeat(5000)),
                 unbraced("if (x < 5.0)", 2000),
                 unbraced("for (;;)", 2000),
@@ -988,7 +1007,7 @@ fn hostile_nesting_fails_on_a_small_stack_without_crashing() {
                 handed_out: RefCell::default(),
                 threads: RefCell::default(),
             };
-            let c = env.compile(&request(MINIMAL_VERTEX, "#include \"n0.h\"\nvoid main() { gl_FragColor = vec4(1.0); }"));
+            let c = env.compile(&request(MINIMAL_VERTEX, "#include \"n0.h\"\nvoid main() { gl_FragColor = CAST4(1.0); }"));
             assert_eq!(c.status, RS_SHADER_ERROR);
             assert_eq!(env.frees(), env.handed_out.borrow().len());
             // and the layer is still usable
@@ -1011,7 +1030,7 @@ fn the_deepest_nesting_the_guard_accepts_still_compiles_on_a_small_stack() {
         .stack_size(kib * 1024)
         .spawn(|| {
             use wm_shader::backend::depth::{STACK_BUDGET, STRUCT_DEPTH_LIMIT, stack_cost};
-            let body = |inner: String| format!("void main() {{ float x = 0.0; {inner} gl_FragColor = vec4(x); }}");
+            let body = |inner: String| format!("void main() {{ float x = 0.0; {inner} gl_FragColor = CAST4(x); }}");
             type Shape = (&'static str, Box<dyn Fn(usize) -> String>);
             let shapes: Vec<Shape> = vec![
                 ("if", Box::new(move |n| body(format!("{}x = 1.0;", "if (x < 5.0) ".repeat(n))))),
@@ -1030,7 +1049,7 @@ fn the_deepest_nesting_the_guard_accepts_still_compiles_on_a_small_stack() {
                         for i in 1..n {
                             text.push_str(&format!("struct S{i} {{ S{} a; }};\n", i - 1));
                         }
-                        text + "void main() { gl_FragColor = vec4(1.0); }"
+                        text + "void main() { gl_FragColor = CAST4(1.0); }"
                     }),
                 ),
             ];

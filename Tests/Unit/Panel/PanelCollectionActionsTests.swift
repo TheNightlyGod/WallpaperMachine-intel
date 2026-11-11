@@ -44,12 +44,18 @@ final class PanelCollectionActionsTests: PanelTestCase {
     } catch { XCTAssertEqual(error.localizedDescription, stale) }
     XCTAssertEqual(panel.collections.collection(id: kept.id)?.wallpaperIDs, ["a"])
 
-    for refused in [[""], Array(repeating: "a", count: 4097)] {
-      do {
-        _ = try await controller.createCollection(name: "Invalid", wallpaperIDs: refused)
-        XCTFail("an empty id or more than 4,096 ids is not a selection a control makes")
-      } catch { XCTAssertTrue(error is InvalidControlValue) }
-    }
+    do {
+      _ = try await controller.createCollection(name: "Invalid", wallpaperIDs: [""])
+      XCTFail("an empty id is not a selection a control makes")
+    } catch { XCTAssertTrue(error is InvalidControlValue) }
+    // More than a batch takes is a selection Select all can make in a very large library: it is
+    // refused with the limit, and nothing is created.
+    do {
+      _ = try await controller.createCollection(
+        name: "Too many", wallpaperIDs: Array(repeating: "a", count: PanelController.batchLimit + 1))
+      XCTFail("more than a batch takes is refused")
+    } catch { XCTAssertTrue(error is WallpaperActionError, "refused with \(error)") }
+    XCTAssertEqual(controller.collectionRows.map(\.name), ["Kept"])
   }
 
   func testNamesThatAreBlankLongOrOnSeveralLinesAreRefusedWithoutChangingAnything() async throws {

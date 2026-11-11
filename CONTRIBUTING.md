@@ -8,7 +8,7 @@ topic; it does not repeat them.
 Everyone taking part follows the [code of conduct](CODE_OF_CONDUCT.md). Found a
 vulnerability? Report it privately, as [SECURITY.md](SECURITY.md) describes, not in
 an issue. Bugs and ideas go through the issue forms; questions go to the
-Discussions Q&A.
+Discussions Q&A or MMFoundation's [Discord](https://mmfoundation.dev/discord).
 
 ## Setup
 
@@ -57,7 +57,7 @@ generates the Xcode project and builds the app. Flags and failure modes:
 | Find out where a file or new code belongs | [docs/repository-layout.md](docs/repository-layout.md) |
 | Build, package, or install locally | [docs/build.md](docs/build.md) |
 | Know the code, test and doc rules | [docs/conventions.md](docs/conventions.md) |
-| Translate the app or improve existing wording | [docs/localization.md](docs/localization.md#contributing-translations) |
+| Translate the app, improve existing wording or ask for a language | [Crowdin](https://translate.wallpapermachine.app/project/wallpaper-machine), then [docs/localization.md](docs/localization.md#contributing-translations) |
 | Write or run tests, or record evidence | [docs/testing/README.md](docs/testing/README.md) |
 | Debug the renderer or GPU output | [docs/testing/renderer.md](docs/testing/renderer.md) |
 | Ship a version | [docs/release.md](docs/release.md) |
@@ -165,6 +165,12 @@ By making a contribution to this project, I certify that:
 ```
 
 ## Automated review
+
+Every pull request into `main` runs the Checks workflow (`.github/workflows/checks.yml`): the
+Python script tests on Linux, a minute or two, the same as
+`python3 scripts/test.py --python-only` locally. CodeQL runs on pushes to `main`,
+weekly and on demand, not on pull requests. The native gate does not run on pull
+requests either: run `python3 scripts/test.py` locally, or the Test workflow by hand.
 
 Claude Code runs on the Claude account of `fzlzjerry`, so only that account wakes
 it; events from anyone else, including re-runs, are skipped. A same-repository PR

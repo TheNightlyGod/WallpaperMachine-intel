@@ -22,6 +22,19 @@ Playback, backend, host and startup areas are in
   runs. `SceneSchema.SceneSettingsLeftOutTakeWallpaperEnginesDefaults`: a scene
   that leaves them out gets parallax amount 0.5, delay 0.1 and influence 0.5,
   black ambient and sky light, and Wallpaper Engine's HDR bloom defaults.
+- **Wallpaper Engine's per-wallpaper options** — `metal_scene_draw_smoke`
+  `MetalSceneDraw.UserColourOptionsRunAfterBloom` (brightness 60 turns flat
+  (0.5, 0.25, 0.25) into (184, 92, 92) after bloom), `.UserImageFilterMixesItsVolumeLutByItsStrength`
+  (a 2×2×2 volume LUT mixed at 50 %) and `.UserColourOptionsAtIdentityAddNoPass` (no
+  `ccsimple` pass or target at the identity); `horizontal_flip_pointer_test`
+  `HorizontalFlipPointerTest.TheUserOptionsFlipMirrorsThePointer`; `model_parallax_test`
+  `ModelParallax.MouseParallaxOffKeepsLayersStill` (the model stays put and
+  `g_ParallaxPosition` reads the centre until the switch is on again);
+  `backdrop_scene_test` `BackdropScene.FitBordersTakeTheSchemeColour` and
+  `.FitBordersAreBlackWithoutASchemeColour`; `scene_options_binding_test`
+  `SceneUserOptionsBinding.*` (ranges, only a change of the pass's shape loads again,
+  scene traits, LUT decoding). The poster harness takes `WE_TEST_USER_OPTIONS` (WE's own
+  property names) for a comparison with Wallpaper Engine set the same way.
 - **Camera shake** — `CameraShake.TheSceneCameraShakesWhileItsPropertyIsOn` and
   `.ADoubledAmplitudeDoublesTheOffset` check Wallpaper Engine's offset for a 2D scene, that it moves the view, that the
   scene asks for frames while it shakes, and that its user property stops it.
@@ -67,7 +80,9 @@ Playback, backend, host and startup areas are in
     (`LayerCompositeCameraKey`) that ignores placement, view and parallax, compose
     cameras are not layer-local (children draw through them at their place inside
     the layer), and the static-result cache folds each pass's camera and the
-    active camera into its sample (`FoldPassCameras` in `RenderCommon/SceneRaster.hpp`).
+    active camera into its sample (`FoldPassCameras` in `RenderCommon/SceneRaster.hpp`);
+    the active camera is left out only for a pass whose read uniforms are proven not
+    to depend on it (see **Layer-local reuse samples**).
 - **Camera-object zoom in 2D scenes** — `CanvasShots.ZoomTightensTheOrthographicFrustumWithoutChangingTheAuthoredExtent`
   and `ZoomOutsideTheUsableRange.FramesTheWholeCanvas` in
   `scene_schema_part02_test`, `MouseInput.HitTestingFollowsACameraObjectZoomAcrossAResize`
@@ -97,7 +112,16 @@ Playback, backend, host and startup areas are in
   `.ACardWithEffectsIsSeenThroughTheCameraByThePassThatPutsItOnTheScene`
   (the card's own `perspective` flag, drawn as it is and through an effect, on both
   renderers: it was drawn flat, 30 pixels where the camera gives 44.5, and a cover
-  laid on a model's face slid off it once a group turned them). The eye sat at 1000 units with a field of view derived from it, so a
+  laid on a model's face slid off it once a group turned them). In `model_parallax_test`,
+  `ModelParallax.ImageAndComposeCardsStayOnAModelFaceWhileItsParentTurns` compares the
+  model face with ordinary, effect and composition cards at seven successive group
+  rotations and alternating cursor positions. The model has nonuniform scale, and
+  the composition cases cover both copying the background and composing children.
+  Composition cards used to ignore `perspective`, leaving the cover smaller or
+  skewed relative to its model. Wallpaper Engine captures at three fixed orientations
+  confirm the shared closing projection; a separate colour-grid probe confirms that
+  the initial background sample keeps using the scene camera.
+  The eye sat at 1000 units with a field of view derived from it, so a
   particle 500 units out was twice its size and one past 1000 units was cut; the
   distance is the scene's own, in one helper (`FitCanvasPerspective`) that the
   parser, `Scene::FrameCanvas`, the scene zoom and `ApplyCameraFillMode` share.
@@ -122,7 +146,27 @@ Playback, backend, host and startup areas are in
   returns. Packaged eye/center/up/FOV curves share the path clock, with
   sequential or random queuing and bounded catch-up; only selected paths advance,
   hidden paths add no animation demand, and curves are parsed once. Camera-path
-  zoom, path events and camera-cut fades are not implemented.
+  zoom and path events are not implemented.
+- **Camera-path fades** — `PerspectiveCameras.CameraPathFadeTracksBothEndsWithoutRebuildingItsGraph`,
+  `.CameraFadeAllocatesNoPassWhenDisabledOrWithoutAPath` and
+  `.AnObjectCameraPathDoesNotAllocateAGlobalCameraFade` cover the half-second ramps,
+  disabled allocation and the distinction between global and camera-layer paths.
+  `.GlobalCameraPathsUseHalfSlopeInterpolationBeforeAdvancingTheClock`,
+  `.GlobalCameraQueueUsesTheLastFileAndDropsOvershootAtACut` and
+  `.AVisibleCameraLayerPausesTheGlobalQueue` guard the legacy queue's clock and
+  interpolation. `.GlobalPathMissingPoseVectorsDefaultToZero` keeps absent vectors
+  as zero-valued keys; `.GlobalPathCutsUseTheFloatClockAndLoadedTimestamps` checks
+  the strict boundary at 30 Hz and a fractional timestamp. The canvas regressions
+  `.CanvasGlobalZoomPreservesBaseExtentAcrossShotOverrides` and
+  `.ACanvasShotDoesNotInheritTheGlobalPathsRotationOrDepth` switch a global path
+  through an explicit shot and back, comparing the view matrices with a scene
+  without global paths. `.TheEndFadeWinsWhenAShortGlobalSegmentHasOverlappingRamps`
+  pins the end-ramp priority. `CameraFadeGpu.*` in `metal_scene_draw_smoke` samples
+  the actual fade and live scheme-colour update, checks that colour correction
+  precedes it, and compares target memory with fading disabled. These tests use
+  synthetic paths. WE controls confirm that only top-level `camera.paths` produces
+  this fade; an object's `path` alone does not. This corrects the earlier assumption
+  that every active camera-layer path should fade.
 - **Camera parallax** — `ShaderValueUpdaterCompat.CameraParallaxMovesEachLayerTreeByItsRootsDistanceFromTheCursor`,
   `.ZeroParallaxDelayFollowsTheCursorAtOnce` and
   `.ParallaxLayersAreReportedAsFollowingTheCursor` in `script_runtime_compat_test`;
@@ -215,10 +259,11 @@ Playback, backend, host and startup areas are in
   `metal_scene_draw_smoke`. Parented layers take the outermost parent's
   `parallaxDepth`, including a zero one or an omitted one, which is (1, 1) (Wallpaper Engine's
   [release notes](https://steamcommunity.com/app/431960/allnews/) confirm that
-  the parent controls parallax on child layers). `ResolveLayerParallax`
-  resolves it once at parse time, independent of declaration order and before
-  materials are built, with no per-frame ancestor walk. Missing or ambiguous
-  parents supply no depth, cycles stay unresolved, and IDs and parent references
+  the parent controls parallax on child layers). The loader preserves raw depths,
+  including on groups without meshes; the draw's existing root traversal selects
+  both the effective depth and anchor. `ScriptAttachments.ParallaxUsesRootDepthWithoutChangingTheChildsRawValue`
+  covers authored and dynamic parents, raw readback, root changes and detaching.
+  Missing or ambiguous parents supply no depth, cycles stay unresolved, and IDs and parent references
   must be integers in the signed 32-bit range (wider JSON numbers are ignored,
   never truncated into another layer's identity).
 - **Fullscreen layers** — `CameraFraming.AFullscreenLayerCoversTheScreenWhateverTheShot`,
@@ -288,8 +333,8 @@ Playback, backend, host and startup areas are in
     fullscreen layer depth 0 and never reads the one in the file, and the default depth 1
     moved the last pass of its effects, so the copy of the screen was drawn a second time,
     shifted by the cursor, over the scene (3521337568's film-grain post-processing layer).
-    The layers below it keep their tree's depth (`ResolveLayerParallax`, which copies the
-    outermost layer's saved depth into its descendants).
+    The layers below it use their current root's effective depth while retaining
+    their own raw values for detaching or reparenting.
     Established from the 2.8.42 decompile (the layer's own draw ignores its model matrix;
     children are drawn through its composite) and from two local scenes, not from a
     Wallpaper Engine frame of a scene that has the layer: 3804689861's author preview
@@ -340,6 +385,32 @@ Playback, backend, host and startup areas are in
   own message loop offscreen, so the host's half (polling the pointer and
   publishing the viewport) is covered only by `mouse_input_test` at the unit
   level.
+- **Cursor event coordinates and puppet box names** — `ScriptCursorEvent.*` in
+  `scenescript_behavior_test` covers pixel coordinates from the image's top-left,
+  detached Vec3 values between programs, nonuniform parent transforms, mirrored
+  rotation, outside leave/held-release positions and `engine.on` listeners.
+  `CanvasParallaxChangesHitAndPixelCoordinatesWithoutPublishingADraw` requires
+  both hits and local coordinates to follow current parallax while leaving the
+  attachment projection's last-draw offset untouched. WE controls confirm the
+  centred/translated/parented/mirrored values and a moving layer's outside leave
+  position; its parallax control returns (140,30), where the unshifted hit path
+  returned (120,40).
+  The puppet cases parse the MDLS box/order records, require reverse-order
+  selection and clamped indices, use a published pose changed by a bone write,
+  and keep ordinary hover, a miss and 3D models free of a made-up `hitBox`.
+  One authorized WE reference click confirmed `CursorBone` as a string in
+  down/up/click, local (100,50,0) and button 0; hover omitted `hitBox`.
+  Empty bone names, overlapping-box order and moved-pose misses have CPU and
+  native-code coverage, not additional WE clicks. An exported `cursorHitTest`
+  does not override hit geometry in either the control or the actual native walk.
+  `TheHostsFirstInputWaitsForInitWithoutLosingItsEnter`,
+  `InitialPressAndReleaseEdgesAreDeliveredOnceAfterInit`,
+  `AnUnstartedScriptAddedLaterDoesNotConsumeItsFirstEnter` and
+  `ReplacingTheSceneDropsItsUnreadyInput` exercise the real host order (input
+  before `Tick`). They failed when a cold property script received cursor
+  callbacks before `init`, consuming its initial inside state. The runtime keeps
+  one dispatch marker for that sampled frame, dispatches after init/notices and
+  drops it at teardown; no mouse-move queue or second clock/pose step is added.
 - **Cursor hit testing under scaling** — `MouseInput.CursorViewportMapsWindowOntoTheCroppedSceneRectangle`,
   `.LayerHitTestingFollowsWhereTheWallpaperIsPresented` and
   `.LetterboxBarsDoNotTriggerLayersThatCrossTheCanvasEdge` in `mouse_input_test`;
@@ -429,11 +500,74 @@ Playback, backend, host and startup areas are in
   callback can hide or move a blocker, and costs nothing in a scene with no blocker.
   A cost has not been measured on a scene with many scripted layers and one blocker.
   Not modelled: Wallpaper Engine's walk skips blocking while a button is held and a
-  captured set is non-empty, and fires its click on release rather than on press.
+  captured set is non-empty.
+- **Click on release** — `MouseInput.TheClickComesOnReleaseOverTheLayerThatTookThePress`
+  in `mouse_input_test`, with the press-and-release taps of `sound_layer_cursor_behavior_test`,
+  `ClickScripts.OnlyTheHitOneOfThreeSameNamedLayersPlaysItsOwnSound` (`scene_schema_part05_test`),
+  `CursorInputState.SceneScriptStillGetsTheReleaseAfterThePointerLeftTheWindow` and
+  `ScriptRuntimeCompat.CursorCoveragePreservesAllPhasesThresholdsAndLiveTransforms`. As in
+  Wallpaper Engine, a press brings `cursorDown` to the layers the walk reaches, which hold
+  the button; the release brings each holder `cursorUp` wherever the pointer is, then
+  `cursorClick` only when the pointer is still over that layer (for a script of the scene
+  itself, anywhere on the wallpaper). A release elsewhere cancels the click, and a press
+  that began off a layer clicks nothing where it ends. A program with only a click handler
+  holds the button from the press. Up before click follows the browsers' order; Wallpaper
+  Engine's order between the two was not read from the binary.
 
 ## Scene scripts and property bindings
 
+- **Custom ModelData geometry** — `ScriptModelData.*` and
+  `ModelDataGeometry.*` in `scenescript_behavior_test` exercise typed-array offsets,
+  exact UInt16 triangle counts, shared updates, dynamic-buffer checks, replacement
+  scope and layout changes, numeric-token destruction and retirement. ModelData
+  wrappers deliberately remain false under `engine.isObjectValid`, as in WE.
+  `ModelDataGpu.*` in `metal_scene_draw_smoke` reads back shared geometry updates and
+  replacements, starts a scene whose first mesh is created by `init`, and compares
+  allocated geometry/upload bytes between one and eight instances.
+  A WE 2.8.0.42 event-callback control replaces one held dynamic shape without
+  changing its format, material or vertex count: the translated triangle matches
+  exactly in both captured frames. Separate creation controls now cover all
+  canonical position/normal/signed-tangent/UV/colour streams, reversed format
+  declarations with canonical buffer packing, Uint32 indices above 65535, and
+  multiple shapes with distinct materials. `CanonicalStreamsKeepTheirLayoutWhenDeclarationsAreReversed`
+  and `WideIndicesAndSeparateShapesDrawTheirSelectedVertices` preserve those
+  GPU results; sampled interior colours match WE, with small raster-edge differences
+  in the reference capture. `ScriptModelData.CreateLayerConfigAnglesAreSceneFileRadians`
+  keeps `createLayer`'s `angles` in scene-file radians: a WE matrix-readback control
+  (config pi/4 against setter 45 degrees, model and image layers) now matches WE's
+  model matrix exactly on all four panels. In that 3D control the model-view-projection
+  z column still differs from WE's (WE writes 0 to the clip z of every basis vector
+  but w; the layer-perspective flag selects a raster-scaled camera there), so 3D
+  ModelData projection stays open, as do broader event replacement and replacement
+  before creating the first layer; a failed or crashed reference is not a passing
+  visual control.
+
 All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
+
+- **Native object lifetime and static camera scripting** — `ScriptObjectValidity.*`
+  and `ScriptSceneCamera.*` in `scenescript_behavior_test` cover removed script-created
+  layers, effects losing their owner, ordinary/prototype-derived values, partial camera
+  updates, detached snapshots, projection movement and zoom. Startup camera writes
+  preserve zoom while the authored pose replaces the temporary init pose before updates,
+  matching the WE init/update probes. `AnimationObjectValidityFollowsItsSerialThroughRemoval`
+  in `script_runtime_compat_test` keeps a hidden surviving animation valid after an
+  earlier stack entry is removed and invalidates each removed serial. A runtime probe
+  confirms `requestFeatures` is not a global in WE 2.8.0.42; it is not added as a no-op.
+- **Particle layers from scripts** — `ParticleScripts.EmitParticlesEmitsAtOnceEvenWithNoRateOfItsOwn`,
+  `.PauseKeepsTheLiveParticlesStopClearsThemAndPlayResumes` and
+  `.TheInstanceReachesTheOverridesAPropertyWouldBind` (`scene_schema_part11_test`): a parsed
+  particle layer answers `emitParticles` (at once, once, also while paused), `pause`, `stop`,
+  `play` and `isPlaying`, and `instance.count`, `size` and `controlpointN` read and write the
+  layer's instance override, a count of 3 emitting three times the authored rate.
+- **Camera transforms from scripts** — `CameraScripts.APerspectiveSceneAnswersAndTakesItsCameraBlock`
+  and `.A2DSceneZoomsThroughItsCameraTransforms` (`scene_schema_part11_test`): the camera block
+  reads back, a new eye places the perspective camera there looking at the centre, and a 2D
+  scene's zoom of 2 shows half the canvas.
+- **Parenting and bones from scripts** — `ScriptRuntimeCompat.SetParentKeepsTheLayersPlaceOnlyWhenAskedTo`
+  (with `adjustTransforms` the layer stays in place under a moved, scaled parent; without it
+  it rides the parent; no parent puts it back at the root),
+  `.PuppetBonesAnswerTheirIndexParentAndPose` (count, index by name, parent, the posed
+  transform in the scene and in the parent bone) and `.ABoneReadBeforeTheFirstPoseIsItsBindPose`.
 
 - **Script values, objects, start-up and local rotation without a device** —
   `scenescript_behavior_test` loads synthetic scenes for their runtime only
@@ -447,15 +581,23 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     `0` and `2` read `true`/`false` (typeof boolean) as the choice moves through 2, 0, 1,
     as a number and as text; a conditional layer `visible` follows the choice; a constant
     bound with a condition reads 1 or 0 while one with no condition keeps the number.
+  - `ChoiceAsFlagUndeclared.*`: layers whose `visible` names a property the project
+    never declares, with a condition or none, keep each one's own authored value (a
+    conditioned `true` stays visible; one binding's value never leaks into another's),
+    and all of them follow the name once a property document supplies it.
   - `ScriptEffectObject.*`: `thisObject.visible` of an effect script, written from
     `init`, `update` and a media handler, switches that effect only (also where a
     property hid the layer, and with two effects on a layer).
   - `ScriptKeyedSettingObject.*`: `thisObject.getAnimation()` with no name is a keyed
     constant's own animation (the layer's slide does not play); a named lookup still
     finds the layer's animation; a setting without a timeline finds the layer's first
-    unnamed one.
+    unnamed one; a keyed constant whose script exports no `update` rests on its first
+    key and plays to its last when the script's `init` or `mediaThumbnailChanged`
+    handler calls `play()` (it stayed on the first key, so a cover cross-fade left the
+    previous cover over the current one).
   - `ScriptStartUp.*`, `ScriptInitResult.*`: all `init`s, then all first notices, then
-    `update`, in layer order; a notice may call what a later layer's `init` set up through
+    `update`, in layer order, every tick (a group's transform script made after every layer
+    still updates before a later layer's script that reads what it published); a notice may call what a later layer's `init` set up through
     `shared`; what `init` returns is the value (a handle hides itself, a typing text starts
     empty, a vector or number is converted as `update`'s is), and nothing, an exception or
     an object for a flag leave it alone.
@@ -471,11 +613,60 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
 - **Local-axis rotation** — `Rotation.*` in `scenescript_behavior_test` checks radians
   increments composed with an existing orientation, degree-valued angles readback,
   repeated updates, transformed parents, mirrored scale and anchored pivots.
+- **Look-at rotation** — `ScriptLookAt.*` checks direction in parent space, unchanged
+  origin, a chosen yaw-up axis, the small-direction tolerance, and camera layers'
+  opposite facing axis. WE probes provide actual angles and matrices for straight,
+  oblique, yaw-only and alternate-up image directions, plus model and camera layers.
+- **Parenting and attachments** — `ScriptParenting.*` and `ScriptAttachments.*` cover
+  scene-index/name/object parent resolution, both adjustment overloads, detached
+  roots, mirrored-scale component rules, self-parent error side effects, cycle
+  rejection, case-sensitive and empty attachment names, current bone writes,
+  attachment removal, and normalized `Mat3` texture projection with half-texel
+  and perspective terms. Composition-boundary cases cover the allowed third
+  level, the rejected fourth level, deepest-branch rather than sibling-sum
+  counting, raw passthrough models without a private composition buffer, ordinary
+  image effects that do not consume this budget, detachment on refusal and
+  unchanged local components. Degenerate
+  projection cases cover zero receiver scales, edge-on planes and a target on
+  the camera plane, retaining a collapsed matrix instead of returning null.
+  Finite, nearly edge-on projections still differ from WE's single-precision
+  arithmetic: a large UV and the normalization of a tiny perspective-plane
+  residual are not bit-exact. These existing numerical differences are separate
+  from the corrected matrix/null and collapsed-axis behavior.
+  `ScriptAttachments.TextureProjectionReadsTheLastSceneDrawOffset`
+  distinguishes first-query zero from the last visible draw, a moved or hidden
+  object retaining its previous offset, a visible depth-zero reset, shadow and
+  layer-local isolation, and a visible program without uniforms. Native draw-loop
+  evidence and first/1-second/5-second WE logs establish that queries read stored
+  offsets rather than recomputing them. Raw depths and the two stored offset
+  components occupy existing node padding: the arm64 node remains 928 bytes,
+  without a cache allocation, another render pass or a scene-wide frame traversal.
+  Hand-built nodes without raw state retain their existing per-pass metadata
+  fallback; a parsed root's explicit zero takes precedence over descendant or
+  stale effect records. Compatibility checks preserve compose/ordinary-effect
+  first-pass matrices and fullscreen children as well as root zero crossings.
+  `SceneHierarchyGpu.*` samples actual reparented pixels,
+  unchanged pictures after ordinary transform adjustment and idle repeated writes.
 - **Property-bound scene shading** — `LightingFog.HeightFogBoundToPropertiesEqualsTheSameFogWrittenOut`
   (`scene_lighting_fog_test`) draws a known squared-density gradient from a scene with
   property-selected endpoints and colour and compares it with the same fog written out;
   `.AmbientAndSkylightAreEachBoundAndEachCounted` checks ambient and
-  skylight contributions independently in the resulting pixels.
+  skylight contributions independently in the resulting pixels;
+  `.ChangingABoundPropertyIsAppliedByTheNextFrame` (a live edit of the ambient
+  property is drawn on the next frame, and the property is not load-only) and
+  `.DistanceFogBoundToAPropertyFollowsIt`. `SceneGeneralScripts.AnAmbientColourScriptIsFollowedEveryTick`
+  and `.AHeightFogStartBoundToAPropertyFollowsItWithoutAReload` (`scene_schema_part03_test`)
+  read `g_LightAmbientColor` and `g_FogHeightParams` off a material tick by tick.
+
+- **Native scene-general setters** — `ScriptSceneGeneral.*` in
+  `scenescript_behavior_test` checks typed members against same-named project
+  properties, raw/exclusive sort modes, loaded versus startup camera zoom, and
+  actual clear, projection, shake, parallax and packed fog consumers. Equal writes
+  and uniform changes leave the graph alone. `SceneGeneralModes.*` in
+  `scene_schema_part06_test` covers lazy bloom, quality gating, parameter-driver
+  continuity, retired material/target lifetimes and failed HDR chain replacement.
+  `SceneGeneralGpu.*` in `metal_scene_draw_smoke` reads back bloom enable/strength/
+  tint changes and preserves the live colour-correction material and pass order.
 
 - **Callback-only property scripts** — `*CallbackOnly*` in both binaries.
   Callback-only scripts keep their no-writeback behavior.
@@ -726,6 +917,12 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   the layer's colour) and `.AComposeLayersAlphaFollowsWhatDrivesIt` that
   a compose layer's alpha, which lands in its passthrough because its own pass reads no
   `g_Color4`, follows a property and a script as the authored one does.
+  `RenderGraph.aChainClosedOnAnEventDrivenCardKeepsTheClosingPassMaterial`
+  (`rendergraph_smoke`): a text layer's chain closes on a card laid out again on
+  events, and its closing pass keeps the material its script, property or timeline
+  writes; a copy taken when the chain was laid out kept an Opacity's `g_UserAlpha` at
+  that moment's value, so a clock whose script fades it in after a wallpaper's intro
+  showed from the first frame, over the intro's titles.
 - **Property and name bindings** — `ScriptRuntimeCompat.AuthoredColorPropertiesStayVectorsAcrossTicksAndPropertyChanges`:
   `createScriptProperties().addColor(...)` exposes a `Vec3` even when the saved
   `scriptproperties` stores RGB as a space-separated string, and again after
@@ -745,20 +942,17 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   `getVideoTexture().isPlaying()` reflects shared runtime pause/play state, so
   scripts that hide a layer during init can reveal it during update; `Vec*.mix`
   and `MediaPlaybackEvent` constants are available.
-- **A scene with no player is told nothing plays** — `scenescript_media_event_smoke`:
-  `SceneScriptMediaEventSmoke.ASceneNoPlayerFeedsIsToldNothingIsPlayingOnItsFirstTick`
-  (integration off and no event: the first tick delivers an empty
-  `mediaPropertiesChanged` and `PLAYBACK_STOPPED` once, and a real event is still
-  dropped), `.ARealStateTheSceneHeardBeforeItsFirstTickIsNotRepeatedAsIdle`,
-  `.TheIdleStateFillsInOnlyWhatNoRealEventSaid` (per event type) and
-  `.ARealEventAfterTheIdleStateIsDeliveredLikeAnyOther`; in `metal_scene_draw_smoke`
-  `MetalSceneDraw.AMediaWidgetIsHiddenWhileNothingPlays`
-  (a group hiding itself on `PLAYBACK_STOPPED` takes its parented card with it, after
-  an `init` that shows it), `.AMediaWidgetShowsWhileSomethingPlays` and
-  `.ANoMusicPlaceholderShowsWhileNothingPlays` (a hidden group that
-  shows itself on `PLAYBACK_STOPPED` is brought into the graph). Without the idle
-  state the media widget's cover and mascot stayed on screen for every user with media
-  integration off.
+- **A scene with no player hears no media event** — `scenescript_media_event_smoke`:
+  `SceneScriptMediaEventSmoke.ASceneWithNoPlayerHearsNoMediaEvent` (no handler of the
+  five runs over two ticks) and `.ARealEventIsDeliveredOnceTheSettingIsOn`;
+  `SceneSchema.MediaWidgetTimeTextReadsZeroWithNoPlayer` (`scene_schema_tests`: 3662790108's
+  time readout script, verbatim, reads "0:00 / 0:00", Wallpaper Engine's frame, not
+  "NaN / 0:00"); in `metal_scene_draw_smoke`
+  `MetalSceneDraw.AMediaWidgetIsShownWhileNoPlayerReports` (a group hiding itself on
+  `PLAYBACK_STOPPED` stays as its `init` left it), `.AMediaWidgetShowsWhileSomethingPlays`
+  and `.ANoMusicPlaceholderStaysHiddenUntilStopped` (a hidden group that shows itself on
+  `PLAYBACK_STOPPED` stays hidden with no player and is brought into the graph when a
+  player reports stopped).
 - **Who hears a button's release** — `SceneSchema.APressedTransportButtonComesBackWhenItIsReleased`
   and `CursorHitTest.ALayerThatShrinksWhileHeldStillHearsItsOwnRelease`;
   `SoundLayerScripts.ALayerThatTookAPressHearsItsReleaseAfterThePointerLeftTheWindow`
@@ -811,6 +1005,23 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
   scene file stays and the call answers false. Without
   it, a script that rebuilds its layers when a setting changes threw
   `not a function` before building the new set.
+- **Script-built model geometry** — `ScriptMadeModel.*` (`scene_schema_part08_test`)
+  covers the `IModelData` flag words (`position`, `normal`, `tangentSigned`, `uv`,
+  `color`), a model layer's submeshes holding the script's vertices tightly packed
+  in format order with 32-bit indices; the refusals are
+  `ScriptModelData.ApplyRejectsStaticOrIncompatibleBuffersWithoutChangingGeometry`.
+  `ScriptModelLayer.*` (`script_model_layer_test`) draws the
+  shapes with their materials and vertex colours, moves them with `applyData` on
+  every layer sharing the model, follows `setParent` and `visible`, keeps a
+  static model reusable, and checks that only `applyData` moves the mesh's dirty
+  generation, which is what makes the renderer copy the buffers. Before it, a
+  script calling `thisScene.createModelData` threw `IModelData is not defined`
+  in `init` (Workshop item 3798688689, issue #127).
+  `ScriptModelLayer.ALayerAScriptParentsToAComposeLayerIsDrawnThroughItsEffects`
+  covers a compose layer without authored children that a script parents layers
+  to: it is built as a composition (`ScriptMayParentTo` in the parser), so they
+  are drawn into its buffer and through its effects; before, they were drawn
+  straight onto the screen and the item's particle canvas added them up uncomposed.
 - **Timeline events** — `ScriptRuntimeCompat.*Timeline*Event*`, `*Marker*`,
   `GlobalAnimationListenersRunOncePerMarkerWhateverIsBound`,
   `GlobalOnlyAnimationListenerSeesTheCurrentTickTime` and
@@ -1032,6 +1243,12 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     round the sextants again, a negative hue is black, as in Wallpaper Engine);
     `.WEVectorReportsTheAngleOfADirection`;
     `.LocalStorageDeleteRemovesAKeyAndRemoveStaysAnAlias`;
+    `scenescript_storage_test` (`SceneScriptStorage.*`): a value set in one run is read
+    by the next; screen is the default and global is a separate file; a `Vec3` comes back as
+    a plain object; `set` serialises at the call; a non-string key throws WE's message; a
+    location over 100,000 bytes refuses the set; no file is written before 2 s; read-only
+    storage never writes; a property reset keeps storage; `delete` answers whether the key
+    existed and `clear()` empties both;
     `.CursorScreenPositionIsInDisplayPixelsFromTheTop` (`input.cursorScreenPosition`
     is the window-normalized pointer times `engine.screenResolution`, y from the
     top; `input.cursorLeftDown` is the primary button). The typed Rust path
@@ -1080,6 +1297,15 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     instantiated are counted: an object the scene file marks statically invisible
     (and nothing can show) is never built, so it has no index and no id, and the
     count and later indices differ from the scene file's object list by those.
+    "Nothing can show" includes being named by a script: a quoted name, or, when
+    some script calls `getLayerByID`, a whole number in any script that equals the
+    layer's id (ids often come from a config object, never quoted), keeps the hidden
+    layer built (`HiddenLayerRetention.AHiddenImageIsKeptWhenAScriptLooksItUpById`
+    and `.ANumberInAScriptThatNeverLooksUpByIdKeepsNothing`, `scene_schema_part02_test`).
+    `LayerRegistry.AnIdWrittenAsTextFindsTheSameLayer`: `getLayerByID('31')` finds
+    what `getLayerByID(31)` does; a non-numeric or empty string finds nothing. Issue
+    #127: a scene controller looked up hidden layers as `getLayerByID(String(id))`,
+    its `init` threw on the first `null`, and both scenes' clocks stayed shown.
     `.LayersShowTheNameTheSceneFileGaveThemWhateverKeyTheyAreRegisteredUnder` and
     `LayerRegistry.ScriptsSeeTheAuthoredNameOfLayersRegisteredUnderGeneratedKeys`:
     `layer.name` is the authored name (empty for an unnamed layer) even where the
@@ -1141,10 +1367,83 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     the shader value updater advances the sheet by the frame time the node lets it
     have, so a paused sheet holds its frame (driven through the real updater);
     `rate` reads back what was written, and a rate that is not a positive speed
-    holds the sheet without changing what it reads.
+    holds the sheet without changing what it reads. `SpriteSheetScript.SetFrameOnARunningSheetKeepsItPlaying`,
+    `.SetFrameTakesTheWholePartOfTheNumber`, `.JoinReturnsToTheLayerClock`,
+    `.RateOtherThanOneDetaches` and `.StopHoldsFrameZero`: Wallpaper Engine's
+    TextureAnimation (0x1402131A0, `artifacts/we-parity/decompiles/A-5.md`) — the
+    sheet's own clock keeps running; `pause`, `stop`, `setFrame` and a rate other than
+    one detach the layer onto a frame of its own, `setFrame` on a sheet still on its
+    clock keeps it playing from that frame (it froze it), `setFrame(2.7)` is frame 2,
+    and `join()` puts the layer back on the clock (it was missing).
+  - *Image layer members.* `ScriptLayerFlags.BrightnessWriteReachesTheLayersTint`,
+    `.ClampUvsWriteIsKeptAndRebuildsNothing`, `.CopyBackgroundWriteChangesTheChildrenAlphaRule`,
+    `.ALayerWithoutImageMembersKeepsThemAsPlainProperties` (`script_runtime_compat_test`) and
+    `.TheMembersReadTheAuthoredImageLayer` (`scenescript_behavior_test`): `brightness`,
+    `colorBlendMode`, `perspective`, `copybackground`, `nointerpolation`, `clampuvs`, `ledsource`
+    and `castshadow` read the authored layer (they were undefined); a `brightness` write reaches
+    the tint at once, `copybackground` switches the children's alpha rule, the others are kept
+    and rebuild nothing, as Wallpaper Engine's setters (0x1401EE520,
+    `artifacts/we-parity/decompiles/A-7a.md`) only write the field. `ScriptLayerFlags.SizeWriteStretchesTheCard`
+    (`scenescript_behavior_test`): `thisLayer.size = new Vec2(…)` stretches a parsed image
+    layer's card and reads back (the setter did nothing; `size` is read on every draw,
+    `A-7b.md`).
+  - *Cursor members.* `CursorHitTest.ASolidFalseWriteStopsHits` (`script_runtime_compat_test`):
+    `solid` and `disablepropagation` read the layer's cursor target and a write changes it
+    (bits @288 of Wallpaper Engine's object base, 0x1401E0530); a layer a script made not
+    solid hears no click (the writes were plain script properties).
+    `MouseInput.APerspectiveFlagWriteMovesWhereTheLayerIsHit` (`mouse_input_test`): in a 2D
+    scene a `perspective` write moves where the image layer is hit at once, to where the scene's
+    perspective camera draws it, and clearing it on a layer built with it brings the hit back
+    to the canvas (the hit test kept the camera the layer was built with; Wallpaper Engine's
+    cursor ray `sub_1401EDB20` reads the flag on every event).
+  - *`sortorder`.* `ScriptLayerFlags.SortOrderReadsBackWhatWasWritten` (`scenescript_behavior_test`):
+    every layer's `sortorder` reads the file's integer (0 without one) and back what a script
+    wrote, truncated; with `customsortorder` a change marks the graph for one rebuild, as
+    Wallpaper Engine sorts its draw by it every frame (`A-7d.md`).
+    `RenderGraph.CustomSortOrderChangesDrawsStablyWithoutChangingTheLayerList` and
+    `.CustomSortOrderCrossesOrdinaryParentsButKeepsInheritedAlphaMax` in
+    `rendergraph_smoke` cover ascending order, stable ties, separate script indices,
+    cross-parent order and inherited alpha-MAX. WE controls with sorting off,
+    custom sorting on, and both sorting switches on confirm the same ordering
+    across flat, sibling and cross-parent overlaps. These canvas controls use the
+    original draw order when both switches are enabled; perspective scenes instead
+    retain transparent sorting.
+  - *Transparent depth order.* `TransparentSorting` in `rendergraph_smoke` covers
+    marked/unmarked order, raw local origins, previous-order ties, fullscreen layers,
+    particle-internal draws, composition children, mode changes and changes smaller
+    than the transform cache tolerance. `TransparentSortingGpu` verifies layer and
+    camera-direction crossings, whole effect groups, previous/current composite
+    inputs, omitted first contenders, pointer events and bounded idle catch-up.
+    `TransparentSortingLifetimeGpu` covers shared named FBO partial writes, self-link
+    accumulation, early scene snapshots at 1x/4x, optimization toggles and resize.
+    Movement preserves prepared programs, geometry and target bytes. Static readers
+    return to zero encoders after delayed inputs catch up; true cycles stay active.
+    `MetalSceneDraw.ASortedVideoKeepsSamplingPlanesWhenACopyChangesItsSampleCount`
+    crosses a decoded NV12 layer between 1x and 4x without new conversions or pipelines.
+    Wallpaper Engine controls verify local origins, stable ties, 3D flag priority,
+    and earlier/later composite timing with sorting enabled and disabled.
+  - *Writable names.* `ScriptLayerNames.ARenamedLayerIsFoundByItsNewNameOnly`
+    (`scenescript_behavior_test`): `layer.name = …` renames the layer, `getLayer` finds it by
+    the new name (the first layer in order with that name) and not by the old one (the write
+    was a script-side name only; setter 0x1401A4D00, `A-7e.md`).
+  - *Light members.* `ScriptLights.IntensityWriteChangesPremultipliedColour`
+    (`scenescript_behavior_test`): a light layer's `color`, `intensity`, `radius`, `exponent`,
+    `innercone`, `outercone`, `controlpoint`, `density`, `volumetricsexponent`,
+    `cascadedistance0-2`, `lightsourcesize`, `castshadow`, `usecookie`, `castvolumetrics` and
+    `light` read the file and reach the light the renderer packs (they were plain script
+    properties, and `color` wrote the node); `visible` hides the light (`A-7g.md`).
+  - *Video `loop` and ended callbacks.* `ScriptVideo.ANonLoopingVideoEndsOnceAndCallsBack`
+    (`script_runtime_compat_test`): `getVideoTexture().loop` reads back what was written
+    (default true); a clip that does not loop holds its last frame, reads as not playing and
+    calls its `addEndedCallback` listeners once (both members were missing; `A-7i.md`).
+  - *Sound members.* `ScriptSoundLayers.MaxTimeWriteChangesTheNextDelay`
+    (`sound_layer_cursor_behavior_test`): a sound layer's `mintime`, `maxtime`,
+    `playbackmode`, `attenuation`, `mindistance`, `muteineditor`, `startsilent` and
+    `spatialization` read the file; a `mintime`/`maxtime` write sets the silence before the
+    next random file (they were plain script properties; `A-7j.md`).
   - *Text layers.* `.TextLayerStyleIsReadAndWrittenThroughTheLayer`,
     `.TextStyleOnAnotherKindOfLayerStaysAPlainProperty`,
-    `.TextStyleRejectsValuesTheLayerCannotUse`, `.TextAlignmentOnlyTakesTheWordsItIsDefinedFor`,
+    `.TextStyleRejectsValuesTheLayerCannotUse`, `.TextAlignmentUnknownWordsUseTheRegistryDefaults`,
     `.TextPointSizeSurvivesAReadModifyWriteWithoutLosingPrecision`,
     `.CreateLayerMakesATextLayerFromItsConfiguration`,
     `.CreateLayerWithoutAnythingToMakeStillThrowsAndWithoutAFactoryReportsIt` and, with the
@@ -1154,17 +1453,33 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     `Teardown.TheRastersOfMadeAndDestroyedTextLayersAreReleased`: `font`, `pointsize`,
     `horizontalalign` and `verticalalign` read and write the text layer, a write
     lays it out again and moves the card about the layer's origin (setting one axis
-    keeps the other's authored edge); the alignments take only `left`/`center`/`right` and
-    `top`/`center`/`bottom` (anything else stays a plain property); the size reads
+    keeps the other's authored edge); unknown alignment words take `left` horizontally
+    and `center` vertically, as the WE getter probe confirms; the size reads
     back as the float it is; a font is resolved by the parser's own rule;
     `createLayer({ text, font, pointsize, color, alpha, ... })` parses a text
     object as the scene file's own are parsed and joins the scene beside the layer
     that made it, and when such a layer is destroyed its raster is dropped from
     the scene once the graph that drew it is gone.
+    `TextRuntimeScene.EveryScriptTextMemberReachesTheNativeLayerWithItsType` covers all
+    additional text members through actual script writes. `.TextUniformMembersDoNotRelayoutOrRebuild`
+    and `.TextLayoutMembersGrowTheCardAndEqualWritesDoNoWork` separate their costs.
+    `.TextDistanceFieldSwitchPublishesItsAtlasBeforeChangingTheMaterial` and
+    `.ACancelledDistanceFieldSwitchKeepsItsCoverageAtlasAndNeedsNoRebuild` reject an
+    atlas/shader mismatch, including a switch cancelled while its worker job is pending.
+    `.ABackgroundEnabledByScriptKeepsFollowingTheExistingAlphaDriver`,
+    `.TextColourWritesReachTheGlyphsWithoutRecolouringTheBackground` and
+    `.TextEnumsUseReferenceDefaultsAndMaxRowsKeepsItsSignedValue` cover driver lifetime,
+    separate background colour and the reference's value semantics.
+    `MetalSceneDraw.ScriptedTextMaterialsDrawLikeTheirAuthoredStylesAndKeepTintBindings`
+    compares six scripted styles against authored controls, then switches them back to
+    plain text; `.ATextDepthSetterChangesOcclusionAndCanBeReversed` checks both depth
+    states and switches back, against an opaque foreground card. Vector getters preserve
+    their float components when promoted to JavaScript numbers, as the WE getter probe
+    and the `Math.fround` assertion in the member test require.
   - *Image layers made by script.* `.CreateLayerHonoursSizeNameParentAndParallaxDepth`,
     `.ASizedLayerHasItsOwnStretchedCardAndTheTemplateKeepsItsOwn`,
     `.ParallaxDepthIsReadAndWrittenThroughTheShaderUpdater`,
-    `.ParallaxDepthIsTheDepthOfWhatIsDrawnAndAWriteReachesTheLayersBelow`,
+    `.ParallaxDepthKeepsChildValuesWhileParentWritesMoveTheirDraws`,
     `.ACreatedLayersParallaxDepthDecidesWhetherTheCursorMovesIt`,
     `.CreateLayerWithAParentThatNamesNoLayerStaysBesideItsCreator` and
     `.ALayerCreatedBelowAParentMovesWithItAndStaysOutOfTheRoot`: `size` stretches
@@ -1173,12 +1488,13 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     layer reachable by it (and `destroyLayer` still takes the object), `parent`
     moves it below that layer and its world place follows the parent (a parent
     that names no layer leaves it beside its creator, not at the root), and
-    `parallaxDepth` is a property of every layer. A write reaches the layer, the
-    effect passes it is drawn through (a layer drawn through them holds the depth
-    on those alone) and the layers below it (Wallpaper Engine
-    moves a whole tree by its outermost layer's depth, so a write on a child
-    changes only that child's drift; layers above and beside keep theirs), and a
-    layer that starts or stops following the cursor asks for a new render graph.
+    `parallaxDepth` reads and writes each layer's raw value, including its own
+    effect metadata, without replacing descendants' raw values. Canvas draws
+    use the current outermost root's depth and anchor; changing a child's raw
+    value under an unchanged root does not change its drift. Detaching the child
+    exposes that saved value again. A graph rebuild follows an effective root's
+    transition between zero and nonzero depth, not a descendant-only raw write
+    or a repeated write that leaves cursor following unchanged.
   - *Layer transforms.* `.LayerTransformMatrixPlacesAChildWhereItsParentsPutIt`,
     `.LayerTransformMatrixCarriesTheTurnAndScaleOfItsParents`,
     `.LayerTransformMatrixFollowsALayerWhereverItMoves` and
@@ -1201,10 +1517,9 @@ All in `script_runtime_compat_test` and `scene_schema_tests` unless noted.
     anchor, and the matrix follows a script that moves the anchor. A name with no
     node answers the identity, and a script that reassigns the global `Mat4` does
     not change what the host builds. Each call answers a matrix of its own.
-  - Not covered here: `localStorage` persistence, effects, bones, particles,
-    scene properties, the camera, `Intl`, and the other layer transform calls
-    (`getChildren`, `setParent`, `lookAt`, `lookAtYaw`,
-    `getAttachment*`: a script that calls one still stops at `not a function`);
+  - Not covered here: particles,
+    scene properties, the camera and `Intl`; parent/attachment behavior is covered
+    by the separate hierarchy cases above;
     host plumbing for `SetLanguage` (scripts are told `en-us` until the host calls
     it).
 - **Scene commits in headless tests** — `scene_schema_tests` helpers wait for
@@ -1223,6 +1538,27 @@ The retained blend/effect/skeleton logic and always-active `TestRequire` remain.
 These parser/graph fixtures use in-memory assets and real Null audio; their empty
 texture entrances are not decoded-image or native-rendering evidence.
 
+- **Texture containers against Wallpaper Engine 2.8.0.42** (`sub_14015C760`,
+  `sub_14015C8D0`, `sub_14015C480`, `sub_1401E53A0`, `sub_1401A5C40`; notes in
+  `artifacts/we-parity/decompiles/E-D*.md`) — `tex_container_tests`:
+  `TexContainer.AVolumeHeaderReadsItsDepthBeforeTheColour` (flag 0x40 puts a slice
+  count in TEXI and in every level header), `.AVolumePictureIsItsSlicesStackedTopToBottom`
+  (a volume's picture is width x height·depth; slices side by side are refused),
+  `.ShippedLutsLoadAsVolumes` (every `materials/lut/*.tex` is 32x32x32; skips without
+  SceneAssets), `.EveryFormatOfTheReferenceTableIsRead` and
+  `.CodesOutsideTheReferenceTableAreRefused` (codes 1, 2, 10-15, 17-21 load, three-channel
+  ones widened to four; 3, 5, 16, 22 refused), `TextureFormatTable.NamesAndCodesMatchTheReference`,
+  and the TEXB0004 variant tests (`.AVariantPatchIsLaidOverItsLevelWhileItsConditionHolds`,
+  `.AVariantPatchCanBlendOrReplaceTheWholeLevel`, `.ABareNameConditionAsksWhetherThePropertyIsSet`,
+  `.AVariantCountTheFileCannotHoldIsRefused`, `.AVariantStringWithoutItsEndIsRefused`):
+  a holding record lays its rectangle patches over each level, blended, copied or
+  replacing the level. `metal_scene_draw_smoke`:
+  `MetalSceneDraw.AVolumeTextureIsSampledInThreeDimensions` (`texSample3D` reads slice 1 at
+  depth 0.75) and `.WideAndPackedFormatsUploadAndSample` (R16F, RG16F, RGB10A2, RGBA16,
+  RGBA16 SNORM, RGB888 sampled back). `scene_schema_tests`:
+  `MaterialContracts.EveryFileTextureSlotGetsItsReferenceFormatCombo` (`TEX<N>FORMAT` is
+  the file's code for slots 0-9, 0 included, so a fur4-shaped shader reading `TEX8FORMAT`
+  bare compiles with an RGBA8 texture there).
 - **Composites, covers, perspective images, unbound slots, fog** — pixel tests
   through the synthetic scene harness, each in a file of its own:
   `LayerComposite.*` in `layer_composite_render_test` (a chain's translucent result
@@ -1252,6 +1588,35 @@ texture entrances are not decoded-image or native-rendering evidence.
   draws an accumulating, signed effect. Wallpaper Engine's
   fluid simulation (`effects/fluidsimulation`) needs both: without the swap its
   history buffers were never written, and a local scene that runs it drew wrongly.
+- **Effect file keys (`uvs`, `unique`, `clear`, `conditions`, `functions`, `format`)** —
+  `scene_schema_part04_test`: `EffectFbo.RepeatClearUniqueAndConditionsAreRead` (the fluid
+  simulation's layout: conditions drop buffers, passes and binds), `.ConditionsAreEveryElementOfTheArrayAndCompareWithTheirOperator`
+  (AND over the array, `ge`/`gt`/`le`/`lt`, missing combo 0; `sub_1401E63B0`),
+  `.AnEntryWithoutANameAndAFormatIsNoBufferAndClearNeedsFourNumbers`,
+  `.ANonUniqueBufferIsOneTargetForEveryLayerThatDeclaresItAtTheSameSize` (`sub_1401EA500`),
+  `.TheLastExplicitClearOfASharedBufferWins` (later explicit clears replace the initial
+  colour, and a declaration without a clear leaves it alone),
+  `EffectFboFormat.UnknownIsRgba8EvenInHdr` and
+  `EffectFunctions.RunEffectFunctionQueuesClearsOfTheEffectsFirstBuffers` (the first N buffers,
+  `sub_1401EE3A0`); `MetalSceneDraw.R8EffectBufferReadsZeroInGreenAndBlue` and
+  `.AnEffectFunctionClearsItsBuffersBeforeTheNextFrame` draw them. Before: every buffer was
+  per layer, `clear`/`conditions`/`functions` were ignored and `r8`/`rg88` were RGBA.
+  `LayerTextureReference.AnEffectsOwnBuffersAreTargetsWhateverTheyAreCalled` keeps `plain` and
+  `_rt_plain` two shared buffers.
+  Wallpaper Engine 2.8.0.42 reference probes confirm the visible values: a clear of
+  `0.25 0.5 0.75 1` reads RGB `64/128/191` from RGBA8, `64/0/0` from R8 and
+  `64/128/0` from RG8; condition branches select their own colours, and two readers
+  of a shared target both see the last explicit clear. A red/blue split sampled at
+  `u=1.25` stays blue under clamp and wraps to red under repeat. All 14 cell centres
+  agree with both captured frames; the remaining sheet difference is the Windows watermark.
+- **Effect script API** — `ScriptEffectObject.*` in `scenescript_behavior_test` checks last-match
+  instance lookup, unnamed effects, material-path and empty-string lookup, separation from the
+  layer's transform setters, radians conversion and vector writes, and function clear requests.
+  Wallpaper Engine reference probes confirm exact relative material paths (neither basenames,
+  display names nor shader names), the last material for an empty string, and null for an unknown
+  name. An unnamed instance reports an empty name and is not found by either the file title or
+  an empty name. Its numeric aliases retain float storage: writing -2.7 to an `int` shader alias
+  produces the float's raw bits, -1070805811, rather than coercing the constant to integer -2.
 - **3D model materials and skinning** — `ModelLayerParse.ModelMaterialsDefaultToOpaqueAndDepthTestedAndExplicitStateWins`
   and `.BonesReachEveryMaterialAndTheBindPoseIsTheIdentity` in `scene_schema_part01_test`.
   Model materials default to normal blending, back-face culling and enabled
@@ -1265,14 +1630,111 @@ texture entrances are not decoded-image or native-rendering evidence.
   authored skeleton. Versioned model fixtures cover MDLV13–23 attribute layouts
   (`MdlMesh.SurfaceAttributesSurviveEveryFileVersion` and
   `.SkinnedMeshesKeepBoneStreamsAndSkeletonForEveryVersion`).
-- **Pass depth and cull words** — `ModelLayerParse.PassStateWordsOutsideTheListsReadAsTheFirstEntry` (`scene_schema_part01_test`):
+- **Skeleton IK description (MDLS 2-4 tail)** — `MdlSkeleton.IkTailFollowedByAnAttachmentBlockStaysInSync`,
+  `.IkTargetCountSetsTheExtraAnimationTracks`, `.VersionThreeAndFourReadTheReferencePose`,
+  `.LinkRecordsReadFlagsFromVersionFourAndClampTheirWeight`, `.BonesAnIkChainDrivesTakeNoAnimation`
+  and `.AMalformedIkTailIsDroppedButItsReferencePoseKept` in `mdl_parse_tests`. The tail is read
+  in Wallpaper Engine's order (`we_LoadMdlModel` `0x140261880`,
+  `artifacts/we-parity/decompiles/B-W1-MDLS-tail.md`): IK targets, the reference pose (bones,
+  then targets, from version 2 on, not only in 2), link records (flags from version 4, the
+  weight raised to `FLT_EPSILON`), the per-bone table and its groups, the IK chains, then the
+  skin table and the two bone tables. Every animation then stores one track per IK target and
+  one curve per link record after its declared bone tracks (kept apart from the bone tracks),
+  and a bone flagged as IK-driven (flag word bit 2) that does not start a chain takes no
+  animation. A malformed description is dropped whole (a complete reference pose is kept); a
+  count the block has no bytes left for reads as zero, as in Wallpaper Engine. Walking every
+  library model under that layout (`artifacts/we-parity/puppet-walks/walk_mdl.py`) ends each
+  skeleton block exactly at its declared end. The IK targets, links and chains are parsed but
+  not yet solved.
+- **MDL vertex formats (26-bit table)** — `MdlMesh.EveryWeVertexBitHasItsSize`,
+  `.ABitOutsideTheTableAddsNothing`, `MdlGeometry.EveryStoredStreamIsUploadedUnderItsAttribute`,
+  `.LightmapUvReachesTexCoordVec4AndTexCoordStillReadsUv`, `.AFourWidePositionAloneIsAlsoThePosition`
+  and `SceneVertexArrayAlias.AnAliasReadsItsTargetAndNeverHidesARealAttribute` in
+  `mdl_parse_tests`. A mesh's flag word is read with Wallpaper Engine's mask and size tables
+  (`0x140484A20` / `0x1404849B0`, record order; `artifacts/we-parity/decompiles/B-D7.md`):
+  the position is bit `0x1` (no longer implied), `0x10000` is a 16-byte `a_PositionVec4` right
+  after it, `0x2000000` a 12-byte `a_PositionC1`, and every texture-coordinate set C1–C5 and
+  `a_Color` has its size; before, 19 of the bits failed the stride check and `0x10000` was
+  read as 4 bytes after the tangent. Every stream is uploaded; the narrower names of a
+  coordinate set are aliases at the widest stream's offset (`SceneVertexArray::AddAlias`),
+  since WE binds a shader input by semantic (`sub_1400D7B60`). No library model uses a bit
+  beyond `0xF`/`0x1800009`/`0x180000F`, so nothing in the corpus changes.
+- **Per-bone alpha (`SKINNING_ALPHA` / `g_BonesAlpha`)** — `MdlGeometry.SkinningAlphaFlagAddsTheCombo`
+  and `MdlMesh.AMeshFlagWordWithBitTwoReadsOneMoreWord` in `mdl_parse_tests`,
+  `PuppetPose.BoneAlphaCurveIsSampledPerFrame`, `.APartialLayerPullsBoneAlphaByItsWeight`,
+  `.AFlaggedOffTrackKeepsItsBoneOpaque` and `.APuppetWithoutSkinningAlphaHasNoBoneAlpha` in
+  `puppet_pose_tests`, and `MetalSceneDraw.SkinningAlphaFadesTheBonesVertices`. Bit 4 of the first
+  mesh's flag word (mesh+24, `0x140206AE0`) adds `SKINNING_ALPHA`; the per-bone alpha
+  (`0x1401FDF90`, skeleton+616) starts at 1 and each layer moves it by `(v − 1)·weight`, clamped
+  between the value below and `v`, `v` sampled from the clip's MDLA 3 per-bone curve block; a
+  track flagged `& 3 == 1` keeps its bone's value (`artifacts/we-parity/decompiles/B-D5.md`). The
+  extra word after the mesh flag word is read whenever bit 2 is set, not only for the value 2.
+  Library users: the eye and eyelash puppets of 2998757800; their renders at WE's two shot times
+  are unchanged (mean difference to WE 4.93 / 3.58 before and after), so their curves hold 1 there.
+- **Model `rootmotion` and `castshadow`** — `ModelLayerParse.RootMotionAndCastShadowAreRead`
+  (`scene_schema_part01_test`) and `PuppetPose.RootMotionIsSharedByCopiesAndLeavesAClipWithoutItsBitsAlone`
+  (`puppet_pose_tests`). Both keys are read on a model layer, default off, and reachable from
+  scripts through `SceneRuntimeContext::SetModelFlag`/`ModelFlag` (`we_ss_reg_ModelLayer`
+  `0x140227470`: `rootmotion` a plain flag at +784, `castshadow` bit `0x800` of +288).
+  An omitted model `castshadow` is true; false and live changes gate the shadow caster pass.
+- **Root motion** — `MdlSkeleton.AnimationFlagsAndTheClipRecordAreRead` (`mdl_parse_tests`),
+  `PuppetRootMotion.ALockedAxisKeepsTheRootAtTheClipsStartAndHandsTheMotionOn`,
+  `PuppetRootMotion.TheYawBitHandsTheTurnToTheLayer`,
+  `PuppetRootMotion.TheLayersAboveAndTheWeightScaleTheMotion` (`puppet_pose_tests`) and
+  `ScriptRuntimeCompat.RootMotionMovesTheModelLayerBeforeTheScriptsRun`
+  (`script_runtime_compat_test`). The MDLA header word after the frame count is the clip's flags
+  (anim+80) and `flags & 1` adds a clip record after the version-6 curves (source, start, end, origin
+  offset, root bone; an earlier animation as source). With `rootmotion` on and root-motion bits
+  (`& 0x1F800`), `sub_140225900`: x/y/z bits keep the root bone at the clip's first frame, the yaw
+  bit takes the clip's turn about y out of it, and the layer moves instead — origin by the world
+  3x3 times the motion measured from the last frame (carried past the end when the clock goes
+  back), yaw by the turn — weighted by the layer and by `1 - weight` of every absolute layer above;
+  before the frame's scripts. With it off the clip plays as it is. No library model sets
+  `rootmotion` (test only; not compared with Wallpaper Engine).
+- **Puppet bone script API** — `ScriptRuntimeCompat.PuppetBoneTransformIsWorldSpaceAndAWriteIsDrawn`,
+  `.PuppetBoneIndexAndParentFollowTheSkeleton`, `.PuppetBoneQueriesOnAnUnknownLayerAnswerNothing`
+  (`script_runtime_compat_test`) and `PuppetBones.*` (`scenescript_puppet_bones_test`). Puppet poses
+  are evaluated before the frame's scripts (`SceneRuntimeContext::EvaluatePuppetPoses`, I8), so
+  `getBoneTransform` reads this frame's pose: world = layer world × model-space bone. `setBoneTransform`
+  moves that bone only (0x14020F350); the local calls work on the parent-relative bone and carry the
+  bones below (0x14020F840 → sub_14020DB40); local angles are radians (no conversion in
+  0x14020FA10 / 0x14020FCE0). Names resolve to the first exact match; a write holds through a
+  recompute at the same time and is gone at the next frame. A layer without a puppet answers 0, -1 or
+  null and takes writes without throwing; blend shapes act on nothing until morph targets land.
+- **Bone simulation** — `MdlSkeleton.BoneSimulationJsonSetsFlagsAndParameters` (`mdl_parse_tests`),
+  `PuppetPhysics.*` (`puppet_pose_tests`), `ScriptRuntimeCompat.PuppetBoneImpulseAndResetReachASimulatingBone`
+  (`script_runtime_compat_test`). we_ParseBoneSimulationJson 0x140265C30: a flag is a JSON true (a number
+  is not), settings are kept only for a bone with `r`/`t` and `se`/`re` (or `ik`), defaults are the bone
+  constructor's (mass 1000, inertia factors 1, ikd 2, ikrd 50). The composer 0x1401FDF90 steps each
+  simulating bone once per clock move in the layer's world space from last frame's final bone (a
+  recompute at the same time puts the same offset on the new pose): the translation spring
+  `v1 = v - dt·ts·x0, x = x0 + dt·v1`, friction `min(dt·tf, 1)`, the offset capped at tm × the layer's
+  scale; the turn spring lags a turning parent and catches up; an impulse adds world-unit velocity
+  (twice the layer size moves the bone half as far in its own units); reset returns the state to rest;
+  two layers of one puppet keep separate state; a bone that does not simulate takes neither.
+- **Shaders that do not compile** — `MetalSceneDraw.AStageThatCannotBeTranslatedIsReplacedByTheFallbackStage`,
+  `.AProgramMetalCannotCompileIsDrawnWithTheFallbackShader` (`metal_scene_draw_smoke`) and
+  `SceneFailurePolicy.AnEffectWhoseShaderCannotBeCompiledDrawsTheFallbackShader`: the stage that
+  does not translate (or the program Metal refuses) is replaced by Wallpaper Engine's
+  `dx11fallback` stage (`sub_1400D5070`, probe T9): a broken fragment draws (0.5, 0, 0, 1) with
+  the pass's blending, a broken vertex keeps the real fragment, and the scene is no longer held.
+- **Scene step and unbound slots** — `ShaderValueUpdaterCompat.FrametimeIsClampedToAQuarterSecondAndNeverZero`
+  (`script_runtime_compat_test`) and `UnboundSlot.ASlotNobodyBoundDescribesItselfAsTwoTexelsSquare`:
+  the scene step is held to [1e-4, 0.25] s before and after the rate (`sub_140110630`), and a
+  slot with no texture reads Resolution (2,2,2,2) / Texel (0.5,0.5,2,2) (`sub_1400D8300`).
+- **Pass depth, cull and blending words** — `ModelLayerParse.PassStateWordsOutsideTheListsReadAsTheFirstEntry`
+  and `.AnImageMaterialWithoutABlendingWordBlendsAsNormal` (`scene_schema_part01_test`):
   `depthtest` and `depthwrite` are on only for `enabled` and `cullmode` is off only for
   `nocull`; any other word (`less`, `greater`, `always`, `inverted`) reads as the list's
   first entry: no depth test, no depth write, back faces culled. A write without a
   test is not drawn (`ResolveSceneDepthState`). The native capability check no longer
   refuses a material for its depth word, so such scenes stay on Native Metal;
   `MetalCapability.AnUnsupportedDepthCompareIsRefusedWithItsOwnReason` went with the
-  rule it pinned.
+  rule it pinned. `blending` is matched case-sensitively and anything outside
+  normal/translucent/additive/alphatocoverage — `bogus`, `Additive`, a missing key — is
+  normal (`sub_1401587D0`; probe T10 in `artifacts/we-parity/probes/texshader2`). A material
+  that named no blending used to be drawn translucent, which scaled an effect pass or bloom
+  step by its own output alpha instead of writing it.
 - **Perspective model contracts** — the parser selects the index width from the
   vertex count (32-bit indices above 65535 vertices; reading that blob as uint16
   triples rejects the mesh or draws scrambled triangles), and the vertex cap is
@@ -1334,7 +1796,8 @@ texture entrances are not decoded-image or native-rendering evidence.
   The ping-pong pair an image layer's effects run through, and the composite
   another layer reads, are point-sampled when the layer sets `nointerpolation` or
   its primary texture's header does, wrapped when `clampuvs` is off, clamped and
-  linear otherwise; per-effect buffers stay clamped and linear. The header is read
+  linear otherwise; per-effect buffers are linear and clamped unless they specify
+  `uvs: "repeat"`. The header is read
   from the texture file (`LayerRenderTargetFilter`), because the composite of a layer
   another layer reads is registered before the layer's own material is loaded: the
   second test makes the point-sampled texture's only user the layer in question, in
@@ -1388,38 +1851,34 @@ texture entrances are not decoded-image or native-rendering evidence.
   The last pass of an image layer's effects is drawn with the layer's authored
   `depthtest` and `depthwrite`, not the state its effect pass authored
   (`SceneImageEffectLayer::SetFinalDepth`, applied beside the layer's blending in
-  `ResolveEffect`). The write is left out for a layer Wallpaper Engine sorts: one whose
-  material blends, `translucent` or `additive`, in a scene with `transparentsorting` on
-  a perspective camera (`Scene::opaque_first`); the parser hands such a layer no write.
-  The fixture is an opaque card nearest the camera, a red translucent layer behind it,
-  and a card behind that which depth-tests and writes none, drawn into a depth-attached
-  scene with and without a pass-through effect that authors neither state, by both
-  renderers. A layer that tests is hidden over the nearer card with effects exactly as
-  without; one that writes hides the card behind it; one that authors neither draws over
-  the nearer card even when its effect pass authors both. The red layer is also a solid
-  layer (`solidlayer_depthtest`) and a composition layer (`composelayer_depthtest`,
-  holding a red card) that test without writing. Eight more cases draw the same cards
-  through a perspective camera with `transparentsorting` (the far card translucent,
-  since an opaque one is drawn first there). A translucent or additive layer that tests
-  and writes, whether a plain card, a solid layer or a composition layer, is hidden over
-  the nearer card yet does not hide the far card drawn after it, whether or not the far
-  card runs the same effect and authors the same state. That layer is transparent over
-  the far card, as a glare card is, so the case asserts that its texels cut nothing out
-  of the far card, not that the far card is drawn under the layer, which Wallpaper
-  Engine's sort would add and this engine's scene order does not. A layer authoring
-  neither is the reference that proves the geometry. A `normal` or `alphatocoverage`
-  layer is not one Wallpaper Engine sorts: it keeps its write, and the far card is
-  hidden behind it. Each case except the geometry references fails
-  when the rule it guards is broken: with no final depth state the effect cases draw the layer over the nearer card
-  and a layer authoring neither is hidden; with the write kept for a layer that blends
-  the sorted cases of such a layer draw nothing over the far card (it is cut out); with
-  the write dropped from every layer of a sorting scene the `normal` and
-  `alphatocoverage` cases draw the far card over the layer.
+  `ResolveEffect`). Like every draw, that pass writes no depth when it blends
+  (`translucent`, `additive`; `ResolveSceneDepthState`, Wallpaper Engine's device rule,
+  next entry).
+  The fixture is an opaque card nearest the camera, a red layer behind it, and a card
+  behind that which depth-tests and writes none, drawn into a depth-attached scene with
+  and without a pass-through effect that authors neither state. A layer that tests is
+  hidden over the nearer card with effects exactly as without; a `normal` one that
+  writes hides the card behind it and a translucent one does not; one that authors
+  neither draws over the nearer card even when its effect pass authors both. The red
+  layer is also a solid layer (`solidlayer_depthtest`) and a composition layer
+  (`composelayer_depthtest`, holding a red card) that test without writing. Eight more
+  cases draw the same cards through a perspective camera with `transparentsorting`
+  (the far card translucent, since an opaque one is drawn first there). A translucent
+  or additive layer that tests and writes, whether a plain card, a solid layer or a
+  composition layer, is hidden over the nearer card yet does not hide the far card
+  drawn after it, whether or not the far card runs the same effect and authors the same
+  state. A `normal` layer or a covered `alphatocoverage` fragment keeps its write,
+  and the far card is hidden behind it. The coverage depth cases use alpha 0.75
+  (covered), 0.25 (rejected), and 0.75 with writing disabled; the exact 0.5 boundary
+  has no Wallpaper Engine reference measurement. Each case except the geometry references fails when the rule it
+  guards is broken: with no final depth state the effect cases draw the layer over the
+  nearer card and a layer authoring neither is hidden; with the write kept for a draw
+  that blends the translucent cases hide the far card; with the write dropped from
+  every draw the `normal` and `alphatocoverage` cases draw the far card over the layer.
 
   The depth test and write rest on Wallpaper Engine's binary (its image layer copies the
-  material's `depthtest` and `depthwrite` flags onto the pass, and a scene that sorts
-  draws the layers that blend after the others, back to front, so the write hides
-  nothing there), and on frames of 3509243656 (a star's glare layers, authored
+  material's `depthtest` and `depthwrite` flags onto the pass, and its device writes no
+  depth for a draw that blends), and on frames of 3509243656 (a star's glare layers, authored
   translucent with both enabled, over opaque spheres). Without the test each star is a
   smooth warm disc; with the test and the write a card-shaped hole is cut out of
   everything farther drawn after the nearest star's glare card: the other stars' glows
@@ -1443,9 +1902,32 @@ texture entrances are not decoded-image or native-rendering evidence.
   writes, no sorting) draws the same pixels with and without the write; the test draws
   17 small clusters of star pixels (about 500 of 7 million pixels at 3456x2024) over the
   moon's disc that Wallpaper Engine's frame does not have: with the test those pixels
-  are 38 to 44 levels off its frame on average, without it 2 to 3. The likely cause is
-  the star shell model (additive, `depthwrite` enabled) being nearer than the moon; it
-  is not settled here and not changed.
+  are 38 to 44 levels off its frame on average, without it 2 to 3. The star shell model
+  is additive with `depthwrite` enabled and nearer than the moon; since a draw that
+  blends writes no depth (next entry) it no longer hides the moon's tested pass there.
+  That scene is not in this machine's library, so the change was not rendered on it.
+- **Depth writes of draws that blend** — `MetalSceneDraw.OnlyADrawThatDoesNotBlendWritesDepth`
+  (`metal_scene_draw_smoke`) and `ModelLayerParse.DepthStateFollowsTheTargetsDepthAttachment`
+  (`scene_schema_part01_test`). Wallpaper Engine's device picks the depth-stencil state
+  from the material's two depth words and the draw's blend mode: `sub_140099F60` indexes
+  its table with `depth flags | (mode != normal && mode != alphatocoverage)`, bit 0
+  being "no depth write" (the `depthwrite` setter `sub_14009AFD0` sets the same bit). So
+  a translucent or additive draw never writes depth, whatever its material authors, and
+  still tests; `ResolveSceneDepthState` takes the draw's blend mode and does the same.
+  The depth probe (`artifacts/we-parity/probes/tools/make_depth_probe.py`, a perspective
+  scene of a nearer red card drawn before a farther green one, captured in Wallpaper
+  Engine 2.8.0.42) agrees in all twelve cells, and this engine now draws all twelve as
+  Wallpaper Engine does (before: the translucent cards authored with both words enabled,
+  at alpha 1, 0.5, 0.002 and 0, hid the green card). On 3662790108 four translucent cards
+  authored `depthwrite` enabled (the sun glare cards `sun-1`, `sun-2`, `sun-4` and the
+  full-screen `hud1`, at alpha 0) are drawn before the planet labels and nearer the
+  camera; they hid the labels (太阳, 地球, 金星, ...), which Wallpaper Engine shows.
+  Against Wallpaper Engine's frames (`artifacts/we-parity/compare-1.1C`): 3662790108 now
+  draws 太阳, 水星, 地球, 金星 and the probe labels where its frame has them; its mean
+  difference moves from 3.82 to 3.88 (correlation 0.494 to 0.497) because the labels
+  ride on the script-animated orbits and stand a little apart from the frame's at the
+  same scene time. 3615154110 and 3708363772 (3D, models and translucent cards) draw
+  the same metrics as before.
 - **Layers a wallpaper's properties hide** — `HiddenLayers.ALayerItsPropertiesHideStaysOutOfTheGraphUntilSomethingShowsIt`
   in `layer_texture_reference_test` (CPU, in the gate) and
   `MetalSceneDraw.ALayerItsPropertiesHideHoldsNoImagesUntilAScriptShowsIt` in
@@ -1470,8 +1952,8 @@ texture entrances are not decoded-image or native-rendering evidence.
 - **Layer as texture** — `layer_texture_reference_test` (CPU, in the gate):
   `_rt_imageLayerComposite_<id>[_a|_b]` forward refs, duplicate names, missing
   targets, cycles, a layer's own composite outside its effects, file names vs layer names, invisible sources
-  kept, producer-before-consumer graph order, and an effect-chain source linking
-  from its composite rather than `_rt_default`.
+  kept, authored previous/current composite timing, and an effect-chain source
+  linking from its composite rather than `_rt_default`.
   - A render target is a name that starts with `_rt_` or `_alias_`; any other
     texture name is a file, however it starts
     (`ATextureNamedWithALeadingUnderscoreIsItsFile`). Layers exported from an image
@@ -1547,19 +2029,50 @@ texture entrances are not decoded-image or native-rendering evidence.
     Taken as history, the name made native Metal refuse the scene, and an
     effect naming `_b` in its first slot without a `bind` (a wave after an
     audio-bar effect) had no image for the slot.
-  - A layer's own `_a` or `_b` outside its effects is its composite as the frame
-    before left it. The shared graph copies each composite into the layer's
-    `_rt_link_<id>` after the layer draws, so a read of it ahead of that copy is
-    history, and `sceneToRenderGraph` declares the link as a target that carries
-    its previous frame, shaped like the composite it is copied from. Without the
-    declaration there was no image for the link on its first
-    draw (the `slot 0 (_rt_link_<id>) has no image` line above) and drew the layer
-    from nothing every frame, while native Metal kept the picture, so the two
-    differed; with it they are byte-identical after 1 and 4 frames
-    (`MetalSceneDraw.ALayerReadingItsOwnCompositeSeesTheFrameBefore`,
-    with the material naming `_a` or `_b` and with the layer's object also naming
-    `_b`, which no parser reads). Native Metal no longer refuses a scene for such a
-    name (`ALayersOwnCompositeOutsideItsEffectsIsNotARefusal`).
+  - A layer's own `_a` or `_b` outside its effects reads its previous composite.
+    A GPU composite reference to another object reads the retained previous frame
+    when the reader precedes the producer, and the current frame when it follows.
+    Wallpaper Engine controls confirm this for both transparent and authored order;
+    a forward reference alone must not prefetch its producer. Direct cross-object
+    references use the source composite; self-links keep their separate snapshot
+    so no draw samples the attachment it is writing. Source metadata is bound once
+    to the actual graph target so resolution, texel and mip uniforms follow resize.
+    Primary file-image reads, the layer's own effect input and CPU text donors retain
+    their distinct rules. `MutualLayerReferencesCarryTheLaterLayerFromThePreviousFrame`
+    and `AReferencedCompositeIsSampledAtItsRealSize` cover the CPU contract;
+    `TransparentSortingGpu` covers changes of depth, source pixels and pointer inputs,
+    and `TransparentSortingLifetimeGpu` checks self-link accumulation without growth.
+    A runtime toggle is compared with WE 2.8.0.42: probes sort-runtime-off-v1 and
+    sort-runtime-on-v1 (the static cells of depth-sort-contract-v1, with a script that sets
+    `thisScene.transparentsorting` once at 3 s) agree on all 36 samples; four cells change
+    between the two states in WE, so the toggle is observed, not inert.
+    `MetalSceneDraw.MutualLayerReferencesPreserveCanvasHistoryAcrossEffectSwitches`
+    and `.ALayerReadingItsOwnCompositeSeesTheFrameBefore` preserve history across
+    effect changes and graph rebuilds.
+  - `PlanarReflection` in `rendergraph_smoke` covers model-only activation,
+    literal `reflected: false`, hidden model material admission, inactive and
+    undrawn material slots, quality-off background colour, the shader's retained
+    view-forward vector, and framing before the reflection projection flip.
+    `PlanarReflectionGpu` compares actual reflected geometry on both sides of the
+    world plane, moving cameras and sources, transparent sorting in both phases,
+    effects with MSAA, excluded sources' previous composites, opaque RGB storage,
+    HDR zoom/pan, zero-valued self sampling, resource bounds and return to idle. Image-only reflection
+    sampling is a negative control; it does not request the native reflection
+    phase. Quality-off consumers retain a background-colour picture.
+  - `LayerScriptsReachChildrenEffectsAndEffectMaterials` in
+    `layer_texture_reference_test`: `thisLayer.getChildren()`, `getEffectCount()`,
+    `getEffect(index | name)` (preserving the instance `name` from `scene.json` over
+    the effect file's), `effect.visible` and `effect.getMaterial(i)` constant writes
+    update the effect chain and its pass uniforms (issue #89).
+  - `EffectMaterialsGiveScriptsTheirAuthoredAndDefaultConstants` in
+    `layer_texture_reference_test`: a script reads a material constant as the material
+    holds it, the scene's authored value or the shader's default, by material name or
+    through `getConstant`, so `m.speed += 0.25` steps the authored value instead of
+    writing `NaN` (sent as 0), and an unauthored vector reads as a `Vec3` of its default.
+  - `AnEffectPassReadingTextureResolutionWithoutSamplingTheSlotGetsItsTargetSize` in
+    `layer_texture_reference_test`: an effect pass that reads `g_Texture0Resolution`
+    without sampling `g_Texture0` in the active combo branch still receives its effect
+    target's dimensions while leaving slot 0 unbound (issue #89).
   - Older editors also list the layer in its own `dependencies`, once for each
     self name its effects bind. A dependency names no slot, so it cannot ask
     for the last frame, and a layer waits on nothing of its own; whatever it
@@ -1625,6 +2138,18 @@ texture entrances are not decoded-image or native-rendering evidence.
 - **JPEG/EXIF orientation** — `tex_schema_tests`: all eight EXIF display
   transforms on asymmetric RGBA pixels, both TIFF byte orders, truncated
   JPEG/EXIF data, invalid IFD offsets.
+- **Every level is of the first level's kind** — `TexContainer.ALevelOfAnotherKindEndsTheChain`,
+  `TexContainer.ASpriteFrameOfAnotherKindRefusesTheSheet`: a texture's levels are uploaded
+  in one format, so a decoded picture after raw pixels (or raw one-byte pixels, or a clip,
+  after a picture) ends the chain with the levels behind it, and a sprite frame of another
+  kind refuses the sheet; otherwise the upload reads the level as the first one's pixels,
+  past its own bytes.
+- **Picture formats and sizes** — `TexLoose.APictureInAFormatNoTextureUsesIsNotDecoded`,
+  `TexLoose.APictureWiderThanAnyTextureIsNotDecoded`, `TexLoose.ATgaShorterThanItsPixelsIsNotDecoded`,
+  `TexLoose.AJpegWhoseMarkersFailBeforeAnyScanIsNotDecoded`:
+  stb_image decodes only PNG, JPEG, BMP, GIF and TGA (a PNM named `.png` and as a declared
+  picture is refused), nothing wider or taller than 16384 (16384 still loads), no TGA
+  whose rows the file does not hold, and no JPEG whose markers fail before any scan ([ThirdParty/stb_image/PATCHES.md](../../ThirdParty/stb_image/PATCHES.md)).
 - **Texture mip budget** — `TexBudget.*` in `tex_container_tests` and
   `MetalSceneDraw.ATextureWhoseNextLevelFallsShortOfTheSurfaceKeepsItsFullSizeLevel`
   in `metal_scene_draw_smoke`. A 2D scene's packaged chain loses a leading level only
@@ -1720,6 +2245,20 @@ texture entrances are not decoded-image or native-rendering evidence.
   `flags` 2 against the rate, a burst paid out of the rate's account, `delay`,
   `duration`, periodic windows with pauses, `maxtoemitperperiod`, a window re-arming
   the burst, a lone burst firing once, and every instance running its own schedule.
+  `ScriptParticles.*` exercises native playback and instance controls through real
+  SceneScript: pause stops emission while root/static-child positions and ages advance;
+  stop clears static particles and event instances; manual zero/negative counts, per-emitter
+  quotas and balance debt; play reopens flags while stop/play resets the schedule;
+  deferred instance binding, vector copies and unset sentinels; rate readback and positive-rate
+  rebinding after stop; expired wrappers and cancelled pending writes; empty/finished frame
+  demand, including zero-count streams versus a burst still waiting to fire.
+  `MetalSceneDraw.ParticleScriptControlsReachTheSameFrame` starts with a visible
+  sprite, clears it and emits two other sprites from scripts after the ordinary simulation,
+  checking the current frame through the host's mesh-rebuild and poster path. The instance
+  writes in those scripts affect the next step, while the newly emitted geometry is already
+  visible. WE reference probes distinguish pause motion, naturally expired play versus
+  stop/play, deferred binding and scalar/vector readback; the native unset-vector test only
+  relies on the specified first-component sentinel, not uninitialized native tail lanes.
   `Initializers.*`, `ColourInitializers.*` and `ColourOverride.*`: hue steps spaced as
   the loader spaces them (whole-turn and partial ranges, one step or none, a range of no
   width) and colour-list noise as a draw cut off at 0 and 1 with the override added
@@ -1757,7 +2296,29 @@ texture entrances are not decoded-image or native-rendering evidence.
   vortex centre/axis/flags/audio, the control point operators, and collision shapes
   (the response given to every particle found inside whichever way it moves, the
   default sphere origin of a pixel scene, and flag 1 carrying a plane or sphere with a
-  turned control point). `Prewarm.*`: a start time
+  turned control point; flag 2 stopping the spin of what every kind hits; the canvas
+  planes of `collisionbounds` in the layer's frame with the last plane behind winning;
+  `collisionbox` doing nothing; a `collisionquad` stopping only what crossed its front
+  inside its size, pushed out by 1.05 times the depth; a `collisionmodel` capsule pushing a
+  particle to its surface once its layer link resolves).
+  `LayerImage.*` covers an emitter linked to a hidden image (the old path emitted
+  nothing), the quarter-size sampler and alpha-127 threshold, point and mip filters,
+  opt-in content refresh and unconditional resize refresh, opacity masks, puppet UV
+  points read through the cached palette, image colour flags, local offsets,
+  inherited motion measured with the scene timestep, initializer ordering and text
+  raster sources. `AQuarterImageProducerRunsOnlyWhenTheMapNeedsNewPixels` checks that
+  a text pixel producer runs only on first use, resize or the timed refresh, is not
+  downsampled twice, and releases its temporary image after the map is made;
+  `EncodedVideoPayloadsAreNotSampledAsRgbaPixels` keeps compressed video data out of
+  the CPU reader. Wallpaper Engine donor probes show plain/MSDF text at opacity 0.70
+  emits nothing while 0.75 and 0.80 emit, matching material alpha squared and the
+  127 threshold; image donors at 0.50/0.75 still emit from their original texture.
+  `PuppetPose.AReadOnlyPaletteKeepsTheLastCompletedPoseWithoutEvaluating`
+  in `puppet_pose_tests` checks that an unevaluated palette is empty and a pending
+  animation change does not run merely because a particle asks for the cached pose.
+  The Wallpaper Engine `layerimage` feature preview changes from an empty background
+  to the same coloured emission grid; individual particle positions remain random.
+  `Prewarm.*`: a start time
   populates the first frame, the 0.05/0.2 s step, the bound on a huge start time, an
   event child's instance (and the number of steps it costs, capped at 6000), a
   static child, and a worldspace system or a pinned control point prewarmed by the
@@ -1775,14 +2336,103 @@ texture entrances are not decoded-image or native-rendering evidence.
   the scene runs, and the speed override with the file flag that ignores it.
   `Renderers.*`: an empty `renderer` list draws nothing but the system still runs and
   spawns its children, a missing or non-array key gets one sprite, and a 2D scene's eye
-  is 2000 in front of the canvas. `MultipleRenderers.*`: one mesh per `renderer` entry,
+  is 2000 in front of the canvas. `ParticleOrientation.*` reads the actual orientation
+  uniforms through the parser and updater: fixed zero/negative/cardinal axes,
+  worldspace transpose under a rotated nonuniform model, local scale effects,
+  numeric/unknown mode fallback, local/worldspace upright, the parallel-axis
+  non-finite result, and independent renderer bases sharing one simulation.
+  `MetalSceneDraw.ParticleRendererAxesChooseTheBillboardPlane` checks real sprite
+  pixels with screen and fixed planes, a rotated layer and renderer worldspace.
+  The mode byte fits existing `WPShaderValueData` padding (104 bytes on arm64);
+  basis constants use the material's existing constant storage, with no additional
+  particle traversal, render pass or growing cache.
+  `MultipleRenderers.*`: one mesh per `renderer` entry,
   each with its own shader whatever order the entries are in, and live particles kept in
   birth order for a plain rope in any position. `RopeGeometry.*`: a subdivided rope
   trail, a plain rope's `subdivision + 1` pieces per pair in the thick layout, and a
   trail's recorded points and strip length as the shader sees them. `ParticleCorpus.EveryLocalParticleFileSimulatesWithoutNonFiniteValues`
   is opt-in (`WE_TEST_PARTICLE_DIR` names a directory of unpacked scenes): twenty
   simulated seconds of every particle file there, no non-finite value, never more than
-  `maxcount`; `ParticleCorpus.PrewarmCostOfTheLocalLibraryIsReported` times the prewarm of
+  `maxcount`; plan step 8.1 cases in `particle_parity_test`: `ParseLevel.AChildEntryWithoutMaxcountAllowsTenInstances`,
+  `.AParticleFileWithoutMaxcountHoldsNoParticles`,
+  `.TheIgnoreColourCountAndLifetimeFlagsAreBitsEightThirtyTwoAndSixtyFour`,
+  `InstanceOverride.AFileWithFlagEightKeepsItsColours`, `.AFileWithFlagThirtyTwoIgnoresTheCountOverride`,
+  `.AFileWithFlagSixtyFourIgnoresTheLifetimeOverride`,
+  `ParticleInstanceOverride.LifetimeReachesOnlyALifetimeRandomRecord`,
+  `ParticleCountOverride.TheCountOverrideLeavesTheMapSequenceSpacingAlone`,
+  `AngularMovement.BlendWindowKeepsTheForceOffBeforeItOpens`, `ControlpointAttract.BlendWindowScalesThePull`,
+  `ControlpointOperators.ReduceMovementAndMaintainDistanceTakeTheBlendWindow`, `Vortex.IgnoresBlendKeys`,
+  `AlphaFade.WhenTheFadesOverlapTheFactorsAreBitwiseOred`,
+  `ParticleControlPoints.APointIsPlacedByItsPositionInTheListNotItsId`, `.AnglesTurnTheControlPoint`,
+  `.AnUnregisteredParentPointLeavesTheChildsAuthoredPoint`,
+  `.ARegisteredParentPointIsCopiedIntoTheStaticChildsSpace`,
+  `.ARegisteredParentPointIsRelativeToAnEventChildUnlessRaw`,
+  `.CopiedPointMotionKeepsASeparatePreviousPositionForEachEventInstance`,
+  `.ANestedEventCopyReadsItsBoundParentInsteadOfTheLastSibling`,
+  `.AParentCopyCarriesTheFullControlPointOrientationIntoChildSpace`,
+  `.ARemapOwnedPointIsNotReplacedByAParentCopy`, and
+  `ParticleChildren.AControlPointStartIndexDoesNotShiftTheChildEmitter` cover parent
+  registration, transformed/raw copies, independent event history, pool recycling and stop/recreation,
+  nested event parents whose control-point links survive particle detachment, full frame orientation, destination ownership and emitter
+  index independence. Parent-copy state is allocated only for applicable event
+  children, bounded by their instance pool; default object sizes stay unchanged.
+  `WorldSpace.BornEventParticlesKeepTheirWorldPositionWhenTheirParentMoves`,
+  `.SiblingControlpointVelocityKeepsEachInstancesPreviousBinding`, and
+  `Remap.WorldOriginsAffectAbsoluteCoordinatesButNotDifferencesAtBirthOrAtEachStep`
+  cover world event births, rope history, sibling previous positions during prewarm
+  and pool reuse, and absolute versus relative remap inputs. Synthetic WE comparisons
+  cover static and moving parents across each parent/child world flag, rotation,
+  child-entry transform and ordinary/transformed/raw control-point copy.
+  `ParticleControlpointWrites.*` (birth writes that persist and keep untouched
+  components, the operator's first lane of each four-particle group, the child-entry
+  flag 1 feed without shifting emitter indices, the homogeneous w of operator versus
+  birth writes, nested readers of a written parent frame and a world birth write
+  staying put when its layer moves) and `Remap.MissingFlagsClampInputsButLeaveTheOutputRangeUnclamped`
+  cover remap-written control points; synthetic WE 2.8.0.42 probes agree on 128/128
+  write/feed samples and 144/144 nested-frame samples (before: 82 and 48), maximum
+  channel difference one. Written and fed point state lives in the existing optional
+  per-instance history; default control-point, instance and subsystem sizes are unchanged.
+  `AngularMovement.ABlendWindowWeighsTheForceTheTurnAndTheClampedDrag` and
+  `ControlpointAttract.ABlendWindowWeighsThePullAfterFlagTwoCapsIt` follow the blended kernels
+  (`0x14023FBC0` cases 0x1C and 0x20).
+  `EventDeath.*` in `particle_parity_test` keep an `eventdeath` child emitting after the
+  death that made it, prewarmed or not, and reuse a burst child once its burst has died;
+  the WE 2.8.0.42 parent-copy probe now agrees on all 64 particle and control-point
+  samples, including the eight event-death samples that were blank before.
+  Plan step 8.2:
+  `ParticleNoise.*` (the engine's 3D/2D/1D simplex values from a float port of the decompile,
+  zero at the origin and whole numbers, within -1..1 off tie planes, fbm), `Turbulence.TheFieldIsTheEnginesSimplex`,
+  `.TheRateOverrideScalesTheNoiseTime`, `SequenceInitializers.PositionOffsetRandomIsTheEnginesFbm`,
+  `TurbulentVelocity.*` (forward at time zero, heading turned by the 1D noise, shared heading,
+  rate on the timescale) and `ParticleRateOverride.ARateBelowAHundredthRunsAtAHundredth`
+  (`particle_override_test`). These match the Wallpaper Engine probe
+  `artifacts/we-parity/probes/particle-81`/`-81b` cell by cell: alphafade with fade-in 0.8 over
+  fade-out 0.4 reads the bitwise OR (life 0.44: WE 247 / ours 248, 0.59: 179 / 186, 0.74: 252 / 252),
+  flag 8 keeps a red `colorrandom` red under a teal override (unflagged: teal), flags 64 and 32 keep the
+  lifetime and count overrides out, a file without `lifetimerandom` keeps its lifetime under override
+  3, control point entries land by position, a mapsequence keeps 4 spots under override counts 2 and
+  0.5. Its parent-point cases never registered the requested parent slot and exercise
+  only that fallback; registered parent copies are covered separately. Plan step 8.3 (the force time step and
+  low-frame-rate half step, `0x140237724`): `Movement.DragUsesTheScaledStepBelowFortyFramesASecond`
+  (30 fps: drag over `dt * 0.75^0.7`, position over `dt`), `.AtSixtyFramesASecondTheScaledStepIsTheStep`,
+  `ParticleStep.AFrameRateOfTwentyOrLessRunsTheOperatorsInTwoHalfSteps` (15 fps, gravity: y -1/30, not
+  -2/45), `.AboveTwentyFramesASecondTheOperatorsRunOnce`, `.TheScaledStepIsDtTimesPowOfAFortiethOverTheFrameInterval`,
+  `.HalfStepsStartEachPassFromTheBirthValues` (a ramp is not applied twice),
+  `ControlpointAttract.PullsByTheScaledStep`, `Turbulence.SpeedIsTakenOverTheScaledStep`,
+  `Vortex.SwirlsOverTheScaledStep` and `AngularMovement.DragUsesTheScaledStep`; plan step 8.4
+  (the missing operators, `F-D9` to `F-D12`): `VortexV2.*` (swirl over the scaled step, flag 1 from
+  the axis line, flag 2 keeps the distance, the ring's pull between its band and its reach),
+  `Boids.*` (cohesion with the particle itself counted, separation, flag 1 speed cap, nothing beyond
+  the threshold, one slice of three steered per step at 400 slots), `ParticleNoise.OpenSimplex2IsZeroAtTheOriginAndStaysWithinOne`,
+  `Remap.*` (the preview scene's distance-to-colour remap, input and output clamps, the default
+  multiply of size by the lifetime fraction, each transform, the blend window),
+  `RemapInitial.AppliesOnceAtBirthToTheBirthValues` and `InheritValue.*` (the operator alone, and an
+  event child following its parent's colour through the subsystem); the stock vortex orb preset
+  (`magic_vortex_orb`, which drew nothing): `ControlpointOperators.MaintainDistanceIsMeasuredInTheControlpointsFrame`
+  (kernel 0xB: a world-space layer scaled by 0.5 keeps its particles 0.5 x `distance` away) and
+  `InstanceOverride.AControlpointAngleKeyedWithATimelinePlaysIt` (a `controlpointangleN` keyed only
+  with an `animation` timeline turns the control point as the scene clock runs);
+  `ParticleCorpus.PrewarmCostOfTheLocalLibraryIsReported` times the prewarm of
   every file with its own start time and prints the slowest. `particle_mouse_controlpoint_test` keeps the audio-emitter
   cases, the size override on ramps, the control point attraction, the mouse control point in
   the cropped presentation and the movement and audio-band cases, updated to the rules above.
@@ -1798,7 +2448,52 @@ texture entrances are not decoded-image or native-rendering evidence.
 - **Rope and rope-trail geometry** — `particle_rope_pieces_test` and
   `particle_rope_geometry_test`, with
   `RopeGeometry.ATrailIsDrawnAsOnePiecePerSubdivisionBetweenItsRecordedPoints`
-  (CPU, in the gate). `particle_rope_pieces_test` (`RopePieces.*`, `RopeTextureRepeat.*`)
+  (CPU, in the gate). `Renderers.ASpriteTrailSelectsThickLayoutForEveryRendererSharingItsParticles`,
+  `RopeGeometry.ARopeShaderWithAGeometryStageDrawsEachPairAsTheStripItEmits` (subdivision
+  0 and 2: one record per pair, `4 + 2 * subdivision` ordinals, D3D strip order) and
+  `RopeGeometry.AGeometryStageThatCannotBeLoweredLeavesTheRopeOnItsVertexStage` cover
+  the geometry-stage layout (the strip vertex each quad vertex keeps) and the
+  author's vertex-only path when the stage does not translate;
+  `shipped_rope_geometry_translates_for_every_renderer_combination` in
+  `Renderer/Shader/tests/metal_compile.rs` translates (and, opted in, compiles) the
+  shipped rope program with its geometry stage for 384 renderer combinations. In the
+  WE 2.8.0.42 trail probe the ribbon's width across (19.9 px against WE's 19.6-19.9)
+  and its centre now match; the old vertex-only path doubled the measured width in
+  several cells. Trail length is unchanged (about 75 px against WE's 83).
+  `RopeGeometry.ATrailRecordsOnItsFirstFrameAndThenAWholeNumberOfFramesApart`,
+  `RopeGeometry.APrewarmedTrailStartsFromWhereItsParticleIs`,
+  `RopePieces.AFullHistoryKeepsItsOldestPointWhereItWasRecorded` and the
+  `ParticleTrailHistory.*` clock tests follow WE's countdown in `0x1402308A0`; the
+  trail probe's spans went from 75.0/58.8 px to 81.2-84.0/67.9-70.7 px against WE's
+  80.0-82.8/69.4 (the remaining spread is the recording phase).
+  `RopeTextureRepeat.*` in `particle_rope_pieces_test` and
+  `RopeGeometry.AScrollingRopeIsMeasuredAgainstItsFilesRateAndAverageLifetime` pin WE's rope
+  texture length (points / uvscale; scrolling: rate x average lifetime - 1, frame-rate cap,
+  one point per death). The WE 2.8.0.42 probe rope-uv-v3 (parabola ropes whose fragment
+  writes its coordinate) now agrees on every non-steady cell within 0.01 of v (scrolling
+  was 0.55 against 0.93), and its subdivided ropes match WE's silhouettes (0.995-0.998);
+  `RopeTextureRepeat.ASteadySmoothedRopeStartsAtItsFirstParticlesAge` (0x140230A42) and
+  `RopeGeometry.AScrollingTrailIsDrawnByTheShadersScrollingBranch` (TRAILSCROLLALPHA,
+  `g_RenderVar0.x/.w`) cover the remaining rope branches;
+  WE probe far-plane-v1 (unlit cards inside, just beyond and far beyond `farz`, and a
+  near overlapping pair) draws the same set and order as this port: WE's 3D projection
+  is an infinite reversed-Z one with clip z at the near plane, but `farz` still clips
+  through its view volume, so the different clip-z layout is not visible to ordinary
+  materials and is not reproduced.
+  `PerspectiveImage.InA3DSceneTheFlagLooksFromTwoThousandUnitsAtTheSceneCameraZoom`
+  (`perspective_image_layer_test`) covers WE's far view for a flagged image in a 3D scene;
+  this port's model-view-projection now equals WE's in its x, y and w columns for all six
+  pcam probes (eye moved, look-at point moved, field of view 30/50).
+  `ParticleSpawn.ABoxWithNoDirectionGivesItsParticlesNoUsableVelocity` follows WE's
+  zero-direction box (probe bisect-clock-dir draws, bisect-clock does not).
+  `RopeGeometry.AFragmentThatDoesNotCompileKeepsTheGeometryStage` keeps the geometry
+  stage when only the fragment falls back.
+  `RopeGeometry.ATrailRecordsHistoryAfterASpriteRenderer` and
+  `RopeGeometry.TrailFadeWeightsReachBothEndsOnlyWhileTheTextureScrolls` (in
+  `particle_parity_test`) cover the shared thick layout, history after another renderer and
+  the scrolling-only fades; a 16-cell WE 2.8.0.42 probe brings the fadesize and
+  sprite-first cells to WE's extent (pixel ratio 1.47/0.06 to 0.99/0.95), with the
+  64-segment cell still short. `particle_rope_pieces_test` (`RopePieces.*`, `RopeTextureRepeat.*`)
   builds the generator input by hand: pieces per instance and never across instances, dead particles skipped
   and neighbours joined, subdivision through the particles, coincident points
   without `NaN`, the thick format's end colour and half-size, the instance offset, the rope-trail head, tail shrink and per-slot
@@ -1830,6 +2525,90 @@ texture entrances are not decoded-image or native-rendering evidence.
   plane (which reduces its lighting to ambient-only). Material overrides cannot
   change this scene-owned switch, and the shader request/cache key includes it.
   `PerformLighting_V1` itself is generated as Wallpaper Engine writes it, below.
+- **Light and general defaults** — a light that leaves keys out takes Wallpaper Engine's
+  constructor values (`wallpaper64.exe` `sub_14018FF60`; its loader `sub_1401730D0` sets only
+  written keys): colour 0, intensity 0, radius 1, exponent 2, cones 20/30, density 2,
+  volumetricsexponent 1, cascadedistance0-2 3/10/100, lightsourcesize 0; the volumetric and
+  shadow keys feed the shadow views and the volumetric keys feed the point/spot volume passes
+  (`SceneLights.ALightThatLeavesOutItsKeysTakesWallpaperEngineDefaults`). A scene `general`
+  without them gets nearz 0.1, gravity 1 along (0,-1,0) and wind 1 along (0.707,0.707,0)
+  (`sub_140186C90`; `SceneGeneral.OmittedPhysicsAndNearPlaneTakeWallpaperEngineDefaults`).
+  The image-puppet rope solver consumes these scene forces; ordinary spring/rigid
+  bone gravity and particle movement gravity remain independent.
+- **Volumetric point and spot lights** — `VolumetricsGpu` covers the visible beam,
+  density changes without a continuous clock, Off/noncasting allocation gates, all
+  quality target sizes, point/spot camera entry/exit, framed depth reconstruction,
+  reversed shadow-atlas coexistence, no-caster depth sentinels, repeated casting and light-kind/visibility
+  changes, hidden-parent reparenting, cookie mesh replacement, and transactional material-load failure.
+  `VolumetricDepth` covers visible→hidden→visible depth at 1× and 4× MSAA with static
+  reuse both on and off, including unchanged idle frames and the no-volume control.
+  The depth clear shares the existing scene encoder and adds no separate clear pass.
+  `ADepthDisabledOverlayClearsThePriorDepthStateInTheSharedSceneEncoder` keeps a
+  depth-disabled overlay visible after a depth-writing draw without replacing its
+  depth, in LDR and HDR at 4× MSAA. The encoder transition binds a cached legal
+  disabled depth state; an ordinary first draw needs no added state bind.
+- **Shadow-atlas and mirrored-view draw infrastructure** — `metal_scene_draw_smoke`
+  `MetalSceneDraw.ADepthOnlyPassDrawsDepthIntoItsTileOfADepthTarget` draws a card depth-only
+  into the top-right quarter (`viewport_uv`) of a 64×64 `Depth32F` target cleared to 0 (the far
+  plane of the reversed depth Wallpaper Engine draws its shadow atlas with, `GreaterEqual`)
+  and reads it back: depth inside the tile, none outside it.
+  `.AFlippedWindingCullsTheFacesThatWereFront` draws a back-culled card with and without
+  `flip_winding`: exactly one of the two writes (no scene pass asks for it now).
+  `.CulledCardsShowTheirAuthoredWindingAndHideAMirroredOne` (canvas and perspective) and
+  `.ADrawCullsTheFacesItsMaterialAsksForWithOrWithoutDepth` pin WE's culling: the WE
+  2.8.0.42 probe ordinary-cull-v1 agrees on all eight tiles (clip-space and world cards,
+  vertex and layer-scale mirrors, stock `genericimage2`, a `nocull` control), and the
+  reflection-cull-v7 probe now agrees on all 24 samples, its ordinary clip pair included,
+  with the reflected world pair's coverage unchanged (31,119 pixels). `rendergraph_smoke`
+  `RenderGraph.anOrdinarySceneHasNoDepthOnlyTiledOrMirroredDraw` checks an ordinary scene asks
+  for none of these options, so they cost nothing until shadows or reflections use them.
+- **Model shadows** — `SceneShadows.*` in `scene_schema_part02_test` covers the WE
+  shelf packer (8192-pixel rows), 256/512/1024-pixel quality tiles, point-light six-face
+  layout, spot and directional view projections, feature-array indexing, no atlas or
+  pass for Off/no light/no caster, and live cast/visibility/type changes. Shadow depth
+  clears to 0 and uses strict GREATER; spot and directional caster clip z subtracts
+  0.0005, while point casters do not (`sub_140190C80`, `sub_14025D420`, `sub_14025D370`,
+  `sub_140169140`). Models cast by default; image-layer `castshadow` produces no caster.
+  `MovingLightsKeepShadowViewsWithThePackedSlots` fails if distance sorting changes
+  the selected light but the view stays attached to the previous one. Movement updates
+  existing view cameras at draw time, after scripts tick; topology changes alone replan.
+  Caster passes draw both triangle windings (NoCull), independently of the visible
+  model material. WE opposite-winding controls cast all four shadows for authored
+  `normal` and `nocull`, including a face the visible pass removes;
+  `MetalSceneDraw.BothModelWindingsCastShadowsRegardlessOfTheVisibleCullMode` pins the
+  same four cases on the GPU. This does not change caster bias or the visible pass.
+  `MetalSceneDraw.ASpotLightCastsAShadowOfAModelOntoALitCard` checks an occluded pixel
+  against both an unoccluded pixel and `castshadow: false`.
+  `.AShadowCanStartAndStopWithoutReloadingOrRecompilingEveryFrame` checks actual pixels
+  through three cast changes, with repeated identical writes causing no rebuild;
+  `.ShadowsOffDrawsTheUnoccludedCardWithoutAnAtlas` checks the Off GPU control.
+  `.ShadowVariantsReplaceOldLightCountsAndQuality` checks reflected array lengths,
+  release of old shaders, and the latest off/on variants keyed by all light counts and
+  shadow quality. `SceneQualityBinding.ShadowsInForceFollowsTheLiveCasterVisibility`
+  checks quality read-back after a live property hides and shows the last caster.
+  Rust `genericimage4_with_shadow_mapping_compiles_with_the_system_metal_compiler`
+  (with `WM_SHADER_METAL_COMPILE=1` and the shipped assets present) compiles comparison
+  sampling for all three shadow kinds with the system Metal compiler. WE 2.8.0.42
+  point/spot/directional synthetic captures and false/image-caster controls were
+  compared; shadowed and lit regions agree, with remaining edge and model-raster
+  differences. A stock-program gray shadow-factor probe also shows grid/triangle
+  structure in WE; grid presence alone is not a new renderer defect. The sampled lit
+  side still differs and needs separate depth/sampling evidence. The directional texel snap is still inferred;
+  reflected-camera passes are separate work.
+- **Projected spot cookies** — `SceneLights.CookieProjectionExistsWithoutAShadowCasterOrAtlas`
+  checks a cookie-only light with shadows off/on: its projection follows movement without
+  allocating a shadow atlas. `SpotCookieGpu.*` exercises the generated lighting block,
+  coloured cookie halves outside the inner cone, shared texture selection under the
+  packed light budget and visibility, and a direct alias reader changing without a graph
+  rebuild. WE controls with two distinct cookies confirm that all cookie spots use the
+  last eligible packed spot's image; hiding it restores the previous choice. Cookie
+  sampling replaces the ordinary cone factor and keeps the alias's transparent border.
+  Files are imported during graph preparation; draw-time selection only changes an
+  existing binding, with no additional pass or texture upload. The unused-consumer
+  control keeps imported images absent, idle demand zero and the test-only count of
+  draw-time projection/packing updates unchanged, even while the light moves.
+  A projection-only consumer follows that same movement while leaving the cookie
+  image unimported; matrix demand does not imply texture demand.
 - **Scene lights (LightingV1)** — from `Renderer/`, `cargo test --release --locked -p
   wm-shader --features ffi --lib preprocess::lighting` pins the generated block (arrays
   sized by the `LIGHTS_*` combos, nothing for an unlit pass), `pipeline::tests::globals`
@@ -1844,10 +2623,30 @@ texture entrances are not decoded-image or native-rendering evidence.
   `.ALegacyLightIsKeptAtItsOriginAndReachesThePackedLightPosition` (`scene_schema_part02_test`)
   check every kind's uniform layout, parenting and the legacy-only packing;
   `SceneLights.LightsFollowAUserPropertyAScriptAndAnIntensityTimeline` the
-  bindings and the light-state hash the static cache folds in;
+  bindings and the light-state hash the static cache folds in (the moved light, now
+  nearer the camera, takes slot 0);
+  `SceneLights.LightsOfAKindArePackedNearestToTheCameraFirst`,
+  `.ASpotUsingItsCookieTakesTheCookieSlotAheadOfThePlainSpots`,
+  `.AShadowCastingLightTakesTheShadowSlotAtTheFront` and
+  `.LightSubsetsFollowTheShadowsSetting` Wallpaper Engine's per-frame light sort
+  (0x140186990 / 0x14019F360: kind, shadow/cookie flags first, then nearest along the
+  camera's forward axis), the subsets ahead of the plain lights in each array
+  (0x140190C80) and the `lightconfig` subset bits and `LIGHTS_*` macros with the
+  Shadows setting on and off (0x140186C90, 0x1401A5C40; WE probe `light-pl2-a/-b`:
+  the nearer of two lights takes the one point slot in either file order), with
+  `preprocess::lighting::tests::spot_partitions_follow_the_subset_counts` the same
+  partitions in the generated block, whose text the subsets leave unchanged;
   `NormalMatrix.ItIsTheRotationOfTheDrawWithoutItsScale` the per-draw
   normal matrix; `MetalSceneDraw.ALayerIsLitByScenePointAndDirectionalLights`
-  the lit pixels.
+  the lit pixels; `MetalSceneDraw.ALitLayerUnderAnEffectIsLitWhereItSits` that a
+  lit card under a copy effect is lit once, by a closing `PRELIGHTING` pass at the
+  layer's world position (Wallpaper Engine 0x140206AE0, 0x140209540; lit in its card
+  it read card-local positions and missed the light),
+  `MetalSceneDraw.ALitLayerUnderAnEffectIsLitAsIfItWereItsTexturesSize` that the pass
+  measures lights against the card squeezed to its texture's size around the layer's
+  origin (WE probes `light-pe4`–`light-pe6`, matched within one level), and
+  `ShaderUpdaterMatrices.AltMatricesAreTheDrawsWorldNormalAndViewProjection`
+  (`shader_updater_behavior_test`) the Alt matrices that pass reads.
   `SceneFog.DistanceFogIsCompiledIntoPassesWhoseFogComboIsOn`,
   `.WithoutDistanceFogNoPassIsCompiledWithIt` and `.AuthoredDensitiesReachTheFogParameters`
   check that scene fog reaches a pass whose `FOG` combo is on (and only such a
@@ -1875,6 +2674,21 @@ texture entrances are not decoded-image or native-rendering evidence.
   `Renderer/target/release/libwm_shader.a` (`cargo build -p wm-shader --features ffi
   --release`, run inside `Renderer/`) before the CMake test binaries, or they link the
   old compiler.
+- **Scene quality decides bloom, HDR and reflections** — Wallpaper Engine's
+  post-processing level (`wallpaper64.exe` `sub_14010DF40`): Disabled builds no bloom,
+  Enabled builds the LDR chain only, Ultra and Display HDR keep HDR bloom for an `hdr`
+  scene, and Display HDR sets `Scene::display_hdr`
+  (`BloomQuality.TheLevelDecidesBloomAndHdr`); reflection off clears
+  `Scene::reflection_enabled`, which gates the `_rt_MipMappedFrameBuffer` copy
+  (`BloomQuality.ReflectionQualityGatesTheMipMappedFrameBuffer`). That copy runs right
+  after the scene draws and before bloom and the combine, as WE's `sub_14017FA70` does,
+  so a reflection never samples the scene's own bloom
+  (`RenderGraph.mipMappedFrameBufferIsCopiedBeforePostProcesses`). The quality reaches the
+  parse through `owe_scene_wallpaper_set_quality` before the load, a change after it
+  reloads the scene. `owe_scene_wallpaper_quality_in_force` reports negotiated MSAA;
+  volumetrics reports its level while a point or spot volume is active, and shadows at their level only while a
+  visible light and model caster produce shadow passes (`scene_options_binding_test`,
+  `SceneQualityBinding.*`). The HDR tests above parse at Ultra.
 - **HDR, bloom and emissive masks** — an authored `hdr` scene with bloom on uses
   RGBA16F color intermediates
   (`BloomHdr.HdrNeedsBloomToo`: with bloom off it is
@@ -1887,7 +2701,12 @@ texture entrances are not decoded-image or native-rendering evidence.
   follows Wallpaper Engine 2.8: as many half-size levels as the frame's shorter
   side allows, at most eight and at most `bloomhdriterations`; extraction and
   downsampling read one source texel either side and upsampling half of one
-  (`ScenePostProcessPass::source_texel_radius`, refreshed at prepare/resize); the
+  (`ScenePostProcessPass::source_texel_radius`, refreshed at prepare/resize). The
+  offsets use the unrounded fractional raster size, and HDR pyramid targets use
+  integer division with a minimum of two pixels, independently of ordinary effect
+  buffers' round-to-nearest/four-pixel policy. `BloomHdr.SamplingOffsetsKeepTheFractionalPyramidExtentWhenTargetsRound`
+  and `.NativePyramidAllocatesIntegerDivisionsWithATwoPixelMinimum` cover odd,
+  small and scaled extents. The
   two coarsest levels upsample through `hdr_upsample_cubic` (the linear upsample
   stands in when an asset set lacks it); every upsample adds its level times
   `bloomhdrscatter` as it is, and the extraction strength is
@@ -1904,6 +2723,92 @@ texture entrances are not decoded-image or native-rendering evidence.
   reads pixels and unclamped radiance on the native backend, and
   `BloomHdr.AnHdrSceneWithoutItsHdrMaterialsIsRefusedRatherThanDrawnWithTheLdrChain`
   guards the parser.
+  `MetalSceneDraw.HdrBloomLevelCountFollowsPhysicalRasterAcrossScaleAndResolution`
+  covers the raster after display/canvas resolution and internal scale, including the
+  resulting chain length, target retirement, extraction strength and real draws.
+  `.HdrBloomCanGrowPastTheAuthoredCanvasAndRetireItsExtraLevels` starts with a 64-pixel
+  canvas and grows to a larger display raster, preserves the eight-level cap, keeps
+  materials when the level count stays unchanged, and releases the old chain on a
+  boundary crossing. The resize path uses Wallpaper Engine's physical frame dimensions
+  (`sub_14017F1B0`), not the authored canvas; neither the scene clock nor its normal frame
+  loop gains another scan or render pass.
+- **HDR Display framing before bloom** —
+  `HdrOutputGpu.DisplayClipsTheSceneBeforeBloomSamplesItsEdge` draws a stripe that
+  touches the display crop: filtering the whole canvas first gives 104 instead of
+  128 at the edge. The physical default target is 96×64, while Canvas resolution
+  keeps 64×64. `.DisplayLayoutPreservesZoomPanFlipPointerAndBlurModeTransitions`
+  compares flat pixels with SDR across placement modes, zoom, pan and flip,
+  checks cursor mapping and authored-camera stability, and verifies that a
+  FitBlur round trip restores the target bytes.
+  `.DisplayFramingPreservesFullscreenAndLocalScreenCopies` keeps camera and
+  clip-space fullscreen effects, local pass-through copies and a compose layer over
+  the whole canvas (which samples through the framed projection, so its card is not
+  moved again) aligned through live layout changes; repeated frames do not relayout
+  their cards.
+  `ShaderUpdaterMatrices.DisplayFramingKeepsComposeSamplingAndItsInverseTogether`,
+  `.LocalGeometryStaysLocalWhileEffectScreenCoordinatesAreFramed` and
+  `.ExplicitShadowProjectionKeepsItsOwnViewport` cover scene/local sampling,
+  inverse matrices, camera movement, layout-generation invalidation and shadow views.
+- **SDR display framing** (experimental, off by default) — `RasterWindow.*` in
+  `render_scale_test` plans the window of the canvas-cover raster an SDR
+  Display-resolution scene draws with the switch on: the bilinear pairs the composition
+  reads (3972→2979 texels at render scale 0.75 keeps texels 193–2785), cuts on the grid
+  of screen-sized targets drawn at a fraction of the raster (none for a cover that is
+  not a multiple of it), an odd crop offset, headroom for a pan, zooms above 1 inside
+  the zoom-1 window, Fit and Stretch unframed, the flipped footprint and the target
+  sizes the window gives. `SdrDisplayFraming.*` in `metal_scene_draw_smoke` composes
+  the framed scene through the poster path against the same scene drawn whole
+  (`SetSdrFramingOverrideForTests` forces either): Fill with and without bloom (only
+  bloom's reach across the window's edge differs), an odd crop offset, Stretch, Fit,
+  Fit with blurred backdrop and original size sizing the targets again before their
+  first draw, and zoom, pan and flip moving the window, sizing it at most once.
+  `.IsOffByDefaultAndARunningSceneTakesTheSettingAtItsNextFrame` keeps the setting off
+  until it is turned on, frames a running scene at its next frame, and turned off again
+  draws the whole raster and the very picture it drew before;
+  `.MetalFxUpscalingKeepsTheWholeRaster` leaves a scene MetalFX upscales unframed and
+  frames or unframes it at its next frame as upscaling goes and comes.
+- **HDR output color and display capability** — `HdrOutputGpu` covers linear HDR
+  camera fade (sRGB 160/116/83) alongside unchanged SDR fade (89/45/22), runtime
+  bloom toggles, and a black/white edge whose linear quarter sample encodes to 137.
+  `.ADecodeAfterBilinearSamplingDoesNotReplaceTheLinearIntermediate` actually samples
+  the encoded intermediate then decodes in presentation: the same pixel is 64,
+  documenting why presentation-only conversion cannot replace the pre-filter pass.
+  No-bloom first/steady-frame encoder counts and repeated-toggle target bytes are
+  checked with scene optimization on and off. The composition/poster is excluded
+  from these scene-pass counters; readbacks are test-only work.
+  `.ExtendedSurfaceKeepsLinearRadianceAndDeliversAnSdrPoster` supplies display identity
+  and capability through the same controller as production: current 1/potential 4
+  enables RGBA16Float/EDR, a screen notification changes current headroom to 3, a
+  display-ID change selects headroom 2, and an SDR notification returns to sRGB without
+  changing Display HDR processing quality. Ordinary frames do not query capability.
+  The SDR poster clamps highlights while a float composition preserves radiance above
+  1. `.SdrOnlySurfaceKeepsTheSavedDisplayHdrProcessingMode` covers the extension policy.
+  Layer-lease tests reject an older queued first acquire, retain the generation fence
+  after shutdown, preserve the original host contract across overlapping owners and
+  capture a new host contract after restoration. Unknown display identity stays SDR.
+  `.LinearBackdropKeepsHighlightRadianceAndSharesTheSdrPosterContract` checks linear
+  blur brightness, highlights above 1 and bounded images across float/SDR composition.
+  Rust window-move tests preserve the renderer instance and reject a metadata commit
+  if rebinding the output display fails; source review covers ID propagation through
+  the C surface creation/reconfiguration route. These are unattached-layer tests, not
+  evidence of perceived brightness on HDR hardware.
+  A Wallpaper Engine 2.8.0.42 reference control uses a 64×64 authored canvas at
+  a 4112×2504 output, sampling bloom at 30 seconds and camera fade at 35 seconds in
+  both Ultra and Display HDR on the SDR VM. Native comparisons preserve every
+  simulation/render frame; the probe has no wall-clock or media dependency. Across
+  the full 4112×2408 work area, bloom mean absolute error is 7.116 before the
+  physical-level fix, 1.297 after that fix and 1.261 with linear output. The fade
+  error falls from 67.714 to 0.017 (Ultra) / 0.036 (Display HDR); its central half
+  matches exactly at RGB 160/116/83, and all nine gray-step samples match.
+  Framing the original, unmodified probe before bloom, with the native target and
+  sampling rules, reduces the remaining full-resolution bloom error from 1.261 to
+  0.319 in both modes; pixels off by more than 48 fall from 1.356% to 0.069%.
+  The upper-half halo error falls from 2.180 to 0.300. A separate Ultra control
+  moving only the pulse into the interior improves from 0.753 to 0.307; the original
+  fade's central half still matches exactly. These are SDR VM comparisons, not
+  physical HDR display validation. Windows watermark pixels remain in the
+  whole-area metrics; the standard comparison sheets also report coarser resized
+  metrics, which must not be mixed with these full-resolution measurements.
 - **Render targets and texture allocation**
   - Texture residency comparisons must cover the scene's full visibility and
     crossfade cycle, including the moments when each affected image is actually
@@ -1951,7 +2856,54 @@ texture entrances are not decoded-image or native-rendering evidence.
   image another target still draws into is never pinned, because that key's prepared
   passes still draw into the image every frame; pinning it lets a skipped layer read
   another layer's picture from the second frame on, which the pooled/isolated
-  comparison in `check_renderer.py` shows as a divergence.
+  comparison in `check_renderer.py` shows as a divergence. The sample hash decides
+  nothing of its own: `StaticSampleHash.ReuseDecisionsAreThoseOfComparingEveryInputExactly`
+  plans random graphs under random edits (a bit, a value, two values swapped, a change
+  undone) against an oracle that compares the inputs themselves, and the other
+  `StaticSampleHash.*` cases pin that every byte, the order of values and the split
+  between two runs count.
+- **Scene video reuse** — `MetalSceneDraw.AVideoFrameShownAgainIsReusedAndANewOneRedraws*`
+  and `.APausedVideoSceneStopsDrawingOnlyWhileVideoReuseIsOn`. A pass that samples a
+  video is reused only while the import its frame came from is the one it drew: every
+  import, a re-import for a changed demand and a directly sampled plane frame included,
+  redraws it, and a frame that imported a video frame always presents.
+- **Audio-spectrum reuse** — `StaticReuseInputs.*` in `metal_scene_draw_smoke` and
+  `ShaderUpdaterAudio.TheAudioStateHashFollowsExactlyTheArraysTheMaterialBinds` in
+  `shader_updater_behavior_test`. An audio visualizer under an effect that rewrites its
+  chain's first buffer every frame is reused exactly on the frames whose spectrum, in
+  every array it binds, equals the frame before's (silence repeated, a repeated
+  spectrum, a change only in an array it does not bind) and redrawn on every other,
+  each picture byte-equal to scene optimisation off; with
+  `WALLPAPER_MACHINE_AUDIO_REUSE=0` it is redrawn every frame. An audio pass that samples
+  the changing buffer, directly, in the combo variant that reads it or through an array
+  element, is never reused; the variant whose combo compiles the read out is. The hash
+  answers "unknown" before the host's first frame and for an updater that does not track
+  audio, which redraws the pass.
+- **Layer-local reuse samples** — `MetalSceneDraw.AStillEffectChainIsReusedWhileTheCameraShakesOrItsLayerMoves`
+  and `.AnEffectReadingWhereItsLayerIsIsRedrawnWhenTheCameraShakesOrTheLayerMoves` in
+  `metal_scene_draw_smoke`, `ShaderUpdaterSignatures.*` in `shader_updater_behavior_test`,
+  `MetalReflection.AMemberIsUnreadOnlyWhenTheCompilerSaysWhatIsRead` in
+  `metal_backend_test` and `reflect::reads::tests` (Rust). A pass drawn through a
+  layer-local or the effect camera folds the node's world transform, its effect's layer
+  and the active camera only when a uniform its program reads (the compiler's
+  `read_uniforms`, not its declarations) is derived from them, so a still chain under
+  a shaking camera or a moving parent is reused frame after frame and holds the pixels
+  drawing it gives, while an effect or a card that reads
+  `g_EffectModelViewProjectionMatrix` or `g_EffectModelMatrix` is drawn again.
+  `ShaderUpdaterSignatures.EveryWrittenUniformThatMovesIsOneTheSampleFolds` is the
+  guard against drift: it moves the parent, the pass node and the camera under every
+  uniform `UpdateUniforms` writes and fails for any value that changed without
+  `TransformInputs` folding what moved. Compose layers, scene-space draws, reflection
+  passes, plane-sampling video variants and readers of the eye, view axes, particle
+  orientation, lights, puppets and the cursor keep the whole sample.
+  `MetalSceneDraw.AMovingLayerBetweenTwoCardsIsReusedAndJoinsTheCardsRenderPasses` pins
+  the one known cost: in a scene drawn in object order (a card reads another's picture)
+  the moving layer's buffers sit between two draws into the scene's image, and leaving
+  them out joins those draws into one render pass, which on 3808922316 at 3456x2234@2
+  left one texel of a few frames one level apart on an M5 Pro (accepted for the saving).
+  The test checks that the shipped renderer reuses the chain and joins the render passes,
+  and that `WALLPAPER_MACHINE_LAYER_LOCAL_SIGNATURES=0` encodes the frame render pass for
+  render pass, byte for byte, as drawing every pass does.
 - **Sprite-sheet stepping and reuse** — `MetalSceneDraw.ASpriteSheetAdvancesOnItsOwnClockAndRedrawsOnlyWhenTheFrameChanges`.
   A sheet between frame changes may be reused, but its clock must keep running or
   the animation never reaches the next frame. `sprite_animation_test` checks
@@ -1965,37 +2917,97 @@ texture entrances are not decoded-image or native-rendering evidence.
   and moves neither with the picture's position nor with its scale factor. A frame that
   repeats the picture repeats the copy and is skipped; the key that decides it must
   keep its capacity.
+- **An alias slot reads transparent black outside its target** —
+  `MetalSceneDraw.AnAliasSlotReadsTransparentBlackOutsideItsTarget`. A material slot that
+  names an `_alias_*` texture (Wallpaper Engine has one, `_alias_lightCookie`) samples its
+  target with the target's filter, never anisotropically, and the border colour (0,0,0,0)
+  outside 0..1, as Wallpaper Engine's alias wrapper does (`sub_14009ACD0`,
+  `artifacts/we-parity/decompiles/E-D6-D7.md`). A slot naming the same image directly keeps
+  the image's own wrap, and another layer's composite keeps that layer's `clampuvs` (probe
+  T7, `artifacts/we-parity/probes/texshader2`: clamp by default, wrap with `clampuvs` false,
+  never the border).
 
 ## Alpha compositing
 
-- **Source-over coverage** — the `generated-alpha` case in `check_renderer.py`.
-  `SetBlend` (and the native `MetalBlend` state) writes source-over's
-  `As + Ad*(1-As)` for `BlendMode::Translucent`: the color source factor is
-  `SRC_ALPHA` but the alpha source factor is `ONE`. With `SRC_ALPHA` for both,
-  every translucent draw loses coverage on partially covered texels, nested
-  compose layers multiply the loss, and soft anti-aliased seams show a thin
-  saturated line. Opaque and fully transparent texels are unaffected. The case
-  composites a half-covered source over transparent, half-covered and opaque
-  destinations inside a compose layer and samples the composed alpha back as RGB
-  (expected 128/191/255). It uses synthetic shaders only. A text composite is the one
-  exception: the card of a text layer that draws through effects writes its glyph's alpha
-  squared, as Wallpaper Engine's glyph pass does, because that is where its text lands at
-  alpha cubed; the rule above is the blend state of every other draw and is not touched
-  (see the text composite entry under Text, fonts and clocks).
+- **Nested puppet masks and the multiply blend** — Wallpaper Engine's device keeps four more
+  blend flags (`sub_14009B070` 0x80, `sub_14009B0A0` 0x20, `sub_14009B0D0` 0x40,
+  `sub_14009B100` 0x100); only 0x100 is ever set, by `sub_14020D6A0`, which multiplies a
+  nested clipping mask into the mask enclosing it (DEST_COLOR / INV_SRC_ALPHA, alpha ONE/ONE).
+  A mask is nested in the first other mask that clips every piece it is drawn from
+  (`sub_140261880`); its enclosing masks are drawn first, the further ones cleared into
+  `_rt_puppet_mask_intermediate` and multiplied in, and every mask draw starts from a cleared
+  target (`MetalBlend.MultiplyIsDestinationColourOverInverseSourceAlpha`,
+  `MdlGeometry.ANestedMaskIsMultipliedIntoTheMaskThatEnclosesIt`,
+  `MdlGeometry.MasksThatEncloseEachOtherAreNotLinkedInALoop`,
+  `PuppetSlots.ANestedMaskIsMultipliedIntoItsEnclosingMask`,
+  `RenderGraph.aMaskSubmeshThatClearsItsTargetIsDrawnOntoAClearedTarget`). WE's masks are R8
+  (`sub_1401AADB0` format 9), so the multiply's sample reads alpha 1 and the mask becomes
+  mask.r × intermediate.r, 0 wherever either is empty; our four-channel masks get the same by
+  the multiply pass writing (red, 0, 0, 1). On the GPU, a nested mask over two half-red masks
+  leaves 64/255 where both cover and nothing elsewhere, and a second unnested mask keeps none of
+  the first one's shape (`MetalSceneDraw.ANestedPuppetMaskIsTheProductOfItsMasks`,
+  `MetalSceneDraw.EachPuppetMaskStartsFromAClearedTarget`).
+- **Inverted puppet masks** — `MetalSceneDraw.AMaskWhoseRecordSetsBitOneIsInvertedWhereItDraws`.
+  A mask record's flag word (the u32 after its material path, record +68 in `sub_140261880`)
+  with bit 1 makes `sub_14020D6A0` set `clippingmaskimage4`'s `g_RenderVar0.x` to 1 (else 0),
+  so the shader writes `1 - r` where the mask draws; outside its pieces the target stays
+  cleared. Before, the flag was read and dropped and every mask drew uninverted: a red-64 mask
+  with the flag clipped the piece to 64/255 instead of 191/255.
+- **Translucent alpha, alpha MAX and the write mask** — `MetalBlend.*` in
+  `metal_backend_test`, `RenderGraph.childrenOfANoCopyBackgroundLayerDrawWithAlphaMax`,
+  `RenderGraph.aReferencedLayersOwnPictureEntersItsCompositeWithSourceOverAlpha` and
+  `RenderGraph.alphaWritingDecidesTheMask` in `rendergraph_smoke`,
+  `MetalSceneDraw.AlphaProbeCellsMatchWallpaperEngine`, and the `generated-alpha` case in
+  `check_renderer.py`. Wallpaper Engine 2.8.0.42 blends a translucent draw's alpha with the
+  colour's factors, `SRC_ALPHA / INV_SRC_ALPHA`, so it leaves `As*As + Ad*(1-As)`
+  (`sub_140099F60`); everything a layer without `copybackground` draws as its children
+  (their effect passes included, nested layers counted) blends alpha as `max(As, Ad)`
+  with RGBA writes (`sub_1401ECB20`, `sub_140207B50`); a layer's own picture into the
+  composite another layer samples keeps `As + Ad*(1-As)`, because Wallpaper Engine's
+  composite is that layer's first chain buffer (`sub_1401EA500`). The write mask is RGB
+  unless a pass asks for alpha: `alphawriting: enabled`, alpha MAX, or any draw into a
+  layer or chain buffer; `alphawriting: disabled` keeps RGB. The GPU test rebuilds the
+  cells of Wallpaper Engine's alpha probe and reads them against its frame
+  (`artifacts/we-render-re/probe-shots/alpha-1.png`): two half children of a
+  no-copybackground compose layer stand at 128 (source-over gave 192), one and two
+  half children over a clear-alpha background at 64 and 96, two over the opaque copied
+  background at 159; the plain-layer, readback and scene-alpha cells are unchanged.
+  `generated-alpha` composes a half source over transparent, half and opaque children
+  of a compose layer without copybackground and reads 128/128/255. Python's
+  `CoveragePixelTests` accepts that alpha-MAX result and the separate single-sample
+  coverage result below, and rejects the old 128/191/255 source-over result. The text composite
+  keeps its own exponent (see the text composite entry under Text, fonts and clocks);
+  it is the same `SRC_ALPHA` rule written in the shader.
 - **Alpha-to-coverage passes** — `MetalBlend.*` in `metal_backend_test`. On multisampled
   attachments coverage decides what an `alphatocoverage` pass keeps and kept
   samples are written unblended, as in Direct3D (blending as well multiplies
   partially covered texels by alpha a second time and dims thin lines). On
-  single-sample targets coverage is disabled and source-over
-  blending is used, otherwise transparent or partially covered pixels become opaque.
-  Scenes stay single-sampled, so edges are thresholded rather than antialiased.
-  `generated-alpha-single-sample` verifies composed coverage on Compatibility
-  (128/191/255), `MetalSceneDraw.SingleSampleAlphaCoveragePreservesTransparentAndPartialPixels`
-  checks zero, half and full coverage as RGB on Native Metal across repeated
-  frames, and the CPU blend-state tests keep the unblended multisample
-  contract. None of this adds MSAA targets, render passes or allocations.
+  single-sample targets the state is the same: a fragment below half alpha is not
+  covered and leaves the target as it was, a covered one is written unblended, which is
+  Direct3D's single-sample coverage and so Wallpaper Engine's (mode 3, `sub_140099F60`;
+  `MetalSceneDraw.MetalSingleSampleAlphaToCoverageThresholdsAtHalf` checks Metal's threshold
+  on 0.25/0.49/0.51/0.75 without the scene). Edges are thresholded rather than antialiased.
+  `generated-alpha-single-sample` verifies composed coverage on Compatibility (0/159/255:
+  the quarter-alpha source and target third are not covered, 0.625 and 1 are written as
+  they are), `MetalSceneDraw.SingleSampleAlphaCoverageWritesCoveredTexelsUnblended`
+  checks 0.25, 0.625 and 1 as RGB on Native Metal across repeated frames, and the CPU
+  blend-state tests keep the unblended contract at one and four samples. None of this adds
+  MSAA targets, render passes or allocations.
+- **`ADDITIVE` combo** — `MaterialContracts.OnlyAuthoredAdditiveBlendingSetsTheAdditiveCombo`
+  in `scene_schema_tests` and `ShaderCorpusJobs.BlendingSetsOnlyItsOwnCombo` in
+  `shader_corpus_test`. A material whose own `blending` is `additive` compiles with
+  `ADDITIVE = 1`, as Wallpaper Engine 2.8.0.42 sets it (`sub_140154480`); the shipped
+  `generic4`, `chroma4`, `fur4` and `foliage4` read it to fade a fogged additive model's
+  alpha with the fog (`ApplyFogAlpha`) as well as its colour. Translucent and alpha-to-coverage materials, and a
+  layer whose colour blend mode is the additive 31 over a translucent material, do not
+  get it.
 
 ## Text, fonts and clocks
+
+- **Colour emoji** — `TextObjectRuntime.AColourEmojiIsDrawnInItsOwnColoursAndTakesRoomInTheRow`
+  (`text_object_runtime_test`, macOS only): an emoji the layer's font lacks comes from Apple
+  Color Emoji, takes room in the row and is drawn in its own colours (the grinning face's
+  yellow) in white text.
 
 - **Fonts and limits** — `text_object_runtime_test`. Font decoding prefers valid
   authored bytes, then the installed face of the font the scene names, then Arial;
@@ -2016,8 +3028,8 @@ texture entrances are not decoded-image or native-rendering evidence.
   faces read from their files, not from a copy of the font in memory),
   `.AFallbackFaceIsOpenedOnlyWhenAGlyphIsMissing` that text the font can draw asks for
   no second face, `.AFontTheWallpaperShipsIsNotOpenedFromAFile` that an authored font
-  stays in memory, and `.TheFaceCacheKeepsEightFacesAndDropsTheOneUnusedLongest`
-  that ten fonts leave eight open and the one used last is not reopened, and
+  stays in memory, and `.TheFaceCacheKeepsTenFacesAndDropsTheOneUnusedLongest`
+  that twelve fonts leave ten open (the cache holds Wallpaper Engine's whole fallback list) and the one used last is not reopened, and
   `.AFontFileThatChangedIsOpenedAgainBeforeItsCachedFaceIsUsed` that a font file
   rewritten or deleted under a cached face is opened again, not read through the old
   mapping. The face of
@@ -2118,7 +3130,14 @@ texture entrances are not decoded-image or native-rendering evidence.
   are the metrics of the Arial of the machine that ran Wallpaper Engine, and a build
   of the font with other metrics shows as a difference, not a skip.
   `.PenAdvancesAreUnhintedWholePixelsKernedWithTheNextGlyph` states the kerning rule
-  against FreeType's own numbers. Two cards that were reproduced while the rule was
+  against FreeType's own numbers. Shaping (HarfBuzz, decompiles `G-F1.md`-`G-F3.md`,
+  `G-F14.md`): `.GposKerningNarrowsAPairTheKernTableDoesNotHave` (SF NS "AV", a font with
+  no `kern` table), `.ALigatureIsOneGlyph` (Hoefler Text "fi"),
+  `.ArabicIsJoinedAndSetRightToLeft` (Geeza Pro), `.DevanagariPreBaseMatraIsDrawnBeforeItsConsonant`
+  (Kohinoor Devanagari), `.OnlyARunGuessedRightToLeftIsSetRightToLeft` (no bidi reordering,
+  as the reference) and `.ASpaceStaysInTheRunBeforeIt`; each skips naming the font when it
+  is not installed. `metal_scene_draw_smoke` `MetalSceneDraw.ShapedArabicIsDrawnInItsJoinedForms`
+  draws Arial "سلام" in at most two ink pieces (four when drawn as isolated letters). Two cards that were reproduced while the rule was
   developed, one of wrapped text of 729 characters and one with a padding of 128, are
   not kept: their text is private, so nothing re-checks them. The other fixtures use
   a system font, so the tests state relations to the font's own metrics, not pixel
@@ -2200,28 +3219,26 @@ texture entrances are not decoded-image or native-rendering evidence.
   and
   `.EnablingAnEffectDoesNotMoveAnAlignedTextLayer` that padding moves
   nothing.
-- **Opaque background** — `opaquebackground` fills the card's rectangle, and not the room a style
-  needs around it, with `backgroundcolor` times `backgroundbrightness` at the layer's alpha, the
-  brightness only in the HDR pipeline.
+- **Opaque background** — `opaquebackground` fills the card's rectangle with `backgroundcolor`
+  times `backgroundbrightness` at the layer's alpha, the brightness only in the HDR pipeline.
   `MetalSceneDraw.AnOpaqueBackgroundFillsTheCardAtTheLayersAlpha` draws a caption
   in each quadrant of a four-coloured backdrop and requires the quadrant's colour mixed towards the
   plate by the alpha at every corner of the card and the backdrop untouched just outside it, with
-  the stem of the glyph over the fill when the card is drawn directly and blended into the cleared
-  composite when it goes through an effect (the expectations come from the blend equations and
-  `kTextCompositeAlphaExponent`); `.AnOpaqueBackgroundFillsTheCardAndNotTheRoomAStyleNeedsAroundIt`
+  the stem of the glyph over the fill when the card is drawn directly and blended into the
+  composite seeded with the fill when it goes through an effect (the expectations come from the
+  blend equations and `TranslucentBlendAlpha`); `.AnOpaqueBackgroundFillsTheCardAndNotTheRoomAStyleNeedsAroundIt`
   gives the text an outline and a shadow and requires the fill to stop at the card; both fail with
-  the fill off. `TextObjectRuntime.AnOpaqueBackgroundsColourBrightnessAndInsetReachTheCardsMaterial`
-  requires the colour, the brightness in each pipeline (and a bound one following its property), no
-  constant at all on a card without a background, and the card's inset in its raster following a
-  relayout (`g_CardInset`, a `DynamicValue` the text effect gate holds). The fill is one pass with the
-  glyphs, the glyph over the fill as the two quads one after the other, or the composite cleared to
-  the fill; for the colour blend "add" that is the two added as one value, which differs from adding
-  them where they overlap.
-- **Text composite and live padding** — a text layer that draws through a visible effect
-  is drawn through a composite of its own, as Wallpaper Engine draws it: the card starts as
-  the scene behind it with no alpha, the glyphs are blended into it by their alpha on
-  colour and on alpha alike, the effects run on that, and the last pass goes onto the scene
-  by the alpha the card holds. Black text of alpha `a` over a background therefore stands at
+  the fill off. `TextObjectRuntime.AnOpaqueBackgroundIsTheFontBackgroundQuadInItsColourAndBrightness`
+  requires slot 0 of the text mesh to be the `fontbackground` material with the colour times the
+  brightness in each pipeline (and a bound one following its property), and no background material
+  on a layer without the key.
+- **Text composite and live padding** — a text layer that draws through a visible effect, a
+  colour blend other than 0 and 31, or in a fogged scene is drawn through a composite of its own,
+  as Wallpaper Engine draws it (`sub_140258900`, decompiles/G-colorblend-composite.md): a seed pass
+  fills the card with the scene behind it at no alpha, the glyphs are blended into it with the
+  font material's translucent blend (the alpha the composition stream's `Material` rule leaves,
+  `a` squared), the effects run on that, and the last pass goes onto the scene by the alpha the
+  card holds. Black text of alpha `a` over a background therefore stands at
   `a` cubed of the way to black through an `opacity` chain, where the same text with no
   effect stands at `a`; in the probe scene `probetext4` (DIN Engschrift and Baqacents,
   `Alpha`, through the `opacity` effect) Wallpaper Engine's stems are at 0.275 and 0.125 for
@@ -2230,26 +3247,20 @@ texture entrances are not decoded-image or native-rendering evidence.
   4.2 times it. The clock of 3819684521 (black, alpha 0.73, one `opacity` effect over white)
   draws its interior at (162, 161, 157) where Wallpaper Engine has (164, 162, 158) and the
   old single alpha gave (75, 74, 70), and the `blurprecise` heading of the same scene (alpha
-  1) has 99.7 percent of Wallpaper Engine's ink where it had 152. The card does the seeding
-  and the glyph blend in its own pass, not in two, because it covers the whole composite:
-  it samples the scene (`_rt_default`) at the screen position of each fragment through
-  `g_EffectModelViewProjectionMatrix`, the matrix of the scene camera over the layer's own
-  transform, and writes `mix(scene, glyph, alpha)` with the alpha raised to
-  `kTextCompositeAlphaExponent` (2; declared in `WPSceneParser.hpp` with
-  `TextCompositeReach`, the share of the colour that lands, which every test derives its
-  expectation from, so a different measurement changes that one line). A composite is only
-  for a layer whose effects the glyphs go through: with every effect off the layer is plain
-  text (the card's `g_Composite` is 0, which a script that switches an effect moves with
-  it), and a layer with a colour blend keeps the single alpha it had, since how the blend's
-  passthrough treats a seeded card is not known. The chain's effects and the passthrough
-  that ends it while a script has every effect off take a white `g_Color4`: the card carries
-  the layer's colour and alpha, and an unbound `g_Color4` is zero, which made Wallpaper
+  1) has 99.7 percent of Wallpaper Engine's ink where it had 152. `TextCompositeReach(a)` =
+  `a · TranslucentBlendAlpha(a, 0)` (`WPSceneParser.hpp`) is the share of the colour that lands,
+  which every test derives its expectation from. With every effect off, and nothing else making
+  it a composite, the layer draws its glyphs straight onto the scene through its own camera and
+  the chain is skipped (`SceneImageEffectLayer::DrawsOwnerDirectly`,
+  `TextEffectChain.ALayerWithEveryEffectOffDrawsStraightOntoTheScene` requires the glyph pass
+  into a chain buffer while the effect runs and onto the scene once its script turns it off).
+  The chain's effects take a white `g_Color4`: the composite carries the layer's colour and
+  alpha, and an unbound `g_Color4` is zero, which made Wallpaper
   Engine's own `effectpassthrough` (the `genericimage3` shader, the card times `g_Color4`)
   draw nothing, so a text layer whose scripted effects were all off was invisible with the
   shipped assets. Colour blend mode 31 ("add") draws a text layer without a running effect
-  additively, so the passthrough of that state is drawn additively
-  (`SceneImageEffectLayer::SetIdleFinalBlend`), and the last pass is translucent while an
-  effect runs, as Wallpaper Engine forces it. An effect with no pass counts for neither the
+  additively straight onto the scene, and the last pass is translucent while an effect runs, as
+  Wallpaper Engine forces it. An effect with no pass counts for neither the
   margin, the composite nor the fallback (`EffectCountsForText`: one predicate for the
   load-time padding, the composite's start and the runtime's count). `text_object_runtime_test`
   and `metal_scene_draw_smoke`:
@@ -2294,11 +3305,36 @@ texture entrances are not decoded-image or native-rendering evidence.
   (0.42 and 0.40), where this composite gives 0.28, `a` cubed, and the single alpha it
   replaced 0.68; the card is minified and turned the same way in every frame, so the ratio is the
   exponent. A model that fits every measurement made so far is a glyph pass that keeps the
-  single alpha (`kTextCompositeAlphaExponent` 1, `a` squared for any chain) and an `opacity`
+  single alpha (`a` squared for any chain) and an `opacity`
   effect that takes the layer's alpha for its own `alpha` whatever its constant says (the
   third factor of probetext4, whose effect has `alpha` 1). That is a rule about effect passes
   that this change does not make, so the choice stays open; the capture that settles it is
   described under Known limitations in [renderer verification](renderer.md#known-limitations).
+- **Text glyph pipeline (Appendix G T.5–T.10)** — the glyphs are quads from per-layer atlases
+  drawn through Wallpaper Engine's `font` materials in a three-part event mesh.
+  `TextParseScene.ALayersGlyphsAreDrawnFromItsAtlasThroughTheFontShader` (slot 1 reads the
+  layer's R8 atlas, one quad per inked glyph), `TextRuntimeScene.APumpedChangeRewritesTheGlyphsUnderTheSameAtlas`
+  and `.AHiddenLayerWaitsUntilItIsShown` (the quads follow the text, the atlas keeps its name and
+  nothing is rebuilt), `TextObjectRuntime.MsdfCellsAreThirtyTwoPixelsToTheEmWithATwelvePixelMargin`,
+  `.PostScriptOutlineFacesOrientTheirMsdfContours` and `.AClockDoesNotRegenerateItsDigitCells`
+  (G-F6, G-F16; `msdfgen::Shape::orientContours` normalises PostScript/CFF `.otf` and CJK
+  contour winding before distance-field generation), `.AnEmojiIsAColourGlyphFromTheColourAtlas`,
+  `.AZwjSequenceIsOneColourGlyph`, `TextParseScene.TheAssetsTwemojiIsReadOnceAndSharedByEveryLayer`
+  and `MetalSceneDraw.AnEmojiIsDrawnInItsOwnColours` (colour glyphs, `basefontrgba`);
+  `TextParseScene.DepthtestSelectsTheDepthFontMaterialsInAPerspectiveScene`,
+  `.AnOrthoSceneNeverDepthTestsItsText` and `MetalSceneDraw.ADepthTestedTextIsHiddenBehindANearerLayer`
+  (G-F10: `_depth` materials in a perspective scene unless `depthtest` is `disabled`);
+  `TextParseScene.APerspectiveTextLayerIsSeenThroughThePerspectiveCamera` and
+  `MetalSceneDraw.APerspectiveTextTurnedAboutXIsForeshortened` (the `perspective` flag);
+  `TextParseScene.EveryTextLayerOfAFoggedSceneEndsInTheFogPass` and
+  `MetalSceneDraw.TextInAFoggedSceneTakesTheFogOfItsPlace` (text and a card at one place take one
+  fog, as the WE probe probetext-fog shows; glyph passes unfogged, G-F11);
+  `MetalSceneDraw.ATextThatGrowsPastItsGlyphCapacityIsDrawnWithoutARebuild` (Metal grows an event
+  mesh's storage in place); `.TextThatHasNotChangedIsNeitherLaidOutNorUploadedAgain` (an unchanged
+  text costs no layout, no mesh write and no upload; a changed one is laid out and its quads
+  rewritten, the atlas uploaded only when it gained a cell). The parse-level tests read the
+  stand-in font materials of `tests/support/font_assets.hpp`; the Metal ones fail on the code
+  before the cutover except the growth test, which the old card raster also passed.
 - **Text effect buffers are the card** — `text_object_runtime_test`. The buffers an effect
   chain on a text layer draws into are the layer's card with the fraction cut off, at least
   4 texels, as Wallpaper Engine builds them, so the chain's `v_TexCoord` runs 0 to 1 across
@@ -2327,6 +3363,16 @@ texture entrances are not decoded-image or native-rendering evidence.
   `.AFractionalCardIsCutOffNeverRounded`, `.AScriptSetTextKeepsTheFinalCardWhole`,
   `.ARightBottomTextWithAnEffectFollowsTheMeasuredRenderFrame` and
   `.AStaticAlignedTextWithAnEffectCoversItsRasterWithoutScaling` in `text_object_behavior_test`.
+  `TextEffectChain.ScaledBuffersFollowTextWhileExplicitExtentsStayFixed` checks that a
+  half-size FBO grows with the card, while explicit width, height, width-and-height,
+  and fit extents stay fixed. Its fixed extents include the FBO's scale.
+  `MetalSceneDraw.ATextEffectsHalfSizeAndFixedBuffersSurviveTextAndRenderScaleChanges`
+  reads both private GPU targets before and after a text/point-size change and at
+  internal render scales 1 and 0.5, including a second-level quarter-size binding.
+  It requires non-empty glyph pixels and the actual half-size, quarter-size and fixed
+  target dimensions; comparing two equally wrong renders cannot pass it. These cases
+  failed when the text binding forced every FBO's scale to one, and when Metal resolved
+  a bound target from its parent's previous physical size before scaling that parent.
   `.ACardPastTheBufferLimitIsCutOffToIt` there (formerly `.OversizedTextEffectClipsFinalMeshToBoundedTarget`) keeps the
   one clamp that is left: a card past 4096 texels on a side, which Wallpaper Engine has no
   limit for, is drawn into buffers cut to 4096. `MetalSceneDraw.AnEffectsUvOffsetIsAFractionOfTheCard` puts a layer
@@ -2435,10 +3481,10 @@ texture entrances are not decoded-image or native-rendering evidence.
 - **Text colour blend and screen anchor** —
   `TextObjectRuntime.ColorBlendModeMixesTextWithTheScreenThroughThePassthroughPass`
   and `.AddColorBlendTextIsDrawnAdditivelyOntoTheSceneUnlessItGoesThroughEffects` (CPU, in the gate) and
-  `MetalSceneDraw.ATextLayersColourBlendModeAppliesItsColourAndAlphaOnce`,
-  which draws white text at half alpha over green: mode 2 mixes
-  half of white once (128, 159, 128), mode 31 adds half of it (128, 191, 128), and
-  the pictures are identical. `.ScreenAnchorOffsetsPinTheLayerToTheEdgeItNames`
+  `MetalSceneDraw.ATextLayersColourBlendModeComposesItsTextOverTheSceneBehindIt`,
+  which draws white text at half alpha over green: mode 2 makes the layer a seeded composite
+  and lands `TextCompositeReach(0.5)` of white (32, 88, 32), mode 31 adds half of it
+  (128, 191, 128); it fails on the code before the cutover, which gave mode 2 a single alpha. `.ScreenAnchorOffsetsPinTheLayerToTheEdgeItNames`
   tabulates the nine anchors against the presented margins, and
   `.ScreenAnchoredTextFollowsThePresentedAreaAndNothingElseDoes` moves the draw of
   anchored layers with `SetCursorViewport` (a pan, a display that shows more than the
@@ -2461,41 +3507,32 @@ texture entrances are not decoded-image or native-rendering evidence.
   plane, and `MetalSceneDraw.AScreenAnchoredTextLayerIsDrawnWhereItsAnchorPutsIt`
   the picture, with and without an effect chain: 40 columns in
   for a display that shows 344 of 384.
-- **Outline, blur and drop shadow** — `TextObjectRuntime.OutlineGrowsTheGlyphByItsThicknessInPixels`,
-  `.OutlineThicknessIsCappedWithTheGlyphAtlasAndNeverBelowOnePixel`,
-  `.BlurSoftensEdgesOverItsSizeAndKeepsTheGlyphWhereItIs`,
-  `.DropShadowFollowsItsOffsetAndOpacityAndOutlineWidth`,
-  `.StyledTextCardGrowsOutwardAndKeepsTheLayoutBoxWhereItWas`,
-  `.ParserReadsTheFontShaderStyleAndPicksTheStyledShader`,
-  `.StyledTextCardCoversTheStyleWhenTheLayerIsParsed` and
-  `.StyleColoursFollowTheirPropertiesAndTheBakedKeysAreReadOnceAndHeld`, and
+- **Outline, blur and drop shadow** — `TextObjectRuntime.StyleRenderVarsAreTheFontShadersUniforms`
+  (range 24, the caps 5.1/6/6/6 in atlas units, the floors while a switch is on, zero while it is
+  off, decompiles/G-F5.md), `.TheDistanceFieldPathIsTakenForMsdfOrAnyStyle` (G-F4),
+  `TextParseScene.GlyphsDrawWithTheFontMaterialsAndTheirStyleCombos` (the combos the font shader
+  is built with, read from what its program declares, and `g_RenderVar0.x` 24),
+  `TextObjectRuntime.ParserReadsTheFontShaderStyleAndPicksTheStyledShader`,
+  `.StyleValuesFollowTheirPropertiesAndTheSwitchesAreReadOnceAndHeld` (the colours, sizes and
+  opacity follow their property live into `g_RenderVar0..3` with no layout; the switches are read
+  once with the user's value, noted load-only and held by a preview), and
   `MetalSceneDraw.StyledTextIsDrawnWithItsOutlineAndShadowByTheNativeBackend` and
-  `.StyledTextWithoutAnOutlineKeepsTheLayersColourAtItsEdges`.
-  The raster of a styled layer holds three coverage masks (red the glyph, green the
-  glyph and its outline, blue the shadow with its opacity), so the glyph takes the
-  layer's colour and the outline and shadow keep theirs; the first Metal test requires
-  green outline and magenta shadow pixels around white glyphs (Native Metal only), and
-  the second, draws red text blurred, and shadowed in red, over
-  white: every pixel is red mixed with white, so its red channel must stay full,
-  which it does not when an outline colour the layer never asked for is mixed in at
-  the partly covered pixels (the shader takes the outline colour into the glyph only
-  for a layer with an outline, as the reference's path without `OUTLINE_ENABLED`
-  does). The property test binds the outline and shadow colours, which follow their
-  property live, and the switches, sizes and opacity, which are read once at load with
-  the user's value, noted load-only and held by a preview. Sizes are pixels of the
-  finished text, capped in the shader's atlas units (outline 5.1, blur and shadow 6),
-  and the tests state them as distances from the unstyled glyph box.
+  `.StyledTextWithoutAnOutlineKeepsTheLayersColourAtItsEdges`. The style is the font shader's: the
+  stand-in `font` shader of `tests/support/font_assets.hpp` draws the outline and shadow from the
+  distance field and the render variables as the shipped one does; the first Metal test requires
+  green outline and magenta shadow pixels around white glyphs, the second red text blurred, and
+  shadowed in red, over white with its red channel full everywhere (no outline colour mixed in
+  without an outline).
 - **Text edges take the glyph's colour** —
-  `TextObjectRuntime.EveryTexelOfRasterizedTextCarriesTheTextsColourWhateverItsCoverage`,
-  `.StyledTextLeavesEveryTexelOutsideItsMasksClear` and
+  `TextObjectRuntime.EveryTexelOfRasterizedTextCarriesTheTextsColourWhateverItsCoverage` and
   `MetalSceneDraw.AMagnifiedTextsEdgesFadeToItsColourNotToBlack`.
   The card's texture is straight alpha sampled linearly, so a layer scaled up past
   its raster (a small pixel font enlarged) reads edges between a glyph texel and a clear
   one; the clear texels hold the text's colour (white in the runtime's neutral cache),
   not black, or the colour dims toward black along with the alpha and a dark ring runs
   round every stroke. The first test requires the colour in every texel of a plain
-  raster whatever its alpha; the second requires a styled raster, whose channels are
-  coverage masks, to keep its texels outside the masks fully clear. The Metal test draws
+  raster whatever its alpha (the glyphs drawn on the CPU as the plain font shader draws them,
+  `RasterizeTextGlyphsForTests`). The Metal test draws
   red text over white at three pixels a texel, plain and through an effect chain, on both
   renderers: every pixel is red mixed with white, so its red channel must stay full, and
   the plain card draws over a thousand pixels darker than that without the colour in the
@@ -2580,6 +3617,25 @@ texture entrances are not decoded-image or native-rendering evidence.
   string costs at most one upload per in-flight frame and reaches the drawn
   picture, and it then goes quiet again. The script keeps running throughout;
   "quiet" must never be achieved by stopping it.
+- **Text as a particle source** — `TextRuntimeScene.ATextParticleImageIsMadeOnlyOnDemandAndKeepsTheMaterialAlphaRule`,
+  `.ATextParticleImageRejectsMissingDonorsAndOversizedMaps` and
+  `.TextParticleImagesIncludeBackgroundsColourGlyphsAndStyledCoverage` in
+  `text_object_behavior_test` build the bounded quarter-resolution map from the
+  published glyph mesh and atlases. Plain and MSDF text at alpha 0.70 yields a peak
+  byte alpha of 125, below the emitter's 127 threshold; 0.75 yields 143, including
+  while hidden. Building the map must neither measure text, register an image nor
+  dirty the layer. The style test covers opaque background, outline coverage,
+  red shadow particles and a transparent shadow control, and retains colour emoji
+  pixels. Wallpaper Engine probes with visible and hidden image controls confirm
+  text visibility, the 0.70/0.75/0.80 threshold and plain, outline, shadow,
+  opaque-background and MSDF-outline donor colours. The emoji reference's visible
+  control was empty too, so colour-emoji donor parity remains unverified.
+  `.AHiddenParticleDonorRefreshesItsTextFontAndPointSize` changes an explicitly linked,
+  hidden source's text, font and point size, then clears its glyphs to a space. The
+  next requested emission map must carry the changed dimensions and pixels without
+  allocating a GPU composite. An unreferenced hidden sibling must remain unprepared
+  and must not keep text work in flight; deleting the source removes its emission
+  frame. The existing `.AHiddenLayerWaitsUntilItIsShown` remains the ordinary case.
 - **Text layers under an effect chain** — `MetalSceneDraw.ATextLayerWithAnEffectChainKeepsBothOfItsCards`:
   a text layer with effects has three meshes the relayout rewrites — its own
   card, the chain's final card and the node the chain resolves its last pass onto
@@ -2595,16 +3651,65 @@ texture entrances are not decoded-image or native-rendering evidence.
 
 ## Animation and puppets
 
-- **Non-additive layer weights** — `PuppetPose.NonAdditiveLayersShareOneUnitOfPoseWeight`
-  (normalized and partial weights, rotation, scale, loop wrap, repeated samples)
-  and `.DistinctMotionMixesAndAdditiveOffsetsRideOnTop` (distinct
-  animations, additive overlays, live blend/visibility changes) in
-  `puppet_pose_tests`. Non-additive puppet animation layers use their effective
-  blend weights for the entire pose (translation, scale and rotation), including
-  offsets from the reference pose; otherwise overlapping layers double
-  character-sheet assembly offsets and separate attached pieces. Additive layers
-  keep their authored weights. The prepared weights are reused: no per-frame work
-  or GPU resources are added.
+- **Bone opacity** — `PuppetBoneAlpha.CurvesAreSampledAndMixedWithTheOpaqueRestPose`
+  (`puppet_pose_tests`: a curve sampled between frames, a half blend leaving half to the
+  opaque rest pose, a hidden layer fading nothing; the combo itself follows the first mesh's
+  flag bit 4) and `ShaderUpdaterPuppet.BonesAlphaCarriesOneOpacityPerBone`
+  (`shader_updater_behavior_test`: `g_BonesAlpha` holds one opacity per bone).
+
+- **Animation-layer composition** — `PuppetPose.NonAdditiveLayersLerpInOrder`
+  (partial and whole weights, rotation, scale, loop wrap, repeated samples),
+  `.DistinctMotionMixesAndAdditiveOffsetsRideOnTop` (distinct animations, additive
+  overlays, live blend/visibility changes), `.AbsoluteLayersLerpInOrderWithoutNormalising`,
+  `.ABoneOutsideALaterClipKeepsTheValueBelowIt` and `.PartialWeightRotationIsANormalisedLerp`
+  in `puppet_pose_tests`. As Wallpaper Engine composes (`0x1401FDF90`, kernels
+  `0x1401F89A0`/`0x1401F9020`/`0x1401F9820`, `artifacts/we-parity/decompiles/B-D4.md`): the
+  running pose starts at the reference; each visible layer in stack order is written whole
+  at weight 1, lerped toward at any other weight (rotation as a normalised lerp, also
+  between key frames), or, when additive, adds its weighted offset from the reference;
+  nothing is normalised across layers, and a bone the clip does not hold, or whose track
+  flag word has bit 0 set, keeps the value below it. No per-frame allocation is added.
+- **Bone blend rules and grounding** — `PuppetBoneLinks.*` tests ordinary image-puppet
+  world-space TRS blending before children, stored rule order, IK-mode-bit independence,
+  previous-pose reads from later source bones and instance isolation. Ordinary-only
+  plans keep per-bone solver arrays empty, and model composition retains FK.
+  `PuppetGrounding.*` tests the reach left beyond a grounding source, behind-plane
+  targets and preserved target rotation, plus first-sweep knee reflection independent
+  of blend weight and its source-distance cutoff. The existing `PuppetIkLinks.*`
+  keeps position/full-transform/axis rules and tests high-bit precedence over axis mode.
+- **Animation-layer fades** — `PuppetBlend.*` in `puppet_pose_tests`: `blendin` ramps the
+  weight over the first `min(clip / 2, blendtime)` seconds and `blendout` over the last
+  (`we_AnimLayerEffectiveBlend` `0x14026C8B0`), `blendtime` defaults to 0.5 s
+  (`0x14026C680`), a loop or mirror fades in once (its `blendin` flag clears) while a single
+  shot fades in each time it restarts, a mirrored clip fades by one pass, and the flags and
+  `blendtime` read back. `ScriptPuppetLayers.AdditiveReadsBackAndChangesEffectiveBlend` in
+  `script_runtime_compat_test` drives `additive`, `blendin`, `blendout` and `blendtime` from
+  a script.
+- **Animation layers a script makes and destroys** — in `script_runtime_compat_test`,
+  `ScriptPuppetLayers.CreatedLayersTakeTheirPlaceAndDestroyingOneShiftsTheRest` and
+  `.DestroyingByNameTakesEveryLayerWithIt`: `createAnimationLayer` (`0x14020EA30` →
+  `sub_1401FCC20`) takes an animation name or a config object (never a number), turns
+  `blendin`/`blendout` on unless its second argument says otherwise (copied over the object),
+  keeps `blendout` only for a clip that plays once, and places the layer below the trailing
+  additive layers for `autosort`, at `min(index, last place)` for `index`, else on top;
+  `destroyAnimationLayer` (`0x14020EF80`) takes a name (every layer with it), an index or the
+  object, and the objects of the layers above keep naming them.
+  `.LayerNamesCannotRedirectAnExistingAnimationObject` keeps object identity, writes and
+  deletion intact when an authored name resembles an internal serial; `.DestroyingEmptyNameRemovesOnlyUnnamedLayers`
+  covers deleting unnamed layers without touching named ones. `.PlaySingleAnimationEndsAndIsGone`
+  and `.PlaySingleAnimationOfALoopingClipGoesAtItsFirstWrap`: a `playSingleAnimation` layer
+  (flag `0x8000000`) calls its `addEndedCallback` listeners once at the end of its first cycle,
+  while still on the stack, and is gone after them (`0x1401FDF90`). Before, all three methods
+  threw `not a function`.
+  `ScriptRuntimeCompat.LoopingAndMirroredAnimationLayersNotifyEachCycleAndKeepPlaying`
+  checks callbacks at every wrap or mirror turn without stopping playback, and no duplicate
+  callbacks from repeated draws or a paused clock (previously ordinary repeating layers
+  never notified listeners). `PuppetBlend.AuthoredLoopsAndMirrorsDoNotFadeOutAtTheirTurn`
+  in `puppet_pose_tests` checks that authored repeating clips keep their full pose across the
+  turn: `sub_1401FCC20` clears their `blendout` just as it does for script-created layers.
+  `PuppetPose.RemovingASinglePlayLayerKeepsItsCompletedPoseForTheCurrentFrame` checks that
+  automatic removal retains the pose already sampled for this frame, and the next frame
+  uses the smaller stack; removal previously recomposed the pose before it was drawn.
 - **Puppet lighting** — `MetalSceneDraw.PuppetEffectsApplyLightingOnceAfterAssembly`
   covers all eight combinations of puppet/card, effects/direct and lit/unlit over
   repeated draws. Puppet layers with effects light their assembled geometry only
@@ -2612,6 +3717,33 @@ texture entrances are not decoded-image or native-rendering evidence.
   is neither multiplied twice nor baked into the separate cut-out pieces.
   Unskinned layers, effect-free puppets and unlit materials keep their lighting
   paths.
+- **Puppet texture channels** — `MaterialContracts.APuppetsTextureChannelMeshIsNotDrawnAsPartOfTheModel`
+  in `scene_schema_tests`. A puppet model whose second mesh draws with
+  `puppettexturechannels` is drawn as its picture's mesh alone, directly and by
+  the closing pass of an effect chain. That pass used to draw every mesh with the
+  layer's material, so the channel's quads (in picture pixels) showed small copies
+  of the whole picture beside the model (issue #88).
+- **Puppet texture channel painting** —
+  `MdlSkeleton.TextureChannelWeightsAreNumberedByRecordOrder` (`mdl_parse_tests`),
+  `MaterialContracts.APuppetsTextureChannelPaintsIntoItsPictureOnlyWhileItsAnimationWeighsItIn`
+  (`scene_schema_tests`) and
+  `MetalSceneDraw.APuppetsTextureChannelPaintsItsPictureWhileItsAnimationWeighsItIn`
+  (`metal_scene_draw_smoke`). The animation block's per-channel weight records are
+  read in file order, whatever word leads each (the parser used to read them as a
+  "translation track"). A puppet whose animation weighs a channel in gets a paint
+  pass in its effect chain, effects or none: the channel quad is moved from picture
+  pixels onto the card, the pass is shown only in frames whose weight is above
+  0.001 and the layer shows, and it reads the frame-interpolated weight as
+  `g_BlendMap` with the card's colour in `g_Color4`. `g_BlendMap` is uploaded as
+  exactly the rows the shader declares, enough for every channel the mesh names
+  and more when the material's `BLENDROWCOUNT` asks for more; a mesh naming a
+  channel past 255 is not painted, and a weight that is not a number counts as 0
+  (`MdlSkeleton.ATextureChannelWeightThatIsNotANumberPaintsNothing`). The Metal test checks the
+  painted pixel at rising, held and falling weights and that the picture is its
+  own again once the weight falls back. Wallpaper Engine's rules were read from
+  probe scenes built from Swimming Kirby's assets (2026-10-25): records are
+  numbered by order, weights mix linearly and interpolate between frames, a lone
+  layer paints in full at blend 0.5, and a hidden layer or none paints nothing.
 - **Colour blend modes** — `MetalSceneDraw.AColorBlendLayersColourAndAlphaApplyOnce`
   draws a tinted, half-transparent layer through a stand-in passthrough over a
   coloured background: the tint and alpha are taken once, by the layer's own
@@ -2648,7 +3780,8 @@ texture entrances are not decoded-image or native-rendering evidence.
   layer) with a `worldspace` one (the authored length);
   `ParticleMouseControlpoint.AWorldspaceSystemsControlpointsAreWhereItsLayersMatrixPutsThem`
   turns and scales a layer and requires an authored control point offset to be the
-  layer's matrix applied to it, a cursor-linked one the cursor less the layer's origin,
+  layer's matrix applied to it, a cursor-linked one the cursor less the layer's origin
+  (the cursor replaces the authored translation, as the engine's mouse branch does),
   and one pinned to the world (never the first) the scene place less the origin with
   none of the layer's matrix; `ParticleMouseControlpoint.AWorldspaceEmitterOnAPinnedControlpointIsNotStretchedByItsLayer`
   requires an emitter on such a control point to spread and launch its particles as
@@ -2703,11 +3836,15 @@ texture entrances are not decoded-image or native-rendering evidence.
   copy of the whole wallpaper inside the layer. The passthrough is dropped, not
   added to. The test parses a one-bone puppet and requires the only
   screen-sampling pass to be the one writing the scene.
-- **Four-light shaders** — `ShaderValueUpdaterCompat.FourLightColorsRoundTripThroughPackedUniforms`
-  in `script_runtime_compat_test`: legacy four-light shaders pack the fourth
-  light's RGB into the `w` lanes of three color uniforms; zero through five
-  lights, channel order, radius/intensity premultiplication, the four-light limit
-  and clearing after lights are removed.
+- **Four-light shaders** — `ShaderValueUpdaterCompat.FourLightColorsRoundTripAndAFifthLightTakesSlotZero`
+  and `.LegacyLightsFillColorRadiusSlots` in `script_runtime_compat_test`, and
+  `SceneLights.LegacyLightsTakeTheSlotOfTheirPlaceAmongAllLights` in
+  `scene_schema_part02_test`: legacy four-light shaders pack the fourth light's
+  RGB into the `w` lanes of three colour uniforms; each legacy light writes the
+  slot of its place among all light objects (Wallpaper Engine `sub_14018FF60`:
+  a fifth light takes slot 0 again, the later writer wins); `g_LightsColorRadius`
+  is colour × intensity with the radius, and a hidden light's slot reads
+  (0, 0, 0, 1) (`sub_14025D1F0`).
 - **`origin.animation`** — `OriginSlide.*`, `TransformTimeline.*`, `OriginOnParent.*` and
   `PausedStart.*` in `scene_schema_part05_test` (aligned images,
   text/groups, absolute/relative keys, loop duration, paused playback,
@@ -2779,6 +3916,30 @@ Rust regressions in `Renderer/Shader` (`src/*/tests/` for the preprocessor, the 
 converter, the legalizer and the pipeline, and `tests/`) cover these paths with synthetic
 shader sources; the corpus sweeps skip asset-dependent cases with a printed reason.
 
+- **The dialect's texel fetch, back-buffer and comparison sampling (Wallpaper Engine 2.8.0.42
+  prelude, `artifacts/we-parity/decompiles/E-D8.md`)** — `dialect` `vocabulary`
+  (`comparison_sampling_reads_a_shadow_sampler_at_level_zero`,
+  `tex_load_2d_fetches_the_texel_under_the_coordinate`,
+  `back_buffer_sampling_loads_sample_zero_when_multisampled_and_samples_otherwise`):
+  `texSample2DCompare` is a level-0 comparison, `texLoad2D` a `texelFetch` at
+  `ivec2(u * r)`, `texSample2DBackBuffer` sample 0 of `sampler2DMS` under `BACKBUFFER_MS`
+  and an ordinary sample otherwise; `legalize` `textures`
+  (`a_comparison_texture_splits_into_a_texture_and_a_shadow_sampler`,
+  `a_multisampled_back_buffer_is_a_texture2d_ms`); `pipeline` `pins`
+  (`reflection_reports_the_texture_shape_and_a_comparison_sampler`,
+  `the_shipped_volumetric_light_shader_compiles_in_every_variant`); the shipped,
+  workshop and video-plane corpus sweeps no longer leave `volumetricsfront` out;
+  `tests/metal_compile.rs` (with `WM_SHADER_METAL_COMPILE=1`) compiles a comparison,
+  a texel fetch and a multisampled back-buffer program with the system's Metal compiler.
+  An operand or condition whose type the converter cannot work out is `bool(x)`, and a
+  store of one into a scalar its constructor (`operators`
+  `untyped_numeric_operands_of_logical_operators_are_tested_against_zero`). Engine side:
+  `metal_backend_test` `MetalShaderReflection.ReadsTheDeclaredTextureShapeAndAComparisonSampler`
+  and `metal_scene_draw_smoke`
+  `MetalSceneDraw.ATextureOfAnotherTypeThanTheShaderDeclaresReadsZero` (a 2D picture in a
+  `sampler3D` or comparison slot is replaced by a stand-in of the declared type that reads
+  zero, as a mismatched view does in Direct3D; the slot's sampler compares GREATER and
+  clamps to a transparent border).
 - **One declarator per array suffix (`Renderer/Shader`)** — `tests/declarator_lists.rs`:
   in `float color[4], f;` only `color` is an array, for locals, globals, constants,
   constructor and brace initializers and uniform lists (reflection lists every member);
@@ -2838,11 +3999,27 @@ shader sources; the corpus sweeps skip asset-dependent cases with a printed reas
   (`src/pipeline/tests/golden.rs`) fails when the output changes without a new identity. Bump it
   whenever codegen can produce different output for source that already
   compiled; each bump invalidates previously compiled programs.
-- **`HLSL` is true, as in Wallpaper Engine** — a stage sees `GLSL`, `HLSL` and
-  `HLSL_SM40` defined as 1 (`Renderer/Shader/src/preprocess/mod.rs`).
+- **`HLSL` is true and `GLSL` undefined, as in Wallpaper Engine** — a stage sees `HLSL`
+  and `HLSL_SM40` defined as 1 and `GLSL` undefined (`Renderer/Shader/src/preprocess/mod.rs`;
+  `preprocess` `dialect_macros_select_the_direct3d_branches_without_being_written`).
   Wallpaper Engine compiles its shaders as HLSL: it prepends `#define HLSL 1` and
-  `#define HLSL_SM40 1` and never defines `GLSL`, which stays defined here so the
-  `#if GLSL` paths shaders pick for the backend language stay picked. `HLSL`
+  `#define HLSL_SM40 1` and never defines `GLSL` (probe T5,
+  `artifacts/we-parity/probes/texshader2`, reads `#ifdef GLSL` and `#if GLSL` as false). The
+  shipped `#if GLSL` blocks are the `discard` below half alpha inside `#if ALPHATOCOVERAGE`
+  (`generic3`, `generic4`, `genericimage3`, `genericimage4`, `clippingmaskimage4`,
+  `genericparticle`, `genericropeparticle`, `shadowcaster`, `shadowcasterfoliage4`,
+  `base/model_fragment_v1.h`), which coverage now decides instead
+  (`pins` `the_alpha_to_coverage_branch_of_generic4_has_no_discard`), and the `floor`/`mod`
+  index of `puppettexturechannels`, whose Direct3D form is taken
+  (`puppettexturechannels_takes_the_direct3d_branch`). The one exception is a program
+  refused because its fragment varyings exceed 124 components: it is compiled once more
+  with `GLSL` defined too, so an author's smaller `#ifdef GLSL` varying array (the audio
+  oscilloscope's `vec4[28]` instead of `vec4[RESOLUTION]`, issue #161) gets it under the
+  limit. A program that compiles the first time never sees `GLSL`
+  (`Renderer/Shader/NOTES.md` note 143; `pipeline` `budget`
+  `a_program_over_the_budget_is_compiled_again_with_glsl_defined`,
+  `a_program_within_the_budget_never_sees_glsl`,
+  `a_program_still_over_the_budget_with_glsl_keeps_the_first_refusal`). `HLSL`
   used to be 0, which `#ifdef HLSL` cannot tell from 1 but `#if HLSL` can: every
   such block was skipped. The first pass of each compositing effect
   (`effectcomposebackground`, and the `COPYBG` and `TEX` paths of the god rays,
@@ -2861,7 +4038,7 @@ shader sources; the corpus sweeps skip asset-dependent cases with a printed reas
     `gl_VertexID + g_MorphOffsets[1]` and `CASTF(gl_InstanceID)` need no
     conversion, and the compiled program lists neither as a vertex input. A
     `gl_` builtin the backend lacks (`gl_ViewportIndex`) keeps its former
-    handling, so the shadow caster stages (their shadow maps are not drawn) still
+    handling, so the shadow caster stages still
     compile.
   - The `mat3 inverse(mat3)` of `common_perspective.h` is an ordinary user
     function: Naga calls it in place of its builtin on both targets, and a stage
@@ -2882,12 +4059,11 @@ shader sources; the corpus sweeps skip asset-dependent cases with a printed reas
   bokeh kernel 20, screen coordinate 8, four of them in two). With the dialect's
   cast macros defined, the shipped `generic3`, `generic4` and `shadowcaster`
   vertex stages with `MORPHING`, and `fur4` with its instancing, compile where
-  they stopped at `gl_VertexID` and `gl_InstanceID`. Known and not handled: the compiler does
-  not supply the dialect's own prelude macros `CASTI`, `CASTU`, `CASTF`,
-  `CAST4U`, `DECLARE_SAMPLER2D_PARAMETER` and `MAKE_SAMPLER2D_ARGUMENT`, so those
-  stages, and the morph-target stages that pass a sampler to a function
-  (`foliage4`, `chroma4`), do not compile on their own; and Naga has no
-  `gl_ViewportIndex`. Tests: `preprocess`
+  they stopped at `gl_VertexID` and `gl_InstanceID`. The dialect's prelude macros
+  (`CASTI`, `CASTU`, `CASTF`, `CAST4U`, `DECLARE_SAMPLER2D_PARAMETER`,
+  `MAKE_SAMPLER2D_ARGUMENT`) are supplied since; `pipeline` `pins` compiles `fur4`,
+  `generic4`, `genericimage4` and both shadow casters with `MORPHING` on. Known and not
+  handled: Naga has no `gl_ViewportIndex`. Tests: `preprocess`
   (`default_macros_are_wallpaper_engines_direct3d_dialect_plus_glsl`,
   `every_spelling_of_the_hlsl_test_takes_the_direct3d_branch`), `legalize`
   (`a_redeclared_vertex_builtin_makes_no_attribute_and_its_uses_reach_the_builtin`
@@ -2940,9 +4116,9 @@ shader sources; the corpus sweeps skip asset-dependent cases with a printed reas
   that compiled before can read differently in two forms, `bar % 2` (now
   `_we_Fmod(bar, float(2))`) and a condition `if (bar)` (now `bar != 0.0`, was
   `bar != 0`), and both mean the same as before, so a stored program stays correct.
-  Known and not handled: a bool stored into a genuine `int` or `uint`, and a number
-  as an operand of `!`, `&&` or `||`, are still rejected
-  ([Known limitations](renderer.md#known-limitations)). The corpus sweep
+  A bool stored into a genuine `int` or `uint`, and a number as an operand of `!`,
+  `&&` or `||`, compile since (`pins` `the_renderer_doc_bool_forms_compile_through_the_pipeline`,
+  `operators` `logical_operators_accept_numbers`). The corpus sweep
   `shader_corpus_test` (`*ParsesCorpus*`) compiled only the material's own
   combos, so it never saw a scene's choice of `SHAPE`; it now overlays the effect
   file's pass combos and the scene's entry for the pass, in the engine's order, so
@@ -3004,8 +4180,6 @@ shader sources; the corpus sweeps skip asset-dependent cases with a printed reas
   one, which then reads zero. Constant initializers stay constant expressions.
   A statement that follows a JSON annotation or a `#define` is analyzed like any
   other; before, it took that token for its type and every repair skipped it.
-  Known and not handled: logical-not applied to a float (`!someFloat`), which
-  still rejects Wallpaper Engine's own `clipping_mask` effect.
 - **An array suffix declares one name, and an integer `clamp` stays integer** —
   `pipeline` tests `array_suffix_declares_only_its_own_declarator` and
   `integer_clamp_keeps_integer_literals`, each compiled for SPIR-V and MSL; both
@@ -3072,24 +4246,23 @@ shader sources; the corpus sweeps skip asset-dependent cases with a printed reas
   shader family) and through array-parameter specialization, not just direct
   ones. A `float` element is one component, so a further subscript
   (`g_AudioSpectrum64Left[i / 4][i % 4]`) selects the element itself.
-- **Matrix `inverse` reaches Metal through a generated helper** — Naga's MSL
-  writer has no `inverse()`, so a stage that inverted a matrix failed native
-  translation (`metal translation of '<shader>' failed`), which dropped the
-  effect or held the whole wallpaper: the stock
-  `perspective` and `lightshafts` effects with any combos, and `reflection`,
-  `clouds` and `waterwaves` with `PERSPECTIVE=1`, which undo `squareToQuad` in
-  the vertex stage. The `compatibility_functions` strategy renames builtin
-  `inverse` calls to `_we_Inverse` and emits mat2/mat3/mat4
-  adjugate-over-determinant overloads behind `#ifdef _WE_POLYFILL_INVERSE`,
-  else `#define _we_Inverse inverse`.
-  `NagaCompiler` defines the macro for MSL only (the SPIR-V target that once kept
-  `GLSL.std.450` `MatrixInverse` has since been removed), and no pipeline revision bump was
-  needed. A shader that declares its own `inverse` keeps it.
-  `matrix_inverse_of_every_square_size_compiles_to_metal`
-  (`naga_metal`) covers the translation;
-  `MetalSceneDraw.MatrixInversesOfEverySizeAreTranslatedAndDrawnExactly` draws
-  each size's round-trip residual on the native backend, where one wrong
-  cofactor sign turns its channel black.
+- **GLSL-only calls follow Wallpaper Engine's refusal** — WE 2.8.0.42 reference probes
+  T6/T13 show a fallback shader for GLSL arithmetic, derivative, matrix and bit names that
+  its HLSL prelude does not provide. Rust dialect tests reject those calls, even in unused
+  functions, and accept their HLSL counterparts and author-declared functions. The author's
+  matrix `inverse` remains supported, including the stock perspective include:
+  `MetalSceneDraw.AuthorDefinedMatrixInversesOfEverySizeAreTranslatedAndDrawnExactly`
+  draws 2/3/4-order round-trip residuals using functions declared in the fixture.
+  `author_defined_glsl_names_keep_hlsl_argument_conversions_on_the_gpu` checks that a
+  same-named function still receives broadcasts and vector truncation instead of being
+  replaced by a GLSL intrinsic. `hlsl_bit_operations_keep_unsigned_results_and_vector_width_on_the_gpu`
+  checks unsigned zero-input scan results and signedness in later comparisons.
+- **Material-property conversion metadata survives compilation** — Rust metadata JSON tests
+  retain the exact `rad2deg` annotation, omitting false flags.
+  `ShaderBridgeMerge.AngleConversionFollowsAliasesAndOldDocumentsDefaultToFalse`,
+  `.MalformedAngleConversionDoesNotPartiallyUpdateAliases` and
+  `ShaderBridgeParser.MaterialConversionFlagsSurviveTheParserMerge` cover old cache documents,
+  duplicate aliases, atomic failure and propagation into `WPShaderInfo` for script writes.
 - **A sampler slot's `combo` answers whether the material bound a texture there**,
   which is not the same as whether the slot is bound. An annotation's `default`
   exists so an unused sampler still reads something sane; `WPSceneParser` binds

@@ -313,7 +313,7 @@ TEST(GeneralBlockSchema, TheExtremeVersionsReadNothingGatedAndEverythingGated)
         EXPECT_FALSE(low.norecompile);
         EXPECT_FLOAT_EQ(low.bloomtint[2], 1.0f);
         EXPECT_FALSE(low.windenabled);
-        EXPECT_FLOAT_EQ(low.windstrength, 0.0f);
+        EXPECT_FLOAT_EQ(low.windstrength, 1.0f) << "the default (sub_140186C90)";
         EXPECT_TRUE(low.lightconfig.is_null());
         EXPECT_FALSE(low.transparentsorting);
         EXPECT_FALSE(low.fogdistance);

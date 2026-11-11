@@ -92,7 +92,7 @@ fn layout_of(members: &[Member], structs: &Structs) -> (u64, u64, Vec<u64>) {
 
 /// Compares the reflected block with the MSL struct `GlobalUniforms` of the fragment stage.
 fn assert_parity(label: &str, glsl_members: &str) {
-    let fragment = format!("{glsl_members}\nvoid main() {{ gl_FragColor = vec4(pre + post); }}");
+    let fragment = format!("{glsl_members}\nvoid main() {{ gl_FragColor = CAST4(pre + post); }}");
     let p = ok(PASS_VERTEX, &fragment);
     let block: &UniformBlock = p.reflection.uniform_blocks.first().unwrap_or_else(|| panic!("{label}: no block reflected"));
     let msl = &p.stage(crate::request::StageKind::Fragment).unwrap().payload.msl_source;
@@ -122,9 +122,17 @@ fn assert_parity(label: &str, glsl_members: &str) {
     assert_eq!(size, u64::from(block.size), "{label}: block size\n{msl}");
 }
 
+fn author_type(ty: &str) -> String {
+    for (glsl, hlsl) in [("ivec", "int"), ("uvec", "uint"), ("bvec", "bool")] {
+        if let Some(width) = ty.strip_prefix(glsl) { return format!("{hlsl}{width}"); }
+    }
+    ty.to_string()
+}
+
 fn block_of(members: &[(&str, &str)]) -> String {
     let mut text = String::new();
     for (ty, name) in members {
+        let ty = author_type(ty);
         text.push_str(&format!("uniform {ty} {name};\n"));
     }
     text
@@ -208,7 +216,8 @@ fn arrays_of_booleans_are_refused_naming_the_member() {
     // Arrays of booleans have no widened form: they are refused up front (spec C2 R87 allows
     // it, NOTES). Two-row matrices are laid out, see `every_member_type_alone_between_floats`.
     for (ty, name) in [("bool", "flags[4]"), ("bvec2", "flags[2]")] {
-        let fragment = format!("uniform {ty} {name};\nvoid main() {{ gl_FragColor = vec4(0.0); }}");
+        let ty = author_type(ty);
+        let fragment = format!("uniform {ty} {name};\nvoid main() {{ gl_FragColor = CAST4(0.0); }}");
         let e = Req::new(PASS_VERTEX, &fragment).err();
         assert_eq!(e.category(), ErrorCategory::InvalidRequest, "{ty}: {e}");
         let member = name.split('[').next().unwrap();

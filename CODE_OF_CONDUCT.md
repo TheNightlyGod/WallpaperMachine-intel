@@ -42,7 +42,7 @@ warning, then a temporary ban, and a permanent ban for severe or repeated harm.
 ## Scope
 
 This applies to the repository's issues, discussions, pull requests and reviews,
-the Supporter forum, and anywhere someone represents the project in public.
+the website's support forum, and anywhere someone represents the project in public.
 
 ## Attribution
 

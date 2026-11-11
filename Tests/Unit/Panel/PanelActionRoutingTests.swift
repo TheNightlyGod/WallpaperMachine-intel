@@ -170,8 +170,13 @@ final class PanelActionRoutingTests: PanelTestCase {
         "one stale id refuses the whole batch")
     }
     XCTAssertThrowsError(try controller.installedWallpaperIDs([])) { XCTAssertTrue($0 is InvalidControlValue) }
-    XCTAssertThrowsError(try controller.installedWallpaperIDs(Array(repeating: "a", count: 4097))) {
-      XCTAssertTrue($0 is InvalidControlValue)
+    // More than a batch takes is a selection the user can make (Select all in a very large
+    // library), so it is refused with the limit and not as a control sending nonsense.
+    XCTAssertNoThrow(try controller.installedWallpaperIDs(Array(repeating: "a", count: PanelController.batchLimit)))
+    XCTAssertThrowsError(
+      try controller.installedWallpaperIDs(Array(repeating: "a", count: PanelController.batchLimit + 1))
+    ) {
+      XCTAssertTrue($0 is WallpaperActionError, "refused with \($0)")
     }
   }
 

@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <optional>
+#include <array>
 #include "Utils/Linalg.hpp"
 #include "SceneImageEffectLayer.h"
 
@@ -26,7 +27,8 @@ public:
     explicit SceneCamera(float aspect, float near, float far, float fov)
         : m_perspective(true), m_aspect(aspect), m_fov(fov), m_nearClip(near), m_farClip(far) {}
 
-    SceneCamera(const SceneCamera&) = default;
+    SceneCamera(const SceneCamera&);
+    SceneCamera& operator=(const SceneCamera&);
 
     void Update();
 
@@ -92,11 +94,29 @@ public:
     linalg::Vector3d GetUp() const;
     linalg::Vector3d GetRight() const;
 
+    /// A view `distance` units in front of the point the camera looks at, along its own
+    /// axis, with the lens scaled by `distance`: the camera WE gives a `perspective`
+    /// layer in a 3D scene (2000; probes pcam-a..f). 0 is the camera's own view.
+    void   SetLookBack(double distance, double look_distance) {
+        m_lookBack = distance;
+        m_lookDistance = look_distance;
+    }
+    double LookBack() const { return m_lookBack; }
+
     void LockFov(bool lock) { m_fovLocked = lock; }
     bool FovLocked() const { return m_fovLocked; }
 
     linalg::Matrix4d GetViewMatrix() const;
     linalg::Matrix4d GetViewProjectionMatrix() const;
+    /// Shader-only framing; the authored projection above remains the one
+    /// scripts and pointer queries see. Allocated lazily for cameras used by
+    /// a framed display draw or a projection sampling its scene framebuffer.
+    linalg::Matrix4d GetRasterViewProjectionMatrix(const std::array<double, 4>& clip,
+                                                  uint64_t generation) const;
+    /// A view-projection the camera returns instead of the one its node and lens build: a
+    /// shadow view, whose projection the scene computes every frame. `std::nullopt` returns
+    /// the camera to its own.
+    void SetViewProjectionOverride(std::optional<linalg::Matrix4d> matrix);
 
     /// World-space axes of the attached node, which is the basis the particle
     /// shaders read as `g_Orientation*`. Identity when no node is attached,
@@ -120,9 +140,10 @@ public:
     void Clone(const SceneCamera& cam) {
         if (&cam == this) return;
         // Lens first, in the order the members are declared, then the flags.
-        std::tie(m_perspective, m_aspect, m_fov, m_width, m_height, m_nearClip, m_farClip, m_zoom) =
+        std::tie(m_perspective, m_aspect, m_fov, m_width, m_height, m_nearClip, m_farClip, m_zoom,
+                 m_lookBack, m_lookDistance) =
             std::tie(cam.m_perspective, cam.m_aspect, cam.m_fov, cam.m_width, cam.m_height,
-                     cam.m_nearClip, cam.m_farClip, cam.m_zoom);
+                     cam.m_nearClip, cam.m_farClip, cam.m_zoom, cam.m_lookBack, cam.m_lookDistance);
         std::tie(m_fovLocked, m_isComposeLayer, m_layerLocal, m_childrenUseSceneCamera) =
             std::tie(cam.m_fovLocked, cam.m_isComposeLayer, cam.m_layerLocal,
                      cam.m_childrenUseSceneCamera);
@@ -146,7 +167,7 @@ private:
         bool             valid { false };
         linalg::Matrix4d model { linalg::Matrix4d::Identity() };
         linalg::Vector3d shake { linalg::Vector3d::Zero() };
-        double           inputs[8] {};
+        double           inputs[10] {};
         linalg::Matrix4d view { linalg::Matrix4d::Identity() };
         linalg::Matrix4d viewProjection { linalg::Matrix4d::Identity() };
     };
@@ -163,14 +184,24 @@ private:
     double m_nearClip { 0.01f };
     double m_farClip { 1000.0f };
     double m_zoom { 1.0 };
+    double m_lookBack { 0.0 };
+    double m_lookDistance { 0.0 };
     bool   m_fovLocked { false };
     bool   m_isComposeLayer { false };
 
     std::shared_ptr<SceneNode>             m_node;
     std::shared_ptr<SceneImageEffectLayer> m_imgEffect;
     mutable Cache                          m_cache;
+    struct RasterProjection {
+        const void* owner {nullptr};
+        uint64_t generation {0};
+        bool valid {false};
+        linalg::Matrix4d matrix {linalg::Matrix4d::Identity()};
+    };
+    mutable std::unique_ptr<RasterProjection> m_rasterProjection;
     bool                                   m_layerLocal { false };
     bool                                   m_childrenUseSceneCamera { false };
+    std::optional<linalg::Matrix4d>        m_viewProjectionOverride;
 };
 
 /// Seats the perspective camera of a 2D scene -- the one particles, models and
@@ -202,6 +233,10 @@ inline constexpr float kCanvasShaderEyeDepth = 2000.0f;
 /// hit lies outside the clip volume.
 [[nodiscard]] std::optional<linalg::Vector3d> IntersectNdcWithNodePlane(
     const SceneCamera& camera, SceneNode& node, double ndc_x, double ndc_y);
+/// The same plane with an additional canvas translation, for cursor parallax.
+[[nodiscard]] std::optional<linalg::Vector3d> IntersectNdcWithNodePlane(
+    const SceneCamera& camera, SceneNode& node, double ndc_x, double ndc_y,
+    const linalg::Vector2d& translation);
 
 /// The world-space point on the camera ray through NDC `(ndc_x, ndc_y)` that is
 /// `depth` in front of the eye, measured along the view axis (the camera's view

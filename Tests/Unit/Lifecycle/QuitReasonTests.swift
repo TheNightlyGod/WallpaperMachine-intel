@@ -181,6 +181,61 @@ final class QuitReasonTests: XCTestCase {
         XCTAssertNil(QuitReason.appleEventReason(from: event))
     }
 
+    // MARK: Who asked
+
+    func testAnEventNamesTheProcessThatSentIt() {
+        XCTAssertEqual(QuitRequester.resolve(menuChosen: false, senderPID: 4242), .process(4242))
+        XCTAssertEqual(QuitRequester.resolve(menuChosen: true, senderPID: 4242), .process(4242),
+                       "a menu choice never arrives as an event, so the event's sender wins")
+    }
+
+    func testWithoutASenderTheMenuOrNothingAsked() {
+        XCTAssertEqual(QuitRequester.resolve(menuChosen: true, senderPID: nil), .menu)
+        XCTAssertEqual(QuitRequester.resolve(menuChosen: false, senderPID: nil), .none)
+        XCTAssertNil(QuitRequester.senderPID(of: nil))
+        XCTAssertNil(QuitRequester.senderPID(of: quitEvent()), "an event built in place names no sender")
+    }
+
+    /// The sender is only set on an event the Apple Event Manager delivers, so this sends one
+    /// of a private class to this process and reads it in the handler.
+    func testADeliveredEventNamesItsSender() throws {
+        let eventClass = AEEventClass(code("WMqt"))
+        let handler = SenderRecorder(expectation: expectation(description: "event delivered"))
+        let manager = NSAppleEventManager.shared()
+        manager.setEventHandler(handler, andSelector: #selector(SenderRecorder.handle(_:reply:)),
+                                forEventClass: eventClass, andEventID: eventClass)
+        defer { manager.removeEventHandler(forEventClass: eventClass, andEventID: eventClass) }
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let event = NSAppleEventDescriptor.appleEvent(
+            withEventClass: eventClass, eventID: eventClass,
+            targetDescriptor: NSAppleEventDescriptor(processIdentifier: ownPID),
+            returnID: AEReturnID(kAutoGenerateReturnID), transactionID: AETransactionID(kAnyTransactionID))
+
+        _ = try event.sendEvent(options: [.noReply], timeout: 5)
+        wait(for: [handler.expectation], timeout: 5)
+
+        XCTAssertEqual(handler.sender, ownPID)
+        XCTAssertEqual(QuitRequester.resolve(menuChosen: false, senderPID: handler.sender).logText(), "self")
+    }
+
+    func testTheLogNamesTheSenderWithoutItsPath() {
+        let names: [pid_t: String] = [77: "com.apple.dock"]
+        let text = { (requester: QuitRequester) in
+            requester.logText(ownPID: 10, name: { names[$0] })
+        }
+        XCTAssertEqual(text(.menu), "menu")
+        XCTAssertEqual(text(.none), "none")
+        XCTAssertEqual(text(.process(77)), "com.apple.dock (pid 77)")
+        XCTAssertEqual(text(.process(10)), "self")
+        XCTAssertEqual(text(.process(99)), "exited (pid 99)", "a sender that is gone still leaves its pid")
+    }
+
+    func testARunningProgramWithoutABundleIsNamedByItsFileName() throws {
+        // This test process: a bundle-less name must never be a full path, which can hold the user's name.
+        let name = try XCTUnwrap(QuitRequester.processName(ProcessInfo.processInfo.processIdentifier))
+        XCTAssertFalse(name.contains("/"))
+    }
+
     func testACodeReadsAsItDoesInTheHeadersWhenItIsText() {
         XCTAssertEqual(QuitReason.text(forCode: code("rlgo")), "'rlgo'")
         XCTAssertEqual(QuitReason.text(forCode: 0x0000_0001), "0x00000001", "a code that is not text stays a number")
@@ -217,5 +272,19 @@ final class QuitReasonTests: XCTestCase {
         notice.record(at: later)
 
         XCTAssertTrue(notice.isCurrent(at: later.advanced(by: .seconds(10))))
+    }
+}
+
+private final class SenderRecorder: NSObject {
+    let expectation: XCTestExpectation
+    private(set) var sender: pid_t?
+
+    init(expectation: XCTestExpectation) {
+        self.expectation = expectation
+    }
+
+    @objc func handle(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        sender = QuitRequester.senderPID(of: event)
+        expectation.fulfill()
     }
 }

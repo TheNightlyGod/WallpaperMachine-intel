@@ -29,10 +29,8 @@ pub enum Class {
     ScalarResult,
     /// `cross`: 3-vector result.
     Cross,
-    /// `transpose`, `determinant`, `inverse` and friends on matrices.
+    /// `transpose`, `determinant`.
     Matrix,
-    /// `lessThan` and the other component-wise comparisons: boolean vector result.
-    Compare,
     /// `any all`: boolean result.
     Reduce,
     /// `texture`, `textureLod`, ... sampler calls.
@@ -41,13 +39,15 @@ pub enum Class {
     Other,
 }
 
-/// The class of a GLSL built-in by name.
+/// The class of a GLSL built-in by name. Of the GLSL built-ins Wallpaper Engine refuses
+/// ([`WE_REFUSED_GLSL_CALLS`]) only those this converter itself writes for a dialect call are
+/// listed (`fract`, `inversesqrt`, `dFdx`, `dFdy`, two-argument `atan`), so that its output
+/// converts again unchanged (R95); an author's call of one is refused before this is asked.
 pub fn class_of(name: &str) -> Option<Class> {
     Some(match name {
-        "radians" | "degrees" | "sin" | "cos" | "tan" | "asin" | "acos" | "sinh" | "cosh" | "tanh" | "asinh"
-        | "acosh" | "atanh" | "exp" | "log" | "exp2" | "log2" | "sqrt" | "inversesqrt" | "floor" | "ceil" | "fract"
-        | "trunc" | "round" | "roundEven" | "normalize" | "dFdx" | "dFdy" | "fwidth" | "dFdxFine" | "dFdyFine"
-        | "dFdxCoarse" | "dFdyCoarse" | "fwidthFine" | "fwidthCoarse" => Class::Unary,
+        "radians" | "degrees" | "sin" | "cos" | "tan" | "asin" | "acos" | "sinh" | "cosh" | "tanh" | "exp" | "log"
+        | "exp2" | "log2" | "sqrt" | "inversesqrt" | "floor" | "ceil" | "fract" | "trunc" | "round" | "normalize"
+        | "dFdx" | "dFdy" | "fwidth" => Class::Unary,
         "abs" | "sign" => Class::UnaryInt,
         "pow" | "reflect" | "atan" => Class::Pair,
         "min" | "max" => Class::MinMax,
@@ -58,18 +58,86 @@ pub fn class_of(name: &str) -> Option<Class> {
         "mix" => Class::Mix,
         "dot" | "length" | "distance" => Class::ScalarResult,
         "cross" => Class::Cross,
-        "transpose" | "determinant" | "inverse" | "outerProduct" | "matrixCompMult" => Class::Matrix,
-        "lessThan" | "lessThanEqual" | "greaterThan" | "greaterThanEqual" | "equal" | "notEqual" => Class::Compare,
+        "transpose" | "determinant" => Class::Matrix,
         "any" | "all" | "isnan" | "isinf" => Class::Reduce,
         "texture" | "textureLod" | "textureSize" | "textureQueryLod" | "textureQueryLevels" | "texelFetch"
         | "textureGrad" | "textureOffset" | "textureProj" | "textureGather" | "textureLodOffset" | "textureProjLod" => {
             Class::Texture
         }
-        "refract" | "faceforward" | "fma" | "frexp" | "ldexp" | "modf" | "floatBitsToInt" | "floatBitsToUint"
-        | "intBitsToFloat" | "uintBitsToFloat" | "packHalf2x16" | "unpackHalf2x16" | "bitCount" | "findLSB"
-        | "findMSB" | "not" | "interpolateAtCentroid" => Class::Other,
+        "refract" | "faceforward" | "frexp" | "ldexp" | "modf" => Class::Other,
         _ => return None,
     })
+}
+
+/// GLSL built-ins Wallpaper Engine 2.8.0.42 refuses. It compiles the dialect as HLSL behind a
+/// prelude of `#define`s (`sub_1400F5CB0`) that supplies none of these GLSL-only
+/// functions, so their calls do not compile there and the stage is drawn with its fallback
+/// shader, even inside a function nothing calls (WE reference probes T6 and T13).
+/// Each entry: the name, the argument
+/// count it is refused with (`None`: any; HLSL's `atan` takes one argument) and the dialect's
+/// spelling of the same operation, when it has one. A function the stage declares with that name
+/// and argument count is called instead, as HLSL would.
+///
+/// T13 and its follow-up also reject the legacy/GLSL texture spellings. The
+/// generated GLSL reconversion path keeps them through `glsl_builtins`.
+pub const WE_REFUSED_GLSL_CALLS: &[(&str, Option<usize>, Option<&str>)] = &[
+    ("texture", None, Some("texSample2D")),
+    ("texture2D", None, Some("texSample2D")),
+    ("tex2D", None, Some("texSample2D")),
+    ("textureLod", None, Some("texSample2DLod")),
+    ("texture2DLod", None, Some("texSample2DLod")),
+    ("tex2DLod", None, Some("texSample2DLod")),
+    ("texelFetch", None, Some("texLoad2D")),
+    ("textureSize", None, None),
+    ("fract", None, Some("frac")),
+    ("inversesqrt", None, Some("rsqrt")),
+    ("atan", Some(2), Some("atan2")),
+    ("roundEven", None, None),
+    ("asinh", None, None),
+    ("acosh", None, None),
+    ("atanh", None, None),
+    ("dFdx", None, Some("ddx")),
+    ("dFdy", None, Some("ddy")),
+    ("dFdxFine", None, None),
+    ("dFdyFine", None, None),
+    ("dFdxCoarse", None, None),
+    ("dFdyCoarse", None, None),
+    ("fwidthFine", None, None),
+    ("fwidthCoarse", None, None),
+    ("inverse", None, None),
+    ("outerProduct", None, None),
+    ("matrixCompMult", None, None),
+    ("lessThan", None, None),
+    ("lessThanEqual", None, None),
+    ("greaterThan", None, None),
+    ("greaterThanEqual", None, None),
+    ("equal", None, None),
+    ("notEqual", None, None),
+    ("not", None, None),
+    ("fma", None, None),
+    ("floatBitsToInt", None, Some("asint")),
+    ("floatBitsToUint", None, Some("asuint")),
+    ("intBitsToFloat", None, Some("asfloat")),
+    ("uintBitsToFloat", None, Some("asfloat")),
+    ("packHalf2x16", None, None),
+    ("unpackHalf2x16", None, None),
+    ("bitCount", None, Some("countbits")),
+    ("findLSB", None, Some("firstbitlow")),
+    ("findMSB", None, Some("firstbithigh")),
+    ("interpolateAtCentroid", None, None),
+];
+
+/// Why a call of `name` with `arity` arguments does not compile in Wallpaper Engine, when it is a
+/// GLSL built-in of [`WE_REFUSED_GLSL_CALLS`].
+pub fn we_refused_call(name: &str, arity: usize) -> Option<String> {
+    let (_, _, spelling) = WE_REFUSED_GLSL_CALLS
+        .iter()
+        .find(|(n, at, _)| *n == name && at.is_none_or(|a| a == arity))?;
+    let mut reason = "a GLSL built-in Wallpaper Engine's HLSL dialect does not have; it refuses the stage".to_string();
+    if let Some(spelling) = spelling {
+        reason.push_str(&format!("; the dialect writes `{spelling}`"));
+    }
+    Some(reason)
 }
 
 /// True for the spellings of the dialect vocabulary that are calls (spec 3.5), whether or not
@@ -87,6 +155,13 @@ pub fn is_dialect_call(name: &str) -> bool {
             | "fmod"
             | "log10"
             | "clip"
+            | "rsqrt"
+            | "asint"
+            | "asuint"
+            | "asfloat"
+            | "countbits"
+            | "firstbithigh"
+            | "firstbitlow"
             | "CAST2"
             | "CAST3"
             | "CAST4"
@@ -103,17 +178,17 @@ pub fn is_dialect_call(name: &str) -> bool {
             | "tex2DLod"
             | "texSample3D"
             | "MAKE_SAMPLER2D_ARGUMENT"
+            | "MAKE_SAMPLER2D_COMPARE_ARGUMENT"
+            | "texSample2DCompare"
+            | "texLoad2D"
+            | "texSample2DBackBuffer"
     )
 }
 
 /// Names that are outside this compiler's scope, with the reason (R22).
 pub fn unsupported_reason(name: &str) -> Option<&'static str> {
     Some(match name {
-        "texSample2DCompare" | "sampler2DComparison" | "sampler2DShadow" | "textureCompare" => {
-            "shadow-map comparison sampling is not supported"
-        }
-        "texLoad2D" => "texel fetch of the volumetric shader is not supported",
-        "texSample2DBackBuffer" => "back-buffer sampling of the volumetric shader is not supported",
+        "textureCompare" => "`textureCompare` is not part of the dialect; use `texSample2DCompare`",
         _ => return None,
     })
 }
@@ -237,7 +312,8 @@ mod tests {
         assert!(is_reserved_identifier("sample"));
         assert!(is_reserved_identifier("input"));
         assert!(!is_reserved_identifier("gain"));
-        assert!(unsupported_reason("texLoad2D").is_some());
+        assert!(unsupported_reason("textureCompare").is_some());
+        assert!(unsupported_reason("texLoad2D").is_none());
         assert!(unsupported_reason("texture").is_none());
     }
 }

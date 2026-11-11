@@ -23,6 +23,7 @@ set(WM_MEDIA_SOURCES
     Checked.cpp
     CodecConfig.cpp
     DisplayMatrix.cpp
+    DisposableSample.cpp
     Error.cpp
     IsoBmff/IsoBmffReader.cpp
     Matroska/MatroskaReader.cpp

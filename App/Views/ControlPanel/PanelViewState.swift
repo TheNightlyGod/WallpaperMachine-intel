@@ -22,7 +22,7 @@ struct PanelViewState: Codable, Equatable {
   var scroll: [String: Double] = [:]
 
   /// Installed's sort keys.
-  static let sorts: Set<String> = ["title", "type", "favorites", "size", "added"]
+  static let sorts = Set(LibrarySort.allCases.map(\.rawValue))
   /// The pages that draw into the library grid.
   static let pages: Set<String> = ["installed", "discover", "pixiv"]
   static let maxTextLength = 200

@@ -836,6 +836,115 @@ final class SteamCMDSetupTests: XCTestCase {
         XCTAssertEqual(store.state, .ready)
     }
 
+    func testUpdateCheckReplacesAManagedCopyValveNoLongerLists() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let old = try fixture.oldRuntime()
+        try fixture.recordInstalledVersion("1700000000")
+        let store = fixture.store()
+        await store.refresh()
+        XCTAssertTrue(store.updateCheckIsDue())
+        let updated = await store.updateIfOutdated()
+        XCTAssertTrue(updated)
+        XCTAssertEqual(store.state, .ready)
+        XCTAssertEqual(try String(contentsOf: old, encoding: .utf8), "fixture-executable")
+        XCTAssertEqual(SteamCMDSetupStore.installedVersion(at: old.deletingLastPathComponent()), "1788292693")
+        XCTAssertEqual(store.selectedRuntime?.executableURL.path, old.path)
+        XCTAssertFalse(store.updateCheckIsDue(), "One check a day")
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).contains { $0.hasPrefix(".steamcmd-") })
+    }
+
+    func testUpdateCheckLeavesACurrentCopyAndComesBackADayLater() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let old = try fixture.oldRuntime()
+        try fixture.recordInstalledVersion("1788292693")
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        let store = fixture.store(now: { clock })
+        await store.refresh()
+        let updated = await store.updateIfOutdated()
+        XCTAssertFalse(updated)
+        XCTAssertEqual(store.state, .ready)
+        XCTAssertEqual(try String(contentsOf: old, encoding: .utf8), "old-executable")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.root.appendingPathComponent("smoke-started").path))
+        clock += SteamCMDSetupStore.failureUpdateCheckInterval
+        XCTAssertFalse(store.updateCheckIsDue())
+        XCTAssertTrue(store.updateCheckIsDue(within: SteamCMDSetupStore.failureUpdateCheckInterval),
+                      "A sign-in that ended for no reason may look again sooner")
+        clock += SteamCMDSetupStore.updateCheckInterval
+        XCTAssertTrue(store.updateCheckIsDue())
+        clock = Date(timeIntervalSince1970: 1_700_000_000)
+        XCTAssertTrue(store.updateCheckIsDue(), "A clock set back does not postpone the check")
+    }
+
+    func testUnreadableManifestKeepsTheInstalledCopyWithoutComplaint() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let old = try fixture.oldRuntime()
+        BootstrapURLProtocol.replace(fixture.identifier, path: "/client/steam_cmd_osx",
+                                     response: .init(body: Data(), status: 503, headers: [:], hold: false, redirect: nil))
+        let store = fixture.store()
+        await store.refresh()
+        let updated = await store.updateIfOutdated()
+        XCTAssertFalse(updated)
+        XCTAssertEqual(store.state, .ready)
+        XCTAssertEqual(store.selectedRuntime?.executableURL.path, old.path)
+        XCTAssertEqual(try String(contentsOf: old, encoding: .utf8), "old-executable")
+        XCTAssertFalse(store.updateCheckIsDue(), "An offline Mac is not asked again on every download")
+    }
+
+    func testAFailedUpdateKeepsTheWorkingCopyQuietly() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let old = try fixture.oldRuntime()
+        try fixture.recordInstalledVersion("1700000000")
+        for path in BootstrapURLProtocol.routes(fixture.identifier).keys where path != "/client/steam_cmd_osx" {
+            BootstrapURLProtocol.replace(fixture.identifier, path: path,
+                                         response: .init(body: Data("truncated".utf8), status: 200, headers: [:], hold: false, redirect: nil))
+        }
+        let store = fixture.store()
+        await store.refresh()
+        let updated = await store.updateIfOutdated()
+        XCTAssertFalse(updated)
+        XCTAssertEqual(store.state, .ready, "Downloads go on with the copy in use; the next day tries again")
+        XCTAssertEqual(store.selectedRuntime?.executableURL.path, old.path)
+        XCTAssertEqual(try String(contentsOf: old, encoding: .utf8), "old-executable")
+        XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).contains { $0.hasPrefix(".steamcmd-") })
+    }
+
+    func testAnUpdateMacOSHoldsForApprovalIsShown() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let old = try fixture.oldRuntime()
+        try fixture.recordInstalledVersion("1700000000")
+        let store = fixture.store(blocked: .securityApprovalRequired)
+        await store.refresh()
+        let updated = await store.updateIfOutdated()
+        XCTAssertFalse(updated)
+        guard case .failed(let issue) = store.state else { return XCTFail("Approval is the user's: \(store.state)") }
+        XCTAssertEqual(issue.kind, .securityApprovalRequired)
+        XCTAssertNotNil(store.retainedCandidateURL)
+        XCTAssertEqual(store.selectedRuntime?.executableURL.path, old.path, "Downloads keep the copy in use meanwhile")
+        XCTAssertFalse(store.updateCheckIsDue(), "A retained candidate waits for the user's decision")
+    }
+
+    func testUpdateCheckLeavesALocatedCopyAlone() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let elsewhere = fixture.root.appendingPathComponent("Located/steamcmd")
+        try FileManager.default.createDirectory(at: elsewhere.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("located".utf8).write(to: elsewhere)
+        try Data("library".utf8).write(to: elsewhere.deletingLastPathComponent().appendingPathComponent("steamconsole.dylib"))
+        fixture.defaults.set(elsewhere.path, forKey: preferenceKey)
+        let store = fixture.store()
+        await store.refresh()
+        XCTAssertEqual(store.selectedRuntime?.executableURL.path, elsewhere.path)
+        XCTAssertFalse(store.updateCheckIsDue())
+        let updated = await store.updateIfOutdated()
+        XCTAssertFalse(updated)
+        XCTAssertEqual(try String(contentsOf: elsewhere, encoding: .utf8), "located")
+    }
+
     private func assertInvalidInstall(_ fixture: Fixture, kind: SteamCMDSetupIssue.Kind = .invalidArchive) async throws {
         let store = fixture.store()
         store.install()
@@ -885,13 +994,22 @@ final class SteamCMDSetupTests: XCTestCase {
             try? FileManager.default.removeItem(at: root)
         }
         func store(mode: FixtureRunner.Mode = .complete, blocked: SteamCMDSetupIssue.Kind? = nil,
-                   downloader: WorkshopDownloader? = nil, provider suppliedProvider: (any SteamCMDRuntimeProviding)? = nil) -> SteamCMDSetupStore {
+                   downloader: WorkshopDownloader? = nil, provider suppliedProvider: (any SteamCMDRuntimeProviding)? = nil,
+                   now: @escaping () -> Date = Date.init) -> SteamCMDSetupStore {
             let provider = suppliedProvider ?? FixtureRuntime(blocked: blocked)
             // Exercise Apple's public /var alias while expecting canonical publication paths.
             let support = URL(fileURLWithPath: root.path.replacingOccurrences(of: "/private/var/", with: "/var/"), isDirectory: true)
             return SteamCMDSetupStore(downloader: downloader ?? WorkshopDownloader(sessionDirectory: root.appendingPathComponent("Session"), runtimeProvider: provider),
                 supportDirectory: support, defaults: defaults, sessionConfiguration: configuration,
-                runtimeProvider: provider, processRunner: FixtureRunner(root: root, mode: mode))
+                runtimeProvider: provider, processRunner: FixtureRunner(root: root, mode: mode), now: now)
+        }
+        /// Records `version` as the manifest the managed copy was installed from.
+        func recordInstalledVersion(_ version: String) throws {
+            let served = String(decoding: try XCTUnwrap(BootstrapURLProtocol.routes(identifier)["/client/steam_cmd_osx"]).body, as: UTF8.self)
+            let record = root.appendingPathComponent("SteamCMD/MacOS/package")
+            try FileManager.default.createDirectory(at: record, withIntermediateDirectories: true)
+            try Data(served.replacingOccurrences(of: "\"1788292693\"", with: "\"\(version)\"").utf8)
+                .write(to: record.appendingPathComponent("steam_cmd_osx.manifest"))
         }
         func oldRuntime() throws -> URL {
             let directory = root.appendingPathComponent("SteamCMD/MacOS")

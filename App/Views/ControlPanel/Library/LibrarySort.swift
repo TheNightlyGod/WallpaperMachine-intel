@@ -1,7 +1,8 @@
 import Foundation
 
-/// Installed's five sort keys, each with the direction it starts in: names read A to Z, while
-/// favorites, size and date are asked for to see the starred, biggest or newest first.
+/// Installed's six sort keys, each with the direction it starts in: names read A to Z, while
+/// favorites, size and the dates are asked for to see the starred, biggest, newest or most
+/// recently used first.
 ///
 /// The raw value is the key `PanelViewState` stores, so a reopened window restores it.
 enum LibrarySort: String, CaseIterable, Identifiable, Sendable {
@@ -10,6 +11,8 @@ enum LibrarySort: String, CaseIterable, Identifiable, Sendable {
   case favorites
   case size
   case added
+  /// When the wallpaper was last put on a display (`WallpaperHistoryStore.lastUsedDates()`).
+  case lastUsed
 
   var id: String { rawValue }
 
@@ -17,7 +20,7 @@ enum LibrarySort: String, CaseIterable, Identifiable, Sendable {
   var startsDescending: Bool {
     switch self {
     case .title, .type: false
-    case .favorites, .size, .added: true
+    case .favorites, .size, .added, .lastUsed: true
     }
   }
 
@@ -30,6 +33,7 @@ enum LibrarySort: String, CaseIterable, Identifiable, Sendable {
     case .favorites: L("Favorites")
     case .size: L("File size")
     case .added: L("Date added")
+    case .lastUsed: L("Last used")
     }
   }
 }
@@ -46,15 +50,17 @@ extension LibrarySort {
   /// `rows` in this key's order.
   ///
   /// The key decides first and the title breaks ties. A row whose size or date has not been
-  /// measured yet sorts last in both directions, and the type sort breaks its ties by title in
-  /// the natural direction whichever way the list runs. Rows equal in everything keep the order
-  /// they came in, so the same library always lists the same way.
+  /// measured yet, or that was never used, sorts last in both directions, and the type sort
+  /// breaks its ties by title in the natural direction whichever way the list runs. Rows equal in
+  /// everything keep the order they came in, so the same library always lists the same way.
   ///
   /// - Parameters:
   ///   - favorites: The favorite ids, which the `favorites` key reads.
+  ///   - lastUsed: When each wallpaper was last used, by id, which the `lastUsed` key reads.
   ///   - locale: How titles are compared.
   func sorted(
-    _ rows: [LibraryRow], descending: Bool, favorites: Set<String>, locale: Locale
+    _ rows: [LibraryRow], descending: Bool, favorites: Set<String>,
+    lastUsed: [String: Date] = [:], locale: Locale
   ) -> [LibraryRow] {
     let direction: Int = descending ? -1 : 1
     func order(_ result: ComparisonResult) -> Int {
@@ -73,6 +79,7 @@ extension LibrarySort {
       case .favorites: favorites.contains(row.id) ? 1 : 0
       case .size: row.size.map(Double.init)
       case .added: row.addedAt?.timeIntervalSince1970
+      case .lastUsed: lastUsed[row.id]?.timeIntervalSince1970
       case .title, .type: nil
       }
     }
@@ -83,7 +90,7 @@ extension LibrarySort {
       case .type:
         let kinds = lhs.kind.rawValue.compare(rhs.kind.rawValue)
         return order(kinds) * direction != 0 ? order(kinds) * direction : byTitle(lhs, rhs)
-      case .favorites, .size, .added:
+      case .favorites, .size, .added, .lastUsed:
         let (left, right) = (value(lhs), value(rhs))
         guard let left, let right else {
           if (left == nil) != (right == nil) { return left == nil ? 1 : -1 }

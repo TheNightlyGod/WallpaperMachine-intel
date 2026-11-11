@@ -27,9 +27,10 @@ impl AudioSpectrum128 {
 
 use crate::{
     EngineError,
+    display::DisplayDesc,
     media::audio::{AudioVolume, InterleavedStereoF32, MonoPcmF32},
     owe::{sys, unwind::UnwindSafeFFI},
-    project::{ScalingMode, SceneDesc, SceneFraming, SerdeValudeExt},
+    project::{ScalingMode, SceneDesc, SceneFraming, SceneQuality, SceneUserOptions, SerdeValudeExt},
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -128,6 +129,7 @@ impl OweBackend {
             registration: None,
             load,
             previewed_properties: None,
+            previewed_user_options: None,
         };
 
         call_status("owe_scene_wallpaper_set_log_scope", || unsafe {
@@ -136,6 +138,8 @@ impl OweBackend {
         call_status("owe_scene_wallpaper_init", || unsafe {
             sys::owe_scene_wallpaper_init(raw.as_ptr())
         })?;
+
+        scene.set_display_id(display.display_id)?;
 
         let (render_width, render_height) = render_resolution.unwrap_or((0, 0));
         call_status("owe_scene_wallpaper_init_metal", || unsafe {
@@ -258,6 +262,32 @@ impl OweBackend {
         }
     }
 
+    /// Turns SDR display framing on or off inside native Metal scenes,
+    /// process-wide.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the call unwinds.
+    pub fn set_scene_display_framing_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        unsafe {
+            UnwindSafeFFI::new("owe_set_scene_display_framing_enabled")
+                .call(|| sys::owe_set_scene_display_framing_enabled(enabled))
+        }
+    }
+
+    /// Turns MetalFX upscaling of scenes drawn below full resolution on or
+    /// off, process-wide.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the call unwinds.
+    pub fn set_metalfx_upscaling_enabled(&self, enabled: bool) -> Result<(), EngineError> {
+        unsafe {
+            UnwindSafeFFI::new("owe_set_metalfx_upscaling_enabled")
+                .call(|| sys::owe_set_metalfx_upscaling_enabled(enabled))
+        }
+    }
+
     /// Chooses how many pixels a 2D scene is rasterized with, process-wide.
     ///
     /// New scenes take it when they are built; a running scene takes it the
@@ -365,6 +395,10 @@ pub struct OweScene {
     /// no longer has. `None` is "shows what it loaded with", and also "not
     /// known" after an update the renderer refused.
     previewed_properties: Option<String>,
+    /// The per-wallpaper options this renderer was last shown by
+    /// [`Self::preview_user_options`]; `None` after a load, like
+    /// `previewed_properties`.
+    previewed_user_options: Option<SceneUserOptions>,
 }
 
 unsafe impl Send for OweScene {}
@@ -478,6 +512,15 @@ impl OweScene {
             })
             .transpose()?;
 
+        // The quality is kept for the load the configuration starts, so the first
+        // frame is already drawn with it.
+        self.set_quality(desc.quality)?;
+        // Script localStorage lives per wallpaper, its screen file per display (plan decision I3).
+        let screen_key = desc.display.identity.storage_key(desc.display.display_id);
+        self.set_storage(desc.scene_storage_dir.as_deref(), &screen_key, false)?;
+        // So are WE's per-wallpaper options; a new load shows the saved ones.
+        self.previewed_user_options = None;
+        self.set_user_options(&desc.user_options)?;
         let raw = self.raw_ptr()?;
         // The volume and mute travel with the configuration: the scene can load as soon as
         // it is configured, and its sounds play from the moment they are mounted, before a
@@ -520,11 +563,9 @@ impl OweScene {
     pub fn finish_surface_reconfigure(
         &mut self,
         metal_layer: *mut c_void,
-        width: u32,
-        height: u32,
+        display: &DisplayDesc,
         render_width: u32,
         render_height: u32,
-        scale_factor: f64,
     ) -> Result<(), EngineError> {
         if metal_layer.is_null() {
             return Err(EngineError::InvalidInput(
@@ -532,15 +573,16 @@ impl OweScene {
             ));
         }
         let raw = self.raw_ptr()?;
+        self.set_display_id(display.display_id)?;
         call_status("owe_scene_wallpaper_finish_surface_reconfigure", || unsafe {
             sys::owe_scene_wallpaper_finish_surface_reconfigure(
                 raw.as_ptr(),
                 metal_layer,
-                width,
-                height,
+                display.width,
+                display.height,
                 render_width,
                 render_height,
-                scale_factor,
+                display.scale_factor,
             )
         })?;
         self.render_initialized = true;
@@ -572,6 +614,103 @@ impl OweScene {
     /// keeps playing. The caller validates the fractions first, so a value the
     /// renderer would have to clamp never reaches it.
     ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the scene is closed or OWE rejects the
+    /// update.
+    pub fn set_quality(&mut self, quality: SceneQuality) -> Result<(), EngineError> {
+        quality.validate()?;
+        let raw = self.raw_ptr()?;
+        let value = sys::owe_scene_quality {
+            msaa: i32::from(quality.msaa),
+            shadows: quality.shadows as i32,
+            volumetrics: quality.volumetrics as i32,
+            reflection: quality.reflection,
+            post_processing: quality.post_processing as i32,
+        };
+        call_status("owe_scene_wallpaper_set_quality", || unsafe {
+            sys::owe_scene_wallpaper_set_quality(raw.as_ptr(), &raw const value)
+        })
+    }
+
+    /// Where the scene's script `localStorage` is kept for the load that follows
+    /// (`None` = memory only; `read_only` keeps writes in memory).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the scene is closed, a value holds a NUL byte, or OWE
+    /// rejects the screen key.
+    pub fn set_storage(
+        &mut self,
+        directory: Option<&str>,
+        screen_key: &str,
+        read_only: bool,
+    ) -> Result<(), EngineError> {
+        let directory = directory.filter(|dir| !dir.is_empty()).map(cstring).transpose()?;
+        let key = cstring(screen_key)?;
+        let raw = self.raw_ptr()?;
+        call_status("owe_scene_wallpaper_set_storage", || unsafe {
+            sys::owe_scene_wallpaper_set_storage(
+                raw.as_ptr(),
+                directory.as_ref().map_or(std::ptr::null(), |text| text.as_ptr()),
+                key.as_ptr(),
+                read_only,
+            )
+        })
+    }
+
+    /// Sets Wallpaper Engine's per-wallpaper options. Before a load they are in
+    /// force for its first frame; on a loaded scene the renderer applies them live
+    /// and loads the scene again only when the colour pass changes shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EngineError`] if the options are out of range, the scene is
+    /// closed or OWE rejects the update.
+    pub fn set_user_options(&mut self, options: &SceneUserOptions) -> Result<(), EngineError> {
+        options.validate()?;
+        let lut = cstring(&options.lut)?;
+        let raw = self.raw_ptr()?;
+        let value = sys::owe_user_options {
+            color_enabled: options.color_enabled,
+            brightness: options.brightness,
+            contrast: options.contrast,
+            saturation: options.saturation,
+            hue: options.hue,
+            lut: lut.as_ptr(),
+            lut_strength: options.lut_strength,
+            flip_horizontal: options.flip_horizontal,
+            mouse_parallax: options.mouse_parallax,
+            playback_rate: options.playback_rate,
+        };
+        call_status("owe_scene_wallpaper_set_user_options", || unsafe {
+            sys::owe_scene_wallpaper_set_user_options(raw.as_ptr(), &raw const value)
+        })
+    }
+
+    /// Shows per-wallpaper options that are not saved yet on the running scene.
+    /// Options it already shows are not sent again; a load forgets them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::set_user_options`]. A refused update leaves nothing recorded.
+    pub fn preview_user_options(&mut self, options: &SceneUserOptions) -> Result<(), EngineError> {
+        self.raw_ptr()?;
+        if self.previewed_user_options.as_ref() == Some(options) {
+            return Ok(());
+        }
+        self.previewed_user_options = None;
+        self.set_user_options(options)?;
+        self.previewed_user_options = Some(options.clone());
+        Ok(())
+    }
+
+    /// The options this renderer was last shown by [`Self::preview_user_options`].
+    #[must_use]
+    pub fn previewed_user_options(&self) -> Option<&SceneUserOptions> {
+        self.previewed_user_options.as_ref()
+    }
+
     /// # Errors
     ///
     /// Returns [`EngineError`] if the scene is closed or OWE rejects the
@@ -1047,6 +1186,15 @@ impl OweScene {
         }
     }
 
+    /// Rebinds output capability to the physical display, even when its raster
+    /// dimensions match and the existing layer can stay in place.
+    pub fn set_display_id(&mut self, display_id: u32) -> Result<(), EngineError> {
+        let raw = self.raw_ptr()?;
+        call_status("owe_scene_wallpaper_set_display_id", || unsafe {
+            sys::owe_scene_wallpaper_set_display_id(raw.as_ptr(), display_id)
+        })
+    }
+
     /// Keeps the registry's physical display identity in sync with window moves.
     pub fn update_runtime_display(&mut self, display_id: u32) {
         if let (Some((registry, handle)), Some(raw)) = (&self.registration, self.raw) {
@@ -1148,12 +1296,38 @@ impl OweScene {
             registration: None,
             load: 0,
             previewed_properties: None,
+            previewed_user_options: None,
         }
     }
 }
 
 fn cstring(value: &str) -> Result<CString, EngineError> {
     CString::new(value).map_err(|error| EngineError::InvalidInput(error.to_string()))
+}
+
+/// What a scene's own file says about the per-wallpaper options Wallpaper Engine
+/// offers for it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SceneTraits {
+    /// The scene uses the cursor to move its camera (`cameraparallax` true and a
+    /// mouse influence other than 0, WE `sub_14010DF40`), so WE offers the
+    /// mouse-parallax switch.
+    pub camera_parallax_offered: bool,
+}
+
+/// Reads the traits of the scene `project_json` names, without loading it.
+///
+/// # Errors
+///
+/// Returns [`EngineError`] when the path has a NUL byte, the project is not a
+/// scene, or its scene file cannot be read.
+pub fn read_scene_traits(project_json: &std::path::Path) -> Result<SceneTraits, EngineError> {
+    let path = cstring(&project_json.to_string_lossy())?;
+    let mut out = sys::owe_scene_traits { camera_parallax_offered: false };
+    call_status("owe_read_scene_traits", || unsafe {
+        sys::owe_read_scene_traits(path.as_ptr(), &raw mut out)
+    })?;
+    Ok(SceneTraits { camera_parallax_offered: out.camera_parallax_offered })
 }
 
 fn call_status(operation: &'static str, call: impl FnOnce() -> c_int) -> Result<(), EngineError> {
@@ -1319,7 +1493,7 @@ mod pointer_callback_tests {
         let dropped = Arc::new(AtomicUsize::new(0));
         let witness = DropWitness(dropped.clone());
         let callback: PointerInputCallback = Arc::new(move |_| { let _ = &witness; });
-        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None, previewed_user_options: None };
         assert!(scene.set_pointer_input_callback(Some(callback)).is_err());
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
     }
@@ -1371,7 +1545,7 @@ mod render_failure_callback_tests {
     fn a_registration_on_a_closed_scene_hands_the_callback_back_to_be_dropped_once() {
         let dropped = Arc::new(AtomicUsize::new(0));
         let called = Arc::new(AtomicUsize::new(0));
-        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None, previewed_user_options: None };
 
         assert!(scene.set_render_failure_callback(Some(callback_with(&dropped, &called))).is_err());
 
@@ -1396,6 +1570,7 @@ mod render_failure_callback_tests {
             registration: None,
             load: 0,
             previewed_properties: None,
+            previewed_user_options: None,
         };
 
         assert!(scene.set_render_failure_callback(Some(callback_with(&dropped, &called))).is_err());
@@ -1406,7 +1581,7 @@ mod render_failure_callback_tests {
 
     #[test]
     fn clearing_the_callback_on_a_closed_scene_has_nothing_to_drop() {
-        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None, previewed_user_options: None };
         assert!(scene.set_render_failure_callback(None).is_err());
     }
 
@@ -1475,7 +1650,7 @@ mod property_preview_tests {
 
     #[test]
     fn a_document_with_a_nul_byte_never_reaches_the_renderer() {
-        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None, previewed_user_options: None };
 
         let err = scene.preview_property_override("{\"a\":\"b\0c\"}").expect_err("a NUL byte is refused");
 
@@ -1533,8 +1708,29 @@ mod property_preview_tests {
     }
 
     #[test]
+    fn user_options_the_renderer_never_took_are_not_remembered() {
+        let brighter = SceneUserOptions { color_enabled: true, brightness: 60.0, ..SceneUserOptions::default() };
+
+        // Out of range: refused before the renderer hears of it.
+        let mut scene = OweScene::uninitialized_for_test();
+        let bad = SceneUserOptions { playback_rate: 500.0, ..SceneUserOptions::default() };
+        assert!(matches!(scene.preview_user_options(&bad), Err(EngineError::InvalidInput(_))));
+        assert!(matches!(
+            scene.set_user_options(&SceneUserOptions { lut: "a/b".to_owned(), ..SceneUserOptions::default() }),
+            Err(EngineError::InvalidInput(_))
+        ));
+        // A renderer that has no looper yet refuses the options; nothing is recorded.
+        assert!(scene.preview_user_options(&brighter).is_err());
+        assert_eq!(scene.previewed_user_options(), None, "a refused update leaves nothing recorded");
+
+        let mut closed = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None, previewed_user_options: None };
+        let err = closed.preview_user_options(&brighter).expect_err("a closed scene takes nothing");
+        assert!(matches!(&err, EngineError::InvalidInput(message) if message.contains("already closed")), "{err:?}");
+    }
+
+    #[test]
     fn a_closed_scene_refuses_a_preview() {
-        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None };
+        let mut scene = OweScene { raw: None, render_initialized: false, registration: None, load: 0, previewed_properties: None, previewed_user_options: None };
 
         let err = scene.preview_property_override("{}").expect_err("a closed scene takes nothing");
 

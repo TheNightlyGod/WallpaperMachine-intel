@@ -329,7 +329,13 @@ void WriteProgramFile(fs::VFS& vfs, const std::string& path, const std::string& 
 void MergeOutput(const wallpaper::shader::RustShaderOutput& output, std::span<WPShaderUnit> units,
                  WPShaderInfo& info) {
     for (const auto& [name, value] : output.shader_info.combos) info.combos.emplace(name, value);
-    for (const auto& [material, uniform] : output.shader_info.alias) info.alias.emplace(material, uniform);
+    for (const auto& [material, uniform] : output.shader_info.alias) {
+        const auto [entry, inserted] = info.alias.emplace(material, uniform);
+        (void)inserted;
+        if (entry->second != uniform) continue;
+        if (output.shader_info.alias_rad2deg.contains(material)) info.alias_rad2deg.insert(material);
+        else info.alias_rad2deg.erase(material);
+    }
     for (const auto& [name, value] : output.shader_info.svs) {
         if (value.size() > 0) info.svs.emplace(name, value);
     }
@@ -360,6 +366,7 @@ bool CompileProgramRust(std::string_view scene_id, std::string_view shader_name,
     request.scene_id      = std::string(scene_id);
     request.cache_enabled = env.vfs != nullptr && env.vfs->IsMounted("cache");
     request.combos        = shader_info->combos;
+    request.point_geometry = shader_info->point_geometry;
     for (const auto& unit : units) request.stages.push_back({ unit.stage, unit.src });
     for (std::size_t slot = 0; slot < texs.size(); ++slot) {
         const auto& tex = texs[slot];
@@ -369,6 +376,7 @@ bool CompileProgramRust(std::string_view scene_id, std::string_view shader_name,
         info.enabled    = tex.enabled;
         info.format     = FormatText(tex.format);
         info.components = tex.composEnabled;
+        info.sample_count = tex.sample_count;
         if (nv12_plane_slot.has_value() && *nv12_plane_slot == slot)
             info.video_planes = shader::RustShaderVideoPlanes::Nv12Biplanar;
         request.textures.push_back(std::move(info));

@@ -87,6 +87,24 @@ extension PumpedDrag where Value == PropertyDragValue {
   }
 }
 
+extension PumpedDrag where Value == PropertyDragValue {
+  /// The driver of one Wallpaper Engine option's slider: the option's pump for each drag and
+  /// `commitEngineOption` for what is saved, under the option's key with `.latestWins`.
+  static func engineOption(
+    controller: PanelController, wallpaperID: String, option: BridgeEngineOptionId,
+    sleep: @escaping DragStepPump<PropertyDragValue>.Sleep = { try await Task.sleep(for: $0) }
+  ) -> PumpedDrag<PropertyDragValue> {
+    PumpedDrag(
+      controller: controller, key: InspectorAction.engineOption(wallpaperID, option),
+      makePump: {
+        controller.engineOptionDragPump(wallpaperID, option: option, sleep: sleep)
+      },
+      commit: { value in
+        try await controller.commitEngineOption(wallpaperID, option: option, value: value.bridgeValue)
+      })
+  }
+}
+
 extension PumpedDrag where Value == Double {
   /// The driver of one axis of a display's position sliders: the position pump for each drag and
   /// `setDisplayPosition` with only that axis for what is saved. Both axes of a display share the

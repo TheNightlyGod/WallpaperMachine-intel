@@ -17,6 +17,11 @@ enum WorkshopLink {
         return itemID(inLink: text)
     }
 
+    /// Whether `id` alone names its item: an id as Steam writes it, of at least
+    /// `minimumBareDigits` digits, so a search field holding just `id` shows that item. A link
+    /// may name a shorter id, which a bare number does not.
+    static func isBareItemID(_ id: String) -> Bool { itemID(in: id) == id }
+
     /// The item a link names; a bare id is not a link. Accepted are the Workshop page on
     /// steamcommunity.com (`/sharedfiles/filedetails` or `/workshop/filedetails`, with an `id`)
     /// and `steam://url/CommunityFilePage/<id>`.

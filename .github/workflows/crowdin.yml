@@ -1,0 +1,137 @@
+# Keep the string catalogs and the Crowdin project in step, with scripts/crowdin_sync.py.
+#
+# Push: when a push to main changes a catalog, send its source strings and translations to
+# Crowdin as unapproved translations. A value Crowdin already has is not added again and an
+# approved translation is never replaced, so a merge cannot undo a translator's approved work.
+#
+# Pull: every day, and on demand from Actions -> Crowdin -> Run workflow, take Crowdin's
+# translations for the shipped languages, check the catalogs with their Python tests and, when
+# they changed, open a pull request on `l10n/crowdin` (rebuilt from main on every run). A
+# push made with GITHUB_TOKEN starts no other workflow, so Checks does not run on that pull
+# request by itself: this job runs the catalog test before it pushes, and closing and
+# reopening the pull request starts Checks. Opening the pull request needs Settings -> Actions
+# -> General -> "Allow GitHub Actions to create and approve pull requests"; without it the job
+# still pushes the branch and prints its compare link.
+#
+# Needs the repository secret CROWDIN_PERSONAL_TOKEN: a Crowdin personal access token with the
+# Projects scope (read and write) on the Wallpaper Machine project. Without it every job only
+# warns and syncs nothing (a fork has none). docs/localization.md describes the loop.
+name: Crowdin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - App/Resources/Localizable.xcstrings
+      - App/Resources/InfoPlist.xcstrings
+      - Extension/Localizable.xcstrings
+      - crowdin.yml
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to run"
+        type: choice
+        options: [pull, push]
+        default: pull
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crowdin
+  cancel-in-progress: false
+
+env:
+  CROWDIN_PERSONAL_TOKEN: ${{ secrets.CROWDIN_PERSONAL_TOKEN }}
+  # The Crowdin CLI this was developed against.
+  CROWDIN_CLI: "5.5.0"
+
+jobs:
+  push:
+    name: Push to Crowdin
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the token
+        id: token
+        run: |
+          if [ -z "$CROWDIN_PERSONAL_TOKEN" ]; then
+            echo "::warning::The repository secret CROWDIN_PERSONAL_TOKEN is not set; nothing was synced."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install the Crowdin CLI
+        if: steps.token.outputs.skip != 'true'
+        run: npm install --global "@crowdin/cli@${CROWDIN_CLI}"
+
+      - name: Push the catalogs
+        if: steps.token.outputs.skip != 'true'
+        run: python3 scripts/crowdin_sync.py push
+
+  pull:
+    name: Pull from Crowdin
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.action == 'pull')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Check the token
+        id: token
+        run: |
+          if [ -z "$CROWDIN_PERSONAL_TOKEN" ]; then
+            echo "::warning::The repository secret CROWDIN_PERSONAL_TOKEN is not set; nothing was synced."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install the Crowdin CLI
+        if: steps.token.outputs.skip != 'true'
+        run: npm install --global "@crowdin/cli@${CROWDIN_CLI}"
+
+      - name: Pull the translations
+        if: steps.token.outputs.skip != 'true'
+        # `shell: bash` turns on pipefail, so a failed pull is not hidden behind tee.
+        shell: bash
+        run: python3 scripts/crowdin_sync.py pull | tee "$RUNNER_TEMP/pull.txt"
+
+      - name: Check the catalogs
+        if: steps.token.outputs.skip != 'true'
+        run: |
+          git diff --quiet && exit 0
+          python3 scripts/tests/test_localization_catalogs.py
+
+      - name: Open or update the pull request
+        if: steps.token.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Crowdin has nothing new for the catalogs."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch --quiet -C l10n/crowdin
+          git add App/Resources/Localizable.xcstrings App/Resources/InfoPlist.xcstrings Extension/Localizable.xcstrings
+          title="chore(localization): update translations from Crowdin"
+          git commit --quiet -m "$title" -m "$(cat "$RUNNER_TEMP/pull.txt")"
+          # The branch belongs to this job: it is rebuilt from main on every run.
+          git push --force origin l10n/crowdin
+          if [ -n "$(gh pr list --head l10n/crowdin --state open --json number --jq '.[].number')" ]; then
+            echo "The open pull request on l10n/crowdin now carries the new translations."
+            exit 0
+          fi
+          if ! gh pr create --head l10n/crowdin --base main --title "$title" --body-file "$RUNNER_TEMP/pull.txt"; then
+            echo "::warning::l10n/crowdin is pushed, but the pull request could not be opened. Enable Settings -> Actions -> General -> 'Allow GitHub Actions to create and approve pull requests', or open it from https://github.com/${GITHUB_REPOSITORY}/compare/main...l10n/crowdin"
+          fi
