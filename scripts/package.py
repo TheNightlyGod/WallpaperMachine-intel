@@ -233,14 +233,7 @@ def resolve_libraries(roots, seeds, prefix):
                 if target is not None:
                     add(target)
                 else:
-                    dep_name = Path(dependency).name
-                    candidate = file.parent / dep_name
-                    if not candidate.is_file():
-                        candidate = prefix / "lib" / dep_name
-                    if candidate.is_file():
-                        add(candidate)
-                    else:
-                        relocated.append(f"{file}: {dependency}")
+                    relocated.append(f"{file}: {dependency}")
     if relocated:
         raise PackagingError(f"{FRESH_BUILD}\n  " + "\n  ".join(relocated))
     return libraries
