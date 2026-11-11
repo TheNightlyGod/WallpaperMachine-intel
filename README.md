@@ -318,6 +318,34 @@ no code needed ([how it reaches the app](docs/localization.md#contributing-trans
 | [SPONSORS.md](SPONSORS.md) | Sponsoring on Open Collective, Priority Support and other ways to help |
 | [AGENTS.md](AGENTS.md) | Rules for agents working in this repository |
 
+## Sponsors. On Open Collective.
+
+WallpaperMachine is a project of [MMFoundation](https://mmfoundation.dev/), which takes
+sponsorship on [Open Collective](https://opencollective.com/mmfoundation), where every
+contribution and every expense is public. Sponsors appear here: a company with its logo
+and a link, a person with their avatar. Sponsoring unlocks nothing; the app is the same
+for everyone. [SPONSORS.md](SPONSORS.md) explains how to give.
+
+<!-- MMFoundation's sponsors, drawn by Open Collective and kept current there (its images are
+     cached for up to a day): each company's logo links to its website, and people's avatars to the
+     Collective. While no company sponsors, the first logo slot is Open Collective's Contribute button.
+     The same block is in OhMyShot's README. -->
+<p align="center">
+  <a href="https://opencollective.com/mmfoundation/organization/0/website"><img src="https://opencollective.com/mmfoundation/organization/0/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/1/website"><img src="https://opencollective.com/mmfoundation/organization/1/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/2/website"><img src="https://opencollective.com/mmfoundation/organization/2/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/3/website"><img src="https://opencollective.com/mmfoundation/organization/3/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/4/website"><img src="https://opencollective.com/mmfoundation/organization/4/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/5/website"><img src="https://opencollective.com/mmfoundation/organization/5/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/6/website"><img src="https://opencollective.com/mmfoundation/organization/6/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/7/website"><img src="https://opencollective.com/mmfoundation/organization/7/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/8/website"><img src="https://opencollective.com/mmfoundation/organization/8/avatar.svg" alt="Sponsor"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/9/website"><img src="https://opencollective.com/mmfoundation/organization/9/avatar.svg" alt="Sponsor"></a>
+</p>
+<p align="center">
+  <a href="https://opencollective.com/mmfoundation"><img src="https://opencollective.com/mmfoundation/individuals.svg?width=890&avatarHeight=48&button=false" alt="People who sponsor MMFoundation on Open Collective"></a>
+</p>
+
 ## Thank you. To every Priority Support member.
 
 Priority Support members who choose to be shown are listed here and on the

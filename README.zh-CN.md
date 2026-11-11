@@ -229,6 +229,30 @@ python3 scripts/build.py --configuration Release   # 渲染器、绑定、Xcode 
 | [SPONSORS.md](SPONSORS.md) | 在 Open Collective 上赞助、优先支持及其他支持方式 |
 | [AGENTS.md](AGENTS.md) | 在本仓库中工作的 AI 代理须遵守的规则 |
 
+## Open Collective 赞助者
+
+WallpaperMachine 是 [MMFoundation](https://mmfoundation.dev/zh/) 的项目。MMFoundation 在 [Open Collective](https://opencollective.com/mmfoundation) 上接受赞助，每一笔赞助和每一笔开销都在那里公开。赞助者会出现在这里：公司展示标志和链接，个人展示头像。赞助不会解锁任何功能，应用对每个人都一样。如何赞助见 [SPONSORS.md](SPONSORS.md)（英文）。
+
+<!-- MMFoundation's sponsors, drawn by Open Collective and kept current there (its images are
+     cached for up to a day): each company's logo links to its website, and people's avatars to the
+     Collective. While no company sponsors, the first logo slot is Open Collective's Contribute button.
+     The same block is in OhMyShot's README. -->
+<p align="center">
+  <a href="https://opencollective.com/mmfoundation/organization/0/website"><img src="https://opencollective.com/mmfoundation/organization/0/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/1/website"><img src="https://opencollective.com/mmfoundation/organization/1/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/2/website"><img src="https://opencollective.com/mmfoundation/organization/2/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/3/website"><img src="https://opencollective.com/mmfoundation/organization/3/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/4/website"><img src="https://opencollective.com/mmfoundation/organization/4/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/5/website"><img src="https://opencollective.com/mmfoundation/organization/5/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/6/website"><img src="https://opencollective.com/mmfoundation/organization/6/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/7/website"><img src="https://opencollective.com/mmfoundation/organization/7/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/8/website"><img src="https://opencollective.com/mmfoundation/organization/8/avatar.svg" alt="赞助者"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/9/website"><img src="https://opencollective.com/mmfoundation/organization/9/avatar.svg" alt="赞助者"></a>
+</p>
+<p align="center">
+  <a href="https://opencollective.com/mmfoundation"><img src="https://opencollective.com/mmfoundation/individuals.svg?width=890&avatarHeight=48&button=false" alt="在 Open Collective 上赞助 MMFoundation 的个人"></a>
+</p>
+
 ## 致每一位优先支持用户
 
 选择公开展示的优先支持用户会列在这里和[致谢墙](https://www.wallpapermachine.app/zh/#sponsors)上。以“支持者”名义购买的用户，保留当时承诺给他们的位置。新购买者可以选择出现在致谢墙上；默认关闭，不算在购买内容里。[优先支持](https://www.wallpapermachine.app/zh/pricing/)是一项付费服务，你的问题会优先得到回复；应用及其源代码对所有人始终免费。想赞助这个项目，请看 [SPONSORS.md](SPONSORS.md)（英文）。

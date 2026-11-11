@@ -308,6 +308,33 @@ python3 scripts/build.py --configuration Release   # 렌더러, 바인딩, Xcode
 | [SPONSORS.md](SPONSORS.md) | Open Collective 후원, 우선 지원, 그 밖의 도움 방법 |
 | [AGENTS.md](AGENTS.md) | 이 저장소에서 작업하는 AI 에이전트를 위한 규칙 |
 
+## Open Collective 후원
+
+WallpaperMachine은 [MMFoundation](https://mmfoundation.dev/)의 프로젝트입니다.
+MMFoundation은 [Open Collective](https://opencollective.com/mmfoundation)에서 후원을 받으며, 모든 후원과 지출이 그곳에 공개됩니다.
+후원해 주신 분들은 여기에 표시됩니다. 기업은 로고와 링크로, 개인은 아바타로 나옵니다.
+후원으로 잠금 해제되는 기능은 없으며 앱은 누구에게나 같습니다. 후원 방법은 [SPONSORS.md](SPONSORS.md)(영문)를 참고하세요.
+
+<!-- MMFoundation's sponsors, drawn by Open Collective and kept current there (its images are
+     cached for up to a day): each company's logo links to its website, and people's avatars to the
+     Collective. While no company sponsors, the first logo slot is Open Collective's Contribute button.
+     The same block is in OhMyShot's README. -->
+<p align="center">
+  <a href="https://opencollective.com/mmfoundation/organization/0/website"><img src="https://opencollective.com/mmfoundation/organization/0/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/1/website"><img src="https://opencollective.com/mmfoundation/organization/1/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/2/website"><img src="https://opencollective.com/mmfoundation/organization/2/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/3/website"><img src="https://opencollective.com/mmfoundation/organization/3/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/4/website"><img src="https://opencollective.com/mmfoundation/organization/4/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/5/website"><img src="https://opencollective.com/mmfoundation/organization/5/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/6/website"><img src="https://opencollective.com/mmfoundation/organization/6/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/7/website"><img src="https://opencollective.com/mmfoundation/organization/7/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/8/website"><img src="https://opencollective.com/mmfoundation/organization/8/avatar.svg" alt="후원 기업"></a>
+  <a href="https://opencollective.com/mmfoundation/organization/9/website"><img src="https://opencollective.com/mmfoundation/organization/9/avatar.svg" alt="후원 기업"></a>
+</p>
+<p align="center">
+  <a href="https://opencollective.com/mmfoundation"><img src="https://opencollective.com/mmfoundation/individuals.svg?width=890&avatarHeight=48&button=false" alt="Open Collective에서 MMFoundation을 후원하는 개인"></a>
+</p>
+
 ## 우선 지원 이용자께 감사드립니다
 
 공개를 선택한 우선 지원 이용자의 이름은 아래와

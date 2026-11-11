@@ -27,7 +27,9 @@ On [Open Collective](https://opencollective.com/mmfoundation) you can give once 
 every month. The money goes to MMFoundation and backs its work on WallpaperMachine
 and OhMyShot. Every contribution, and every expense with its receipt, is public
 there. The tiers are recognition only: sponsoring unlocks nothing, and the app stays
-the same for everyone.
+the same for everyone. Sponsors appear in the
+[README](README.md#sponsors-on-open-collective), a company with its logo and a link and
+a person with their avatar, as Open Collective draws them.
 
 ## Priority Support.
 
