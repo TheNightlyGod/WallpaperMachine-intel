@@ -67,6 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var windowAuditor: WallpaperWindowAuditor?
     /// Settings › Desktop & Lock Screen › Hide the notch.
     private var notchMask: NotchMaskController?
+    /// Settings › Desktop Widgets: the clocks, dates and other widgets drawn on the desktop.
+    private var desktopWidgets: DesktopWidgetController?
     /// Keeps the windows of a display that follows desktop Spaces on its current desktop only.
     private(set) var spacePinning: WallpaperSpacePinning?
     private var spaceParking: WallpaperSpaceParking?
@@ -77,6 +79,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Made when the first poster sync starts (`makeSettledPosters`), which empties what an
     /// earlier run left.
     var settledPosters: DesktopSettledPosterStore?
+    /// How long each display's wallpaper has played where it can be seen, so the panel's picture of
+    /// it is taken past an intro or a fade-in (`observeWallpaperSettling`).
+    let wallpaperSettling = WallpaperSettleClock()
     /// The library the settled posters were last trimmed to.
     var settledPosterLibrary: Set<String>?
     var retainedSpacePosters: Set<DesktopSpacePosterCache.Key>?
@@ -256,6 +261,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let notchMask = NotchMaskController()
         self.notchMask = notchMask
         notchMask.start()
+        // Keeps no window and no timer until a widget is added.
+        let desktopWidgets = DesktopWidgetController()
+        self.desktopWidgets = desktopWidgets
+        desktopWidgets.start()
     }
 
     /// Starts every service that works over the opened library, then loads it: at launch, and
@@ -313,6 +322,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             store.willSwitchWallpaper = { [weak self] displays in await self?.switchHold?.begin(displays: displays) }
             store.didSettleWallpaperSwitch = { [weak self] displays in self?.switchHold?.engineSettled(displays: displays) }
             store.didAbandonWallpaperSwitch = { [weak self] displays in self?.switchHold?.cancel(displays: displays) }
+            // The panel's pictures of the desktop: the wallpaper's own frame once it has settled.
+            let frames = DesktopWallpaperFrames(
+                surface: { [weak self] in self?.previewSurface(on: $0) },
+                awaitsFrame: { [weak self] layer in self?.desktopWallpaperSync?.awaitsFrame(from: layer) ?? false },
+                settledPoster: { [weak self] display in self?.desktopWallpaperSync?.settledPoster(display: String(display)) })
+            store.wallpaperFrame = { display, maxPixelSize in await frames.frame(display: display, maxPixelSize: maxPixelSize) }
+            store.wallpaperSettleChange = { [weak self] display in await self?.wallpaperSettling.nextChange(of: display) }
 
             let mediaScheduler = FoundationMediaTimerScheduler()
             let mediaSession = DesktopMediaSession(
@@ -371,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             webHost.onSurfacesChanged = { [weak self, weak lockScreen] in
                 guard let self, !self.shutdownInProgress else { return }
                 self.presentationPolicy?.evaluate()
+                self.observeWallpaperSettling()
                 self.windowAuditor?.windowsMayHaveChanged()
                 self.spacePinning?.update()
                 guard lockScreen?.ownsDesktopProvider != true else { return }
@@ -392,6 +409,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             nativeVideo.onSurfacesChanged = { [weak self, weak lockScreen] in
                 guard let self, !self.shutdownInProgress else { return }
                 self.presentationPolicy?.evaluate()
+                self.observeWallpaperSettling()
                 self.windowAuditor?.windowsMayHaveChanged()
                 self.spacePinning?.update()
                 guard lockScreen?.claimsDesktopPicture != true else { return }
@@ -416,6 +434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.sceneMediaSink?.reconcile()
                 self.nativeVideoHost?.reconcile()
                 self.presentationPolicy?.evaluate()
+                self.observeWallpaperSettling()
                 self.windowAuditor?.windowsMayHaveChanged()
                 self.spacePinning?.update()
                 self.spaceParking?.update()
@@ -535,6 +554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                 try await store.setPresentationUnloadedAsync(true)
                             }
                             self.appliedGlobalPresentation = presentation
+                            self.observeWallpaperSettling()
                             if presentation != .unloaded { self.spaceParking?.setUnloaded(false) }
                             if resuming {
                                 self.desktopWallpaperSync?.presentationResumed()
@@ -639,6 +659,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                             try await store.setDisplayPresentationSuspendedAsync(
                                 displayID: displayID, suspended: suspended)
                             if !suspended { self.desktopWallpaperSync?.presentationResumed() }
+                            self.observeWallpaperSettling()
                             // As on the global path, a change that fell due while this
                             // display was covered happens now that it shows again.
                             self.automaticWallpapers?.scheduler.evaluate()
@@ -2081,10 +2102,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// A window that was closed is no longer ordered in, so it is not listed, and neither is one
     /// kept paused for another desktop (`excluding`).
     private static func wallpaperLayers(on displayID: UInt32, excluding kept: Set<Int>) -> [CALayer] {
-        WallpaperPresentationPolicy.orderedWallpaperWindows().compactMap { window in
+        wallpaperWindows(on: displayID, excluding: kept).compactMap { $0.contentView?.layer }
+    }
+
+    /// The wallpaper windows showing on a display with a content layer, the front one first.
+    static func wallpaperWindows(on displayID: UInt32, excluding kept: Set<Int>) -> [NSWindow] {
+        WallpaperPresentationPolicy.orderedWallpaperWindows().filter { window in
             guard window.isVisible, !kept.contains(window.windowNumber), let screen = window.screen,
-                  SystemDesktopPictureWorkspace.id(screen) == String(displayID) else { return nil }
-            return window.contentView?.layer
+                  SystemDesktopPictureWorkspace.id(screen) == String(displayID) else { return false }
+            return window.contentView?.layer != nil
         }
     }
 

@@ -105,7 +105,7 @@ struct WallpaperBackupPreferences: Sendable {
         PlaylistStore.playlistsKey, PlaylistStore.nextChangeKey,
         WallpaperAutomationStore.configurationsKey, WallpaperAutomationStore.locationKey,
         WallpaperAutomationStore.solarKey,
-        WallpaperDisplayLayoutStore.storageKey,
+        WallpaperDisplayLayoutStore.storageKey, DesktopWidgetStore.storageKey,
         PanelPreferences.favoritesKey, AppThemeStore.defaultsKey,
         AppLanguageStore.defaultsKey, AppLanguageStore.appleLanguagesKey, HotKeyPreferences.bindingsKey,
         PlaybackPreferences.displaySleepKey, PlaybackPreferences.otherAudioKey,
@@ -200,6 +200,7 @@ struct WallpaperBackupPreferences: Sendable {
         switch key {
         case WallpaperAutomationStore.configurationsKey: try WallpaperAutomationStore.validateConfigurations(data())
         case WallpaperDisplayLayoutStore.storageKey: _ = try WallpaperDisplayLayoutStore.decode(data())
+        case DesktopWidgetStore.storageKey: _ = try DesktopWidgetStore.decode(data())
         case WallpaperAutomationStore.locationKey:
             let location = try JSONDecoder().decode(WallpaperSolarLocation.self, from: data())
             guard location.isValid else { throw invalid() }

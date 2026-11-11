@@ -41,7 +41,8 @@ App/                               WallpaperMachine application target sources o
     Desktop/                       multi-display copy/swap and recovery, desktop picture APIs, original-wallpaper ledger,
                                    scoped poster sync, read-only Space topology, presentation policy, playback rules,
                                    system conditions, display refresh and the screen shape of a display id,
-                                   Finder's desktop icons (FinderDesktopIcons) and the notch strip (NotchMaskController)
+                                   Finder's desktop icons (FinderDesktopIcons), the notch strip (NotchMaskController)
+                                   and the clocks and dates on the desktop (DesktopWidget*)
     Diagnostics/                   runtime diagnostics session, diagnostics report, session ledger, counter sampling, energy readout,
                                    memory-pressure log and per-wallpaper energy ratings
     GitHub/                        GitHub release client, update models, update store, installer, what's-new records,
@@ -97,7 +98,7 @@ App/                               WallpaperMachine application target sources o
     Library/ Inspector/            the Installed page and the installed wallpaper's inspector
     Discover/ Downloads/           the Steam Workshop page and its inspector; the downloads button, list and dialog
     Pixiv/                         the pixiv page, its inspector and toolbar pill
-    Settings/                      Settings infrastructure (rows, groups, search) and the eleven sections
+    Settings/                      Settings infrastructure (rows, groups, search) and the twelve sections
     Welcome/                       the first-run guide and the support prompt
     MenuBar/                       the menu bar panel: its popover, controller and view
     Components/ Theme/             shared views; accent and surface palettes

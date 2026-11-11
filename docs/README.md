@@ -84,6 +84,7 @@ file; pass `rg -u` to search them deliberately.
 | [features/display-layouts.md](features/display-layouts.md) | Saved multi-display wallpaper arrangements, copy/swap, preflight and recovery, Shortcuts, backup, mirror sets, AirPlay and a closed lid, and the per-Space boundary |
 | [features/spaces.md](features/spaces.md) | A different wallpaper for each desktop: choices by desktop UUID, windows kept on their desktop, saved posters for the others, visit/manual/Focus semantics and verification limits |
 | [features/wallpaper-switching.md](features/wallpaper-switching.md) | The switch hold: the previous picture stays on screen, then fades, while a newly chosen wallpaper loads; which switches it covers, its limits and Reduce Motion |
+| [features/desktop-widgets.md](features/desktop-widgets.md) | Clocks and dates drawn on the desktop over any wallpaper: adding, arranging and styling them in Settings, their windows, when they redraw, storage, backup and limits |
 | [features/desktop-picture.md](features/desktop-picture.md) | The static desktop picture macOS shows (Mission Control, after quit): posters, the journal of originals, refused writes, macOS 27, restoring on quit |
 | [features/playlists.md](features/playlists.md) | Per-display rotation and day/night selection, local collection sources, reusable named plans, scheduling and storage |
 | [features/pixiv.md](features/pixiv.md) | pixiv page: rankings and tag search, saving a page as a still wallpaper, pixiv sign-in and R-18 works |

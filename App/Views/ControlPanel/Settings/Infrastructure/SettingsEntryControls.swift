@@ -147,6 +147,8 @@ struct SettingsSliderControl: View {
   let saved: Int
   let range: ClosedRange<Int>
   var width: CGFloat = 160
+  /// Off for a setting the renderer never takes, which can change while the Mac is busy.
+  var waitsForMac = true
   /// The text beside the slider for a position: "No limit", "30 fps".
   let readout: (Int) -> String
   let perform: @MainActor (Int) async throws -> Void
@@ -183,7 +185,7 @@ struct SettingsSliderControl: View {
         .frame(minWidth: 62, alignment: .trailing)
         .accessibilityHidden(true)
     }
-    .disabled(settings.isLocked(key))
+    .disabled(waitsForMac && settings.isLocked(key))
   }
 
   /// A step of a pointer drag, which only moves what is shown; the first one starts the drag at the

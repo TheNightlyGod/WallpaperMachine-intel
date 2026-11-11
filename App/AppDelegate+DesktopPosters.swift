@@ -372,6 +372,42 @@ extension AppDelegate {
         spacePosters.retain(keys)
     }
 
+    /// Tells the settle clock what each display shows and whether it presents: after every engine
+    /// snapshot (a switch, a pause), every host pass (a page's or a clip's window opening) and
+    /// every change of presentation, the moments any of it can change.
+    func observeWallpaperSettling() {
+        guard !shutdownInProgress else { return }
+        let kept = keptWallpaperWindows()
+        let ids = wallpaperIDsByWindow()
+        let revision = store?.wallpaperContentRevision ?? 0
+        let paused = store?.appSnapshot.playbackState == .paused
+        let policy = presentationPolicy
+        var displays: [UInt32: WallpaperSettleClock.Observation] = [:]
+        for screen in NSScreen.screens {
+            guard let display = SystemDesktopPictureWorkspace.id(screen).flatMap(UInt32.init),
+                  let window = Self.wallpaperWindows(on: display, excluding: kept).first else { continue }
+            let presenting = !paused && policy.map {
+                !$0.isSuspended && !$0.suspendedDisplayIDs.contains(display)
+            } ?? false
+            displays[display] = .init(
+                identity: .init(wallpaperID: ids[window.windowNumber] ?? "", window: window.windowNumber,
+                                contentRevision: revision),
+                presenting: presenting)
+        }
+        wallpaperSettling.observe(displays)
+    }
+
+    /// The front wallpaper window of `display` as the panel's picture of it asks it: its layer,
+    /// how far it has played and its look.
+    func previewSurface(on display: UInt32) -> DesktopWallpaperFrames.Surface? {
+        observeWallpaperSettling()
+        guard let window = Self.wallpaperWindows(on: display, excluding: keptWallpaperWindows()).first,
+              let layer = window.contentView?.layer else { return nil }
+        let surface = DesktopPosterSurface(layer: layer, display: String(display), window: window.windowNumber)
+        return .init(layer: layer, isSettled: wallpaperSettling.isSettled(display),
+                     remaining: wallpaperSettling.remaining(display), look: desktopPosterLook(surface))
+    }
+
     /// What `surface`'s poster would show now, for giving a wallpaper's settled poster back
     /// (`DesktopPosterLook.resolve`). Nil when the window's wallpaper is unknown.
     private func desktopPosterLook(_ surface: DesktopPosterSurface) -> DesktopPosterLook? {

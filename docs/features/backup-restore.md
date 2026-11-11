@@ -6,8 +6,8 @@ of the Settings → Storage tools; the Settings sections are listed in
 
 **Settings → Storage → Backup** exports a versioned `.wmbackup` directory package
 containing renderer/wallpaper settings, allowlisted preferences (collections,
-plans, presets, favorites, image placements, display layouts, automatic-selection
-rules and sunrise/sunset settings included), retained
+plans, presets, favorites, image placements, display layouts, [desktop
+widgets](desktop-widgets.md), automatic-selection rules and sunrise/sunset settings included), retained
 [user-selected files](user-files.md), and what scene scripts saved with `localStorage`
 (`SceneStorage`, restored per wallpaper under the chosen conflict policy; an older app
 refuses a package that contains it). Handled automatic

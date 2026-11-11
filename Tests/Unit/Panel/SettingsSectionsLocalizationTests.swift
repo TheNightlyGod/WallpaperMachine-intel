@@ -9,7 +9,7 @@ import XCTest
 @MainActor
 final class SettingsSectionsLocalizationTests: XCTestCase {
   private static let sections: [SettingsSection] = [
-    .quick, .general, .appearance, .desktop, .playback, .performance,
+    .quick, .general, .appearance, .desktop, .widgets, .playback, .performance,
     .displays, .shortcuts, .library, .storage, .about,
   ]
   /// Words that are the same in every language on purpose: figures, units, file names and names.

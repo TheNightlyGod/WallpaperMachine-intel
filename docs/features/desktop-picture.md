@@ -280,6 +280,12 @@ Each poster is a second decode of a few frames and is counted as
   arrived last wins, counted on receipt and not when encoding ends, so a slow encode
   cannot put the old picture back; a window without a poster yet never removes its
   sibling's.
+- **Not a poster: the panel's picture of a display.** Settings › Desktop Widgets asks a
+  surface for one frame under its own `panel-preview:` context, which the sync drops, and asks
+  nothing while the sync awaits a frame from that surface (`awaitsFrame(from:)`), taking the
+  sync's frame instead. Without a settled frame of its own it reads `settledPoster(display:)`,
+  the display's poster only once it has settled
+  ([desktop widgets](desktop-widgets.md#the-previews-backdrop)).
 
 Posters are JPEG (`DesktopPosterEncoder`, quality 0.9, sRGB) under
 `<support>/DesktopPosters/` (`<support>` is `ClientPaths.supportURL`). The file name

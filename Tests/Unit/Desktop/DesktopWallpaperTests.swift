@@ -2554,6 +2554,52 @@ final class DesktopWallpaperTests: XCTestCase {
         XCTAssertEqual(workspace.pictures[one], original("one"))
     }
 
+    /// The panel's picture of a display is the poster the sync took last from a window still on
+    /// screen, once it has settled, and the panel can tell a frame the sync asked for is on its way,
+    /// so it waits for that frame instead of asking in its place.
+    @MainActor
+    func testThePanelReadsADisplaysSettledPosterAndSeesTheFrameTheSyncAwaits() async throws {
+        let rig = try OpeningWindowsRig(root: root, settleDelays: [])
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one")]
+        let layer = CAMetalLayer()
+        rig.shown = [layer]
+        XCTAssertNil(rig.sync.settledPoster(display: "1"), "no poster taken yet")
+        rig.sync.refresh()
+        try await waitUntil { rig.asked(layer) == 1 }
+        XCTAssertTrue(rig.sync.awaitsFrame(from: layer))
+        XCTAssertFalse(rig.sync.awaitsFrame(from: CAMetalLayer()))
+
+        let written = rig.workspace.writes.count
+        post(Data([7]), layer: layer, center: rig.frames)
+        try await waitUntil { rig.workspace.writes.count > written }
+        XCTAssertFalse(rig.sync.awaitsFrame(from: layer), "answered")
+        XCTAssertEqual(rig.sync.settledPoster(display: "1"), Data([7]))
+        XCTAssertNil(rig.sync.settledPoster(display: "2"), "another display has its own")
+
+        rig.shown = []
+        XCTAssertNil(rig.sync.settledPoster(display: "1"), "a window that closed takes its poster along")
+    }
+
+    /// A poster taken before the settle captures of a new wallpaper could land may show its intro,
+    /// so the panel is not given it.
+    @MainActor
+    func testThePanelIsNotGivenAPosterTakenDuringTheIntro() async throws {
+        let rig = try OpeningWindowsRig(root: root, settleDelays: [.seconds(60)], settleSleep: { _ in
+            try await Task.sleep(for: .seconds(3600))
+        })
+        defer { rig.finish() }
+        rig.workspace.pictures = [one: original("one")]
+        let layer = CAMetalLayer()
+        rig.shown = [layer]
+        rig.sync.refresh()
+        try await waitUntil { rig.asked(layer) == 1 }
+        let written = rig.workspace.writes.count
+        post(Data([3]), layer: layer, center: rig.frames)
+        try await waitUntil { rig.workspace.writes.count > written }
+        XCTAssertNil(rig.sync.settledPoster(display: "1"))
+    }
+
     @MainActor
     private func waitUntil(timeout: TimeInterval = 3, _ condition: () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)

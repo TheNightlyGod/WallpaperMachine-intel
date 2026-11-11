@@ -37,6 +37,8 @@ final class PanelController {
   let automations: WallpaperAutomationStore
   let solarLocationTracker: SolarLocationTracker
   let displayLayouts: WallpaperDisplayLayoutStore
+  /// The clocks and dates on the desktop (Settings › Desktop Widgets).
+  let desktopWidgets: DesktopWidgetStore
   let spaces: WallpaperSpaceMonitor
   /// The condition rules engaged now, as the app's `SystemConditionMonitor` publishes them.
   let systemConditions: SystemConditionState
@@ -84,6 +86,9 @@ final class PanelController {
   @ObservationIgnored var openLoginItemsSettings: @MainActor () -> Void = {
     DesktopActions.current.openLoginItemsSettings()
   }
+  /// The connected displays Settings › Desktop Widgets offers and arranges on; tests pass fixed ones.
+  @ObservationIgnored var desktopWidgetScreens: @MainActor () -> [DesktopWidgetController.Screen] =
+    DesktopWidgetController.systemScreens
 
   // MARK: Controller state
 
@@ -214,6 +219,7 @@ final class PanelController {
   @ObservationIgnored lazy var pixivBrowser = PixivBrowserModel(controller: self)
   @ObservationIgnored lazy var settings = SettingsModel(controller: self)
   @ObservationIgnored lazy var displaysSettings = DisplaysSettingsModel(controller: self)
+  @ObservationIgnored lazy var widgetsSettings = DesktopWidgetsSettingsModel(controller: self)
   @ObservationIgnored lazy var welcome = FirstRunModel(controller: self)
   @ObservationIgnored lazy var supportPrompt = SupportPromptPresenter(controller: self)
 
@@ -269,6 +275,7 @@ final class PanelController {
     automations: WallpaperAutomationStore? = nil,
     solarLocationTracker: SolarLocationTracker? = nil,
     displayLayouts: WallpaperDisplayLayoutStore? = nil,
+    desktopWidgets: DesktopWidgetStore? = nil,
     spaces: WallpaperSpaceMonitor? = nil,
     systemConditions: SystemConditionState? = nil,
     searchTranslation: WorkshopSearchTranslator? = nil
@@ -306,6 +313,7 @@ final class PanelController {
     self.automations = automations
     self.solarLocationTracker = solarLocationTracker ?? SolarLocationTracker(store: automations)
     self.displayLayouts = displayLayouts
+    self.desktopWidgets = desktopWidgets ?? DesktopWidgetStore(defaults: defaults)
     self.spaces = spaces
     self.systemConditions = systemConditions
     self.hotKeys = hotKeys

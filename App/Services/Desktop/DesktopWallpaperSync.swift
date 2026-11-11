@@ -308,6 +308,30 @@ final class DesktopWallpaperSync {
     private var pendingRequest = CaptureRequest.none
     var isSuspended: Bool { stopped }
 
+    /// The newest poster taken on `display` (its physical number) from a surface still on screen,
+    /// whatever its scope, when it has settled: taken while the wallpaper presented after the
+    /// settle captures of its start could land, or given back as settled. The wallpaper's own
+    /// pixels past any intro, for a picture of the desktop in the panel. Nil while the sync is
+    /// suspended or the display has no such poster.
+    func settledPoster(display: String) -> Data? {
+        guard !stopped else { return nil }
+        var newest: (arrival: UInt64, poster: Data)?
+        for surface in surfaces() where surface.display == display && hasSettledPoster(surface) {
+            let key = ObjectIdentifier(surface.layer)
+            guard let poster = posters[key], let arrival = arrivals[key],
+                  arrival >= newest?.arrival ?? 0 else { continue }
+            newest = (arrival, poster)
+        }
+        return newest?.poster
+    }
+
+    /// Whether the sync asked `layer` for a frame that has not come yet. A request from anyone
+    /// else would then take its place, since a renderer answers piled-up requests with one frame
+    /// that carries the newest request's context, and the sync would drop that frame.
+    func awaitsFrame(from layer: CALayer) -> Bool {
+        !stopped && awaitingFrames.contains(ObjectIdentifier(layer))
+    }
+
     /// `excludedWindows` names windows that are not a desktop's picture now, such as the paused
     /// wallpaper a display keeps for a desktop the person left: their frame belongs to that desktop.
     convenience init(folder: URL, scope: @escaping @MainActor (String) -> DesktopPosterScope = { _ in .all },

@@ -204,7 +204,7 @@ its search field (**Search settings**), each with a System Settings-style tile: 
 square. Settings opens on **Quick Settings** in every window; a section the app asks
 for (**Check for Updates…**, an update notice) is shown once, even when the window
 opens afterwards. The sections, in order, are Quick Settings, General, Appearance,
-Desktop & Lock Screen, Playback & Power, Performance, Displays, Keyboard shortcuts,
+Desktop & Lock Screen, Desktop Widgets, Playback & Power, Performance, Displays, Keyboard shortcuts,
 Library & Steam, Storage and About. Each section opens with a header: its tile at
 44 points, its name and a one-line purpose. Groups are titled cards of rows, as
 System Settings draws them: the title and its explanation on the left, the control
@@ -250,8 +250,8 @@ the rest opens in a popover from the ⓘ beside the title.
   at login, desktop and lock-screen switches, playback, power and app rules, the
   engine's performance and scene choices, logging, web inspection, Steam update checks
   and download count, and performance data. Content is kept: the library, favorites,
-  playlists, collections, presets, displays and their wallpapers, the storage location
-  and sign-ins, as are macOS's own "Click wallpaper to reveal desktop" and Finder's desktop
+  playlists, collections, presets, displays and their wallpapers, the desktop widgets, the
+  storage location and sign-ins, as are macOS's own "Click wallpaper to reveal desktop" and Finder's desktop
   icons. A setting that fails to reset does not stop the others; the first failure goes to
   the banner.
   **Launch at login** is disabled with its reason while the app is outside
@@ -279,6 +279,10 @@ the rest opens in a popover from the ⓘ beside the title.
   edits as they are made;
   see [edits on the desktop](wallpaper-properties.md#showing-edits-on-the-desktop)),
   then the Lock screen and Screen saver groups.
+- **Desktop Widgets** adds clocks, dates and the other widgets drawn on the desktop over any
+  wallpaper, and arranges and styles them: a list of the widgets, a picture of the display to
+  drag one into place, position, look and format. Its controls never wait for the renderer. See
+  [desktop widgets](desktop-widgets.md).
 - **Playback & Power** holds the Playback group (mute all, occlusion, other-app
   audio (pause, mute or a lower volume), another app in front (always, or only on battery), display sleep, an inactive Mac, playing only on
   the display in use, battery, low battery, Low Power Mode, heat, Focus, app rules) and the **What these

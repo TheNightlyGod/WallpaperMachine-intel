@@ -23,7 +23,9 @@ final class DesktopPosterGrab {
     /// this request's context, so the still can never become the desktop poster. The listener
     /// is in place before the request goes out, because an answer may come back inside it.
     /// Replicas require their own context so a late answer from an older source revision is ignored.
-    func run(on layer: CALayer, timeout: Duration,
+    /// With `asks` false nothing is requested: the grab waits for the answer to a request someone
+    /// else made, which a request of its own would take the place of.
+    func run(on layer: CALayer, timeout: Duration, asks: Bool = true,
              sleep: @escaping @Sendable (Duration) async throws -> Void) async -> DesktopPosterFrame? {
         guard !cancelled else { return nil }
         let context = contextPrefix + ":" + UUID().uuidString
@@ -42,6 +44,7 @@ final class DesktopPosterGrab {
                 do { try await sleep(timeout) } catch { return }
                 self?.finish(nil)
             }
+            guard asks else { return }
             center.post(name: DesktopPosterNotification.request, object: layer,
                         userInfo: [DesktopPosterNotification.Key.context: context])
         }

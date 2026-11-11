@@ -10,8 +10,8 @@ enum SidebarSelection: String {
 
 /// The Settings sections, in the order of Settings' section list.
 enum SettingsSection: String, CaseIterable {
-  case quick, general, appearance, desktop, playback, performance, displays, shortcuts, library,
-    storage, about
+  case quick, general, appearance, desktop, widgets, playback, performance, displays, shortcuts,
+    library, storage, about
 }
 
 /// What the panel remembers across a closed window: the section on show, the target display and

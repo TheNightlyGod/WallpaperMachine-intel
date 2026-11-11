@@ -104,6 +104,15 @@ final class BridgeStore {
     @ObservationIgnored var willSwitchWallpaper: (@MainActor ([UInt32]) async -> Void)?
     @ObservationIgnored var didSettleWallpaperSwitch: (@MainActor ([UInt32]) -> Void)?
     @ObservationIgnored var didAbandonWallpaperSwitch: (@MainActor ([UInt32]) -> Void)?
+    /// A settled picture of what the wallpaper on a display (its live CoreGraphics id) draws, its
+    /// longer edge at most the given pixels, or why there is none ([DesktopWallpaperFrames]).
+    /// Unset, as in tests, nothing is asked of the desktop.
+    @ObservationIgnored var wallpaperFrame:
+        (@MainActor (_ displayID: UInt32, _ maxPixelSize: Int) async -> DesktopWallpaperFrames.Answer)?
+    /// Returns when the wallpaper on a display settles, starts or stops playing where it can be
+    /// seen, or is replaced ([WallpaperSettleClock]), or at once when the task is cancelled: when
+    /// asking `wallpaperFrame` again can give a settled frame. Unset, as in tests, nothing waits.
+    @ObservationIgnored var wallpaperSettleChange: (@MainActor (_ displayID: UInt32) async -> Void)?
     /// Reads a video file's format when it is about to be applied, so one nothing can play is
     /// refused with its format named before any display changes. A test stands in for the file read.
     @ObservationIgnored var videoFormatCheck: @Sendable (URL) async -> VideoFormatSupport.Verdict = {
