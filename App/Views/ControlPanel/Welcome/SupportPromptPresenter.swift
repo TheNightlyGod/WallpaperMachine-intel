@@ -104,7 +104,7 @@ final class SupportPromptPresenter {
     controller.supportPromptShown(prompt)
   }
 
-  /// **Star on GitHub**, **Become a Supporter**, **Join Discord**, **Send performance data** and the
+  /// **Star on GitHub**, **Sponsor on Open Collective**, **Join Discord**, **Send performance data** and the
   /// battery question's three choices. A link that cannot be opened, or a setting the engine
   /// refuses, keeps the prompt open with the reason, so the other rows, a retry and **Not now** all
   /// remain.

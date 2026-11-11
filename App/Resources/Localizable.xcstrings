@@ -3986,11 +3986,11 @@
     "Help others discover WallpaperMachine." : {
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Ajude outras pessoas a descobrir o WallpaperMachine."}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "더 많은 사람이 WallpaperMachine을 알 수 있도록 도와주세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineをもっと多くの人に届けましょう。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "让更多人发现 WallpaperMachine。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "讓更多人發現 WallpaperMachine。"}}}
     },
-    "Become a Supporter" : {
-      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Torne-se um Apoiador"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "후원하기"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "サポーターになる"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "成为支持者"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "成為支持者"}}}
+    "Sponsor on Open Collective" : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Patrocinar no Open Collective"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "Open Collective에서 후원하기"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "Open Collectiveで支援する"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "在 Open Collective 上赞助"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "在 Open Collective 上贊助"}}}
     },
-    "Support development with a one-time contribution." : {
-      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Apoie o desenvolvimento com uma contribuição única."}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "일회성 후원으로 개발을 지원하세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "一度限りの寄付で開発を応援する。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "通过一次性赞助，支持后续开发。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "透過一次性贊助，支持後續開發。"}}}
+    "Give to MMFoundation, which makes WallpaperMachine." : {
+      "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "Apoie a MMFoundation, que faz o WallpaperMachine."}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachine을 만드는 MMFoundation을 후원해 주세요."}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "WallpaperMachineを開発するMMFoundationを支援します。"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "赞助开发 WallpaperMachine 的 MMFoundation。"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "贊助開發 WallpaperMachine 的 MMFoundation。"}}}
     },
     "%lld active" : {
       "localizations" : {"pt-BR" : {"stringUnit" : {"state" : "translated", "value" : "%lld ativos"}}, "ko" : {"stringUnit" : {"state" : "translated", "value" : "%lld개 활성화됨"}}, "ja" : {"stringUnit" : {"state" : "translated", "value" : "%lld件が有効"}}, "zh-Hans" : {"stringUnit" : {"state" : "translated", "value" : "%lld 项生效"}}, "zh-Hant" : {"stringUnit" : {"state" : "translated", "value" : "%lld 項作用中"}}}

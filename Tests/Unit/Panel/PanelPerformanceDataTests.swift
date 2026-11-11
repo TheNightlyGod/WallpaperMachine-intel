@@ -241,8 +241,8 @@ final class PanelSharingTests: PanelTestCase {
       try await panel.controller.supportPromptChoice(.star, for: .star)
       XCTAssertEqual(opened, [AppUpdateConfiguration.repositoryURL])
       do {
-        try await panel.controller.supportPromptChoice(.supporter, for: .star)
-        XCTFail("The star prompt offers no supporter page")
+        try await panel.controller.supportPromptChoice(.sponsor, for: .star)
+        XCTFail("The star prompt offers no sponsoring")
       } catch is InvalidControlValue {}
       XCTAssertEqual(opened.count, 1)
     }

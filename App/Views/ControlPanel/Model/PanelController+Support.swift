@@ -6,8 +6,8 @@ enum SupportPromptChoice: Sendable {
   case dismiss
   /// Star the repository on GitHub (the support and star prompts).
   case star
-  /// The supporter pricing page, in Chinese for a Chinese interface (the support prompt).
-  case supporter
+  /// **Sponsor on Open Collective**: MMFoundation's Open Collective (the support prompt).
+  case sponsor
   /// Turn on **Send performance data** (the performance data question).
   case enableTelemetry
   /// **Import my subscriptions** (the subscriptions offer).
@@ -125,10 +125,11 @@ extension PanelController {
     store.supportPrompt?.markPresented(prompt)
   }
 
-  /// `supportPromptChoice`. Star opens the repository, Become a Supporter the pricing page (the Chinese
-  /// one for a Chinese interface), through the `openSupportURL` seam and not the external-link allowlist;
-  /// either link counts as having chosen the star only when it is the repository. **Join Discord**
-  /// opens MMFoundation's invite through the same seam, after the external-link allowlist.
+  /// `supportPromptChoice`. Star opens the repository and **Sponsor on Open Collective**
+  /// MMFoundation's Collective, in every language, through the `openSupportURL` seam and not the
+  /// external-link allowlist; a link counts as having chosen the star only when it is the
+  /// repository. **Join Discord** opens MMFoundation's invite through the same seam, after the
+  /// external-link allowlist.
   /// **Send performance data** turns sending on and opens nothing. **Import my subscriptions** spends
   /// the prompt at once and goes on without it: Steam's sign-in window, then the downloads, whose
   /// failure (or finding nothing to download) reaches the banner. The battery question's three
@@ -182,9 +183,8 @@ extension PanelController {
       return
     case (.support, .star), (.star, .star):
       url = AppUpdateConfiguration.repositoryURL
-    case (.support, .supporter):
-      let path = appLanguage.effective.tag.hasPrefix("zh") ? "zh/pricing/" : "pricing/"
-      url = URL(string: "https://www.wallpapermachine.app/\(path)")!
+    case (.support, .sponsor):
+      url = ExternalLink.openCollective
     default:
       throw InvalidControlValue()
     }

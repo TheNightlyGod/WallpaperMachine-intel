@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 
 /// Every address the panel opens outside the app goes through here: Steam, GitHub, pixiv, Apple's
-/// support pages, the licence text, MMFoundation's website and its Discord. A link built from remote data (a Workshop item, an author's
+/// support pages, the licence text, MMFoundation's website, its Discord and its Open Collective. A link built from remote data (a Workshop item, an author's
 /// profile, a pixiv work) is only as trustworthy as the host it names, so `isAllowed` is the one
 /// gate for `Link`, `openURL` and every button that opens one. Support-prompt links go through
 /// their own injected opener and are not covered by it.
@@ -12,7 +12,7 @@ enum ExternalLink {
   static let allowedHosts: Set<String> = [
     "steamcommunity.com", "store.steampowered.com", "help.steampowered.com", "github.com",
     "www.gnu.org", "support.apple.com", "space.bilibili.com", "www.bilibili.com", "www.pixiv.net",
-    "mmfoundation.dev",
+    "mmfoundation.dev", "opencollective.com",
   ]
 
   /// Whether the panel may open `url`: https, a host on the list, and no user, password or port.
@@ -54,6 +54,9 @@ enum ExternalLink {
   /// MMFoundation's Discord server. The website redirects this address to the current invite, so a
   /// new invite needs no app release; never link the invite itself.
   static let discord = URL(string: "https://mmfoundation.dev/discord")!
+  /// MMFoundation's Open Collective, where sponsoring goes: the support prompt's **Sponsor on Open
+  /// Collective**. Open Collective picks its own language, so every app language opens this page.
+  static let openCollective = URL(string: "https://opencollective.com/mmfoundation")!
 
   // MARK: Built links
 
@@ -96,7 +99,7 @@ enum ExternalLink {
   static var fixedLinks: [URL] {
     [
       steamMobileApp, steamEmailedCodeHelp, steamJoin, wallpaperEngineStore, macOSAppSecurity,
-      gnuGPL3, mmfoundation, discord, repository, repositoryIssues,
+      gnuGPL3, mmfoundation, discord, openCollective, repository, repositoryIssues,
     ]
   }
 }

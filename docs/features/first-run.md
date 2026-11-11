@@ -135,10 +135,12 @@ be selected and copied.
 
 After a wallpaper downloaded through Steam Workshop or pixiv is successfully applied by
 the user, the panel offers **Feeling good?** once, in a sheet on the panel window.
-**Star on GitHub** opens the project repository; **Become a Supporter** opens the
-website's pricing page (the Chinese page for either Chinese app language). Both
-require a click. **Not now** and Escape dismiss the offer. A link that fails to open
-says so and leaves both choices available (`SupportPromptPresenter`).
+**Star on GitHub** opens the project repository; **Sponsor on Open Collective** opens
+MMFoundation's Open Collective (https://opencollective.com/mmfoundation), the same
+page in every app language. Priority Support is a paid service, not a way to give, so
+the prompt does not offer it ([SPONSORS.md](../../SPONSORS.md)). Both require a click.
+**Not now** and Escape dismiss the offer. A link that fails to open says so and leaves
+both choices available (`SupportPromptPresenter`).
 
 The download must have finished installing, and applying must have succeeded and
 reported a new active display assignment. Downloads alone, local imports, failed

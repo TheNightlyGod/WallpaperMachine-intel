@@ -176,10 +176,10 @@ struct SupportPromptSheet: View {
         note: Text("Help others discover WallpaperMachine."), trailingSymbol: "arrow.up.right"
       ) { choose(.star) }
       WelcomeActionRow(
-        symbol: "heart", color: theme.surface.heart.color, title: Text("Become a Supporter"),
-        note: Text("Support development with a one-time contribution."),
+        symbol: "heart", color: theme.surface.heart.color, title: Text("Sponsor on Open Collective"),
+        note: Text("Give to MMFoundation, which makes WallpaperMachine."),
         trailingSymbol: "arrow.up.right"
-      ) { choose(.supporter) }
+      ) { choose(.sponsor) }
     case .star:
       WelcomeActionRow(
         symbol: "star", color: .orange, title: Text("Star on GitHub"),

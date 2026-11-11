@@ -180,15 +180,15 @@ final class SupportPromptPresenterTests: PanelTestCase {
 
   // MARK: Choices
 
-  /// Star opens the repository and Become a Supporter the pricing page, in Chinese for a Chinese
-  /// interface; either answer ends the offer.
+  /// Star opens the repository and Sponsor on Open Collective MMFoundation's Collective, the same
+  /// page in every language; either answer ends the offer.
   func testChoicesOpenTheRightPageAndEndTheOffer() async throws {
     for (choice, language, destination) in [
       (SupportPromptChoice.star, "en", "https://github.com/WallpaperMachine/WallpaperMachine"),
-      (.supporter, "en", "https://www.wallpapermachine.app/pricing/"),
-      (.supporter, "zh-Hans", "https://www.wallpapermachine.app/zh/pricing/"),
-      (.supporter, "zh-Hant", "https://www.wallpapermachine.app/zh/pricing/"),
-      (.supporter, "ja", "https://www.wallpapermachine.app/pricing/"),
+      (.sponsor, "en", "https://opencollective.com/mmfoundation"),
+      (.sponsor, "zh-Hans", "https://opencollective.com/mmfoundation"),
+      (.sponsor, "zh-Hant", "https://opencollective.com/mmfoundation"),
+      (.sponsor, "ja", "https://opencollective.com/mmfoundation"),
     ] {
       try await withPresenter { panel, presenter, prompt, _ in
         var opened = [URL]()
